@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>İKV · Sunucu yönetimi</title>
+  <style>
+    :root { color-scheme: dark; --bg: #151719; --panel: #1e2124; --raised: #272b2e; --line: #454b50; --ink: #f1ede7; --muted: #b9b6b0; --copper: #e4a475; --copper-dark: #543a2b; --good: #a9cead; --bad: #ffaaa1; --focus: #ffcf9f; --mono: "Liberation Mono", "Courier New", monospace; --body: "Liberation Sans", "DejaVu Sans", sans-serif; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.6 var(--body); }
+    a { color: var(--copper); text-underline-offset: .25em; }
+    .skip { position: absolute; left: 1rem; top: -5rem; padding: .6rem 1rem; background: var(--panel); z-index: 2; }
+    .skip:focus { top: 1rem; }
+    :focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+    .shell { max-width: 1440px; margin: auto; padding: 0 2rem 3rem; }
+    .masthead { display: flex; justify-content: space-between; align-items: center; gap: 1rem; padding: 1.8rem 0; border-bottom: 3px solid var(--copper); }
+    .eyebrow, .section-number, .metric dt, th { font: 12px/1.6 var(--mono); letter-spacing: .09em; text-transform: uppercase; }
+    .eyebrow { color: var(--copper); margin: 0 0 .35rem; }
+    h1 { margin: 0; font-size: clamp(1.5rem, 3vw, 2.2rem); line-height: 1.2; letter-spacing: -.025em; }
+    h2 { margin: 0; font-size: 1.2rem; }
+    h3 { margin: 0 0 .65rem; font-size: 1rem; }
+    p { margin: .6rem 0; }
+    .muted, .hint { color: var(--muted); }
+    .hint { font-size: .85rem; }
+    .stamp { color: var(--copper); font: 12px/1.7 var(--mono); border-left: 1px solid var(--line); padding-left: 1rem; text-align: right; }
+    .notice { margin: 1rem 0; padding: .85rem 1rem; background: var(--panel); border-left: 4px solid var(--copper); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .notice[data-kind="error"] { color: var(--bad); border-color: var(--bad); }
+    .notice[data-kind="success"] { border-color: var(--good); }
+    .banner { margin: 0 0 1rem; padding: .75rem 1rem; border: 1px solid var(--bad); color: var(--bad); font-weight: bold; }
+    .login { max-width: 510px; margin: 3rem auto; }
+    .panel { background: var(--panel); border: 1px solid var(--line); padding: 1.3rem; min-width: 0; }
+    .panel-head { display: flex; align-items: baseline; gap: .7rem; margin-bottom: 1.15rem; }
+    .section-number { color: var(--copper); }
+    .toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; padding: 1.2rem 0; }
+    .toolbar p { margin: 0; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 0; margin-bottom: 1.2rem; border-bottom: 1px solid var(--line); }
+    .tabs button { border: 1px solid transparent; border-bottom: 0; background: none; color: var(--muted); padding: .6rem 1rem; }
+    .tabs button[aria-selected="true"] { color: var(--ink); background: var(--panel); border-color: var(--line); border-top: 2px solid var(--copper); }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 1rem; }
+    .grid.even { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .wide { grid-column: 1 / -1; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); margin: 0 0 1rem; border: 1px solid var(--line); background: var(--panel); }
+    .metric { padding: 1rem 1.2rem; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .metric:nth-child(4n) { border-right: 0; }
+    .metric dt { color: var(--muted); }
+    .metric dd { margin: .3rem 0 0; font: 1.6rem/1.2 var(--mono); overflow-wrap: anywhere; }
+    fieldset { padding: 0; margin: 0; border: 0; min-width: 0; }
+    legend { padding: 0; margin: .9rem 0 .6rem; font-weight: bold; }
+    label { display: block; font-size: .88rem; margin-bottom: .3rem; }
+    label.inline { display: inline-flex; gap: .4rem; align-items: center; margin: 0; }
+    input, select, button, textarea { font: inherit; }
+    input, select, textarea { width: 100%; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 0; padding: .6rem .7rem; }
+    input[type="checkbox"] { width: auto; }
+    input[readonly] { color: var(--copper); font-family: var(--mono); }
+    button { border: 1px solid var(--copper); border-radius: 0; background: var(--copper-dark); color: var(--ink); padding: .58rem .9rem; cursor: pointer; }
+    button:hover:not(:disabled) { background: var(--raised); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.secondary { border-color: var(--line); background: var(--raised); }
+    button.danger { border-color: var(--bad); }
+    .field { margin-bottom: .9rem; }
+    .row { display: flex; gap: .65rem; align-items: end; flex-wrap: wrap; }
+    .row > .field { flex: 1 1 130px; margin-bottom: 0; }
+    .actions { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .9rem; }
+    .search { margin-bottom: 1rem; }
+    .table-scroll { overflow: auto; max-height: 30rem; border: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+    caption { text-align: left; color: var(--muted); padding: .65rem .75rem; }
+    th { background: var(--raised); text-align: left; color: var(--muted); position: sticky; top: 0; }
+    th, td { padding: .55rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+    td { overflow-wrap: anywhere; }
+    td:first-child { overflow-wrap: normal; white-space: nowrap; font-family: var(--mono); font-size: .8rem; }
+    tr[aria-selected="true"] { background: var(--copper-dark); }
+    td button { font-size: .8rem; white-space: nowrap; padding: .3rem .6rem; margin: 0 .3rem .3rem 0; }
+    .selection { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .9rem; }
+    pre { margin: .5rem 0; font: .8rem/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+    pre.log { max-height: 30rem; overflow: auto; background: var(--bg); border: 1px solid var(--line); padding: .7rem; }
+    summary { cursor: pointer; color: var(--copper); }
+    .empty { color: var(--muted); padding: .8rem 0; }
+    .ok { color: var(--good); }
+    .bad { color: var(--bad); }
+    .operational { border-left: 3px solid var(--copper); padding-left: 1rem; margin-top: 1.2rem; }
+    code { font-family: var(--mono); color: var(--copper); overflow-wrap: anywhere; }
+    .footer { font: .75rem/1.7 var(--mono); color: var(--muted); border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1rem; }
+    @media (max-width: 860px) { .grid, .grid.even { grid-template-columns: 1fr; } .metrics { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .shell { padding: 0 1rem 2rem; } .stamp { display: none; } .panel { padding: 1rem; } .metric { padding: .8rem; } .row > button { width: 100%; } }
+  </style>
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <a href="#main" class="skip">Ana içeriğe geç</a>
+  <div class="shell">
+    <header class="masthead">
+      <div><p class="eyebrow">İKV / Bağımsız topluluk sunucusu</p><h1>Sunucu yönetim istasyonu</h1></div>
+      <div class="stamp" title="Private administration listener; every route checks the administrator session server-side">ÖZEL YÖNETİM AĞI<br>HTTPS · YETKİ DENETİMLİ</div>
+    </header>
+    <main id="main" tabindex="-1">
+      <noscript><p class="notice">Bu yönetim arayüzü JavaScript gerektirir. Tarayıcınızda bu kaynak için JavaScript'i etkinleştirin.</p></noscript>
+      <p id="feedback" class="notice" role="status" aria-live="polite" aria-atomic="true">Topluluk yönetici hesabınızla giriş yapın. Resmî İKV hesap bilgilerini kullanmayın.</p>
+      <section id="login-panel" class="panel login" aria-labelledby="login-heading">
+        <div class="panel-head"><span class="section-number">00</span><h2 id="login-heading">Yönetici girişi</h2></div>
+        <p class="muted">İşlem yetkisi sunucu tarafından denetlenir. Oturum yalnızca bu sekmenin belleğinde tutulur. Yönetim adresi: <code>https://127.0.0.1:7444/admin</code> veya yapılandırılmış özel ağ adresiniz; oyuncu giriş portu bu paneli sunmaz.</p>
+        <form id="login-form" method="post" action="/v1/login" autocomplete="off">
+          <fieldset id="login-fields">
+            <div class="field"><label for="username" title="Community account name (not an official game account)">Topluluk hesabı</label><input id="username" name="username" required maxlength="128" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+            <div class="field"><label for="password" title="Password">Parola</label><input id="password" name="password" type="password" required autocomplete="off"></div>
+            <button type="submit" title="Log in">Giriş yap</button>
+          </fieldset>
+        </form>
+        <p class="hint">Sayfayı yenilemek oturumu arayüzden siler. Paylaşılan cihazlarda işiniz bitince çıkış yapın.</p>
+      </section>
+      <div id="dashboard" hidden>
+        <div class="toolbar">
+          <div><p id="identity"></p><p class="hint" id="session-expiry"></p></div>
+          <div class="actions"><button id="refresh" type="button" class="secondary" data-operation title="Refresh all data now">Şimdi yenile</button><button id="logout" type="button" title="Log out and revoke this session">Oturumu kapat</button></div>
+        </div>
+        <p id="countdown-banner" class="banner" role="alert" hidden></p>
+        <div class="tabs" role="tablist" aria-label="Yönetim bölümleri">
+          <button type="button" role="tab" id="tab-overview" aria-controls="page-overview" title="Overview">Genel bakış</button>
+          <button type="button" role="tab" id="tab-players" aria-controls="page-players" title="Players: search, kick, ban, mute, teleport">Oyuncular</button>
+          <button type="button" role="tab" id="tab-bots" aria-controls="page-bots" title="Server-side bots">Botlar</button>
+          <button type="button" role="tab" id="tab-world" aria-controls="page-world" title="World: announce, restart/shutdown, clock, config check">Dünya</button>
+          <button type="button" role="tab" id="tab-content" aria-controls="page-content" title="Content: zones and NPC respawn">İçerik</button>
+          <button type="button" role="tab" id="tab-logs" aria-controls="page-logs" title="Logs: world log, commands, audit">Günlükler</button>
+          <button type="button" role="tab" id="tab-backups" aria-controls="page-backups" title="Database backups">Yedekler</button>
+          <button type="button" role="tab" id="tab-settings" aria-controls="page-settings" title="Gameplay rate settings">Ayarlar</button>
+        </div>
+
+        <section id="page-overview" role="tabpanel" aria-labelledby="tab-overview">
+          <dl class="metrics" aria-label="Canlı sayaçlar">
+            <div class="metric" title="Players connected to the world now"><dt>Çevrimiçi oyuncu</dt><dd id="m-online">—</dd></div>
+            <div class="metric" title="Server-side bots in the world"><dt>Bot</dt><dd id="m-bots">—</dd></div>
+            <div class="metric" title="Duration of the last simulation tick (budget 50 ms)"><dt>Tick süresi</dt><dd id="m-tick">—</dd></div>
+            <div class="metric" title="World process uptime"><dt>Çalışma süresi</dt><dd id="m-uptime">—</dd></div>
+            <div class="metric" title="World process resident memory"><dt>Bellek</dt><dd id="m-memory">—</dd></div>
+            <div class="metric" title="Registered accounts"><dt>Hesap</dt><dd id="m-accounts">—</dd></div>
+            <div class="metric" title="Undeleted characters"><dt>Karakter</dt><dd id="m-characters">—</dd></div>
+            <div class="metric" title="Unexpired login sessions (not connected players)"><dt>Etkin oturum</dt><dd id="m-sessions">—</dd></div>
+          </dl>
+          <div class="grid">
+            <section class="panel" aria-labelledby="world-heading">
+              <div class="panel-head"><span class="section-number">01</span><h2 id="world-heading" title="Authoritative world instance">Dünya örneği</h2></div>
+              <p id="world-summary" class="hint" role="status">Durum alınıyor.</p>
+              <div class="table-scroll"><table><caption title="Players, bots and living NPCs per zone">Bölgeler</caption><thead><tr><th scope="col">Bölge</th><th scope="col" title="Players">Oyuncu</th><th scope="col" title="Bots">Bot</th><th scope="col" title="Living NPCs">NPC</th><th scope="col" title="Entry state">Durum</th></tr></thead><tbody id="zone-summary"></tbody></table></div>
+            </section>
+            <section class="panel" aria-labelledby="recent-heading">
+              <div class="panel-head"><span class="section-number">02</span><h2 id="recent-heading" title="Recent world commands and their results">Son dünya komutları</h2></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">Komut</th><th scope="col">Sonuç</th></tr></thead><tbody id="recent-commands"></tbody></table></div>
+              <p class="hint">Dünya komutları saniyede bir alınır; sonuç gelene kadar “bekliyor” görünür. Veriler 10 saniyede bir yenilenir.</p>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-players" role="tabpanel" aria-labelledby="tab-players" hidden>
+          <div class="grid even">
+            <section class="panel wide" aria-labelledby="online-heading">
+              <div class="panel-head"><span class="section-number">03</span><h2 id="online-heading" title="Players currently online">Çevrimiçi oyuncular</h2></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col" title="World entity id">ID</th><th scope="col">Karakter</th><th scope="col" title="Level">Sv.</th><th scope="col" title="Health">Can</th><th scope="col" title="Zone and position">Konum</th><th scope="col" title="Actions">İşlem</th></tr></thead><tbody id="online-players"></tbody></table></div>
+              <form id="move-form" class="selection">
+                <h3 title="Teleport a character or summon it to another">Işınla / yanına çağır</h3>
+                <div class="row">
+                  <div class="field"><label for="move-character" title="Character id to move">Karakter ID</label><input id="move-character" type="number" min="1" step="1" required></div>
+                  <div class="field"><label for="move-zone" title="Destination zone">Bölge</label><select id="move-zone"></select></div>
+                  <div class="field"><label for="move-x" title="Optional X (empty = zone spawn)">X (boş: doğma noktası)</label><input id="move-x" type="number" step="1"></div>
+                  <div class="field"><label for="move-y" title="Optional Y (empty = zone spawn)">Y</label><input id="move-y" type="number" step="1"></div>
+                  <button type="submit" name="command" value="teleport" data-operation title="Teleport the character">Işınla</button>
+                </div>
+                <div class="row" style="margin-top:.8rem">
+                  <div class="field"><label for="summon-to" title="Target character id the player is moved next to">Hedef karakter ID</label><input id="summon-to" type="number" min="1" step="1"></div>
+                  <button type="submit" name="command" value="summon" class="secondary" data-operation title="Move the character next to the target character">Yanına çağır</button>
+                </div>
+              </form>
+            </section>
+            <section class="panel" aria-labelledby="accounts-heading">
+              <div class="panel-head"><span class="section-number">04</span><h2 id="accounts-heading" title="Account moderation">Hesap yönetimi</h2></div>
+              <form id="account-search" class="search row" role="search">
+                <div class="field"><label for="account-query" title="Search accounts by name">Hesap ara</label><input id="account-query" type="search" maxlength="64" autocomplete="off"></div><button type="submit" data-operation title="Search">Ara</button>
+              </form>
+              <div class="table-scroll"><table><caption id="account-results-label">Hesap sonuçları</caption><thead><tr><th scope="col">ID</th><th scope="col">Hesap</th><th scope="col">Kayıt</th><th scope="col">Seçim</th></tr></thead><tbody id="account-results"></tbody></table></div>
+              <form id="account-action" class="selection">
+                <div class="field"><label for="account-id" title="Selected account id">Seçili hesap ID</label><input id="account-id" readonly required aria-describedby="account-action-hint"></div>
+                <p id="account-action-hint" class="hint">İşlem için arama sonuçlarından bir hesap seçin. 0 saniye süresiz yasaktır; süreli yasak en çok 31536000 saniyedir (365 gün). Yasak oturumları iptal eder ve oyuncu dünyadan bir saniye içinde düşer.</p>
+                <fieldset id="account-controls" disabled>
+                  <div class="field"><label for="ban-reason" title="Ban reason, 1-512 UTF-8 bytes">Yasaklama gerekçesi (en çok 512 UTF-8 bayt)</label><input id="ban-reason" maxlength="512"></div>
+                  <div class="field"><label for="ban-duration" title="Ban duration in seconds; 0 = permanent">Yasak süresi (saniye)</label><input id="ban-duration" type="number" min="0" max="31536000" step="1" value="86400" required></div>
+                  <div class="actions"><button type="submit" name="action" value="ban" class="danger" data-operation title="Ban account">Yasakla</button><button type="submit" name="action" value="unban" class="secondary" formnovalidate data-operation title="Remove ban">Yasağı kaldır</button><button type="submit" name="action" value="reset" class="secondary" formnovalidate data-operation title="Issue a single-use password reset token (15 min)">Sıfırlama tokenı üret</button><button type="submit" name="action" value="plus" class="secondary" formnovalidate data-operation title="Grant the Plus Paket entitlement (vendor 1/3, Şan ×3, Karizma loss 10 %)">Plus ver</button><button type="submit" name="action" value="unplus" class="secondary" formnovalidate data-operation title="Revoke the Plus Paket entitlement">Plus kaldır</button></div>
+                </fieldset>
+              </form>
+              <p class="hint">Sıfırlama tokenı yalnızca işlem mesajında gösterilir. Güvenli bir kanaldan elle teslim edin; sonraki işlemde veya çıkışta ekrandan silinir.</p>
+            </section>
+            <section class="panel" aria-labelledby="characters-heading">
+              <div class="panel-head"><span class="section-number">05</span><h2 id="characters-heading" title="Character moderation and inspection">Karakter moderasyonu</h2></div>
+              <form id="character-search" class="search row" role="search">
+                <div class="field"><label for="character-query" title="Search characters by name">Karakter ara</label><input id="character-query" type="search" maxlength="64" autocomplete="off"></div><button type="submit" data-operation title="Search">Ara</button>
+              </form>
+              <div class="table-scroll"><table><caption id="character-results-label">Karakter sonuçları</caption><thead><tr><th scope="col">ID</th><th scope="col">Karakter</th><th scope="col" title="Saved state (written every 5 s while online)">Kayıt</th><th scope="col">Seçim</th></tr></thead><tbody id="character-results"></tbody></table></div>
+              <form id="character-action" class="selection">
+                <div class="field"><label for="character-id" title="Selected character id">Seçili karakter ID</label><input id="character-id" readonly required aria-describedby="character-action-hint"></div>
+                <p id="character-action-hint" class="hint">İşlem için arama sonuçlarından bir karakter seçin. “Kayıt ayrıntıları” karakterin kaydedilmiş durumunu gösterir (çevrimiçiyken 5 saniyede bir yazılır).</p>
+                <fieldset id="character-controls" disabled>
+                  <div class="field"><label for="mute-duration" title="Mute duration, 1-604800 seconds">Susturma süresi (1–604800 saniye; en çok 7 gün)</label><input id="mute-duration" type="number" min="1" max="604800" step="1" value="3600" required></div>
+                  <div class="actions"><button type="submit" name="action" value="mute" data-operation title="Mute chat">Sustur</button><button type="submit" name="action" value="unmute" class="secondary" formnovalidate data-operation title="Unmute chat">Susturmayı kaldır</button><button type="submit" name="action" value="kick" class="danger" formnovalidate data-operation title="Disconnect the character if online">Oyundan at</button></div>
+                </fieldset>
+              </form>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-bots" role="tabpanel" aria-labelledby="tab-bots" hidden>
+          <div class="grid">
+            <section class="panel" aria-labelledby="bot-list-heading">
+              <div class="panel-head"><span class="section-number">06</span><h2 id="bot-list-heading" title="Bots reported by the world">Botlar</h2></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">İsim</th><th scope="col" title="Behaviour">Davranış</th><th scope="col" title="Level / health">Sv. / can</th><th scope="col" title="Zone and position">Konum</th><th scope="col" title="Current activity">Durum</th><th scope="col"></th></tr></thead><tbody id="bot-results"></tbody></table></div>
+              <p class="hint">Botlar sunucu tarafında oynar ve oyuncularla aynı doğrulama yollarından geçer (NONCANONICAL: özgün oyunda bot yoktu).</p>
+            </section>
+            <section class="panel" aria-labelledby="bot-spawn-heading">
+              <div class="panel-head"><span class="section-number">07</span><h2 id="bot-spawn-heading" title="Spawn or remove bots">Bot oluştur / kaldır</h2></div>
+              <form id="bot-spawn">
+                <div class="field"><label for="bot-zone" title="Zone (empty = default spawn zone)">Bölge</label><select id="bot-zone"></select></div>
+                <div class="field"><label for="bot-behaviour" title="town: populate town, hunt: hunt and level, companion: joins parties when invited">Davranış</label>
+                  <select id="bot-behaviour"><option value="town" title="Wander towns">Kasaba (town)</option><option value="hunt" title="Hunt, loot, level, quests">Avcı (hunt)</option><option value="companion" title="Party companion">Yoldaş (companion)</option></select></div>
+                <div class="row">
+                  <div class="field"><label for="bot-level" title="Starting level 1-100 (empty = 1)">Seviye</label><input id="bot-level" type="number" min="1" max="100" step="1"></div>
+                  <div class="field"><label for="bot-count" title="How many bots, 1-50">Adet</label><input id="bot-count" type="number" min="1" max="50" step="1" value="5" required></div>
+                </div>
+                <div class="actions"><button type="submit" data-operation title="Spawn bots">Bot oluştur</button></div>
+              </form>
+              <div class="actions selection"><button id="bot-despawn-zone" type="button" class="secondary" data-operation title="Remove bots in the selected zone">Bölgedeki botları kaldır</button><button id="bot-despawn-all" type="button" class="danger" data-operation title="Remove every bot">Tüm botları kaldır</button></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-world" role="tabpanel" aria-labelledby="tab-world" hidden>
+          <div class="grid even">
+            <section class="panel" aria-labelledby="announce-heading">
+              <div class="panel-head"><span class="section-number">08</span><h2 id="announce-heading" title="Broadcast a message to every player">Duyuru</h2></div>
+              <form id="announce-form"><div class="field"><label for="announce-text" title="Message, 1-256 bytes">Mesaj (en çok 256 bayt)</label><input id="announce-text" maxlength="256" required></div><button type="submit" data-operation title="Send announcement">Herkese duyur</button></form>
+            </section>
+            <section class="panel" aria-labelledby="control-heading">
+              <div class="panel-head"><span class="section-number">09</span><h2 id="control-heading" title="Restart or shut down the world with a countdown">Yeniden başlat / kapat</h2></div>
+              <form id="control-form">
+                <div class="row">
+                  <div class="field"><label for="control-delay" title="Countdown in seconds (0-3600); players get in-game warnings">Geri sayım (saniye)</label><input id="control-delay" type="number" min="0" max="3600" step="1" value="60" required></div>
+                  <div class="field"><label for="control-message" title="Optional reason appended to warnings">Gerekçe (isteğe bağlı)</label><input id="control-message" maxlength="256"></div>
+                </div>
+                <div class="actions"><button type="submit" name="command" value="restart" class="danger" data-operation title="Restart (exit 75; supervisor restarts)">Yeniden başlat</button><button type="submit" name="command" value="shutdown" class="danger" data-operation title="Shut down (exit 0)">Kapat</button><button type="submit" name="command" value="cancel" class="secondary" formnovalidate data-operation title="Cancel a running countdown">Geri sayımı iptal et</button></div>
+              </form>
+              <p class="hint">Yeniden başlatma, yeniden başlatma politikası olan bir süreç yöneticisi (systemd/compose) gerektirir.</p>
+            </section>
+            <section class="panel" aria-labelledby="clock-heading">
+              <div class="panel-head"><span class="section-number">10</span><h2 id="clock-heading" title="Day clock">Gün saati</h2></div>
+              <p id="clock-state" class="hint">Saat bilgisi bekleniyor.</p>
+              <form id="clock-form" class="row"><div class="field"><label for="clock-hour" title="Set the in-game hour (0-23); resets on restart">Saat (0–23)</label><input id="clock-hour" type="number" min="0" max="23" step="1" value="12" required></div><button type="submit" data-operation title="Set time of day">Saati ayarla</button></form>
+            </section>
+            <section class="panel" aria-labelledby="validate-heading">
+              <div class="panel-head"><span class="section-number">11</span><h2 id="validate-heading" title="Validate gameplay configuration without applying it">Yapılandırma denetimi</h2></div>
+              <p class="muted">Sunucunun gameplay.json dosyasını yeniden okur ve kurallarını denetler; canlı dünyaya uygulamaz. Değişiklikleri etkinleştirmek için yeniden başlatın.</p>
+              <button id="validate-config" type="button" class="secondary" data-operation title="Dry-run validation of the gameplay file">Denetle (deneme)</button>
+              <pre id="validate-result" class="log" hidden></pre>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-content" role="tabpanel" aria-labelledby="tab-content" hidden>
+          <section class="panel" aria-labelledby="zones-heading">
+            <div class="panel-head"><span class="section-number">12</span><h2 id="zones-heading" title="Open/close zones and respawn NPCs">Bölgeler ve NPC'ler</h2></div>
+            <p class="muted">Kapalı bölgeye kapılardan ve ışınlamayla giriş engellenir; içerideki oyuncular kalır. Oyun içi yöneticiler girebilir. Ayar veritabanında saklanır ve yeniden başlatmada uygulanır.</p>
+            <form id="zones-form">
+              <div class="table-scroll"><table><thead><tr><th scope="col" title="Open">Açık</th><th scope="col">Bölge</th><th scope="col">Oyuncu</th><th scope="col">Bot</th><th scope="col">NPC</th><th scope="col"></th></tr></thead><tbody id="zone-controls"></tbody></table></div>
+              <div class="actions"><button type="submit" data-operation title="Save which zones are open">Bölge ayarlarını kaydet</button><button id="respawn-all" type="button" class="secondary" data-operation title="Respawn every dead NPC now">Tüm ölü NPC'leri canlandır</button></div>
+            </form>
+          </section>
+        </section>
+
+        <section id="page-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
+          <div class="grid even">
+            <section class="panel" aria-labelledby="world-log-heading">
+              <div class="panel-head"><span class="section-number">13</span><h2 id="world-log-heading" title="Last 64 world action results">Sunucu günlüğü</h2></div>
+              <pre id="world-log" class="log"></pre>
+            </section>
+            <section class="panel" aria-labelledby="commands-heading">
+              <div class="panel-head"><span class="section-number">14</span><h2 id="commands-heading" title="World command history with results">Komut geçmişi</h2></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col">ID / zaman</th><th scope="col">Komut</th><th scope="col">Parametre</th><th scope="col">Sonuç</th></tr></thead><tbody id="command-history"></tbody></table></div>
+            </section>
+            <section class="panel wide" aria-labelledby="logs-heading">
+              <div class="panel-head"><span class="section-number">15</span><h2 id="logs-heading" title="Audit events">Denetim kayıtları</h2></div>
+              <div class="table-scroll"><table><caption>Son 100 yönetim/hesap kaydı</caption><thead><tr><th scope="col">ID / zaman</th><th scope="col">İşlem</th><th scope="col" title="Actor account id">Yetkili ID</th><th scope="col" title="Target id">Hedef ID</th><th scope="col">Ayrıntılar</th></tr></thead><tbody id="log-results"></tbody></table></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="page-backups" role="tabpanel" aria-labelledby="tab-backups" hidden>
+          <section class="panel" aria-labelledby="backups-heading">
+            <div class="panel-head"><span class="section-number">16</span><h2 id="backups-heading" title="PostgreSQL backups">Veritabanı yedekleri</h2></div>
+            <div class="actions"><button id="backup-create" type="button" data-operation title="Create a pg_dump backup on the server">Yedek oluştur</button><button id="backup-refresh" type="button" class="secondary" data-operation title="Reload backup list">Listeyi yenile</button></div>
+            <p id="backup-state" class="hint" role="status"></p>
+            <div class="table-scroll"><table><caption>Sunucuda saklanan yedekler (indirme sınırı 256 MiB)</caption><thead><tr><th scope="col">Dosya</th><th scope="col">Boyut (bayt)</th><th scope="col"></th></tr></thead><tbody id="backup-results"></tbody></table></div>
+            <div class="operational"><h3 title="Offline restore only">Geri yükleme: yalnızca çevrimdışı</h3><p>Bu arayüz canlı geri yükleme yapmaz. Önce auth/HTTPS ve dünya süreçlerini durdurun; mevcut veritabanını ayrıca yedekleyin. Sunucu makinesinde seçtiğiniz düz SQL yedeğinin tam dosya yolunu kullanarak çalıştırın:</p><pre><code id="restore-command">ikv-auth --dsn-file /secure/db.dsn --restore-backup /secure/backups/ikv-NAME.sql</code></pre><p class="hint">DSN dosyasını normal servisinizle aynı veritabanına yönlendirin; ikv-NAME.sql yerine gerçek yedeğin adını yazın. Çevrimdışı geri yüklemede TLS sertifikası veya anahtarı gerekmez. Komutun başarılı çıkışını kontrol edin; ardından servisleri başlatıp verileri doğrulayın. İndirilen yedekler parola özetleri ve oturum özetleri içerir; şifreli ve korunan bir yerde saklayın. Güvenilmeyen SQL dosyasını asla geri yüklemeyin.</p></div>
+          </section>
+        </section>
+
+        <section id="page-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+          <section class="panel" aria-labelledby="settings-heading">
+            <div class="panel-head"><span class="section-number">17</span><h2 id="settings-heading" title="Gameplay rate multipliers">Oran ayarları</h2></div>
+            <p class="muted">NONCANONICAL topluluk ayarları: yüzde olarak çarpanlar (100 = özgün/varsayılan). Ayarlar veritabanında saklanır, canlı dünyaya bir saniye içinde ve her yeniden başlatmada uygulanır.</p>
+            <form id="settings-form">
+              <div class="row">
+                <div class="field"><label for="xp-rate" title="Experience multiplier in percent (10-1000)">Tecrübe oranı (%)</label><input id="xp-rate" type="number" min="10" max="1000" step="1" value="100" required></div>
+                <div class="field"><label for="drop-rate" title="Monster drop chance multiplier in percent (10-1000; chance caps at 100%)">Ganimet oranı (%)</label><input id="drop-rate" type="number" min="10" max="1000" step="1" value="100" required></div>
+                <div class="field"><label for="regen-rate" title="Out-of-combat health/energy regeneration multiplier in percent (10-1000)">Yenilenme oranı (%)</label><input id="regen-rate" type="number" min="10" max="1000" step="1" value="100" required></div>
+              </div>
+              <div class="actions"><button type="submit" data-operation title="Save and apply rates">Kaydet ve uygula</button></div>
+            </form>
+            <p id="settings-state" class="hint"></p>
+          </section>
+        </section>
+      </div>
+    </main>
+    <footer class="footer">TOPLULUK ALTYAPISI / Resmî oyun servislerine bağlanmaz. Yönetim erişimini yalnızca güvenilir özel ağınızda açın.</footer>
+  </div>
+</body>
+</html>

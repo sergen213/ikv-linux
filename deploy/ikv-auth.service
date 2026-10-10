@@ -1,0 +1,45 @@
+[Unit]
+Description=IKV HTTPS authentication and private management
+Requires=postgresql.service
+After=network-online.target postgresql.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ikv
+Group=ikv
+WorkingDirectory=/usr/local/share/ikv
+StateDirectory=ikv
+StateDirectoryMode=0700
+RuntimeDirectory=ikv-auth
+RuntimeDirectoryMode=0700
+LoadCredential=dsn:/etc/ikv/dsn
+LoadCredential=tls-cert:/etc/ikv/tls-cert
+LoadCredential=tls-key:/etc/ikv/tls-key
+ExecStartPre=/usr/bin/install -m 0600 %d/dsn /run/ikv-auth/dsn
+ExecStart=/usr/local/bin/ikv-auth --bind 127.0.0.1 --port 7443 --admin-bind 127.0.0.1 --admin-port 7444 --cert %d/tls-cert --key %d/tls-key --dsn-file /run/ikv-auth/dsn --migrations /usr/local/share/ikv/database/migrations --web-root /usr/local/share/ikv/web --backup-dir /var/lib/ikv/backups
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=1024
+MemoryMax=512M
+CPUQuota=100%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

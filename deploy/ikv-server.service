@@ -1,0 +1,45 @@
+[Unit]
+Description=IKV authoritative TLS community world
+Requires=ikv-auth.service
+After=network-online.target postgresql.service ikv-auth.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ikv
+Group=ikv
+WorkingDirectory=/usr/local/share/ikv
+RuntimeDirectory=ikv-world
+RuntimeDirectoryMode=0700
+Environment=IKV_ASSET_ROOT=/srv/ikv/original
+EnvironmentFile=-/etc/ikv/world.env
+LoadCredential=dsn:/etc/ikv/dsn
+LoadCredential=tls-cert:/etc/ikv/tls-cert
+LoadCredential=tls-key:/etc/ikv/tls-key
+ExecStartPre=/usr/bin/install -m 0600 %d/dsn /run/ikv-world/dsn
+ExecStart=/usr/local/bin/ikv-server --bind 127.0.0.1 --port 7000 --cert %d/tls-cert --key %d/tls-key --dsn-file /run/ikv-world/dsn --gameplay /usr/local/share/ikv/config/gameplay.json --asset-root ${IKV_ASSET_ROOT}
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=1024
+MemoryMax=1G
+CPUQuota=200%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

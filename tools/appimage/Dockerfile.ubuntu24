@@ -1,0 +1,101 @@
+# IKV AppImage toolchain. Build with this file on stdin (no context); the source tree
+# enters only as a read-only bind mount at run time (tools/package_appimage.py).
+# Base image, APT snapshot and InRelease hashes match the sibling Kabus 22 toolchain.
+FROM ubuntu:24.04@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ENV DEBIAN_FRONTEND=noninteractive \
+    CC=/usr/bin/gcc-14 CXX=/usr/bin/g++-14 \
+    CFLAGS="-march=x86-64 -mtune=generic" \
+    CXXFLAGS="-march=x86-64 -mtune=generic"
+# BuildKit downloads before the image has CA trust; every archive is SHA-256 pinned.
+ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 https://snapshot.ubuntu.com/ubuntu/20261007T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb /opt/ikv-baseline/bootstrap/ca-certificates.deb
+ADD --checksum=sha256:603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz /opt/ikv-baseline/sources/openssl-3.5.9.tar.gz
+ADD --checksum=sha256:9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3 https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz /opt/ikv-baseline/sources/SDL3-3.4.18.tar.gz
+RUN <<'PROVISION'
+set -eu
+bootstrap=/opt/ikv-baseline/bootstrap
+dpkg-deb --extract "$bootstrap/ca-certificates.deb" "$bootstrap/payload"
+cat "$bootstrap"/payload/usr/share/ca-certificates/mozilla/*.crt > "$bootstrap/ca-bundle.pem"
+echo "Acquire::https::CaInfo \"$bootstrap/ca-bundle.pem\";" > /etc/apt/apt.conf.d/99ikv-bootstrap-ca
+rm -f /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources
+cat > /etc/apt/sources.list.d/ubuntu.sources <<'SOURCES'
+Types: deb deb-src
+URIs: https://snapshot.ubuntu.com/ubuntu/20261007T000000Z/
+Suites: noble noble-updates noble-security
+Components: main universe
+Architectures: amd64
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+apt-get update --error-on=any
+printf '%s\n' \
+ 'cdb2f31d809f589719a53c6ad15f255b27569c4059542ada282aaa21b8e164b0  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble_InRelease' \
+ '1ba35ee59c0c7c430601e8715ad6379c9e0bbd77960d4246175abc2eb132da42  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble-updates_InRelease' \
+ '27b649589af352e3c6980b1e88431b5555209191fc52a02decf8f4bab74f1aff  /var/lib/apt/lists/snapshot.ubuntu.com_ubuntu_20261007T000000Z_dists_noble-security_InRelease' \
+ | sha256sum --check
+# The bundled PostgreSQL server is copied, never run as a service here.
+mkdir -p /etc/postgresql-common/createcluster.d
+echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/ikv.conf
+apt-get install -y --no-install-recommends \
+ gcc-14 g++-14 cmake ninja-build pkg-config python3 binutils patchelf squashfs-tools \
+ ca-certificates=20260601~24.04.1 make perl xz-utils nasm \
+ libboost-dev nlohmann-json3-dev libpq-dev zlib1g-dev libfreetype-dev libfontconfig-dev \
+ libgl-dev libegl-dev libgles-dev libvulkan-dev glslc \
+ qt6-base-dev qt6-base-dev-tools qt6-qpa-plugins qt6-wayland libarchive-dev \
+ postgresql-16 postgresql-client-16 \
+ libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev libxi-dev libxss-dev \
+ libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libdrm-dev \
+ libgbm-dev libpulse-dev libpipewire-0.3-dev libasound2-dev libdbus-1-dev libudev-dev
+rm /etc/apt/apt.conf.d/99ikv-bootstrap-ca
+dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' > /opt/ikv-baseline/installed-packages.tsv
+PROVISION
+RUN <<'OPENSSL'
+set -eu
+# Ubuntu 24.04 ships OpenSSL 3.0; ikv-auth needs the ARGON2ID KDF (OpenSSL >= 3.2).
+mkdir /tmp/ossl && tar -xzf /opt/ikv-baseline/sources/openssl-3.5.9.tar.gz -C /tmp/ossl
+cd /tmp/ossl/openssl-3.5.9
+./Configure linux-x86_64 --prefix=/opt/ikv-openssl --libdir=lib --openssldir=/etc/ssl \
+ shared no-tests no-docs $CFLAGS
+make -j"$(nproc)"
+make install_sw
+install -Dm644 LICENSE.txt /opt/ikv-openssl/share/licenses/LICENSE.txt
+echo /opt/ikv-openssl/lib > /etc/ld.so.conf.d/00-ikv-openssl.conf
+ldconfig
+/opt/ikv-openssl/bin/openssl kdf -keylen 16 -kdfopt pass:p -kdfopt salt:saltsalt ARGON2ID
+rm -rf /tmp/ossl
+OPENSSL
+RUN <<'SDL'
+set -eu
+mkdir /tmp/sdl && tar -xzf /opt/ikv-baseline/sources/SDL3-3.4.18.tar.gz -C /tmp/sdl
+cmake -S /tmp/sdl/SDL3-3.4.18 -B /tmp/sdl/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_INSTALL_PREFIX=/opt/ikv-sdl3 \
+ -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+ -DSDL_X11=ON -DSDL_WAYLAND=ON -DSDL_PIPEWIRE=ON -DSDL_PULSEAUDIO=ON -DSDL_ALSA=ON -DSDL_VULKAN=ON
+cmake --build /tmp/sdl/build
+cmake --install /tmp/sdl/build
+install -Dm644 /tmp/sdl/SDL3-3.4.18/LICENSE.txt /opt/ikv-sdl3/share/licenses/LICENSE.txt
+rm -rf /tmp/sdl
+SDL
+# Ubuntu 24.04's Vulkan headers (1.3.275) lack VK_EXT_present_timing/VK_KHR_present_id2 and its
+# libjpeg-turbo (2.1.5) lacks the tj3 API: install newer pinned releases into /usr/local.
+# Extension entry points are loaded at run time; the host libvulkan.so.1 loader is used.
+ADD --checksum=sha256:cbaf687d3c59b9666fe080e7f8396b6b4f4d344a768ee6b337c59852f4526b68 https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.363.tar.gz /opt/ikv-baseline/sources/Vulkan-Headers-1.4.363.tar.gz
+ADD --checksum=sha256:6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz /opt/ikv-baseline/sources/libjpeg-turbo-3.2.0.tar.gz
+RUN <<'DEPS'
+set -eu
+mkdir /tmp/deps && cd /tmp/deps
+tar -xzf /opt/ikv-baseline/sources/Vulkan-Headers-1.4.363.tar.gz
+cmake -S Vulkan-Headers-1.4.363 -B vk -G Ninja -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --install vk
+tar -xzf /opt/ikv-baseline/sources/libjpeg-turbo-3.2.0.tar.gz
+# Static libturbojpeg only, linked into ikv-client.
+cmake -S libjpeg-turbo-3.2.0 -B jpeg -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+ -DCMAKE_INSTALL_LIBDIR=lib -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DWITH_TOOLS=OFF -DWITH_TESTS=OFF
+cmake --build jpeg
+cmake --install jpeg
+install -Dm644 libjpeg-turbo-3.2.0/LICENSE.md /usr/local/share/licenses/libjpeg-turbo/LICENSE.md
+install -Dm644 libjpeg-turbo-3.2.0/README.ijg /usr/local/share/licenses/libjpeg-turbo/README.ijg
+install -Dm644 Vulkan-Headers-1.4.363/LICENSE.md /usr/local/share/licenses/Vulkan-Headers/LICENSE.md
+rm -rf /tmp/deps
+DEPS
+WORKDIR /work
+CMD ["/bin/bash"]

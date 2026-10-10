@@ -1,0 +1,4580 @@
+{
+  "schema": "ikv-local-asset-inventory-1",
+  "root": "app",
+  "file_count": 759,
+  "total_bytes": 4075408963,
+  "extension_counts": {
+    ".bin": 36,
+    ".dat": 13,
+    ".dds": 175,
+    ".dll": 2,
+    ".exe": 3,
+    ".ico": 1,
+    ".jpg": 31,
+    ".ogg": 77,
+    ".old": 1,
+    ".pdf": 1,
+    ".psh": 18,
+    ".raw": 371,
+    ".ttf": 3,
+    ".vsh": 20,
+    ".xml": 4,
+    "<none>": 3
+  },
+  "files": [
+    {
+      "path": "_launcher.dll",
+      "bytes": 2259352,
+      "sha256": "096a9fa7c3bd701d5b486fee9862786b8c0a4cacbc0656250910364e10890e2e",
+      "prefix16_hex": "4d5a90000300000004000000ffff0000"
+    },
+    {
+      "path": "base/audio/ambient/break_desk.raw",
+      "bytes": 80930,
+      "sha256": "4268bad69c1b23e6d8d8c4f1ec935b43161bbd3f651eea1dac723bdc1a9c640c",
+      "prefix16_hex": "bb4edc3fea301e38923428347d298612"
+    },
+    {
+      "path": "base/audio/ambient/domuzpropoganda.raw",
+      "bytes": 2863104,
+      "sha256": "52cb397e040613e8aee99eb14cbf5a5a6a94b5261b1144d9db904fcaa49d13c6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/ambient/forge.raw",
+      "bytes": 796686,
+      "sha256": "9c2c2922718a397ce2e3af82f94ce4207bbe1866167f3de283b57ccec546a777",
+      "prefix16_hex": "01000000ffff0000010000000000ffff"
+    },
+    {
+      "path": "base/audio/ambient/gbm0.raw",
+      "bytes": 349272,
+      "sha256": "5023f4b3f76e75087a844ae467f53288e82d6889322efd9bcf5ce80f6d4117b8",
+      "prefix16_hex": "4dfa0efba4fb00fcaafca3fd5ffecafe"
+    },
+    {
+      "path": "base/audio/ambient/gramofon.raw",
+      "bytes": 1527752,
+      "sha256": "848b8a16d841a7519ad1962387d5e735a4747127ddfa3abbfffbefd0a95264cb",
+      "prefix16_hex": "fdff0100ddfff1fff2fffeff16000700"
+    },
+    {
+      "path": "base/audio/ambient/hakircagri1.raw",
+      "bytes": 632156,
+      "sha256": "e0ca5579b719aa4ff519f314f7807b0b01f0f8022c03a3eaee13cc59e5b30446",
+      "prefix16_hex": "faff4800d1004301b8011a026e02a502"
+    },
+    {
+      "path": "base/audio/ambient/hakircagri2.raw",
+      "bytes": 583136,
+      "sha256": "f767ee156559a42149a262414b600985cf61ff7679e10b2289fc5ffcbcb77dfa",
+      "prefix16_hex": "f4ffe7ffe7ffe2ffe0ffdaffd9ffd3ff"
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda.raw",
+      "bytes": 7205668,
+      "sha256": "7aa423ba812fd9ad55b8e945e9a31b7c6f885c84d30256635e65dcb308c019da",
+      "prefix16_hex": "00000000000001000100020003000500"
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda1.raw",
+      "bytes": 2831718,
+      "sha256": "d5e799f8ecb89ecf8a360a2aef4c2b39afacceb03fac3b563ac633275fbafd3a",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda2.raw",
+      "bytes": 771096,
+      "sha256": "dffd118ac8e86954fbc1cd14de4e111fc1b2d41985073cc1be698798ec53e382",
+      "prefix16_hex": "cbffd4ff370065009f00ab00ac008600"
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda3.raw",
+      "bytes": 1437588,
+      "sha256": "76c55050dac20235a2bf00d97d285561aca07e59f5f11472eb059fa7923f1ed2",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda4.raw",
+      "bytes": 862972,
+      "sha256": "d6de4cd5c507b54f3770e2c5dae27893c6b57954be929e2090f6d5084d91aaf2",
+      "prefix16_hex": "140051008800c100f2001f0144015e01"
+    },
+    {
+      "path": "base/audio/ambient/piano.raw",
+      "bytes": 933680,
+      "sha256": "eab68abc20c01cf78dc919ffc1a4a9afd207946fe2a28521f6a3dd3e69f97247",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/ambient/radyo.raw",
+      "bytes": 1527808,
+      "sha256": "cb2b0d720ec24447549b1bb71912b15092da472197bcfd9e8a2d799aeebca485",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/ambient/single_wave_1.raw",
+      "bytes": 113,
+      "sha256": "8ccb523522b0d574c56a9be166e0e3007bc946733800a5cc47cb1bdbd6a62981",
+      "prefix16_hex": "c2ff9eff98fd32ff8001d808040d0a8e"
+    },
+    {
+      "path": "base/audio/ambient/single_wave_2.raw",
+      "bytes": 28,
+      "sha256": "31ba6af7657853a8baa22b7657ae9d1eb8494d54807bb03601f799ecd061c67d",
+      "prefix16_hex": "080006000c001c002e00300028002400"
+    },
+    {
+      "path": "base/audio/ambient/tower_collapse.raw",
+      "bytes": 158184,
+      "sha256": "5aa147cb99e45d6aed505ae88739e1e0475ae03d2dcc01ea32c5de9d470aeecf",
+      "prefix16_hex": "aa0617077407d0070607a8052a041003"
+    },
+    {
+      "path": "base/audio/ambient/wind_1.raw",
+      "bytes": 889,
+      "sha256": "f79c3b820290ae636e48059299ab657a8fa76f29645deaf20ebca3b770b74646",
+      "prefix16_hex": "fcffe4ffa9ff60ff15ffcefe98fe80fe"
+    },
+    {
+      "path": "base/audio/atmospheric/antipater.ogg",
+      "bytes": 1562587,
+      "sha256": "dc37f366849edfb8943848ee3170e8706855e7eac40e3bce4c96ca2f6fd3416b",
+      "prefix16_hex": "4f676753000200000000000000005562"
+    },
+    {
+      "path": "base/audio/atmospheric/buyuluugultu.ogg",
+      "bytes": 1395949,
+      "sha256": "b31522b14f928042623a09c56103b02ece2b673a48c876aed3ec5710d6af47a3",
+      "prefix16_hex": "4f67675300020000000000000000b448"
+    },
+    {
+      "path": "base/audio/atmospheric/dalgalar.ogg",
+      "bytes": 2736058,
+      "sha256": "dec92b926ac2321542d5aa1a8d93d21b713e29548527e63c5a0034f4f62f2b47",
+      "prefix16_hex": "4f676753000200000000000000000000"
+    },
+    {
+      "path": "base/audio/atmospheric/dalgalaruzak.ogg",
+      "bytes": 2663923,
+      "sha256": "7f7f6f809bd6ac7de191528a44c71530ca0db70c6fc44302eed1e466245a8dcf",
+      "prefix16_hex": "4f676753000200000000000000000000"
+    },
+    {
+      "path": "base/audio/atmospheric/dergi.ogg",
+      "bytes": 1194886,
+      "sha256": "948d38f6c6b218f6d0aec5bed22f17c02a011620a99475de311889be0161882f",
+      "prefix16_hex": "4f676753000200000000000000004241"
+    },
+    {
+      "path": "base/audio/atmospheric/domuzsehriendustri.ogg",
+      "bytes": 3319331,
+      "sha256": "d7c0e883c5cad7ae0d797355810f80d6efe48ede07a8ea7d1a1c4defd2b31ee1",
+      "prefix16_hex": "4f676753000200000000000000000c49"
+    },
+    {
+      "path": "base/audio/atmospheric/fanatikler.ogg",
+      "bytes": 811214,
+      "sha256": "7a9a615cd8cab13b0d78743ad0172689a81e2ae043982e5c98bf1c0b78ba7270",
+      "prefix16_hex": "4f67675300020000000000000000e462"
+    },
+    {
+      "path": "base/audio/atmospheric/polikarp.ogg",
+      "bytes": 661686,
+      "sha256": "1efc8ac4e3b5051da36bc580dbbe399ec1ffdfd522226f6db071ca16ae241622",
+      "prefix16_hex": "4f67675300020000000000000000f65c"
+    },
+    {
+      "path": "base/audio/atmospheric/projector.ogg",
+      "bytes": 341213,
+      "sha256": "ca0dd2a25f2fd4b9e6c050a77705a260e8cea17ba887bc3161c9b6da3f2f9fb3",
+      "prefix16_hex": "4f67675300020000000000000000e04a"
+    },
+    {
+      "path": "base/audio/atmospheric/projektor.ogg",
+      "bytes": 346670,
+      "sha256": "83dcb1e86a5b14bddd39ff4b0ef4742d2f31a64320489b214089cfa05ea3335f",
+      "prefix16_hex": "4f676753000200000000000000006827"
+    },
+    {
+      "path": "base/audio/atmospheric/ruzgarkisa.ogg",
+      "bytes": 439394,
+      "sha256": "58d6d187881364b568d493c52720b9dfe5165f290d6986f2c00914f189322965",
+      "prefix16_hex": "4f67675300020000000000000000b27d"
+    },
+    {
+      "path": "base/audio/atmospheric/ruzgaruzun.ogg",
+      "bytes": 1588011,
+      "sha256": "6ecfb72d2f115c1cca76366cbd91ec848bb881ce351cbc6c1c166811d2b83bd0",
+      "prefix16_hex": "4f67675300020000000000000000c423"
+    },
+    {
+      "path": "base/audio/atmospheric/sipirdama.ogg",
+      "bytes": 781402,
+      "sha256": "e4d4edbc34fbd3e4f15d428a3842d735691d617d3630b80afdb1e3badea0b99b",
+      "prefix16_hex": "4f676753000200000000000000000159"
+    },
+    {
+      "path": "base/audio/atmospheric/sogutucu.ogg",
+      "bytes": 384897,
+      "sha256": "a50c2220815e1af5689e30e1bc2b36775498c7066b13ecda4d1c4a7f6fc74454",
+      "prefix16_hex": "4f676753000200000000000000009b35"
+    },
+    {
+      "path": "base/audio/atmospheric/taksim.ogg",
+      "bytes": 991570,
+      "sha256": "5040dcad882761058f810970d15b4ae7cc2795d9d803e9986707b27031b247d5",
+      "prefix16_hex": "4f676753000200000000000000002b3f"
+    },
+    {
+      "path": "base/audio/atmospheric/ugultukisabuyulu.ogg",
+      "bytes": 539220,
+      "sha256": "c42214ec85b3d551eb53d28cc027ef6c99c21afc70ad730bca18c40d397dd1e6",
+      "prefix16_hex": "4f67675300020000000000000000074a"
+    },
+    {
+      "path": "base/audio/atmospheric/yaratiksesi.ogg",
+      "bytes": 157086,
+      "sha256": "c51fa47853314a9d8269c93ad9f5bd8bde17ec41867748416d49c6fde6e01ad1",
+      "prefix16_hex": "4f67675300020000000000000000c559"
+    },
+    {
+      "path": "base/audio/atmospheric/yasamunitesi.ogg",
+      "bytes": 923639,
+      "sha256": "2f34b670e0abdac1e24d9a6bda217a0cc7d877fc68eefbb0cd34ffd7a25a4fee",
+      "prefix16_hex": "4f67675300020000000000000000fb24"
+    },
+    {
+      "path": "base/audio/atmospheric/zeplin.ogg",
+      "bytes": 942283,
+      "sha256": "0da00d0e864ca5427fa0124d70f11ec4182095c102d4c83a17489e21a4764e97",
+      "prefix16_hex": "4f67675300020000000000000000df5f"
+    },
+    {
+      "path": "base/audio/atmospheric/zulum.ogg",
+      "bytes": 506028,
+      "sha256": "3e569ad5d00a1de77e665610318d52b51ff793213b57f8a51ca06ec892423a99",
+      "prefix16_hex": "4f67675300020000000000000000f264"
+    },
+    {
+      "path": "base/audio/monster/bbuyucu/skill.raw",
+      "bytes": 340608,
+      "sha256": "eeaacddffdb2be188a7d296a6a2e3e02899740559e3a18cd59a0a35e19e7e7d4",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/bbuyucu/skill2.raw",
+      "bytes": 793800,
+      "sha256": "fc90cc7bb5464397a75eed588761d9ea19559dd1bf0769893b4f3c7b45c6673d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/bomb.raw",
+      "bytes": 570196,
+      "sha256": "8d7fe1bf93602627cb803d6512fba73616d1d744ff156c06d9a5fd2696ec312a",
+      "prefix16_hex": "980111fe64f945f85bfe17ffeb003cfd"
+    },
+    {
+      "path": "base/audio/monster/centurion/break.raw",
+      "bytes": 70884,
+      "sha256": "4751831a6fa62bece5ea4b01383d79b10e7dddccf54336c78fbe22b0af42015d",
+      "prefix16_hex": "ffffb0ff6dff37001600f9ff580089ff"
+    },
+    {
+      "path": "base/audio/monster/centurion/centhit1.raw",
+      "bytes": 43874,
+      "sha256": "fa947d1398e881a1b9a5a88615d6b1623890bd973a3debd75a8589ecdb3cdcb7",
+      "prefix16_hex": "23003d001600f6ffe4ffeaffedff0000"
+    },
+    {
+      "path": "base/audio/monster/centurion/centhit2.raw",
+      "bytes": 71642,
+      "sha256": "4062857167179f4cb0c73e0066aab107fd6f564f3e2426b11804ae62bdb96a5c",
+      "prefix16_hex": "0100fbfffcff030003000400fffff5ff"
+    },
+    {
+      "path": "base/audio/monster/centurion/centskl01.raw",
+      "bytes": 88200,
+      "sha256": "2d8b4625f3f3318d4cd788f044b3e44b394de19336e23495d7d6ac523574d470",
+      "prefix16_hex": "000001000000fffffeff000001000000"
+    },
+    {
+      "path": "base/audio/monster/centurion/centskl02.raw",
+      "bytes": 89376,
+      "sha256": "689417d1d9bede47e8b79401c54cfa92b2a22505f6522a9bb10b6bd213f7684a",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/centurion/die.raw",
+      "bytes": 242198,
+      "sha256": "aa9085040b88c9079029ae9c9fbf0b61b2f015ada0c28ea5e49cd266b07db9ac",
+      "prefix16_hex": "c20089017a01e6010e024e0252026b02"
+    },
+    {
+      "path": "base/audio/monster/centurion/evoskl.raw",
+      "bytes": 130036,
+      "sha256": "fd66f6741b24554539a3c05987e5316b2094b78c96de65a7fb516192b0dc65b7",
+      "prefix16_hex": "3afdcffd8afe63ff63003f01e3016b02"
+    },
+    {
+      "path": "base/audio/monster/centurion/fundhit.raw",
+      "bytes": 161630,
+      "sha256": "9081fed17ea909fe7470bf525c6d522591031e2d6a3991660c5829e7bb925e40",
+      "prefix16_hex": "140099ff57ff81ff1200a200ba005600"
+    },
+    {
+      "path": "base/audio/monster/ceteci_erkek/attack1.raw",
+      "bytes": 52480,
+      "sha256": "31aca8e1aaa0dc9d9bb1c1325a1686fd2e8f1b04a0926d5a4652ac5fe0c4e1b9",
+      "prefix16_hex": "20022a02a7013101e500b400be00fd00"
+    },
+    {
+      "path": "base/audio/monster/ceteci_erkek/damage1.raw",
+      "bytes": 50432,
+      "sha256": "abf39b6c967b3dc9c7f7380a1c990c07161727d094512f3d434408ec6d7a80c3",
+      "prefix16_hex": "fafee9fe03ff00fff1fefdfe16ff3fff"
+    },
+    {
+      "path": "base/audio/monster/ceteci_erkek/die.raw",
+      "bytes": 77804,
+      "sha256": "7a21d68d9324df055869e484c20ad1c07eb14c2a02b6768716c9c88492e382f8",
+      "prefix16_hex": "8cfe7cfeb3fec4feb9fea2fe76fe33fe"
+    },
+    {
+      "path": "base/audio/monster/ceteci_erkek/run.raw",
+      "bytes": 43136,
+      "sha256": "ee30b3226c9741ebc1106e40542f53537fbb2a2340203a67bdf2cf414990d9af",
+      "prefix16_hex": "10fdfcfdedfee4ffd000b401ad02ca03"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadin/attack1.raw",
+      "bytes": 52480,
+      "sha256": "31aca8e1aaa0dc9d9bb1c1325a1686fd2e8f1b04a0926d5a4652ac5fe0c4e1b9",
+      "prefix16_hex": "20022a02a7013101e500b400be00fd00"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadin/damage1.raw",
+      "bytes": 50432,
+      "sha256": "abf39b6c967b3dc9c7f7380a1c990c07161727d094512f3d434408ec6d7a80c3",
+      "prefix16_hex": "fafee9fe03ff00fff1fefdfe16ff3fff"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadin/die.raw",
+      "bytes": 77804,
+      "sha256": "7a21d68d9324df055869e484c20ad1c07eb14c2a02b6768716c9c88492e382f8",
+      "prefix16_hex": "8cfe7cfeb3fec4feb9fea2fe76fe33fe"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadin/run.raw",
+      "bytes": 43136,
+      "sha256": "ee30b3226c9741ebc1106e40542f53537fbb2a2340203a67bdf2cf414990d9af",
+      "prefix16_hex": "10fdfcfdedfee4ffd000b401ad02ca03"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadın/CVS/Entries",
+      "bytes": 3,
+      "sha256": "76f6e5cb30e2a374e932b5199cea01df9acbcd487da19353414a1d4127338570",
+      "prefix16_hex": "440d0a"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadın/CVS/Entries.Old",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "prefix16_hex": ""
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadın/CVS/Repository",
+      "bytes": 59,
+      "sha256": "13a0399866586bdd12e7402f24a0748f32e497ccb8039bfee7685aae98d26ee5",
+      "prefix16_hex": "697374616e62756c5f6d6d6f7270672f"
+    },
+    {
+      "path": "base/audio/monster/ceteci_kadın/CVS/Root",
+      "bytes": 39,
+      "sha256": "a6c6a7b6eafe18e8db5d79b4f212249ef866788fbed1f8f8a3b2e0e921dd43a4",
+      "prefix16_hex": "3a707365727665723a7a77617274616e"
+    },
+    {
+      "path": "base/audio/monster/deli/bite.raw",
+      "bytes": 450674,
+      "sha256": "c60dd4c4cc44c778641e1b958fb616d11cc0d7f67debe497904486256fcadac5",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/deli/breathe.raw",
+      "bytes": 88248,
+      "sha256": "5f8c61e31e0b6c2c57b135efde316cc818d1ff99a0f9259e755772a575ffdfcf",
+      "prefix16_hex": "1700310029001500eaffc4ff8cff62ff"
+    },
+    {
+      "path": "base/audio/monster/deli/scream.raw",
+      "bytes": 127512,
+      "sha256": "3d61d5c4d3748c509f6338ae80832c90018945ed1faab43eee90d60d99039dde",
+      "prefix16_hex": "d9ffc7ffe6ffe5fff0fff7fff8ffefff"
+    },
+    {
+      "path": "base/audio/monster/dusunen/die.raw",
+      "bytes": 222264,
+      "sha256": "97e62307d102378d4a108423aa99449391b52bb12a5912ae517bd3533dc43347",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/dusunen/headache.raw",
+      "bytes": 186984,
+      "sha256": "330712e509c517f63df68c1485804d19df40fbafa797ecced17b91a3116be7a9",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/dusunen/scream.raw",
+      "bytes": 311980,
+      "sha256": "2b87f7f135f712c4b62f54e30e4e5787d6d08a41559278caead887e196519d3f",
+      "prefix16_hex": "04000f000f001b00220024002c002c00"
+    },
+    {
+      "path": "base/audio/monster/dusunen/smash.raw",
+      "bytes": 176224,
+      "sha256": "31b7cfd29346facd2b76996b89ed0103376d66c26f1fd57f320a735de3ba762b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/fare/attack1.raw",
+      "bytes": 53360,
+      "sha256": "f90d19f9e0cc7b6ec477540fa994e45362401ad0dced223409e7be14a7896f8d",
+      "prefix16_hex": "4c004c001700e5ffdffff0fff3ffebff"
+    },
+    {
+      "path": "base/audio/monster/fare/damage.raw",
+      "bytes": 43584,
+      "sha256": "e184715d2407317c7d423d0cbf3b7d3cf1f93b184b8321c2f894a1a356d1374a",
+      "prefix16_hex": "0f00290047006c009e00d600f500e700"
+    },
+    {
+      "path": "base/audio/monster/fare/die.raw",
+      "bytes": 61568,
+      "sha256": "1a8d684b23cadd5aaca5f15a96f20363d0815d5378149951a28d9f31da6d7478",
+      "prefix16_hex": "04013c019f00b0ff30ff5efff3ff8100"
+    },
+    {
+      "path": "base/audio/monster/fare/showteeth.raw",
+      "bytes": 85372,
+      "sha256": "ca19e9d30a8ef448da948373990a27f2241b58c57870919ce5cb72e6c51c6477",
+      "prefix16_hex": "e3ffe5ff06003b006d008d0094008800"
+    },
+    {
+      "path": "base/audio/monster/fare/walk.raw",
+      "bytes": 85372,
+      "sha256": "ca19e9d30a8ef448da948373990a27f2241b58c57870919ce5cb72e6c51c6477",
+      "prefix16_hex": "e3ffe5ff06003b006d008d0094008800"
+    },
+    {
+      "path": "base/audio/monster/fareadam/attack1.raw",
+      "bytes": 52480,
+      "sha256": "31aca8e1aaa0dc9d9bb1c1325a1686fd2e8f1b04a0926d5a4652ac5fe0c4e1b9",
+      "prefix16_hex": "20022a02a7013101e500b400be00fd00"
+    },
+    {
+      "path": "base/audio/monster/fareadam/attack2.raw",
+      "bytes": 31364,
+      "sha256": "2c3e48377e63a9ecec2f758ceb9e149f321758fbbd4181dededaad88ca35a2d3",
+      "prefix16_hex": "a7fefffe76ff0dfff5fe45ffaeff0800"
+    },
+    {
+      "path": "base/audio/monster/fareadam/damage1.raw",
+      "bytes": 50432,
+      "sha256": "abf39b6c967b3dc9c7f7380a1c990c07161727d094512f3d434408ec6d7a80c3",
+      "prefix16_hex": "fafee9fe03ff00fff1fefdfe16ff3fff"
+    },
+    {
+      "path": "base/audio/monster/fareadam/die.raw",
+      "bytes": 77804,
+      "sha256": "7a21d68d9324df055869e484c20ad1c07eb14c2a02b6768716c9c88492e382f8",
+      "prefix16_hex": "8cfe7cfeb3fec4feb9fea2fe76fe33fe"
+    },
+    {
+      "path": "base/audio/monster/fareadam/run.raw",
+      "bytes": 73642,
+      "sha256": "c4ce554f22b1e2fa95856a6075fd52c414c99333d5e8fe50b6f823b0dc85bc7a",
+      "prefix16_hex": "29fe31fe50fe85fed5fe29ff72ffa4ff"
+    },
+    {
+      "path": "base/audio/monster/fareadam/yolskill.raw",
+      "bytes": 239754,
+      "sha256": "e1af295524e4a98f7c723c4991b0fc4bf1f0c81b1a077d6d3c424005ae6ccbca",
+      "prefix16_hex": "4300430040003f003f003e003e003f00"
+    },
+    {
+      "path": "base/audio/monster/fareadam/yolsvhit.raw",
+      "bytes": 118870,
+      "sha256": "5dfdc7696331a3d9f99a5501313d8bfbee5f7e0e16743173e745673415c0107c",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gaffar/kaos.raw",
+      "bytes": 449280,
+      "sha256": "7250b0e9c956ea1a7622029e234b217fbe46fe6398b5782862911b0a08936262",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbm/alev.raw",
+      "bytes": 247520,
+      "sha256": "0069e175c82e6a58f713a9265e71aaa2cc6e0ef62af23edb4e09dd23d99c83da",
+      "prefix16_hex": "5603a00218023502720260022e022b02"
+    },
+    {
+      "path": "base/audio/monster/gbm/asit.raw",
+      "bytes": 215600,
+      "sha256": "b23545666634e101bd1d6ca677f49554f9de39d86c3be822d813b8514b537c7d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbm/down.raw",
+      "bytes": 250102,
+      "sha256": "867ef88f4a35300a915aa496171181d3c83bf416f111835970c640daa33fad5d",
+      "prefix16_hex": "fafff2fff3fff2fff4fff5fff6fff5ff"
+    },
+    {
+      "path": "base/audio/monster/gbm/hit1.raw",
+      "bytes": 87858,
+      "sha256": "cd4df58fe2fecaf77a5f936c49281d7c8922253565d2c2ea65de78caae5d7027",
+      "prefix16_hex": "03000000020002000400050005000600"
+    },
+    {
+      "path": "base/audio/monster/gbm/hit2.raw",
+      "bytes": 110812,
+      "sha256": "d871ac3226de5c5f6a7167435071504b616fb5821968cccb546a47b6ce98aa06",
+      "prefix16_hex": "83fecde128da9edd95db49dde8db0ddd"
+    },
+    {
+      "path": "base/audio/monster/gbm/impact.raw",
+      "bytes": 164148,
+      "sha256": "014c7380c5f1b53502cc335a7bbc9a9e40a98846a07e537b1567be1670652675",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbm/korteks.raw",
+      "bytes": 105276,
+      "sha256": "f866f1ed2880d6633598052a625aa0348551ea8f8d0110dcfd7b7707c7a7b179",
+      "prefix16_hex": "2bff98fdfffb94faa9f90ef9b7f8c7f8"
+    },
+    {
+      "path": "base/audio/monster/gbm/mitralyoz.raw",
+      "bytes": 307834,
+      "sha256": "f0d7118d9015b6d9529a48d4d9a4fe3908031a155f03e545d8cc338cc9457d29",
+      "prefix16_hex": "66018401b601b601b2011202a002a602"
+    },
+    {
+      "path": "base/audio/monster/gbm/run.raw",
+      "bytes": 116242,
+      "sha256": "e1f00065be4906e3447976be3825be73e7c16ffcef601a9c7b6e313a8f29228f",
+      "prefix16_hex": "dfffddffdbffd7ffd5ffd4ffd5ffd6ff"
+    },
+    {
+      "path": "base/audio/monster/gbm/saw.raw",
+      "bytes": 141056,
+      "sha256": "6c0933e4d3945bf775e3992b1fd0e1cbaf6a8d638575718c851f9d3d867f8c39",
+      "prefix16_hex": "fefffefffefffdfffdfffdfffcfffcff"
+    },
+    {
+      "path": "base/audio/monster/gbm/walk.raw",
+      "bytes": 189786,
+      "sha256": "98a6f1d23cb00f9aed8b99ee59c99d2914a76307f02ccac67245e1165899ada4",
+      "prefix16_hex": "0000000000000000ffffffff00000000"
+    },
+    {
+      "path": "base/audio/monster/gbm/xdeath.raw",
+      "bytes": 494720,
+      "sha256": "2eb1f90ffb0e2db2dfe832ada2200f5c8ca811454b94b46287106437f1909ada",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbm/xhit.raw",
+      "bytes": 65786,
+      "sha256": "b01dd0335bd0185f5d68fa9bd76dc8b34b4aea9cbba4463cc9ceea7e8011bbf3",
+      "prefix16_hex": "000003000b000b0006000000fcfffaff"
+    },
+    {
+      "path": "base/audio/monster/gbz/die.raw",
+      "bytes": 220722,
+      "sha256": "03e3ec5f8d2d2467451f3a1506a21dae19d73d3234bd8a5e8085ae965766d81f",
+      "prefix16_hex": "01000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbz/gun1.raw",
+      "bytes": 275900,
+      "sha256": "b93fb05da2c65201a7dd3cee2fd3ccb3fc156f4e4d723d8a00e83b92e75f26d9",
+      "prefix16_hex": "501b181d2622b41faa193f16a41a981d"
+    },
+    {
+      "path": "base/audio/monster/gbz/gun2.raw",
+      "bytes": 312688,
+      "sha256": "e1634e9a988ec999db8479a3dd1128521dd038f1bb32079124800be5c1ba93b6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbz/hit.raw",
+      "bytes": 187612,
+      "sha256": "a210c6e5476a01be17b210d3af4dacdd39211e5b499c6596ce0797cdf5baed9c",
+      "prefix16_hex": "0300feff010000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbz/missile.raw",
+      "bytes": 220722,
+      "sha256": "562791278012f54312f24bc0d9f05b5b339488ca07c090055697dc0e684244c1",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gbz/walk1.raw",
+      "bytes": 40466,
+      "sha256": "f0ce3f44e2ad5e7f5252dd9f3db55c20105d7c54a9b52fecf767282efbfd123b",
+      "prefix16_hex": "aaf99ffb9cfac5fb4dfb35fcf9fb73fc"
+    },
+    {
+      "path": "base/audio/monster/gbz/walk2.raw",
+      "bytes": 44144,
+      "sha256": "65f09ecf9018eabf13f80f779055948c5e4990556240644544462d23af25d7d6",
+      "prefix16_hex": "470033004b00560098004000b4009900"
+    },
+    {
+      "path": "base/audio/monster/gbz/walk3.raw",
+      "bytes": 33108,
+      "sha256": "7bcf9961d56d1a01214fd1a353bffceb6e11c155833f7b43e90fc8c028a49ffe",
+      "prefix16_hex": "1d00dbfcaefe3afd10fe4ffd89fdf0fc"
+    },
+    {
+      "path": "base/audio/monster/gizit/b_molotov.raw",
+      "bytes": 220720,
+      "sha256": "58b9e26995d86951537f36d94b2ba1db9333494ca5f0e9f649c9d99662895c46",
+      "prefix16_hex": "fbff0300feff0100ffff010000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/f_hit1-1.raw",
+      "bytes": 69894,
+      "sha256": "ac20a73caf4c001979f2951bda376e6ce55ca8af03aecd8277139b516da3096d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/f_hit1.raw",
+      "bytes": 58860,
+      "sha256": "4ef782ce9c0237ff2550c2f68a09f36ca4d4cd140baf4f54c068cbbb637e1090",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/f_hit2.raw",
+      "bytes": 66216,
+      "sha256": "0453043cc8085b9dfe2a2afcc1c93a691470dcbe0b89396a6ebd3b901f045515",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/g_hit1-1.raw",
+      "bytes": 55180,
+      "sha256": "20ab4ebb031ec4eecb331652ca584183f38828943fcaca2540aab3b675d3c683",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/g_hit1.raw",
+      "bytes": 55180,
+      "sha256": "ac4d9af0701bd2a004ec6059be89a88a1aa23a8063166c5fe6ac17d5c2f21fd3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/g_hit2.raw",
+      "bytes": 73574,
+      "sha256": "5c9869f6793c64be4f785cf296bdcb1d673d8f184bd58806cad23e4378c93fcd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/g_hit3.raw",
+      "bytes": 55180,
+      "sha256": "ac4d9af0701bd2a004ec6059be89a88a1aa23a8063166c5fe6ac17d5c2f21fd3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/h_gunshot.raw",
+      "bytes": 198648,
+      "sha256": "e8448aba64541c11c1821a9c0ff5902666877031111327ca20230149e14bedc2",
+      "prefix16_hex": "0e0efff77c05e1fb4c034bfd4c0204fe"
+    },
+    {
+      "path": "base/audio/monster/gizit/h_mortar.raw",
+      "bytes": 331080,
+      "sha256": "878a2e45d3f0b39f529f8a74cbf748ca74256592e5433f4b98bb2a56ef2b7824",
+      "prefix16_hex": "fafaf8fc66fe8d009f040607c9079b06"
+    },
+    {
+      "path": "base/audio/monster/gizit/i_flame.raw",
+      "bytes": 286938,
+      "sha256": "41bc9a9769e826a2baf1c7a360cfd7496f3dcd780ea1deae9557557d68fc2932",
+      "prefix16_hex": "9802cf012902e701af02bd020603bd02"
+    },
+    {
+      "path": "base/audio/monster/gizit/i_rage.raw",
+      "bytes": 158184,
+      "sha256": "ce6d27c4953567a285435176b40a56aa300496026653778ea12d3ccf360d3c49",
+      "prefix16_hex": "0100ffff000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/yk_dblhit.raw",
+      "bytes": 206004,
+      "sha256": "ec3168bf943166bdcbb7d6c25d0d36fd09581c61357585204ace862570e5c6b9",
+      "prefix16_hex": "80ff98ffb6ff78ff5affd6fffcff9aff"
+    },
+    {
+      "path": "base/audio/monster/gizit/yk_hit.raw",
+      "bytes": 121398,
+      "sha256": "9bb6d2143a572f5c682627fcdee35fbd13e180b99294efe991c0c8f9aeec437a",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/yk_tail.raw",
+      "bytes": 143470,
+      "sha256": "d088e40cda98dd98bba45e563b1dd7db6bc30db284bf42b8785442d8c1e5c16d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/gizit/yk_talk.raw",
+      "bytes": 250150,
+      "sha256": "38468f63d2f88ee7aab7ed3041ba4c93ba13aa8f0b87bd9fcb7bd9594a197424",
+      "prefix16_hex": "9dfffeff34000800dcff0d0029000500"
+    },
+    {
+      "path": "base/audio/monster/goblin/attack1.raw",
+      "bytes": 23744,
+      "sha256": "72ae03dd3a381feb8f0b5b0f8d66802a15d0f152cbd37dce802e6620d426da52",
+      "prefix16_hex": "5c04e803af039b03a903b9037e035d03"
+    },
+    {
+      "path": "base/audio/monster/goblin/attack2.raw",
+      "bytes": 29440,
+      "sha256": "e201c62c5df6610d377aacf7e59324c18ae033df6f05c3d1ea3049a1aa195b96",
+      "prefix16_hex": "33001e001c0028002d0039003c002c00"
+    },
+    {
+      "path": "base/audio/monster/goblin/attack3.raw",
+      "bytes": 37888,
+      "sha256": "d45f9ff5d9c3a08dc5c8c06388d6e6e7a6de08d3ac58f9ef35582155454b9625",
+      "prefix16_hex": "4bff88ffa4ff84ffc9ff0c00ddff93ff"
+    },
+    {
+      "path": "base/audio/monster/goblin/damage1.raw",
+      "bytes": 63360,
+      "sha256": "6b8e6624a82fb6386834ef7129cc240c59a7e486251dc7556d3b7a6fbb2d45fa",
+      "prefix16_hex": "32001b000f000c0002000300fefff5ff"
+    },
+    {
+      "path": "base/audio/monster/goblin/damage2.raw",
+      "bytes": 32768,
+      "sha256": "356eb63fa0fb3827a5e986c54a245fd4bb8b999ecbc0582864d0436205f9319f",
+      "prefix16_hex": "d2fed0fdfcfde3fed1ff7c0034010702"
+    },
+    {
+      "path": "base/audio/monster/goblin/die.raw",
+      "bytes": 65280,
+      "sha256": "b361ba7f90420dfd5c75ef7fbc5080add7717bbd51040d0b7387d5fba08064f5",
+      "prefix16_hex": "20ff35ff3cff13ffc3fe91fe62fe87fe"
+    },
+    {
+      "path": "base/audio/monster/goblin/run.raw",
+      "bytes": 63360,
+      "sha256": "6b8e6624a82fb6386834ef7129cc240c59a7e486251dc7556d3b7a6fbb2d45fa",
+      "prefix16_hex": "32001b000f000c0002000300fefff5ff"
+    },
+    {
+      "path": "base/audio/monster/iskelet/attack1.raw",
+      "bytes": 52480,
+      "sha256": "31aca8e1aaa0dc9d9bb1c1325a1686fd2e8f1b04a0926d5a4652ac5fe0c4e1b9",
+      "prefix16_hex": "20022a02a7013101e500b400be00fd00"
+    },
+    {
+      "path": "base/audio/monster/iskelet/attack2.raw",
+      "bytes": 54272,
+      "sha256": "c7272fe42d1bd0d514423dedf8fbf92d5bca039b758d0236f8f1ab48ae54239a",
+      "prefix16_hex": "68009000a600a7009c00890071005000"
+    },
+    {
+      "path": "base/audio/monster/iskelet/attack3.raw",
+      "bytes": 54256,
+      "sha256": "6dbb92a9f11675588a143eef31b63e4c4e8372c6947b01b4f993cf306020c08b",
+      "prefix16_hex": "36042903c90116006dfe2afd8bfcb4fc"
+    },
+    {
+      "path": "base/audio/monster/iskelet/damage1.raw",
+      "bytes": 50432,
+      "sha256": "abf39b6c967b3dc9c7f7380a1c990c07161727d094512f3d434408ec6d7a80c3",
+      "prefix16_hex": "fafee9fe03ff00fff1fefdfe16ff3fff"
+    },
+    {
+      "path": "base/audio/monster/iskelet/damage2.raw",
+      "bytes": 43136,
+      "sha256": "ee30b3226c9741ebc1106e40542f53537fbb2a2340203a67bdf2cf414990d9af",
+      "prefix16_hex": "10fdfcfdedfee4ffd000b401ad02ca03"
+    },
+    {
+      "path": "base/audio/monster/iskelet/die.raw",
+      "bytes": 77804,
+      "sha256": "7a21d68d9324df055869e484c20ad1c07eb14c2a02b6768716c9c88492e382f8",
+      "prefix16_hex": "8cfe7cfeb3fec4feb9fea2fe76fe33fe"
+    },
+    {
+      "path": "base/audio/monster/iskelet/run.raw",
+      "bytes": 63360,
+      "sha256": "933f81f15ef04669777a69881ef2f60288d2833a7d848c82cd0741684ba045ea",
+      "prefix16_hex": "650037001f00190005000600fbffe9ff"
+    },
+    {
+      "path": "base/audio/monster/istihbarat/doublehit.raw",
+      "bytes": 267776,
+      "sha256": "093417b32021d4574d34381191934100727e894c34b81c343e804ab7119e0ed3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/istihbarat/hit1.raw",
+      "bytes": 171332,
+      "sha256": "157785998e2d92e5c1a88807c04968f5fcf92c347bd4a3d78e0547ccf46f21e3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/istihbarat/hit2.raw",
+      "bytes": 229950,
+      "sha256": "5d31ea5ffb40cbafb2cb387d17a6c9b62a14663b75994da4d67d07df6fb57549",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/istihbarat/hit3.raw",
+      "bytes": 128466,
+      "sha256": "d76d19a795ab05cb9f36e152957c09ed4f49cdf5ef201394a587d11976aee825",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/junon/arma.raw",
+      "bytes": 442550,
+      "sha256": "4963ba29a67ac27c9f7bcf4fb0ec8c982789f1fc5354d8d95c42c22caf210987",
+      "prefix16_hex": "cd0030023503b804dd02b8fb5fef7fe7"
+    },
+    {
+      "path": "base/audio/monster/junon/curse.raw",
+      "bytes": 134506,
+      "sha256": "75e12d921126224febd6ccba1a62eeba837d915663b4b0703ceb240952434a58",
+      "prefix16_hex": "8ffff2ff5301f9012b027e01800057ff"
+    },
+    {
+      "path": "base/audio/monster/junon/kiss.raw",
+      "bytes": 152888,
+      "sha256": "380fff5c5c2f9fd9c75754a718120869278cf19ed0e09f5fb23fa5b28c857d54",
+      "prefix16_hex": "000007000a000a000c000b000c000b00"
+    },
+    {
+      "path": "base/audio/monster/junon/spell.raw",
+      "bytes": 115432,
+      "sha256": "d6cababa1452c343d0c33cc0b62af86c97c651d348210c624b4629df0f87bc0d",
+      "prefix16_hex": "170039005700680064004200ffffd2ff"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/deprem.raw",
+      "bytes": 891874,
+      "sha256": "a1025e53f21cf6debbbb8e787543f437d51a646f8418f6d03fc18323de1180e7",
+      "prefix16_hex": "faff0300faff0900f1ff0e00fafff8ff"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/dodge.raw",
+      "bytes": 324658,
+      "sha256": "2ac36cf21bc4e3aa0b13f33c5823fbea17dbcda613e90acdf9fcc9de91acd251",
+      "prefix16_hex": "f9ff1600e8ff1b00f0ff07000800f0ff"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/hidradie.raw",
+      "bytes": 410998,
+      "sha256": "8e0880fe3d3274b3ceb8ba374c148c3b6e254eb6aed98e292d8aa4cb7ec622c5",
+      "prefix16_hex": "ffff000000000100fcff0700f8ff0700"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/hit2.raw",
+      "bytes": 348034,
+      "sha256": "7b6dbf39654f51a948d00fff8bbd19edd932b74ea60d7bf1c3f0d511deb89555",
+      "prefix16_hex": "ffff000000000100fdff0500faff0500"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/hit3.raw",
+      "bytes": 146916,
+      "sha256": "55ef390dc39b80b9acf050fdd7ae32766e1aa867d04008da647160c331e356c8",
+      "prefix16_hex": "0400f8ff0900f8ff0500fefffefffdff"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/nefes.raw",
+      "bytes": 312792,
+      "sha256": "10821d1089554a6187b81fec558e292c8efd5d1298aad88aff62b873fd30d6fc",
+      "prefix16_hex": "0c00f8ff09000000ecff1b00ecff0700"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/scream2.raw",
+      "bytes": 460594,
+      "sha256": "46876cf8e60679bbd8e543343485fc5fa9b87634ff0d0b3cb2aa2b5d44131637",
+      "prefix16_hex": "750dde0d010cd109710879073504a703"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/wait.raw",
+      "bytes": 154586,
+      "sha256": "9e87a9c4315f83a74c011a86cbd111c5f6c478544e49b31edf5f2101644d7e6c",
+      "prefix16_hex": "0800f5ff0f00f9ff0700fbff0700fcff"
+    },
+    {
+      "path": "base/audio/monster/kadimhidra/walk.raw",
+      "bytes": 131400,
+      "sha256": "cadce970e6407fcefbfd7fcb52a1c6858912fd1aa7a5dcdabb187722e00f3f92",
+      "prefix16_hex": "c8001601460192018001c201ea014c02"
+    },
+    {
+      "path": "base/audio/monster/karabasan/die.raw",
+      "bytes": 260040,
+      "sha256": "5068f7771921f9f13143684b3e99bbfad091f7deacb39c503253b4a07d2bd9ba",
+      "prefix16_hex": "1a0019000900f5ffe2ffd4ffc6ffb3ff"
+    },
+    {
+      "path": "base/audio/monster/karabasan/hit.raw",
+      "bytes": 130324,
+      "sha256": "3358b8a8e9c4897989381bdc5a50c20c31ba86b901cc940fb6b1006a0dceae0e",
+      "prefix16_hex": "f0ffefffe6ffe5fffaff200042004200"
+    },
+    {
+      "path": "base/audio/monster/karabasan/hit2.raw",
+      "bytes": 111638,
+      "sha256": "a05e817dc7e22fbf677eda172695ad9db325e7c4b70b27ec94101f4ce4ad1ced",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/karabasan/moan.raw",
+      "bytes": 352800,
+      "sha256": "a819803acba906ac0276a3367160d90625cb6d5ce450a5b08d34e502faf4d65f",
+      "prefix16_hex": "daffd9ffd9ffd7ffd9ffd9ffdcffdeff"
+    },
+    {
+      "path": "base/audio/monster/kenan/die.raw",
+      "bytes": 99962,
+      "sha256": "697461a0dfbe3b6061af1b96cc590cf955ac99eb23a433ce420f495ad21a6acb",
+      "prefix16_hex": "0000000000000000fffffefffdfffcff"
+    },
+    {
+      "path": "base/audio/monster/kenan/fedaiskl.raw",
+      "bytes": 195336,
+      "sha256": "4d5e97fb815582bcc4fac3964819b34c54333d7bea12efeedbc187b959060795",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kenan/laugh.raw",
+      "bytes": 222456,
+      "sha256": "f117463a74793531f73dfc7d74f4d686aa85ab000a1461bc557ab8951c4884bc",
+      "prefix16_hex": "010009001e002f003d00580076008600"
+    },
+    {
+      "path": "base/audio/monster/kenan/roast.raw",
+      "bytes": 402192,
+      "sha256": "c6c0e735e80e9f6e92a04c654f300e1b1db693ae0a102b4f18d33c07758085b7",
+      "prefix16_hex": "e5fdadfbd5fc82fd43fe5bfd73fc0ffc"
+    },
+    {
+      "path": "base/audio/monster/kenan/zhrdie.raw",
+      "bytes": 88890,
+      "sha256": "e41f93342923607538e0131cb57ec7828a48c9b1a9bf9f2a3c9eeb406ad8168f",
+      "prefix16_hex": "caff91ff9eff92ff95ff90ff95ff8dff"
+    },
+    {
+      "path": "base/audio/monster/kralice_tirtil/die.raw",
+      "bytes": 209684,
+      "sha256": "c5b896bb13b91d680f35784cd723d3373e91003928eb05a73e1c8b98e396c002",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kralice_tirtil/hide.raw",
+      "bytes": 419370,
+      "sha256": "27e3244456fcacc72eb3b6d733da13cd3dc7919107215567bc94d034349eccf5",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kralice_tirtil/hit1-1.raw",
+      "bytes": 128754,
+      "sha256": "6d9db9008fb9d08b4821f122e7e9d1a29d573bf8424311899a04c9df244ee8e7",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kralice_tirtil/hit1.raw",
+      "bytes": 128754,
+      "sha256": "1a1baddbb75d709b9b5baa1ff5c23d06cbedfc182ec4ebb0634b785a293b1da6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kralice_tirtil/hit2.raw",
+      "bytes": 125074,
+      "sha256": "c30d823f94a0757881a5fcf9671afd1fefa4290854d5dbc518a6bf9ca7007bdc",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/attack1.raw",
+      "bytes": 80776,
+      "sha256": "80a175732d60ea8a6b2b7ac2357c3012dc06bd086867622c53d03cfad0de712d",
+      "prefix16_hex": "80fefffd7ffd7ffdfffdfffd80fe80fe"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/attack2.raw",
+      "bytes": 20236,
+      "sha256": "bbbf2a956eea6ed1cd825c02f5057d8e4d9ca2bf330292ad419be158150ca325",
+      "prefix16_hex": "7f02e502a6020c03fa02e802ec029902"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/damage1.raw",
+      "bytes": 51688,
+      "sha256": "b7d1ea1c394ead47252a2ec4b7a447b41ea86ed95e3fc7fbf6968d8b959358f1",
+      "prefix16_hex": "00ff00ff00ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/die.raw",
+      "bytes": 26248,
+      "sha256": "9b13eba2b0c08f946b90f6f81a67e6f2177f744d5f257ffb2330bb2db9435115",
+      "prefix16_hex": "80ff80ff80ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/howl.raw",
+      "bytes": 171284,
+      "sha256": "7163892ecc2876eecd461c7ea562b7a775848c069c56d6193158a09514e223a2",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/kurtadam/run.raw",
+      "bytes": 120542,
+      "sha256": "2c8d4f4bc0c4712f677f2a2d83a511c7771be21841ba3af2a37c4d43c9ac2535",
+      "prefix16_hex": "870094008d0083007d006d004a002000"
+    },
+    {
+      "path": "base/audio/monster/motorin/burn.raw",
+      "bytes": 264188,
+      "sha256": "6bf15370d7259878019dd23ea256584fac282cc3d24f06810d3a4d20875a0612",
+      "prefix16_hex": "7600e600ad00c000c600ee0000010a01"
+    },
+    {
+      "path": "base/audio/monster/motorin/die.raw",
+      "bytes": 225738,
+      "sha256": "a483fc944db57488217f02c5f1121887da023491e2745f17953a323abae82471",
+      "prefix16_hex": "41008200730084007d00890085008200"
+    },
+    {
+      "path": "base/audio/monster/philotheos/aeiu.raw",
+      "bytes": 529200,
+      "sha256": "02b5e6baf6b5bb83eb13cadf1a9fada224ba388c6d5117bfb768b9429b9cd9d4",
+      "prefix16_hex": "fdff01000100ffff00000100ffffffff"
+    },
+    {
+      "path": "base/audio/monster/philotheos/die.raw",
+      "bytes": 220880,
+      "sha256": "94f7330264f9b030c515937a9dee35267d4c2fed3f803f1c43505b4018b6252b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/philotheos/hit.raw",
+      "bytes": 36006,
+      "sha256": "788949eed4e4dfdb704f13a660a55bcb18cffe870c3127e3fa22c1bac91deea4",
+      "prefix16_hex": "06000800fffff3ffeefff5fffeff0400"
+    },
+    {
+      "path": "base/audio/monster/solucan/hit.raw",
+      "bytes": 126850,
+      "sha256": "b08354cb9b5f5d395b6a54015050ad56d3a6c254562bd8e6897ba9ad19b18a53",
+      "prefix16_hex": "f7ff0e00f1ff0f00f2ff0d00f6ff0600"
+    },
+    {
+      "path": "base/audio/monster/stuart/energy.raw",
+      "bytes": 216554,
+      "sha256": "9eb7fbeb92e92ce7c0e5809c1e40b146d0af96d099c63314774369a9369a4ecd",
+      "prefix16_hex": "f3ffeafff1ffeefff5ffe9ffceffb5ff"
+    },
+    {
+      "path": "base/audio/monster/stuart/mana.raw",
+      "bytes": 382240,
+      "sha256": "931cbf4e595e4e577c0a27788ec9568b4680ef17cafc2dfe7e0018f066bc7e94",
+      "prefix16_hex": "000000000000feffffff000000000100"
+    },
+    {
+      "path": "base/audio/monster/tepegoz/die.raw",
+      "bytes": 176400,
+      "sha256": "1f2d4e7dca85184a03f267df409d68a01b6537c100e0a95f4f6017500af7d789",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tepegoz/hit.raw",
+      "bytes": 31828,
+      "sha256": "59c20182f5bb2e100c57b32ab7e8191b9465a321c983def8f5482171f6080e04",
+      "prefix16_hex": "3a00370155017801f000bcfef0fb5bf9"
+    },
+    {
+      "path": "base/audio/monster/tepegoz/hit3.raw",
+      "bytes": 40504,
+      "sha256": "f32a770ce731630f885672829deee523ce4317a9447b29fe2ff7a66b54d2118d",
+      "prefix16_hex": "1b0022002e00390032000300eefff4ff"
+    },
+    {
+      "path": "base/audio/monster/tepegoz/taunt.raw",
+      "bytes": 165376,
+      "sha256": "3e6d6c5d89bafd0c50a9f7e4fa9f4832df11d8df77c8388d3926f720375e0833",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tirtil/die.raw",
+      "bytes": 198648,
+      "sha256": "b3e2147dd58b77ba7567b414a9144885aef0c88329945ad02239dd1f3895f17b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tirtil/hit1-1.raw",
+      "bytes": 95644,
+      "sha256": "6b9216316a6fda0a76059e3c227d3837801aa60a6f67e0f96fa237524096d6a3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tirtil/hit1-2.raw",
+      "bytes": 95644,
+      "sha256": "675442b00c676793ea77d3cf94b2717c4936e93dd12dbb0390ffb0843c0487fd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tirtil/hit1.raw",
+      "bytes": 95644,
+      "sha256": "8f1279deeab124d01af877abaeb6be4aed686a5147420ffca7abe70d7673d6b1",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/tirtil/hit2.raw",
+      "bytes": 114040,
+      "sha256": "be6500270fc117c7c2cf1cfd8fa7df41eceef240b01c9d1e5778b1109592d570",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/dodge.raw",
+      "bytes": 321066,
+      "sha256": "d072dcec071208767ebead3e17556faaa3b9b7cc7b0872c49abbb279e88937b5",
+      "prefix16_hex": "f7ff1a00e4ff1f00eeff08000900edff"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/hidradie.raw",
+      "bytes": 388452,
+      "sha256": "24e4e7ce1c70ba7d29b51ba4144a1e2e886994e110476f18b0efe3010cd8f4e7",
+      "prefix16_hex": "0a00fdffffff0400fdff00000500f6ff"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/hit1.raw",
+      "bytes": 230066,
+      "sha256": "d0ec07de3a41ea3c286658e9a8c086ed9eeda1337e8699cd911347de255b53e8",
+      "prefix16_hex": "feff00000300010000000700faff0b00"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/hit2.raw",
+      "bytes": 335986,
+      "sha256": "b291084adc508266ef613ffcbfad99163ed1cd97feb1af7f1ec6acb23bb33254",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/hit3.raw",
+      "bytes": 274932,
+      "sha256": "3dd23e4818f1b6c0a53f385228c62fe109445c6f24e804dfb776e262cb64c155",
+      "prefix16_hex": "000000000000000000000000ffffffff"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/look.raw",
+      "bytes": 319762,
+      "sha256": "bb3bba43bbbe921125ce5db71abd466f6c9aa3914431ef424426a3c0251bd8ce",
+      "prefix16_hex": "f7ff1a00e4ff1f00eeff08000900edff"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/scream.raw",
+      "bytes": 224034,
+      "sha256": "07ec48091a37d13989190574ca8776ff51b7e04c0fd57c2b3a661bf25724ee94",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/monster/yesilhidra/walk.raw",
+      "bytes": 166048,
+      "sha256": "876f36314fe76d55c823dc7c234628f54d010bddc4a07c73b7a614614224a7fd",
+      "prefix16_hex": "0000da002201f600a2000000eafebafd"
+    },
+    {
+      "path": "base/audio/monster/yilan/attack.raw",
+      "bytes": 69392,
+      "sha256": "c2e0f181dfddce6626c3409f06d9dc6433592f125708ce3237681fe13d9c8873",
+      "prefix16_hex": "00ff00ff00ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/monster/yilan/crawl.raw",
+      "bytes": 49146,
+      "sha256": "0468329e5cc366ce086d40de7c6c6eb1eb0c7c6d6c2c5af3d8362cee59eeb576",
+      "prefix16_hex": "00ff00ff00ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/monster/yilan/damage.raw",
+      "bytes": 49146,
+      "sha256": "0468329e5cc366ce086d40de7c6c6eb1eb0c7c6d6c2c5af3d8362cee59eeb576",
+      "prefix16_hex": "00ff00ff00ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/monster/yilan/die.raw",
+      "bytes": 49146,
+      "sha256": "0468329e5cc366ce086d40de7c6c6eb1eb0c7c6d6c2c5af3d8362cee59eeb576",
+      "prefix16_hex": "00ff00ff00ff00ff00ff00ff00ff00ff"
+    },
+    {
+      "path": "base/audio/music/ahistanbul.ogg",
+      "bytes": 817428,
+      "sha256": "9ad242c9b3440795036ad7f1db4555aa73b5ffb748da9b9fc1fd8b3f57d8ac4e",
+      "prefix16_hex": "4f67675300020000000000000000c5ce"
+    },
+    {
+      "path": "base/audio/music/akrep.ogg",
+      "bytes": 3126482,
+      "sha256": "804c8f34b1bbd2f056263380ab7f2ebec9d7401acb4c01ac11c69f240d6362d7",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/anatema.ogg",
+      "bytes": 7001695,
+      "sha256": "ef44482c5a3ae19b7cc68d211f6fbd57b560aefbbb422cfc7ed765de477b2af3",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/avlu.ogg",
+      "bytes": 968769,
+      "sha256": "9ffb3a395cf7a8dfa4ba275c005f4765992e87c01299b13e9382a3ab00270c7b",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/azulazul.ogg",
+      "bytes": 4134565,
+      "sha256": "0aa205297e521de63b2a93c41a2c8727f8302a2352be7d5985dce79e016e4c7d",
+      "prefix16_hex": "4f67675300020000000000000000db7b"
+    },
+    {
+      "path": "base/audio/music/azulcinsarkisi.ogg",
+      "bytes": 3356025,
+      "sha256": "7f33ae4ea996840699031ee5e6611c4eb3fae2b070bd4731e2bcc818769c105b",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/balyoznazima.ogg",
+      "bytes": 5782443,
+      "sha256": "d50cacbbc64c9442901887bf5d38083d066ff57a940e3c74215fe46f27459bdf",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/buyukyalan.ogg",
+      "bytes": 6663216,
+      "sha256": "d25a9f5d306e8874cce39f8bb32848cd588d2d950d9b90a39728d6be5de3026d",
+      "prefix16_hex": "4f6767530002000000000000000044c2"
+    },
+    {
+      "path": "base/audio/music/cehennem.ogg",
+      "bytes": 2329537,
+      "sha256": "f38b226076c8b49ce04c53b93b56250ae5e5bf044454608746cb8bfd274850b4",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/cemberlitasteaser.ogg",
+      "bytes": 2156099,
+      "sha256": "2a4d4ddd6a5e606ee95b711ffed01d558bf85754d4242b5bca577892f42d9abb",
+      "prefix16_hex": "4f67675300020000000000000000b104"
+    },
+    {
+      "path": "base/audio/music/dahasiyok.ogg",
+      "bytes": 4627692,
+      "sha256": "b857b9b338338c9f2a723a2dc849a4e18493d014459924fca97b248076ead293",
+      "prefix16_hex": "4f67675300020000000000000000b29b"
+    },
+    {
+      "path": "base/audio/music/darsokak.ogg",
+      "bytes": 2170095,
+      "sha256": "6c534c63677f91118f53ccd0ecd31dcb90cd4b3353926c5d2fad35d8bb6dda3b",
+      "prefix16_hex": "4f676753000200000000000000005b5d"
+    },
+    {
+      "path": "base/audio/music/deprem.ogg",
+      "bytes": 5538951,
+      "sha256": "e1efef2e31fd864af003f5457cb11c28e64ed6f68c2fe6d684eb665259f41405",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/eminonu.ogg",
+      "bytes": 2620909,
+      "sha256": "cb9ed0925917a92fb7fea51a1dfa5ec7bc420a4ebb6ad00cbc80240076b2102d",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/esinti.ogg",
+      "bytes": 1929424,
+      "sha256": "eedd11a4b2a3c1e7381633d0d27b8697b7e8587084ad99b204371ba69bbdbfe9",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/farelerinofkesi.ogg",
+      "bytes": 2698483,
+      "sha256": "debaa277d2792fbaf640f8dd74437413085e7cf3eb1559ce054dbfd5d266dff4",
+      "prefix16_hex": "4f676753000200000000000000009658"
+    },
+    {
+      "path": "base/audio/music/fedailer.ogg",
+      "bytes": 4654853,
+      "sha256": "0461dc79f86232fbcc479aa689873b5a6436ba425f51d45d75cca4971a943c4a",
+      "prefix16_hex": "4f676753000200000000000000004aeb"
+    },
+    {
+      "path": "base/audio/music/gaffar.ogg",
+      "bytes": 4660144,
+      "sha256": "7a19dd7a3702549fca5c8121990fbae8298a444767a55e1591ea95a6bc58711c",
+      "prefix16_hex": "4f67675300020000000000000000201d"
+    },
+    {
+      "path": "base/audio/music/gustav.ogg",
+      "bytes": 2538071,
+      "sha256": "46738127b45d668f91cbf5775e1e025be0cbc7388411a4992f6f0703fc44516f",
+      "prefix16_hex": "4f676753000200000000000000004d68"
+    },
+    {
+      "path": "base/audio/music/hakir.ogg",
+      "bytes": 5257604,
+      "sha256": "6c686d5fb5f3388030e3513daeff88718c7241d6ce53cbc7ed6000b5ad99274a",
+      "prefix16_hex": "4f676753000200000000000000008367"
+    },
+    {
+      "path": "base/audio/music/halic.ogg",
+      "bytes": 4469614,
+      "sha256": "4049570f0759170f85c3ac2e1758571e22cbc0d7a8e5e12f8b575b3e85e55c0c",
+      "prefix16_hex": "4f676753000200000000000000004165"
+    },
+    {
+      "path": "base/audio/music/hidra.ogg",
+      "bytes": 2353335,
+      "sha256": "0222dcd9d8a8bb5007836a1b7c3a52bf3cc5e0b3b3e751baa8842c229ed79317",
+      "prefix16_hex": "4f67675300020000000000000000055e"
+    },
+    {
+      "path": "base/audio/music/hybandakoy.ogg",
+      "bytes": 3099044,
+      "sha256": "9f9269c0b0de1d92a582e72a4501b0381c1e30305c6b0aa8b155ba6ea8b1d18d",
+      "prefix16_hex": "4f676753000200000000000000001356"
+    },
+    {
+      "path": "base/audio/music/istanbulda.ogg",
+      "bytes": 2780536,
+      "sha256": "d9338782fa225e2fd953197629f0fbbe82204580d776ed1ce89ce8000692e3de",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/istanbulunruyasi.ogg",
+      "bytes": 2998694,
+      "sha256": "1586060390c56a0941447dc1fef4ee47cd64d26ea0e87c321e9a4dedbd225d72",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/junon.ogg",
+      "bytes": 3153680,
+      "sha256": "99d1daf3054f0357cc4d81508d06da19cae9d5ee0efa6535a0805ed2860508d7",
+      "prefix16_hex": "4f67675300020000000000000000629e"
+    },
+    {
+      "path": "base/audio/music/kanklan.ogg",
+      "bytes": 7416283,
+      "sha256": "c4dc057cf962ebb06ff7074c328c800c024949c1e564310b6bb5070499b14abe",
+      "prefix16_hex": "4f6767530002000000000000000076c9"
+    },
+    {
+      "path": "base/audio/music/kayip.ogg",
+      "bytes": 3010356,
+      "sha256": "fbf307def9c0b022bcaacfd88b0b9b9ee878a3642f5e35ef6461ba55d665812e",
+      "prefix16_hex": "4f67675300020000000000000000af0e"
+    },
+    {
+      "path": "base/audio/music/kenan.ogg",
+      "bytes": 4216201,
+      "sha256": "b527d7fe187b6e4effce5601a26c1f7712623d165c2f8a6fc63479f0bd384a2e",
+      "prefix16_hex": "4f67675300020000000000000000aa62"
+    },
+    {
+      "path": "base/audio/music/kiyametninnisi.ogg",
+      "bytes": 2820818,
+      "sha256": "19ba87cd333516ac7dc7f4f899c8e45f4e675c01ee6ae5f091722cd68c6868b8",
+      "prefix16_hex": "4f676753000200000000000000007b5e"
+    },
+    {
+      "path": "base/audio/music/komutan.ogg",
+      "bytes": 2275928,
+      "sha256": "64f02d4269d50fc2354a2217467168d876646d72740ff06cde8f61bd626ccb8d",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/kopru.ogg",
+      "bytes": 7852135,
+      "sha256": "3d749e97cad96e91f8b678bf1204df8ea16fc9052be5e8fb7b43ac4ee44fe345",
+      "prefix16_hex": "4f67675300020000000000000000145a"
+    },
+    {
+      "path": "base/audio/music/koradam.ogg",
+      "bytes": 2029468,
+      "sha256": "58050ed0c02d8e80fb7b53adac9de02fc89f57142f359961e42d4d28fe26a451",
+      "prefix16_hex": "4f676753000200000000000000000e5f"
+    },
+    {
+      "path": "base/audio/music/makine.ogg",
+      "bytes": 5666231,
+      "sha256": "7b9a8add7c37b3ec5b8246973870adb7ce22e090adebe0a5370ee0857ac0afb3",
+      "prefix16_hex": "4f676753000200000000000000003e00"
+    },
+    {
+      "path": "base/audio/music/masal.ogg",
+      "bytes": 5038048,
+      "sha256": "16f196732885424bb0c6e14d09f5b71bab1a24cc22f104e6518ed3fa8cd0006e",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/mehtaplibirgece.ogg",
+      "bytes": 3371707,
+      "sha256": "c4b8ecf5ab1e87d5a2ed23b0e9547b46ac0ef0973860d7e8060b972edfba1ee7",
+      "prefix16_hex": "4f67675300020000000000000000f55f"
+    },
+    {
+      "path": "base/audio/music/meran.ogg",
+      "bytes": 3520422,
+      "sha256": "99a70bd643c44e616df6abacc095a0f9c1f2b209d4af0ae8b30f915de87ed9e8",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/meranlabirenti.ogg",
+      "bytes": 6298772,
+      "sha256": "cba9d30c25f67da5913cdce7638ff34d791cee814191de3a7fadf66b143307af",
+      "prefix16_hex": "4f676753000200000000000000008f60"
+    },
+    {
+      "path": "base/audio/music/mezar.ogg",
+      "bytes": 5161238,
+      "sha256": "bee8be350f48cf2b1179ac782d654e1fe13ca68b5432313b0fecfa3587ee723a",
+      "prefix16_hex": "4f676753000200000000000000005739"
+    },
+    {
+      "path": "base/audio/music/migrat.ogg",
+      "bytes": 7112716,
+      "sha256": "9724ba99cefc4ecfe8b85b35fa9593fbd118a1286d77f3c3803a3032d4181669",
+      "prefix16_hex": "4f6767530002000000000000000099e1"
+    },
+    {
+      "path": "base/audio/music/misircarsisi.ogg",
+      "bytes": 3086488,
+      "sha256": "8950923b4529438f512b546d6bf2c9f02ce4df29d19e27b6b17ba86209f313bc",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/misircarsisipiano.ogg",
+      "bytes": 1874623,
+      "sha256": "6238d974dabf0fb4abc3b3d8c162cbfb3e7bbbbf3a4f6efea0981d8b5aaa744d",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/olumdensonra.ogg",
+      "bytes": 5891272,
+      "sha256": "f1936f21f0a301e68839b2bcf169bd7b49e1e8528eee2270b42b446dd0d1e028",
+      "prefix16_hex": "4f67675300020000000000000000695d"
+    },
+    {
+      "path": "base/audio/music/sahil.ogg",
+      "bytes": 2982002,
+      "sha256": "b106b7de0f53d2e3a341cfa41d56e9aa7999094d78f12e7473711443a6e53f70",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/savas.ogg",
+      "bytes": 4511710,
+      "sha256": "908da689036f7be02f367871e8a9229f8c47854037595c010b8917ce93cba586",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/sifaci.ogg",
+      "bytes": 3305388,
+      "sha256": "99c02500ee1015f059a2e3b72a2f87d3eb72fc5a1c074d123f517f15407838b1",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/siginak.ogg",
+      "bytes": 3651114,
+      "sha256": "cba17a6f5981ccd5864019006b84ca64354f143aece89844ab43f730ca2165ae",
+      "prefix16_hex": "4f676753000200000000000000008c95"
+    },
+    {
+      "path": "base/audio/music/sis.ogg",
+      "bytes": 4667577,
+      "sha256": "942c3dfdc50e261e5579f43f8348d24a8b8c6e7def91a1529c5675608565ed27",
+      "prefix16_hex": "4f67675300020000000000000000cb70"
+    },
+    {
+      "path": "base/audio/music/sonsavas.ogg",
+      "bytes": 6145112,
+      "sha256": "cc20817da24c32aea1fd6c4c06ea54549f8e2f974acbbd6e8f1fdd8695c3e70c",
+      "prefix16_hex": "4f676753000200000000000000007f2e"
+    },
+    {
+      "path": "base/audio/music/tamamlanmamissenfoni.ogg",
+      "bytes": 7775833,
+      "sha256": "bc36129d2172211901378d11315bdeed318da08f7225d34f02799bbe2a3df94a",
+      "prefix16_hex": "4f676753000200000000000000005860"
+    },
+    {
+      "path": "base/audio/music/tangriss.ogg",
+      "bytes": 791403,
+      "sha256": "fccb98d55f3d5d92d82e692f06f6e74baea130cdc50341258abbb03d24d93768",
+      "prefix16_hex": "4f67675300020000000000000000db53"
+    },
+    {
+      "path": "base/audio/music/tarih.ogg",
+      "bytes": 2079440,
+      "sha256": "2d46e7b1de48a4c4708e84e6a6c251eeb0ead73f21513cdfcf0b0cca66cf571b",
+      "prefix16_hex": "4f6767530002000000000000000003d9"
+    },
+    {
+      "path": "base/audio/music/teskilatmarsiradyo.ogg",
+      "bytes": 881389,
+      "sha256": "f2a6410b8dbc8dffa29a7dbf9a1ad4679851fb675943840a50f4bcca959228cc",
+      "prefix16_hex": "4f6767530002000000000000000054b1"
+    },
+    {
+      "path": "base/audio/music/tuneller.ogg",
+      "bytes": 7929237,
+      "sha256": "1979ef6b5021d936edefce0a377dc4ab1a3f3997d913feedf33c5d3ef1130bca",
+      "prefix16_hex": "4f67675300020000000000000000ae61"
+    },
+    {
+      "path": "base/audio/music/uyan.ogg",
+      "bytes": 2162156,
+      "sha256": "fd95a2b1ab618d82deb8b4c11ee3761dd5fce5a5c83a8adc705a8b972b1bfc6b",
+      "prefix16_hex": "4f676753000200000000000000009263"
+    },
+    {
+      "path": "base/audio/music/welcometowar.ogg",
+      "bytes": 4499145,
+      "sha256": "6153a622e781b26863627bdffe0d48e72506bdf474440fed64d5d9c46f513895",
+      "prefix16_hex": "4f676753000200000000000000000563"
+    },
+    {
+      "path": "base/audio/music/zahir.ogg",
+      "bytes": 1588927,
+      "sha256": "8e694e58e29aa2e6c91a50cd469e390c0a35644c6cc6a6219c24b68a92773c84",
+      "prefix16_hex": "4f67675300020000000000000000c8d0"
+    },
+    {
+      "path": "base/audio/nesneler/forge.raw",
+      "bytes": 796686,
+      "sha256": "3aefe8c9bda20f8b134c5ab978e661fd466d4bc72b32bd30d56ee1672e3b29fa",
+      "prefix16_hex": "0d00f7ffeeff00000d000700fbfff3ff"
+    },
+    {
+      "path": "base/audio/nesneler/guvercin.raw",
+      "bytes": 347748,
+      "sha256": "3897775be3309b426284cff5f3113dad78c87021764529638ab15ace5e51be65",
+      "prefix16_hex": "0000ffff060003000100040005000000"
+    },
+    {
+      "path": "base/audio/nesneler/hurda.raw",
+      "bytes": 372732,
+      "sha256": "590d766a312afc83f6776d0db6bb09e6d77c0cc19f72182d8759814eac24bd5b",
+      "prefix16_hex": "bbffd9ff2c00660078007f0084008900"
+    },
+    {
+      "path": "base/audio/nesneler/kule.raw",
+      "bytes": 893200,
+      "sha256": "f7756752263ff3da213a5b899359764ca9c3b7afd024a87d0a367c69769aee81",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/nesneler/labr.raw",
+      "bytes": 610566,
+      "sha256": "112fdc3ad126798968235d8f46fe94c2555db768db1ca2f51b51505640c2e8dd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/nesneler/ors.raw",
+      "bytes": 95232,
+      "sha256": "705f5dfd5559603a9945cd0d17858cc2c4fc3e09c4176419c383dc349cd26d85",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/nesneler/rüstemstrech.raw",
+      "bytes": 93712,
+      "sha256": "5eaeee8a15d6205cf6c0a602b19d711bb8732a08d260053845b50610be85c888",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/nesneler/terzi.raw",
+      "bytes": 308224,
+      "sha256": "424819c5a67a6d24ab78a606845189c01dde532590c9d08945039d30860c9e4e",
+      "prefix16_hex": "85fe75fe7fff9b0012016101bf00b3ff"
+    },
+    {
+      "path": "base/audio/nesneler/tripod.raw",
+      "bytes": 41010,
+      "sha256": "b7ff2d394f87493c1b5d87a6c3b9595566a7f94169477ef78a1a8f0e0979c715",
+      "prefix16_hex": "00000000fffffffffdfffdfffdffffff"
+    },
+    {
+      "path": "base/audio/npc/bozayi/doublehit.raw",
+      "bytes": 64704,
+      "sha256": "de5afe6b49d2b3516770ebbe6e0446bc8bf79a82efe365f9df0e2576b39fdb2d",
+      "prefix16_hex": "000002000a001200150010000400faff"
+    },
+    {
+      "path": "base/audio/npc/bozayi/hit1.raw",
+      "bytes": 58944,
+      "sha256": "ff372a24881e98606cb1b680bd0681313e11de89a60fb7fdb5490e98ddcf0923",
+      "prefix16_hex": "aafc38fcbbfc21fd08fdf1fc2dfd69fd"
+    },
+    {
+      "path": "base/audio/npc/bozayi/hit2.raw",
+      "bytes": 44520,
+      "sha256": "ca895aa56b984a4df83c4d48d32aaf8c9e77d1c420f0a45e24f25429159831d7",
+      "prefix16_hex": "29003c00480054005f0064005e004f00"
+    },
+    {
+      "path": "base/audio/npc/domuz/talk.raw",
+      "bytes": 509294,
+      "sha256": "eae8be272687f165297879d6ab021ecda89a7e3c722f48012e949a46fee57f2c",
+      "prefix16_hex": "00000000000000000100010002000300"
+    },
+    {
+      "path": "base/audio/npc/gozcu/idle.raw",
+      "bytes": 116516,
+      "sha256": "7aca1a291109225c3176cba6981aef3594d7c10ca8189ad7790cc42fb84ae21b",
+      "prefix16_hex": "faff37003500e4ff9bffb5ff14004400"
+    },
+    {
+      "path": "base/audio/npc/gozcu/teslahit.raw",
+      "bytes": 159892,
+      "sha256": "13064a9f07c42afc3fdbd42ec5bfe1a145ef2204be53f9804b49391d51e24579",
+      "prefix16_hex": "cdffc1ffc4ffd1ffe6ff030022003400"
+    },
+    {
+      "path": "base/audio/npc/kangal/bark.raw",
+      "bytes": 67510,
+      "sha256": "3e62461971cdb64a39d34e0cc8a812fdaac201ce543857788c550cb78ce7edfa",
+      "prefix16_hex": "730070006c006c0067005f0053004500"
+    },
+    {
+      "path": "base/audio/npc/kangal/bark2.raw",
+      "bytes": 235100,
+      "sha256": "0f20d22ed3ad5e13d7d3cdfe4e185d3610666981e96eb6237963dd354b222a7d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/npc/kangal/death.raw",
+      "bytes": 61216,
+      "sha256": "d5b8b1777c8619f28007e805ad9bdb960d4a949702333e61cac21036c3b86896",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/npc/kangal/hit.raw",
+      "bytes": 29364,
+      "sha256": "ae4e899b5b2b9b4097e22cc7338442620ade577dce8dd4046da924baec4f60e8",
+      "prefix16_hex": "2d002c002a002a002900250021001b00"
+    },
+    {
+      "path": "base/audio/npc/kangal/hit2.raw",
+      "bytes": 33074,
+      "sha256": "6a313e915beed0ca462ed9d2ec8e42aa970549f211d104807aa1c1d7b9d35a98",
+      "prefix16_hex": "0c000600f0ffe6fffdff1b0022000b00"
+    },
+    {
+      "path": "base/audio/npc/kangal/smell.raw",
+      "bytes": 226568,
+      "sha256": "583f639775f40571ba173474ad06bd66f479223648a93fb55393e5b5377f3dad",
+      "prefix16_hex": "f5ffebffe2ffdaffd4ffd2ffd4ffdbff"
+    },
+    {
+      "path": "base/audio/npc/kangal/whine.raw",
+      "bytes": 211932,
+      "sha256": "b7090ceeb9168368322e635083b8451786d96fc9b1e7a4f8345cccbf62534efe",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/npc/lider/gasp.raw",
+      "bytes": 311382,
+      "sha256": "c7bac02f35a746c3d259d236bd05998a32825e5aa7e010ef15d5ce44a5dd47b3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/npc/sarapci/drink.raw",
+      "bytes": 228860,
+      "sha256": "d7deb21d85143126187b59dc47c0c326f52eea30b196eb8dc3e3f4338535e6df",
+      "prefix16_hex": "42024302cf0023fffffb93feb900c400"
+    },
+    {
+      "path": "base/audio/npc/sarapci/sleep.raw",
+      "bytes": 188928,
+      "sha256": "2c9f8f0455bdc8b3491b7055c820b00f9d126ae0e17771025d4c3d0c960f2077",
+      "prefix16_hex": "0000000000000000ffffffffffffffff"
+    },
+    {
+      "path": "base/audio/npc/sarapci/song.raw",
+      "bytes": 284148,
+      "sha256": "6e01a91c21a42e8f5a14634007b002bfbd68737226373253e39d2251fd81e6d1",
+      "prefix16_hex": "ddffcfffacff98ffa5ffb9ffdfffdbff"
+    },
+    {
+      "path": "base/audio/npc/suzan/kiss.raw",
+      "bytes": 182252,
+      "sha256": "1b3f5e6c96fcfbbd04ddd285862d484044c048a54132109b26ad0fce9b4d14a6",
+      "prefix16_hex": "020006000b00ebffdbff1a006e008900"
+    },
+    {
+      "path": "base/audio/pc/attack1.raw",
+      "bytes": 55180,
+      "sha256": "27badab507cdc7f3f55ff7efa9eefd3d8fd184e9e18ed6cc1a277ad71d8e904b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/attack2.raw",
+      "bytes": 88288,
+      "sha256": "aa2e3115816dd0c05fc087ab44ce43cbc3ac0ac1eb980bd750c35a7979ef1625",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/attack3.raw",
+      "bytes": 47824,
+      "sha256": "b4a9ee222f5818c3b90a11143f59ec52cdd7528745995d1e60c4ea1b4353e5c6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/attack4.raw",
+      "bytes": 36786,
+      "sha256": "4db7794c61ca50e62b746e6a4473c8d874e8ed5c5199c7eeba6049138e6c5566",
+      "prefix16_hex": "99fe68018bffe100e2ffc100e1ff9100"
+    },
+    {
+      "path": "base/audio/pc/common_resurrection.raw",
+      "bytes": 115328,
+      "sha256": "bffd522993502de2eeeb0094a0abab0a52302828a45e26e7201df6b93e8b96df",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/common_run.raw",
+      "bytes": 63968,
+      "sha256": "3f767cc0fc17bdb9f55cf39c07eb830135a75cb83d28c7368c2e93b0a8280a79",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/common_walk.raw",
+      "bytes": 101468,
+      "sha256": "b02fb9865895d68cb0e5cf14826aefedcc6feefdc745a81a1c5e84c630ac8dca",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_attack1.raw",
+      "bytes": 80930,
+      "sha256": "22eb182b9d5e43a1ed0a6a405fe2dfd9dbece7fba6f6182278da17958e375bfa",
+      "prefix16_hex": "04000400060004000400020004000600"
+    },
+    {
+      "path": "base/audio/pc/female_attack2.raw",
+      "bytes": 47822,
+      "sha256": "3eadceb068a273b9eb0bdb6b8de16d5bd880304ae90c46213d7b4ebe767ebefd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_attack3.raw",
+      "bytes": 47822,
+      "sha256": "5a1a92a1bbaccd913e477f4495568a0dd9623189520661948bbd3f95f2551857",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_damage1.raw",
+      "bytes": 27456,
+      "sha256": "af2be6cd363eaadedbc09153c13df96c5092dd42c4381697d8c249b76fe6b476",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_die.raw",
+      "bytes": 167164,
+      "sha256": "7afd1e4dec36e67e0cababec71ab6789897704811f56cc87a9373d7594e773bb",
+      "prefix16_hex": "0f001c0014000e000700f1ffcdffb4ff"
+    },
+    {
+      "path": "base/audio/pc/female_rp1.raw",
+      "bytes": 154504,
+      "sha256": "94f576c178dd86fa1b0b250ae2919492e9190e16ec2eed4e2349f7dae06b705e",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp10.raw",
+      "bytes": 132432,
+      "sha256": "41c6eb669b138aee72b72cb8d7812c1847568a26dd61171a742c831d645fd5dd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp11.raw",
+      "bytes": 114038,
+      "sha256": "b9627483dfe2c021aa8e2f78dad078109e4226b57b673de75acb788c158a922f",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp2.raw",
+      "bytes": 106682,
+      "sha256": "1004fcb15986809216f7e4f7b594e889d9eda9ca67bdbce01abfbedbad1132ae",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp3.raw",
+      "bytes": 69896,
+      "sha256": "a988c0472c977e7c7411605e2f034fad8b747dbd986baa9390e628046bd808e6",
+      "prefix16_hex": "1efe7afe1cfe3afef8fd04fed2fdd4fd"
+    },
+    {
+      "path": "base/audio/pc/female_rp4.raw",
+      "bytes": 143468,
+      "sha256": "de737c2283c5a293a1683ddf0fc074a4c1848a995423f5432e38bf2aa8550409",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp5.raw",
+      "bytes": 80930,
+      "sha256": "7a8b8702d7fdb885c60924ac2875641c0bac175e9a507efb9c536dde616ab5b6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp6.raw",
+      "bytes": 95646,
+      "sha256": "6a6c7886c5e646156601fb8040542ed7521a8ea8662bd13708621fe122c52a0e",
+      "prefix16_hex": "1201860048012e01b801bc0130024202"
+    },
+    {
+      "path": "base/audio/pc/female_rp7.raw",
+      "bytes": 66216,
+      "sha256": "8f9142136c0bb127f6f1612a968a01f26355373840453acbd33574b2395e92c7",
+      "prefix16_hex": "00000200000002000000020000000200"
+    },
+    {
+      "path": "base/audio/pc/female_rp8.raw",
+      "bytes": 103004,
+      "sha256": "d3f79d54d15e6968429a27b1ad13a28fe8d98e7a5c6f4bc9d18258f7b6d67a7a",
+      "prefix16_hex": "1400c4fffeffe4ff0800feff14000200"
+    },
+    {
+      "path": "base/audio/pc/female_rp9.raw",
+      "bytes": 99326,
+      "sha256": "0f956ddf00bedc134ffdf199860921c5273ebe1832d098a62f23353d309326f5",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp9_1.raw",
+      "bytes": 99326,
+      "sha256": "4bf9420a28e38c2ec1d5751e345fcd38f5fa57f5647802208e776014c433fa5c",
+      "prefix16_hex": "f8ff0400feff02000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/female_rp9_2.raw",
+      "bytes": 99326,
+      "sha256": "7325a5d5b707ba725d98de1dd373a0cbd7d0db3c5896cd082a9ae931622b3298",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_attack1.raw",
+      "bytes": 80930,
+      "sha256": "d2d9d62c8633fb5710e7901fd4504b41aeb30837cec1a67a27935ccc1d6122ec",
+      "prefix16_hex": "00000100010002000200010001000200"
+    },
+    {
+      "path": "base/audio/pc/male_attack2.raw",
+      "bytes": 47822,
+      "sha256": "f6f0175ec28bc78ed7a2f401e5b6f592e2db581db746880f9df12c556fdd55b1",
+      "prefix16_hex": "fcfffcfffdfffdfffdfffeffffff0000"
+    },
+    {
+      "path": "base/audio/pc/male_attack3.raw",
+      "bytes": 47822,
+      "sha256": "3bad630490de00dc3e4f47b23351670b2f713ed7ce09160359dfde80ef968a46",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_attack4.raw",
+      "bytes": 44344,
+      "sha256": "cdd6d26f08c9dd06ee107b2efb9f0d20ab820241552d37c8853ed7286ff0d3e4",
+      "prefix16_hex": "07041606a306b106fb06e0063506bb05"
+    },
+    {
+      "path": "base/audio/pc/male_attack5.raw",
+      "bytes": 28574,
+      "sha256": "271e4e17adba71def95d024a5a195f5071798cae777ef99956666f9b7ef31a3a",
+      "prefix16_hex": "1002290231023a0239023b023a024c02"
+    },
+    {
+      "path": "base/audio/pc/male_attack6.raw",
+      "bytes": 20236,
+      "sha256": "655eb70964df611592a476b499e7a9c582ab188db588be8b22070348d9702c42",
+      "prefix16_hex": "8502d102ea021203f502da028502ce02"
+    },
+    {
+      "path": "base/audio/pc/male_damage1.raw",
+      "bytes": 44624,
+      "sha256": "8e16a7906132e8a40ace6ce6d9dcb0418f9ab0ae73ee28bef84e66b85f3f8ebd",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_damage2.raw",
+      "bytes": 43328,
+      "sha256": "e3f8f263513db21b02a681d1c6175faf3d646f00d84033fc1716446fd2cde821",
+      "prefix16_hex": "9efca2fc92fc8dfc9ffcb4fcb5fca2fc"
+    },
+    {
+      "path": "base/audio/pc/male_damage3.raw",
+      "bytes": 46398,
+      "sha256": "36c6b7473b80fe2b25b868030e8abb943b1d7ff788eb94842fc89db9302785bd",
+      "prefix16_hex": "e4fdf3fdecfdeafdeefde8fddefdd1fd"
+    },
+    {
+      "path": "base/audio/pc/male_damage4.raw",
+      "bytes": 37894,
+      "sha256": "34099ca8e0b432771a59ccdd5afcc62a6863a0666bf05722a6cbffe3e6dea897",
+      "prefix16_hex": "98fc9cfc9dfc9cfca0fcacfcb8fcc3fc"
+    },
+    {
+      "path": "base/audio/pc/male_damage5.raw",
+      "bytes": 39718,
+      "sha256": "d65fe04672f254ab79e8e006cac95e5a1d194a0f951ab0bea04a8effe1c71580",
+      "prefix16_hex": "a5fea8fea7fea9feaffea9fea7fea7fe"
+    },
+    {
+      "path": "base/audio/pc/male_damage6.raw",
+      "bytes": 46938,
+      "sha256": "caf122782196d90ec062bcd8aaf15c9f66fa2e793986f7b870df3ad88860b3c9",
+      "prefix16_hex": "09ff08ff0bff0aff09ff0aff09ff01ff"
+    },
+    {
+      "path": "base/audio/pc/male_damage7.raw",
+      "bytes": 33940,
+      "sha256": "50d523bb28b9a5d0079eb3a3f52b20bfd3a9de25b48c8e4b40f884d4f5a2b262",
+      "prefix16_hex": "7ffe79fe7cfe82fe7dfe76fe7afe77fe"
+    },
+    {
+      "path": "base/audio/pc/male_damage8.raw",
+      "bytes": 33940,
+      "sha256": "14a80e2f7a503600a774861dc94624fcc630b12892a132d46c470b1f643c5fb5",
+      "prefix16_hex": "e1fdd7fdcdfdc7fdc2fdcafdcbfdcbfd"
+    },
+    {
+      "path": "base/audio/pc/male_damage9.raw",
+      "bytes": 35384,
+      "sha256": "84e37dea63652d0db88a9f14d15306ab4d2c4fd73d4812e333f63ed569ae6625",
+      "prefix16_hex": "04fe0cfe05fefefdf9fdf8fdf8fdebfd"
+    },
+    {
+      "path": "base/audio/pc/male_die.raw",
+      "bytes": 136998,
+      "sha256": "c06ae79edec77e48267860d53574e043e5c1520359282033309cb49c4afbe09f",
+      "prefix16_hex": "fbfff7fff8fffafff9fffafffbfffcff"
+    },
+    {
+      "path": "base/audio/pc/male_melee1.raw",
+      "bytes": 43266,
+      "sha256": "95364003298496b716209bbfe6eecef6e08f315172e679208965a7e6fcca8fad",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_melee2.raw",
+      "bytes": 19328,
+      "sha256": "316fbd93c50a91a3146c7805a514b4a54dc100a9d35db991914901ec8a85bf36",
+      "prefix16_hex": "f2fe70fe04fe3afecefe25ff36fff7fe"
+    },
+    {
+      "path": "base/audio/pc/male_melee3.raw",
+      "bytes": 44344,
+      "sha256": "cdd6d26f08c9dd06ee107b2efb9f0d20ab820241552d37c8853ed7286ff0d3e4",
+      "prefix16_hex": "07041606a306b106fb06e0063506bb05"
+    },
+    {
+      "path": "base/audio/pc/male_rp1.raw",
+      "bytes": 154504,
+      "sha256": "1cbbe5cd2cefa681fe130b4e71da582ac8fd2e11d3065723d20db15b587af71f",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp10.raw",
+      "bytes": 132432,
+      "sha256": "800173d28d0271de51bf66cfe6494ae849198e7234e3de15777851acfe67e3a6",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp11.raw",
+      "bytes": 95646,
+      "sha256": "f2c73036942ec43f0a3c348eb45edcb6159c43f2b758ab1a58ac021a037a8c3d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp2.raw",
+      "bytes": 91968,
+      "sha256": "3903d09e88226ee82db97fb588da8e1a0f9a2c17471f5f72e144db18db9dc769",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp3.raw",
+      "bytes": 69896,
+      "sha256": "dc84770dcdfb11cd3bcb5160cfc522a271e5c8d7a186c653ee7f9e7081ef4b37",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp4.raw",
+      "bytes": 143468,
+      "sha256": "bbececb74c5e972681ef0dee90beeff844906eec7495f7880c8ee068e9643141",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp5.raw",
+      "bytes": 106682,
+      "sha256": "f87f2b8b417617bee81e0a3f02d97cb90551fb0a5ff940a8b023c068176039ed",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp6.raw",
+      "bytes": 84610,
+      "sha256": "3f0cc9dbbf7c2b947eaaebc76a31f02972e608c47330b97c0bc7856ae2ee1326",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp7.raw",
+      "bytes": 80930,
+      "sha256": "88d9ed0a774b56fd8974405fa196891a58770f2c0165aae839ee334d4564f332",
+      "prefix16_hex": "30005800360058000e00d6ffecff2000"
+    },
+    {
+      "path": "base/audio/pc/male_rp7_1.raw",
+      "bytes": 80930,
+      "sha256": "4c6b7aeee7634aacb12044eab40eed05830f49341908e055ca9b6ab7f53dcac2",
+      "prefix16_hex": "e4ff0800f2ff0200f4ff0000f6ff0000"
+    },
+    {
+      "path": "base/audio/pc/male_rp8.raw",
+      "bytes": 103004,
+      "sha256": "59477f5e88188b92e89173572135c057a4c6a42a98f6987bf6833f00354d8a43",
+      "prefix16_hex": "ccfeda009cff8e00dcff7000ecff4e00"
+    },
+    {
+      "path": "base/audio/pc/male_rp9.raw",
+      "bytes": 99326,
+      "sha256": "93b84aebd2cb08e7a92a423f9068281bed3643560a6c2b877b06f2fb74a77f60",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp9_1.raw",
+      "bytes": 121398,
+      "sha256": "f078c7db55e0b81db0856e99d34e86c30538abc5f95e5cdf449110a3ad49fee4",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/pc/male_rp9_2.raw",
+      "bytes": 99326,
+      "sha256": "dcf39f1e40b3de93842cedf6e481e099cc1d1f15ef5aa08d3bbb7ade8b03d310",
+      "prefix16_hex": "0400feff020000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/agirvurus_erkek.raw",
+      "bytes": 128754,
+      "sha256": "84af5eba32635d7efa62e0944d053f61f32bf1f8e967226c28067a07bd4d0905",
+      "prefix16_hex": "fcff1600060013000b00140010001900"
+    },
+    {
+      "path": "base/audio/skills/agirvurus_kadin.raw",
+      "bytes": 128754,
+      "sha256": "f1477f3e925f99df7b3962478a6fdbaeace32d4697d12f2b3e52fee9df181208",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/asitsaldirisi.raw",
+      "bytes": 110250,
+      "sha256": "3f0f16e384cc6cb0d613e843c3f4a21788d82b5c7e8eaf548ab6ae06e402d5b8",
+      "prefix16_hex": "0efe6efe8cff65009a005b000500d5ff"
+    },
+    {
+      "path": "base/audio/skills/atescemberi.raw",
+      "bytes": 158182,
+      "sha256": "35e13e7c9c152b74b8abcdd229ed2cf86be030024fdb18e940747a6ba53f6293",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/bombaci.raw",
+      "bytes": 170496,
+      "sha256": "e740989ff5561a1e17142c9fc5b805e88eca60e73612d70866c43c24bbb6e607",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/buyubozmabuyucu.raw",
+      "bytes": 134406,
+      "sha256": "f9b76460271ed7af653def64a5e0f858043a53a9c1eb30487f90a554df7a42c4",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/buyubozmasifaci.raw",
+      "bytes": 529200,
+      "sha256": "a7c92063fe2dbfa911cde5d3ba0e107bb5c9734dd4ffb305a8d6a5301d149e92",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/buzoku.raw",
+      "bytes": 143326,
+      "sha256": "bad761da91b726a5bc32679955adf4d51bd7b758a0a23cbfc1b8f57703f98b87",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/defansifdovus.raw",
+      "bytes": 203962,
+      "sha256": "da7a4825e61c497ffc179e0a328609d3a589ee4ce06be9631fb40cb06df1a65e",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/depar.raw",
+      "bytes": 308700,
+      "sha256": "a5f7537144b3b21b99cf4e9a3b846009bc4e36a3915c718639c1f34bf1c1f2a9",
+      "prefix16_hex": "000000000000000000000000fefffeff"
+    },
+    {
+      "path": "base/audio/skills/dikkatdagitma.raw",
+      "bytes": 198450,
+      "sha256": "965ed1e6bed615bc9619eddb4978a9af28232835be217668d0a0bf9c80679017",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/direnckirmaalani.raw",
+      "bytes": 441000,
+      "sha256": "be288f02b62d2592f4723dfafb672271156a8370087ac14d525ad0fb1a3f1570",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/durdurma.raw",
+      "bytes": 308700,
+      "sha256": "1462fdaf7043c5cd26dc368f4933d29914e2462bd7e7f3426340518d8947fd2a",
+      "prefix16_hex": "7313f4127e120812b211611130111811"
+    },
+    {
+      "path": "base/audio/skills/elementdirencialani.raw",
+      "bytes": 308700,
+      "sha256": "48e6305f8633be80c3d2873efa8dd61e3480fd79d876b3af53800fd1a6dd4e93",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/fizikseldirencalani.raw",
+      "bytes": 242550,
+      "sha256": "c42dd4b414deb0d81759fccdb5095faf76f55b8f63e1a2b3a44be158fab306c9",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/hizlidovus.raw",
+      "bytes": 176400,
+      "sha256": "f463244fd87a7bc5ea75f7152af5ee3192aabd2836eb2abdaf1645f45faf8789",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/iyilestirme.raw",
+      "bytes": 273050,
+      "sha256": "191b9376aa9b51d83d1b4dc86ce79928d884b88c44f9dd897b46c95cf59e4e01",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/kanatma.raw",
+      "bytes": 264600,
+      "sha256": "9e15e569dcf95baf2ddbbddcfe3e14f272b7ac22988271299d85a9a6945d7085",
+      "prefix16_hex": "00000000000000000000000000000100"
+    },
+    {
+      "path": "base/audio/skills/kiskirtma.raw",
+      "bytes": 161862,
+      "sha256": "b471de71111d4ccbcd656c6f48f4bbebb24eadd5c093d5607afab6452c6e17d5",
+      "prefix16_hex": "6b0109ffbb0061ff890083ff6f009cff"
+    },
+    {
+      "path": "base/audio/skills/konsantrasyon.raw",
+      "bytes": 708356,
+      "sha256": "2f14bd9d611fbdc798d7fddb942cdb3da7736c21588800a82d93a5f5146637b9",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/kutupruzgari.raw",
+      "bytes": 206006,
+      "sha256": "821be2e6e54435179e4f80ef96da620404e3f0e507a56f202f48f1a1aaff0902",
+      "prefix16_hex": "7dfce1fc9dfcccfca4fcbefca6fcb7fc"
+    },
+    {
+      "path": "base/audio/skills/meteorit.raw",
+      "bytes": 143326,
+      "sha256": "6ea324653643e13b72b9f3431dee230f8d253cbe371abf01520375748d9e4f7a",
+      "prefix16_hex": "c7ffdbfffbff0e0010000700fffffbff"
+    },
+    {
+      "path": "base/audio/skills/ruhkalkani.raw",
+      "bytes": 788478,
+      "sha256": "47d3adb9ca0675803dd0c8c57026c9ca7b2c431eb47f09835ed021eac70aaee7",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/sakinlestirme.raw",
+      "bytes": 237038,
+      "sha256": "e4c34b41613d3872c0f00ee22fafd1d404681f3beca4ee0e760c9a9cc2364ab9",
+      "prefix16_hex": "e600c60130012f008eff7dffc2ff0900"
+    },
+    {
+      "path": "base/audio/skills/sakinma.raw",
+      "bytes": 231526,
+      "sha256": "e0e43687135035cf6d4f8491185e7a5c6c2664d24256ad1e68965d5284d5a29a",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/sarsilmaz.raw",
+      "bytes": 396900,
+      "sha256": "837de9ac84f05f73bc4bf34630fde7a40ef29d4eaaa08e11c185bfea06fda087",
+      "prefix16_hex": "090013000c000200fcfffbfffeff0000"
+    },
+    {
+      "path": "base/audio/skills/sarsilmaz_erkek.raw",
+      "bytes": 226728,
+      "sha256": "5ce344934f430518c069736282746545109ef8a9452c3d08c462db124fe05cb9",
+      "prefix16_hex": "1dff9101f3ffa5ffeafe0eff6bff9dff"
+    },
+    {
+      "path": "base/audio/skills/sarsilmaz_kadin.raw",
+      "bytes": 224400,
+      "sha256": "cd2dcc95649dc12badaec74253fd4d260290d830fec70c0b3b42a18990e4a2f4",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/savasnarasi.raw",
+      "bytes": 220500,
+      "sha256": "e9849e19074f4e7757be67aa80ef0973915b3e03ff91f35450ae6b0596062492",
+      "prefix16_hex": "e5035d02440111010e013e01a3018e01"
+    },
+    {
+      "path": "base/audio/skills/savasnarasi_erkek.raw",
+      "bytes": 169220,
+      "sha256": "4e907794909740718d5b0df3c48600b856523ae322f75e6963965c9397fd690c",
+      "prefix16_hex": "0b00f9ff0600fcff0300fdff0300ffff"
+    },
+    {
+      "path": "base/audio/skills/savasnarasi_kadin.raw",
+      "bytes": 169220,
+      "sha256": "497d7cc0b3fc1baec878a92449b3c4d56810ff9b494e85f92622afde9b8fd0e8",
+      "prefix16_hex": "d9ff1600f2ff0b00f9ff0600fcff0400"
+    },
+    {
+      "path": "base/audio/skills/sertvurus.raw",
+      "bytes": 250818,
+      "sha256": "d7a0388072a5459d7fe1a8df77ad57adea5d1c6a32bd2ebc99198f2712dc212a",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/sertvurus_erkek.raw",
+      "bytes": 117718,
+      "sha256": "cf6e1650ea5b1cb9b949877737c4ebb5899adc677c5c32edd49d15851257509c",
+      "prefix16_hex": "edff7a00890073001c00d0ffc8fff0ff"
+    },
+    {
+      "path": "base/audio/skills/sertvurus_kadin.raw",
+      "bytes": 117718,
+      "sha256": "2fe0b01c343f13125effd18ca8c653914bd1ae31c92fc97dd4ef3a6a24677f49",
+      "prefix16_hex": "edff7a00890073001c00d0ffc8fff0ff"
+    },
+    {
+      "path": "base/audio/skills/supurme.raw",
+      "bytes": 125074,
+      "sha256": "976f1ff00f8c24ef60174c9e22af53da2263bb67b01403f96a3e7577baff8b07",
+      "prefix16_hex": "6300420030002a003c00460049003a00"
+    },
+    {
+      "path": "base/audio/skills/supurme_erkek.raw",
+      "bytes": 125074,
+      "sha256": "203a5cd722f5984a3ec5377c2027e26ef98df3b504d9f30210f5377a5e0caa63",
+      "prefix16_hex": "610040002d0028003a00440047003800"
+    },
+    {
+      "path": "base/audio/skills/supurme_kadin.raw",
+      "bytes": 125074,
+      "sha256": "666c486e633f7c02bd08ab33bb39ccaad8648b6dbf27280db13db9a55f8b478d",
+      "prefix16_hex": "6300420030002a003c00460049003a00"
+    },
+    {
+      "path": "base/audio/skills/teslakuresi.raw",
+      "bytes": 165540,
+      "sha256": "667646c54e6b1bcc51ad33592fc188de99eef6b63f37d7c7d189f92d1a8b1176",
+      "prefix16_hex": "4d004e00510050005000520044002d00"
+    },
+    {
+      "path": "base/audio/skills/yildirim.raw",
+      "bytes": 308700,
+      "sha256": "f61825c3c5b4b2502967d63ae6093ae88af37b0ed7a8aea9812a99e5e1896d50",
+      "prefix16_hex": "00000000ffff00000000ffffffffffff"
+    },
+    {
+      "path": "base/audio/skills/zehirleme.raw",
+      "bytes": 441000,
+      "sha256": "4e4602177a2803db2fced24cc9e06b7aff44dac5acf24d83b9b1ca5466407200",
+      "prefix16_hex": "420816063d05b906c7037101ca026e02"
+    },
+    {
+      "path": "base/audio/skills/zihinsaldirisi.raw",
+      "bytes": 121398,
+      "sha256": "bff90e346f1bdcd984f8e462bd9609f4b056c7ce5ec7c95e496cafb4b78a236f",
+      "prefix16_hex": "feff0000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/skills/zihintoplama.raw",
+      "bytes": 341776,
+      "sha256": "b02ac924b373fbbfe727241eced9f262cc2e38ad01c3eef4e6b3d49d63303c76",
+      "prefix16_hex": "660369f82bf9d9f978fa06fb86fbfafb"
+    },
+    {
+      "path": "base/audio/sounds.xml",
+      "bytes": 542,
+      "sha256": "bfec901c00a340937e5145a2e080f81a035d82c9065abdfab0e4a95d40665355",
+      "prefix16_hex": "3c3f786d6c2076657273696f6e3d2231"
+    },
+    {
+      "path": "base/audio/ui/alert.raw",
+      "bytes": 682,
+      "sha256": "d6f9a3144989177252dffc5b8b14d018dec82c8bcb0355d9bf9aee41c9c20d58",
+      "prefix16_hex": "9800d8ff6bff63ffd0ff93006801fe01"
+    },
+    {
+      "path": "base/audio/ui/click.raw",
+      "bytes": 682,
+      "sha256": "c8a9b22068922754a45111b12af1153dfd55f55ca14444227bbd0ccd2e0f8236",
+      "prefix16_hex": "c8ff9100350109010d0a014d01ec006d"
+    },
+    {
+      "path": "base/audio/ui/craft.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/drink.raw",
+      "bytes": 250,
+      "sha256": "edb3232aab58b6ced4ce914d3a4e227836ca11947d7ea118d7337e0307958732",
+      "prefix16_hex": "1cffe8fe4affdaff25002c001e000000"
+    },
+    {
+      "path": "base/audio/ui/eat.raw",
+      "bytes": 98,
+      "sha256": "01f2c6804d64e984f4df4ce392de207426fc418c0815ff02f4df1f860da0187c",
+      "prefix16_hex": "3dff62ff8cffadffbfffbcffa8ff8bff"
+    },
+    {
+      "path": "base/audio/ui/gold.raw",
+      "bytes": 400,
+      "sha256": "2c6d795539e7bd89dd20899df9a75a20983b8c3597ee876589bc187addf58c2a",
+      "prefix16_hex": "460035002c0022001b00090010000d0a"
+    },
+    {
+      "path": "base/audio/ui/itemdrop.raw",
+      "bytes": 402,
+      "sha256": "b5317a0f5101202686fb4f62386702d01213e76f080614e8bfbc5f4c34301f29",
+      "prefix16_hex": "520022002a006200b9000b012d011201"
+    },
+    {
+      "path": "base/audio/ui/itemuse.raw",
+      "bytes": 683,
+      "sha256": "4a3f17c17f45041ad6bee978922675f0d2f58273098e6bafa05b1233e58bb31f",
+      "prefix16_hex": "2c016c019f017f014401380134013a01"
+    },
+    {
+      "path": "base/audio/ui/kritik.raw",
+      "bytes": 65066,
+      "sha256": "fd6e0542bba7424f2be3b194fef44848c8ba68841a81de8b1b75d7bd3201e00e",
+      "prefix16_hex": "6904d7000cf93bf007ec1aee12ed73e5"
+    },
+    {
+      "path": "base/audio/ui/repair.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/warning.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/windowclose.raw",
+      "bytes": 747,
+      "sha256": "9f477413a5bd9ff69b288dc8380cdabacae549e2b7531085a2e06be0dc9390b0",
+      "prefix16_hex": "4cff5bffa0fff3ff33005a005b003d00"
+    },
+    {
+      "path": "base/audio/ui/windowopen.raw",
+      "bytes": 449,
+      "sha256": "b8855ac6d08d520349b5b13d12ecedf35c31f6fd25a3b8ebd3040f575cfac8d8",
+      "prefix16_hex": "4500f6ff9c0033003eff550079019a00"
+    },
+    {
+      "path": "base/audio/weapon/barehand/1.raw",
+      "bytes": 33108,
+      "sha256": "63792658a071165fb6249ffaac3f035f9cc870b104012bc1231766c0566abcbb",
+      "prefix16_hex": "fcff0200feff0100ffff0100ffff0100"
+    },
+    {
+      "path": "base/audio/weapon/barehand/2.raw",
+      "bytes": 66216,
+      "sha256": "f3134bf58ab90e2747c06ebc59d546f7540d7c7e4bdd80d4d1db926c2d392e94",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/barehand/3.raw",
+      "bytes": 55182,
+      "sha256": "3467184f487ab68086b6cd1f2ff645d05b0adcb43d846ba9173dd4acd02b7424",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/barehand/4.raw",
+      "bytes": 47822,
+      "sha256": "fc5ef531d47e90f64b3cd1e8616d9380ec6ef8a0b9d7838745acfeaee1fec900",
+      "prefix16_hex": "01000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/barehand/5.raw",
+      "bytes": 62536,
+      "sha256": "6a40320241d85f6e7b14860ce752123b0ff5e6cf902f805ff491dd2abe03b5b3",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/barehand/6.raw",
+      "bytes": 55180,
+      "sha256": "7bc5e8db20f4dc638dd3b2f226e971b99a6c1f9880a256f0148d35fdd04c715e",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/barehand/dmg1.raw",
+      "bytes": 586,
+      "sha256": "1ee37a70b4a76cf6cda875b8402b75a689aceedd6f6104973a5e356d7468907b",
+      "prefix16_hex": "08000d0a000d0a001600200021002500"
+    },
+    {
+      "path": "base/audio/weapon/barehand/dmg2.raw",
+      "bytes": 54,
+      "sha256": "d383b6ed9183eaf5c5aee5bd733375190e771523adc65fd9e3a8fb86748a1be8",
+      "prefix16_hex": "0300030006000d0a000f00120012000e"
+    },
+    {
+      "path": "base/audio/weapon/barehand/hit1.raw",
+      "bytes": 200,
+      "sha256": "e728fa75d4c516c908c7d566aa3ba1e94671d66be64e2dcd843bc611adf24e83",
+      "prefix16_hex": "d7ffd9ffe0ffe6fff5ff010015003d00"
+    },
+    {
+      "path": "base/audio/weapon/barehand/hit2.raw",
+      "bytes": 1015,
+      "sha256": "4bdc25158708ad6e69ba510d7c950747ab779d02513dadadb9a016667ed77aca",
+      "prefix16_hex": "6efd73fd76fd69fd49fd22fd08fd08fd"
+    },
+    {
+      "path": "base/audio/weapon/barehand/hit3.raw",
+      "bytes": 39,
+      "sha256": "dd190448a6fc602e54e99810c1e155fea1d4b3ae68993421975c537646e3b7c6",
+      "prefix16_hex": "0000050000001400120012001c001400"
+    },
+    {
+      "path": "base/audio/weapon/handgun/arbalet.raw",
+      "bytes": 29760,
+      "sha256": "7682e923097e35dd432bfe26dd5c8cf2d41af20f7e736c1dbc08109249a60b55",
+      "prefix16_hex": "a5009a0092008800770061004c003d00"
+    },
+    {
+      "path": "base/audio/weapon/handgun/ateslisilah1.raw",
+      "bytes": 77252,
+      "sha256": "c0034d8deb4ce2928b46595441bd5e2d9f68038030cc36a70818773c98494f10",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/handgun/ateslisilah2.raw",
+      "bytes": 88288,
+      "sha256": "838162fa99eef8f8faf23f2960f4e72b339ee31176eab563dddadd62977712a5",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/handgun/ateslisilah3.raw",
+      "bytes": 103002,
+      "sha256": "e2ce38351f4e6bbae9c583c3b64e82980ccf062ccddc772c6fb271e29e80b0c0",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/handgun/ateslisilahtekli.raw",
+      "bytes": 92928,
+      "sha256": "ade28d411cd9bbed69a16cbff22cee2e64363fd1866a7f89e3878263d2113317",
+      "prefix16_hex": "aeffacffb3ffaeffabffb1ffafffb2ff"
+    },
+    {
+      "path": "base/audio/weapon/handgun/dmg1.raw",
+      "bytes": 586,
+      "sha256": "1ee37a70b4a76cf6cda875b8402b75a689aceedd6f6104973a5e356d7468907b",
+      "prefix16_hex": "08000d0a000d0a001600200021002500"
+    },
+    {
+      "path": "base/audio/weapon/handgun/dmg2.raw",
+      "bytes": 54,
+      "sha256": "d383b6ed9183eaf5c5aee5bd733375190e771523adc65fd9e3a8fb86748a1be8",
+      "prefix16_hex": "0300030006000d0a000f00120012000e"
+    },
+    {
+      "path": "base/audio/weapon/handgun/faretetikcisilah.raw",
+      "bytes": 61260,
+      "sha256": "f5e34ad42fa80b1510cc3e3513fc5ff858d3f4ce43a61d00ec55e5daa7a5cc9a",
+      "prefix16_hex": "0d0009000b00090004000c0018002200"
+    },
+    {
+      "path": "base/audio/weapon/handgun/faretetikcisilah2.raw",
+      "bytes": 61132,
+      "sha256": "0fc47f31c7f20d99b0e5831e87ff1e6dd3584f4a092513882e9e1a00c2c027cf",
+      "prefix16_hex": "2a004500470042003a002b0018000d00"
+    },
+    {
+      "path": "base/audio/weapon/handgun/gunshot_1.raw",
+      "bytes": 153,
+      "sha256": "6d42f4dc92d095cb7b258458f9ed24189f9c909cc1f107c619bad77af29e94b4",
+      "prefix16_hex": "2400380040000d0a00faffe8ffe6ff26"
+    },
+    {
+      "path": "base/audio/weapon/handgun/gunshot_2.raw",
+      "bytes": 45,
+      "sha256": "f817b9e96515d0fce0e5231a59ad28e2a73fdb0be149e9fdd2a1be05277a9840",
+      "prefix16_hex": "1e028a01d60050011e011eff98fe10fe"
+    },
+    {
+      "path": "base/audio/weapon/handgun/hit1.raw",
+      "bytes": 243,
+      "sha256": "e3f7ff07a1e559fa642db53215eb108a23a3c816818333c7385342dd0feba991",
+      "prefix16_hex": "1b002a0030000700fdffefffeeff1c00"
+    },
+    {
+      "path": "base/audio/weapon/heavyfire/gustav.raw",
+      "bytes": 247020,
+      "sha256": "4f91b6dced7a7218fdb3e4fb1542a6333ecd9fa61ce3d5ae368278454cc9f365",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/audio/weapon/heavyfire/zeplin_bomba.raw",
+      "bytes": 570194,
+      "sha256": "0fd1e3d085cb7edeeccab569e4a3c6f308abdecfad211252ddc80c58bfcb365d",
+      "prefix16_hex": "612a9306dbd7fed6dafac924152a5100"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg1.raw",
+      "bytes": 306,
+      "sha256": "c75c36547d7f9d3008a72b3fce70353bcb3d32f1ad73a264285bcff26fdd63e8",
+      "prefix16_hex": "f6ffe6ffb3ffe3ff68008f002200b3ff"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg2.raw",
+      "bytes": 265,
+      "sha256": "e3026624cca92c426daa96f9e8f54e8ee6fd9cee9b65058078a30acdfcda810d",
+      "prefix16_hex": "3f00feff1b000d0a00abff88ffc9ffb1"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg3.raw",
+      "bytes": 381,
+      "sha256": "321ec731bf19ec3a97d5f3f77cdb6abc3d4395b039fab1fb26d302ed509c5ee1",
+      "prefix16_hex": "5bfeaffe0eff5effa4ffb0ff8bff42ff"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg4.raw",
+      "bytes": 813,
+      "sha256": "7997b02cf36802eafcca04e1ed6fa330a87d808de6036c4c79a5ad5ced48d4a2",
+      "prefix16_hex": "bbff0e0046001800a7ffb0ff0d0a00f5"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit1.raw",
+      "bytes": 1024,
+      "sha256": "4c1b0f044b7716769195655916c80ac5837d8415992aec180f22bcd3ec2810c5",
+      "prefix16_hex": "9afe7afe6bfe6ffe4dfe24fe55fe7bfe"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit2.raw",
+      "bytes": 417,
+      "sha256": "1268f77d40336a63285945c686a70d469b8083acc836dbb3008a1500ce565174",
+      "prefix16_hex": "71ffabff2700a200be0097007b006500"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit3.raw",
+      "bytes": 575,
+      "sha256": "c83391e7cb25d660ba4c424110714085edb0e2fb36313b85bbc32118fce7b592",
+      "prefix16_hex": "14ff06fff9feeafee4fedafec5fec0fe"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit4.raw",
+      "bytes": 633,
+      "sha256": "4524dbd17c5c44f5ffad6e2b680b5e9382a336c47fea07aacacbbe8ef2dba75d",
+      "prefix16_hex": "d000fa001f013e01540161015d015901"
+    },
+    {
+      "path": "base/data/animation.dat",
+      "bytes": 1133271,
+      "sha256": "3b0bcc88b14767847353593a443a17147bf4278689581a163bc76ad56f662e5b",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/data/classes.dat",
+      "bytes": 1355140,
+      "sha256": "58ca0a1d29e76b025272ea8256dd4898ea347bbe6c7df1dd7dcc8f4be998c1c6",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/data/playlist.dat",
+      "bytes": 2715,
+      "sha256": "dee15a5b6f09e50d914be08011d992391b5023047ddf1111aabecce442b35c6a",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/data/playlistsound.dat",
+      "bytes": 1149,
+      "sha256": "2d1f886b722b3c2da9c062fcb136946e4ed2719d557ad55a438fc0c3a78df3c3",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/data/prefixes.dat",
+      "bytes": 219728,
+      "sha256": "7a5e7b0c19e0f637c3c688f6681c3e93adc75b19677ff2e1effcfec520e552a7",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/data/skills.dat",
+      "bytes": 28731,
+      "sha256": "fa46f829d61c6b72ed73cd62441bdd1c58099e3861643d62a98015017a103e31",
+      "prefix16_hex": "c339d19d77828379d5bd78d7ad579ff5"
+    },
+    {
+      "path": "base/fonts/sobee.ttf",
+      "bytes": 16828,
+      "sha256": "49b4e0bc6f1b197e3e09e3a9981110541d3458ace43cd7dbb495e666801bedf1",
+      "prefix16_hex": "00010000000f0030000300c04f532f32"
+    },
+    {
+      "path": "base/fonts/verdana.ttf",
+      "bytes": 171792,
+      "sha256": "a40de55683d93e6765ae1b5280f0168437857393be4a58c93ce805afb9ea2cff",
+      "prefix16_hex": "00010000001401000004004044534947"
+    },
+    {
+      "path": "base/fonts/verdanab.ttf",
+      "bytes": 137616,
+      "sha256": "2b1ec02c0463ce5e312913da8825002165999b6f370c276cd378ef0f3e16db27",
+      "prefix16_hex": "00010000001201000004002044534947"
+    },
+    {
+      "path": "base/fx/1golge.dds",
+      "bytes": 11064,
+      "sha256": "93d867a185514fd5d707c14548a63580456cf2d321cbd2b9411a21c1e6bc8105",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/Cem_isik.dds",
+      "bytes": 5616,
+      "sha256": "69ccdae24f55e8fe120bd6bb1572d4a5c754ae7c8ae96e2c04efb51e6e2b95d3",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/Kor_Plane.dds",
+      "bytes": 87536,
+      "sha256": "0f19d4ffd3aabcd0a5da07cc0f27643d021290941fb22b9e170c606a07418114",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/Mumlar.dds",
+      "bytes": 87536,
+      "sha256": "7b267cbf2ca1bf594aece4cafc1e610f5c6095cc3c6e92a641081aee0f9ffeee",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/Particle_Sunak.dds",
+      "bytes": 349680,
+      "sha256": "64164e2c42e8ca48c5d582a4e04337f1a9ba48ee6c2940c7b4870e30d5579770",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/Shape_of_my_heart.dds",
+      "bytes": 22000,
+      "sha256": "12a5a4670a32d56787bc5032b7d673ae453ac6ce577398914b5114cf5013ba26",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/asitjazz.dds",
+      "bytes": 87536,
+      "sha256": "4d7647437563000b3b032c9904c3f97e64c731ae3f7c89fec250ec6ca39793c0",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/black.dds",
+      "bytes": 384,
+      "sha256": "872fd66f95784165d8d7e2001d2874c05b4471f7b91c99b300dc13848c5ac302",
+      "prefix16_hex": "444453207c0000000710080008000000"
+    },
+    {
+      "path": "base/fx/buzbuzbuz.dds",
+      "bytes": 87536,
+      "sha256": "7f48e3904bb05a2f0d2d40767ad3c524fca7482a878f9a0106b76ebb2a8efe11",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/buzcuklar.dds",
+      "bytes": 87536,
+      "sha256": "c688815ea1b03ec9e60cd74920ce321760878f2bec57266b29fae255b56b8979",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/buzpatlama.dds",
+      "bytes": 349680,
+      "sha256": "b429d913b3fadcd76cf1d929750beccd6767f385fa7a869ba0b968a28a0f9698",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/chromakey.dds",
+      "bytes": 87536,
+      "sha256": "682ec56c2f3dba58671731a333e9e9ffe5f193bfe4c660863b258465482c57da",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/damlacik.dds",
+      "bytes": 5616,
+      "sha256": "a6e339647606f04f7fc0a4edb44e4d7ecddabce63cc0a09265f830f251450fd5",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/def_norm.dds",
+      "bytes": 384,
+      "sha256": "850534e39d37cf6f0e5996bdf7c2576bf0649160a6c102a0b7ed1fe1109989c3",
+      "prefix16_hex": "444453207c0000000710080008000000"
+    },
+    {
+      "path": "base/fx/direnc.dds",
+      "bytes": 5616,
+      "sha256": "1227f7fffae322dcc551efa5014a5037b9b51af52ccbee9058b2c38a50340b95",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/disimeran.dds",
+      "bytes": 1398256,
+      "sha256": "16b2248ea797cef9b12ba7e600d11faf957588551d550675e4e59344e0ec3a0a",
+      "prefix16_hex": "444453207c00000007100a0000040000"
+    },
+    {
+      "path": "base/fx/ejder.dds",
+      "bytes": 349680,
+      "sha256": "8d82825309cd298161863ec8b6ccf5f8f2cea21f9913cb725cff9d8a83f6d5db",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/el_bombasi.dds",
+      "bytes": 5616,
+      "sha256": "6d4ada9ecb677e93f881dae0946a69babdf4aa3508667ee92ee98e107cc0b761",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/elektrik.dds",
+      "bytes": 349680,
+      "sha256": "b836f30ee09a4e89738a1b1bfef2c147506ea4ba9d37aa1c46d6e7b28987be59",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/empty.dds",
+      "bytes": 496,
+      "sha256": "8182f94323fe89b78c5e7899f60e3cf4d79a3458186fa7a28ef28c593fbec1c9",
+      "prefix16_hex": "444453207c00000007100a0010000000"
+    },
+    {
+      "path": "base/fx/error.dds",
+      "bytes": 184,
+      "sha256": "f676cf3214e05df6b7f0dfa86138c7d58fdb56312c2883ad2c9d8a9a2f91ae0e",
+      "prefix16_hex": "444453207c00000007100a0008000000"
+    },
+    {
+      "path": "base/fx/fluoresant.dds",
+      "bytes": 22000,
+      "sha256": "e38cea5e6452fba944e7d32f58dc2efcb9bf7d1cc8d39426e5ec857f35d5e251",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/glow_icmeler.dds",
+      "bytes": 699192,
+      "sha256": "a259d9ae174021aad1cb3385914df8b0b450e3574448177fbcde65a44b315d5b",
+      "prefix16_hex": "444453207c00000007100a0000040000"
+    },
+    {
+      "path": "base/fx/golge.dds",
+      "bytes": 11064,
+      "sha256": "93d867a185514fd5d707c14548a63580456cf2d321cbd2b9411a21c1e6bc8105",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/grey.dds",
+      "bytes": 384,
+      "sha256": "43cfb12e37313023a199a44d231d767877f988ff888a0be2152e73ec0b7dd1e8",
+      "prefix16_hex": "444453207c0000000710080008000000"
+    },
+    {
+      "path": "base/fx/harfler.dds",
+      "bytes": 87536,
+      "sha256": "fa6fffa9b371766b65695bf39009b05f51ff0ffbe5e1b5f71518a6c1f05d90c3",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/hasar.dds",
+      "bytes": 5616,
+      "sha256": "cede2c732dbf125ad668d719496302d215dc6b7bad655bf644089b154fa1cf91",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/heart.dds",
+      "bytes": 496,
+      "sha256": "25c39a01c3706316e7a720b2d9970d5e8d4a31aafa7ad2ec42653e08b71f4b52",
+      "prefix16_hex": "444453207c00000007100a0010000000"
+    },
+    {
+      "path": "base/fx/hedefsaptirma.dds",
+      "bytes": 22000,
+      "sha256": "b1a93d149d44edd346f245e4840988c24f1b69c368472580e56c836c972a527e",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/hidra_basi.dds",
+      "bytes": 1398256,
+      "sha256": "d8e05d2993eef5b71a2f7dfae254d3276b71a5e0e7c9a682ba3a8152acb2c4d5",
+      "prefix16_hex": "444453207c00000007100a0000040000"
+    },
+    {
+      "path": "base/fx/huzmeler.dds",
+      "bytes": 349680,
+      "sha256": "d80eea522b6b007e5c3a4953853a721aa1e4dc70f04721eae7977d9bd6c0f064",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/karabasan.dds",
+      "bytes": 349680,
+      "sha256": "619fb557bcdfff18d910c3c698dd6347fb113eb4cdf44529f351c6c98aad253d",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/kritik.dds",
+      "bytes": 5616,
+      "sha256": "c4d54ff0974f10a95208de11bd8c8ec1be5b8f5198558e1601e9702c2957aaed",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/kutupruzgari.dds",
+      "bytes": 87536,
+      "sha256": "657e20a8cc195be9d1a34eb0b74585b24cfe2d42a8c2736559d8d5c17ef422be",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/lcdscreen.dds",
+      "bytes": 22000,
+      "sha256": "6380f620ec585c13e599af4e258e5f23adbdd2150ae7606ef92ac63095101449",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/lightsourcesphere.dds",
+      "bytes": 87536,
+      "sha256": "587347f4a939393b3c98bf7df079b32cb511fcc15e589313d100a103d0c4235a",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/lineer.dds",
+      "bytes": 87536,
+      "sha256": "bb37ad7cb442b1da95d2137fca6b1e676600b3a7f06f9b413d39b3b14d46028f",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/mass.dds",
+      "bytes": 87536,
+      "sha256": "d6865ac819e14fc3a89ebbdd5d47fe34b90905bf9105cddce6803eedd31386c8",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/meran_lcd_anim.dds",
+      "bytes": 349680,
+      "sha256": "420f00285de0388d5ec8496d61d6ce8b8f0fca13ace4c9a68d6f133568e84836",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/meteorbuhari.dds",
+      "bytes": 87536,
+      "sha256": "e99718ba1b5dd2c5f24e4ea2be5fc57c29db56e68b1efae651c447dbefa9eba2",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/meteorit.dds",
+      "bytes": 4224,
+      "sha256": "e520badece1ca3908c653246d6c5dd18ff53b55837f6af1d930e8b4dd76cf19b",
+      "prefix16_hex": "444453207c0000000710000040000000"
+    },
+    {
+      "path": "base/fx/missile_vfx.dds",
+      "bytes": 5616,
+      "sha256": "bdf7acc5915cc46ba27533ce32198276bc4959d1bbe16418de197eb9d5fb04da",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/new_particle.dds",
+      "bytes": 1398228,
+      "sha256": "d4f9efb74ccc02b6c2522e263773dc4a809e4a6bd97f632a2a312cdb5aebb6ac",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/nur.dds",
+      "bytes": 4224,
+      "sha256": "911049276fa63988f86318bc2f92f16e6943f697f769728719c30693b7c52747",
+      "prefix16_hex": "444453207c0000000710000040000000"
+    },
+    {
+      "path": "base/fx/particle01.dds",
+      "bytes": 65664,
+      "sha256": "dbd0f630a65ca552a39f0d79b5d9d430f4d0572ed93177ee7b9669731967293d",
+      "prefix16_hex": "444453207c0000000710000000010000"
+    },
+    {
+      "path": "base/fx/particle02.dds",
+      "bytes": 4224,
+      "sha256": "6ad27faf12597f713dd1a728589bea5bb428aa5848b5a72e167f4fd766f6bc13",
+      "prefix16_hex": "444453207c0000000710000040000000"
+    },
+    {
+      "path": "base/fx/particle03.dds",
+      "bytes": 87536,
+      "sha256": "7085c5edb114601858bc3d1d8ff9b675526d5dd01cc2126ee90169741b2f72ed",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/particle03_o.dds",
+      "bytes": 1520,
+      "sha256": "270b181edd9d84e7c8ecdf11b67d463346a0f75d3ce9091385423125c8412acb",
+      "prefix16_hex": "444453207c00000007100a0020000000"
+    },
+    {
+      "path": "base/fx/particle04.dds",
+      "bytes": 1520,
+      "sha256": "3ff4751969f53ebec079843e20c42f42a9481675b249e304f62718bc4b29773b",
+      "prefix16_hex": "444453207c0000000710020020000000"
+    },
+    {
+      "path": "base/fx/particle05.dds",
+      "bytes": 5616,
+      "sha256": "ef854540ff537b176a66fc241503aa035974c77e174dc18e038989c7928c33f7",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle06.dds",
+      "bytes": 349680,
+      "sha256": "b134ef9416c5eacac8356b93326ff8885b4c5d8312d694ce08b6c1ab98ba770b",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/particle07.dds",
+      "bytes": 21972,
+      "sha256": "5e739a3047e421c384fd53d9dd5af6a957bd50c620af7aace41eefcd7271d78a",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle08.dds",
+      "bytes": 21972,
+      "sha256": "e565a8ab2c61e729e09c1b3c7c1e24290ff15ad1af954ef53a9f34c8dc5770b2",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle09.dds",
+      "bytes": 349680,
+      "sha256": "544024dd1e07edefceb33799d4fe86402f8086d01cfbed9545f5b1dd68bc7454",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/particle10.dds",
+      "bytes": 87536,
+      "sha256": "110f42d58da31e5cc5d67e644221a8fd6b570198cc9e0221338167c42e022b3b",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/particle11.dds",
+      "bytes": 5616,
+      "sha256": "9e861b4bfa7613236d81454a693e7161dcc9ba2292376ce4fdbc37f85ccce246",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle12.dds",
+      "bytes": 5616,
+      "sha256": "e3e6c74ce7ba43e25bffaf88b161dc997da3ce42e60b609013e0426f948b0848",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle13.dds",
+      "bytes": 496,
+      "sha256": "c2ae37ae71ca48e22e954b88651aab7d6a8ef7b9e5f37c1c0e881b44521d19bc",
+      "prefix16_hex": "444453207c00000007100a0010000000"
+    },
+    {
+      "path": "base/fx/particle14.dds",
+      "bytes": 5616,
+      "sha256": "51b33e29ecd9e729aea775ba9060b3a629cd8ab39c4f35c382067452918a06b9",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle15.dds",
+      "bytes": 349680,
+      "sha256": "b86109f4c5bd3966844fa8437d99a965935cbd77966a56f0316bb9e663948846",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/particle16.dds",
+      "bytes": 22000,
+      "sha256": "0009690d21f262ed2737fafdfd589489f9b3287e280174a946a794398ecf5529",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/particle17.dds",
+      "bytes": 5616,
+      "sha256": "33ed918e2a5a4506511c01f66f13eece9d786b3b69eb46dd21f86331ddd2dddb",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle18.dds",
+      "bytes": 5616,
+      "sha256": "97d9aca0ec6f53ad29b6f7457836b90e1bf304d720f329213494ae5491e92158",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle19.dds",
+      "bytes": 5616,
+      "sha256": "02ce6cf96d1b8c3b0c0d934c34137d1da32c7333b8175476f257884aac4c43f6",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/particle20.dds",
+      "bytes": 87536,
+      "sha256": "24a072d497ad748504272ef96803e8869cf8a023af17ec95c9d68b0b0d104174",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/particle_21.dds",
+      "bytes": 87536,
+      "sha256": "dc472f1bb7180e599f9b34bdcdf0afc1be749566ef8926f8789063439655fb93",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/particle_22.dds",
+      "bytes": 87536,
+      "sha256": "39f7fdf8e03ff070d475bbb09290b87929af1404f17855e004b7f2f8eda81d14",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/particle_23.dds",
+      "bytes": 5616,
+      "sha256": "72f5424b8d37aa39229818e4d2f3926ea0efaa435470360ccace4c02c5823982",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/perihan_mektup.dds",
+      "bytes": 1398256,
+      "sha256": "5ab0719986165f7ad9511d000120893ef90015890408e336ecf8963c8ac9dcc9",
+      "prefix16_hex": "444453207c00000007100a0000040000"
+    },
+    {
+      "path": "base/fx/sarkaclar.dds",
+      "bytes": 87536,
+      "sha256": "8a6a5d672b93c4f4394a5e1100a234e9afbe7d8800c437f7a99b8f3065b56ab2",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/sertvurus.dds",
+      "bytes": 349680,
+      "sha256": "ee11848f891ff7fb901f9da0a2a2758abc4660c44069f842eb479f6f6aac0d12",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/simsek_cakmasi.dds",
+      "bytes": 349680,
+      "sha256": "f03bd6070f6fff149e2bf33f42f979e56a238fccf95629332b5a234d5e4777e7",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/sinema.dds",
+      "bytes": 524416,
+      "sha256": "27df37aea84a4cc0dce0e3cde0fdb07a02c6c70f1d9c4b6ac9e255842c835a57",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/fx/skill_defansif_dovus.dds",
+      "bytes": 22000,
+      "sha256": "1b63f007c7c5b3396a0ace31066f1372edd45df2ec95cd8e7034f9f4521329c6",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_depar.dds",
+      "bytes": 22000,
+      "sha256": "5cb303b8d4f2913638b70185d6d24005956b06cf25ad7ac45ef09e8fc9b5e3c1",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_dikkat_dagitma.dds",
+      "bytes": 22000,
+      "sha256": "c46ddf7aabd6fee976548ecddd541d57e1fdb9c3e8988ab9e94d407f8198ef44",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_durdurma.dds",
+      "bytes": 22000,
+      "sha256": "2de1fa500803e287bf12a9577d73171a7ddf834c2e825d639354058200786805",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_hizli_dovus.dds",
+      "bytes": 22000,
+      "sha256": "6a4a3a2fe23474e4ff11c1bca203582402e08bf4d86afb7ba23135795fcf2c62",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_kan.dds",
+      "bytes": 22000,
+      "sha256": "3fe70681cb60e4b57010097b4e93f4a138ef04c4657014b0e0dcfa8fd43c1e15",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_nara.dds",
+      "bytes": 22000,
+      "sha256": "893859b07bb65bfd3488211b389e8b1ebe54a5db9af30adceac7c441134b44ab",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_ofansif_dovus.dds",
+      "bytes": 22000,
+      "sha256": "d1d80e87dae42fab0a76bb233f47c6577c6e857e71a552495327d4597a1aade5",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_sakinma.dds",
+      "bytes": 22000,
+      "sha256": "5ea7a91277455d36d654a50c91983ba8f34e1b35b606f4462ee254aa329960b8",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_sert_vurus.dds",
+      "bytes": 22000,
+      "sha256": "4475d7a9de8f1b3ca7d4f3f144c288833b63592fbd940e26e8c06e0c5e7eb753",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/skill_zihin_toplama.dds",
+      "bytes": 22000,
+      "sha256": "fce76bd5ac6bbb65bd900a6014434f14475cfd5dc6910bb86259000331aa6739",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/suparticle.dds",
+      "bytes": 87536,
+      "sha256": "04601ad36d329baf931f22aae1bc4d49add6223aeef43d4f79e7c1d3b20d7a39",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/fx/supurme.dds",
+      "bytes": 22000,
+      "sha256": "4ccbe8d729aee81fa76646eec7a10dcface2b09f0cdd7b27f166846d455db143",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/target.dds",
+      "bytes": 5616,
+      "sha256": "99e4c33da5b134ac7b93c5e50c33947ec2be8957cc067a294dcdd413af9ec44c",
+      "prefix16_hex": "444453207c00000007100a0040000000"
+    },
+    {
+      "path": "base/fx/ufak_tefek.dds",
+      "bytes": 22000,
+      "sha256": "9b4c58eb627a7af273d87d9f1920d3305fac995dc1746000902aa9ee8f20baf0",
+      "prefix16_hex": "444453207c00000007100a0080000000"
+    },
+    {
+      "path": "base/fx/web_effect.dds",
+      "bytes": 349680,
+      "sha256": "f3c04fc92eedda226f47193a35e143d8e7fb07e456da2e61695bc37813871434",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/white.dds",
+      "bytes": 384,
+      "sha256": "6f3acd5ecd7157311d9ac64d8c888f3e882aab7e12b112ac197a314cac54856f",
+      "prefix16_hex": "444453207c0000000710080008000000"
+    },
+    {
+      "path": "base/fx/yagmur.dds",
+      "bytes": 349680,
+      "sha256": "04a48f1089e93eaa6b8398b4a386fc1bdce7729a295b7e7c8b4c214d1663bf41",
+      "prefix16_hex": "444453207c00000007100a0000020000"
+    },
+    {
+      "path": "base/fx/yer_damlacik.dds",
+      "bytes": 87536,
+      "sha256": "c7d20177f2ab89744cd99db8bdc294c2e36d5a87e583523267732f65e8736692",
+      "prefix16_hex": "444453207c00000007100a0000010000"
+    },
+    {
+      "path": "base/helps.xml",
+      "bytes": 15938,
+      "sha256": "b6807ea73359dabd1f96ebeab08d777f45a414afea1e11621d74087a04300bf8",
+      "prefix16_hex": "3c3f786d6c2076657273696f6e3d2231"
+    },
+    {
+      "path": "base/lightmaps_1.DAT",
+      "bytes": 1215649206,
+      "sha256": "cae76290cf3f2f375840443d1e172828f2eca2724bedbe2851e81037ca8aa248",
+      "prefix16_hex": "534b594601006c696768746d61707300"
+    },
+    {
+      "path": "base/lightmaps_2.DAT",
+      "bytes": 307712854,
+      "sha256": "d9978a03593e0cf1cc0bd7cd0b354dc39f42113e5c0c9e1469532791a53a3813",
+      "prefix16_hex": "534b594601006c696768746d61707300"
+    },
+    {
+      "path": "base/lightmaps_4.DAT",
+      "bytes": 80555214,
+      "sha256": "5c0816712da0c5312ef0047f61c5f711d7083f339694584603e1af17105e5242",
+      "prefix16_hex": "534b594601006c696768746d61707300"
+    },
+    {
+      "path": "base/music00.raw",
+      "bytes": 4194304,
+      "sha256": "ee85a5b7b9999d7cc80d11ae7b5108956be89e216510299558be90e90e4cd990",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music01.raw",
+      "bytes": 4194304,
+      "sha256": "73f65f93d71c5494582a1b130ad705ab5faebdacd1bac62af36f957b6515ae8f",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music02.raw",
+      "bytes": 4194304,
+      "sha256": "bed847c9662513918e1aba57465737c85d11fc3e0e62576cd6145977e1e2a6fd",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music03.raw",
+      "bytes": 4194304,
+      "sha256": "667ca875803d1eb7072c0011eb3f71535a5894c8b33f15a72cc51c215cd44fb9",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music04.raw",
+      "bytes": 4194304,
+      "sha256": "75f4d7c9238f94f9ef61a8b45ddb76d357a71fd297bd160867c904317c62943e",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music05.raw",
+      "bytes": 4194304,
+      "sha256": "cb56f5d86a7de069b183baa6b2405581801437599ed585899fbf09d0dd16c688",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music06.raw",
+      "bytes": 4194304,
+      "sha256": "37097ade6b2f0e4359743a28d2c1f85d9927fa106533c8a1ec6af7335482bb0f",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music07.raw",
+      "bytes": 4194304,
+      "sha256": "e3ddb47b0cb7052fef0401b679a59a4b37d348ee4e63a48625358cd961770d26",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music08.raw",
+      "bytes": 4194304,
+      "sha256": "14356687d34e19b2fbb732cf46c5259ca50921713441f01b367e1bd3792dae95",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music09.raw",
+      "bytes": 4194304,
+      "sha256": "9d8cad14b0ea4ebc62f20eb366b645c52b51bd05eb542fe752f4c05e8218be47",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music10.raw",
+      "bytes": 4194304,
+      "sha256": "fe9f9f5df52992302ee6348518e63b295fc231dfa3c6e29154917242a2f50a6e",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music11.raw",
+      "bytes": 4194304,
+      "sha256": "fe9f9f5df52992302ee6348518e63b295fc231dfa3c6e29154917242a2f50a6e",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music12.raw",
+      "bytes": 4194304,
+      "sha256": "a611332f8fb27d6155748e24f37ec56e16f94d998468d4361a9da6bfca0c7923",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music13.raw",
+      "bytes": 4194304,
+      "sha256": "417176ab10de2dfd3ef841d4b830db4a6fc3667001f71b6b4b9d36fdb02d70ba",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music14.raw",
+      "bytes": 4194304,
+      "sha256": "14356687d34e19b2fbb732cf46c5259ca50921713441f01b367e1bd3792dae95",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music15.raw",
+      "bytes": 4194304,
+      "sha256": "9d8cad14b0ea4ebc62f20eb366b645c52b51bd05eb542fe752f4c05e8218be47",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music16.raw",
+      "bytes": 4194304,
+      "sha256": "fe9f9f5df52992302ee6348518e63b295fc231dfa3c6e29154917242a2f50a6e",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/music17.raw",
+      "bytes": 4194304,
+      "sha256": "258058c4c8511ef202bfb3009c643f5db6af238905b4202181b7f9bf26a4543b",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/objects.dat",
+      "bytes": 607138652,
+      "sha256": "fd72b8e69d5d811bc4e9e1ca9bcc200d21c71497128072de2e2ca0e65a75afb2",
+      "prefix16_hex": "534b594601006f626a65637473000000"
+    },
+    {
+      "path": "base/particle_effects/effects/effects.xml",
+      "bytes": 45382,
+      "sha256": "fdbffd74dade525d549c9f91363b33bd24d9b4bc9473a398d80073442ab297f3",
+      "prefix16_hex": "3c3f786d6c2076657273696f6e3d2231"
+    },
+    {
+      "path": "base/particle_effects/systems/particle_systems.xml",
+      "bytes": 496441,
+      "sha256": "26511517c7956b48d7b2054f2465c4f9123d6ac81589fa67625b9f3caece6b25",
+      "prefix16_hex": "3c3f786d6c2076657273696f6e3d2231"
+    },
+    {
+      "path": "base/shaders/t_contour.psh",
+      "bytes": 668,
+      "sha256": "a448e74ca84ec622c4c034213c13f7c9e1757d0fd6ef899197def2612426ca13",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_env_lit.psh",
+      "bytes": 886,
+      "sha256": "fe59ecacf751eb5cfc3e59983e3715c76f29b08d3e3304aebdeb46691b8f7866",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_env_lit_shd.psh",
+      "bytes": 1244,
+      "sha256": "94cc4d694a9a5814ba4355431afaf724e2ac0662d277c1fc88ddce3c3f1d3856",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_env_norm_lit.psh",
+      "bytes": 2334,
+      "sha256": "921feea601794b7c664c6a5a15208fd398606bb5cd6722b93e1aff7c9eef36c2",
+      "prefix16_hex": "2f2f2044583920506978656c20536861"
+    },
+    {
+      "path": "base/shaders/t_dif_env_norm_lit_1.psh",
+      "bytes": 1154,
+      "sha256": "3a6e10c23971797cf56628c79e027dbd84d9eb374d58617c6ce10a9f4443ae38",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_lit.psh",
+      "bytes": 969,
+      "sha256": "7e33202a9b264434f31d636ac9e5be7dd898373cfebb74335517eba7c6d20ded",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_lit_shd.psh",
+      "bytes": 1311,
+      "sha256": "aac9eca84e195b7dae0787d270b6f8b40afe20ec0ad95a2ef95278822cb74c5e",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_dif_norm_lit.psh",
+      "bytes": 2321,
+      "sha256": "511c325e4c65c91e0719a2f95a56c2b6a1b8b287ecfc8969da199dfdd98d18e2",
+      "prefix16_hex": "2f2f2044583920506978656c20536861"
+    },
+    {
+      "path": "base/shaders/t_dif_norm_lit_1.psh",
+      "bytes": 1154,
+      "sha256": "3a6e10c23971797cf56628c79e027dbd84d9eb374d58617c6ce10a9f4443ae38",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_fade_lit.psh",
+      "bytes": 1088,
+      "sha256": "0b2d20f125b99a349dafc75b096529d7f1b2744116667eff845fc749d13a70e5",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_fade_lit_shd.psh",
+      "bytes": 1418,
+      "sha256": "f49515ed56fdc14e856ccc6df8bfccf1cda9115d3cf6afe3161207587efe65f1",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_glow.psh",
+      "bytes": 1159,
+      "sha256": "c0a4aea6e7fe367b34d3609ddc56fad5a8af6021650a77d2e7ec03068f6d33f4",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_half_intensity.psh",
+      "bytes": 937,
+      "sha256": "79712beb412c2642dba6dfcb4dd57110f6542dd17aa9e75a996802b84c0b3855",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_lit.psh",
+      "bytes": 817,
+      "sha256": "922b51b64f43876ba2a57949378afe215e4918599a23246051bae6e8ddae7ae8",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_ocean.psh",
+      "bytes": 2110,
+      "sha256": "95210ed00cba68eaf7146c282465231a0d414fcd5efbb21d2e5a78e682be254b",
+      "prefix16_hex": "2f2f2044583920506978656c20536861"
+    },
+    {
+      "path": "base/shaders/t_ocean_1.psh",
+      "bytes": 1107,
+      "sha256": "3b6c3bd5eac6eb022704ba9ccf66dd94c97b06cf8f9c41ea221f04a5db74a4fe",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_pseudo_HDR_blur.psh",
+      "bytes": 1282,
+      "sha256": "24ea742171936689ec670ba05ec4600cde1e1c9e814108a9c6299625b8b6f547",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/t_sky_dif_lit.psh",
+      "bytes": 1496,
+      "sha256": "3a70729530260417a91fbf07dca53b6ef3f18ce4447dd8b3045a6412a2a78058",
+      "prefix16_hex": "2f2f20506978656c2053686164657220"
+    },
+    {
+      "path": "base/shaders/v_contour.vsh",
+      "bytes": 1963,
+      "sha256": "31e5d02007dc5da7c74e0989daf63b36e851d97c73348e99dc9391acfa73086f",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_env_lit.vsh",
+      "bytes": 3072,
+      "sha256": "5a838cbddbe4c93fe4173a82a220248f2ff969eba507287f6c04d7c8f2a12c97",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_env_lit_shd.vsh",
+      "bytes": 3165,
+      "sha256": "bb39b621bb4bcf5ccc4081c8d3dfca8c44b60e043ae3fd6df44aeaf92d35bad0",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_env_norm_lit.vsh",
+      "bytes": 3499,
+      "sha256": "3455ab3505e5a7240e50d6a1565b68bae58313af9911d9778fe81925debcdaec",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_env_norm_lit_1.vsh",
+      "bytes": 2490,
+      "sha256": "fc00667b487876d3af6cf54553b16e1026a545dfcee2267dcc89dc2a0a21a2d5",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_lit.vsh",
+      "bytes": 2820,
+      "sha256": "10de3dfeacb625b566dea6042a469cc9998f5fa316136d458ad882b4b02e10de",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_lit_shd.vsh",
+      "bytes": 2987,
+      "sha256": "51df50bb29b4ebd8ebb431525999d156fdc0c1ffd23d5a1929a382fbea92c962",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_norm_lit.vsh",
+      "bytes": 3073,
+      "sha256": "7c3ace2d92628cf3af98261a505374fb175a4b85229955a37fe768bf2c935e82",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_norm_lit_1.vsh",
+      "bytes": 2490,
+      "sha256": "fc00667b487876d3af6cf54553b16e1026a545dfcee2267dcc89dc2a0a21a2d5",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_dif_notlit.vsh",
+      "bytes": 2403,
+      "sha256": "bb4e58644833f7f2852f22ce775d8abdcf784b3ae8fb01a7f3800292932d566f",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_fade_lit.vsh",
+      "bytes": 2898,
+      "sha256": "8e8931ee168b50730a6c74fbc75b5c04e9ad4165358a368c04b9b7780f48cd1b",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_fade_lit_shd.vsh",
+      "bytes": 3065,
+      "sha256": "0037226e4e212a87ace45ce9267c9684605f862b458466b9b7ffef4dcda35ab4",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_glow.vsh",
+      "bytes": 2666,
+      "sha256": "8256c57580d515102862b8da011d956341b060001372875c220c1fe12d6c17b1",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_half_intensity.vsh",
+      "bytes": 1795,
+      "sha256": "f6a17960431007f667c24eb5cb8a5b37a408e517ee9eec384e13df19aab09c18",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_lit.vsh",
+      "bytes": 2744,
+      "sha256": "224dae5b85b2f17488883531023736ef48288ba7848cc417dcc185295ac941e2",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_ocean.vsh",
+      "bytes": 4228,
+      "sha256": "7f3835e54ef6f1ca43f0af0e2e817cc9ecfc2f92d00aea011c4f526f148319b6",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_ocean_1.vsh",
+      "bytes": 4026,
+      "sha256": "99087851f49d9460aa287e538d96d5734236ace2e794503bbe2fd03969531c99",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_particles.vsh",
+      "bytes": 1372,
+      "sha256": "a1347acab449dbf8a8ac8cc7321da1e67e7730d1c5e1b13ca4f4104007ce4d32",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_plain_dif.vsh",
+      "bytes": 973,
+      "sha256": "ab090eeaa94b5b85ad1ed2a2fb2a303d77dd9c64aa23a978ffcca73fc7812261",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/shaders/v_sky_dif_lit.vsh",
+      "bytes": 3507,
+      "sha256": "0ca490e1d1fa77047bab42fdd6a19d59dedd8dffd939ff3a8a7cfbd1dd296b28",
+      "prefix16_hex": "76735f315f310d0a2f2f204458392056"
+    },
+    {
+      "path": "base/sound00.raw",
+      "bytes": 4194304,
+      "sha256": "800a7092da1a0bc853a2104dd2d280ddb3a98a74f3b05d7c616fde59ae3b72ab",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/sound04.raw",
+      "bytes": 4194304,
+      "sha256": "b388845e639bca05db6b274b83a263d7dee12c5357482879fc5f60d0bcc66052",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/sound05.raw",
+      "bytes": 4194304,
+      "sha256": "d6881162427d41b948ebe519b8623e76a63780fba82a8afc74374421b82ae300",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/sound07.raw",
+      "bytes": 4194304,
+      "sha256": "8dcac18ecd9d96c9aed3a387d8356ea235a5aae0d39292fe92a588f3778a8210",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/sound13.raw",
+      "bytes": 4194304,
+      "sha256": "310de11ee1e086bb56bb592678383db698f7f2f03e310a8ecaf458363316ba44",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/sound17.raw",
+      "bytes": 4194304,
+      "sha256": "a383f00d7204c054ba5b32b0822f2a215f8d56a1dde37c238a48647f40514217",
+      "prefix16_hex": "ffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "base/textures_1.DAT",
+      "bytes": 744969738,
+      "sha256": "3a6b075833b4750128cb126d6ea6d386543139d626c02ed1d2fa31cc758f6494",
+      "prefix16_hex": "534b5946010074657874757265730000"
+    },
+    {
+      "path": "base/textures_2.DAT",
+      "bytes": 186549994,
+      "sha256": "b8865da87b2d9da1c0cb3122c1d95fb501498c78863405fca0aff49ef674e68b",
+      "prefix16_hex": "534b5946010074657874757265730000"
+    },
+    {
+      "path": "base/textures_4.DAT",
+      "bytes": 46945066,
+      "sha256": "4239657d2ac74041ec3f1a153eee97df937d3c200df13c336af598cf1b5e2ca2",
+      "prefix16_hex": "534b5946010074657874757265730000"
+    },
+    {
+      "path": "base/ui/Help_Bank.dds",
+      "bytes": 524416,
+      "sha256": "d88135c90f2a42276ade9a4a1df18ed275f83cfec1292c614bdd82b661b092db",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Battle.dds",
+      "bytes": 524416,
+      "sha256": "66372c3b37d4714f4af5cce7c207a7ccf870a189b2008c05d20e710fa89b58a1",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_CharacterSelection.dds",
+      "bytes": 524416,
+      "sha256": "07f83009500ba61994bcc2e34f0573e023be293a9544e9aa5bf5f5660c7a3f6e",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Chat.dds",
+      "bytes": 524416,
+      "sha256": "62880b83ac584b93aa1e402376d8d74d93eb2d507da2577ac80565c4ad254b72",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Clan.dds",
+      "bytes": 524416,
+      "sha256": "9432b2b6c25a3a61204f1ac3c308adb6c3196a5b97a0b0f378ea44536fb69c71",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Movement.dds",
+      "bytes": 524416,
+      "sha256": "1387eb0a603417a3ffb7d9cbf4c927e34851afc70a8401066304f4f981ad8aa1",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Quest.dds",
+      "bytes": 524416,
+      "sha256": "ef53c8b814bce4b8360066138071af8171da9b22681010a9210413b6953f96ab",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Trade.dds",
+      "bytes": 524416,
+      "sha256": "8b4bd6d07f41fecb4e97bdbbc49fc32ca94b9c3453882cc75cf4e098def7d3de",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/Help_Userinterface.dds",
+      "bytes": 524416,
+      "sha256": "c2a3603db760f2b97169d64dc9c81a439903dc3ac3dcfdc020390794a3bc4023",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/cursor_attack.dds",
+      "bytes": 4224,
+      "sha256": "6352a2a1eaa0bcb9d6c52d3f14470d80d30db748c60afafd4f9c9264b970a65e",
+      "prefix16_hex": "444453207c0000000710080020000000"
+    },
+    {
+      "path": "base/ui/cursor_friend.dds",
+      "bytes": 3848,
+      "sha256": "94a7ec9f92009bbfbd5dd73915b1b1728bda717865e2c908f1be6060e5174d15",
+      "prefix16_hex": "444453207c000000071008001e000000"
+    },
+    {
+      "path": "base/ui/cursor_grab.dds",
+      "bytes": 4224,
+      "sha256": "efd78e12e9a00a8afe9a4ac83c2cb778d46304a05a16cbafec0e5387062ec61c",
+      "prefix16_hex": "444453207c0000000710080020000000"
+    },
+    {
+      "path": "base/ui/cursor_interact.dds",
+      "bytes": 3848,
+      "sha256": "399fb2421b81f6529e2bd80c40a8b46a3511c54b2e031c99c99d012ea5598c58",
+      "prefix16_hex": "444453207c000000071008001e000000"
+    },
+    {
+      "path": "base/ui/cursor_point.dds",
+      "bytes": 3848,
+      "sha256": "43b7ac7c5b331c0f45fa4469e125f77811570e5599cdf14d1d54da175fe103e5",
+      "prefix16_hex": "444453207c000000071008001e000000"
+    },
+    {
+      "path": "base/ui/cursor_talk.dds",
+      "bytes": 3584,
+      "sha256": "b69bd329eb2148740cea5d483aa42a1cdf93f4db42cf739f9addaafd295d3c3f",
+      "prefix16_hex": "444453207c000000071008001b000000"
+    },
+    {
+      "path": "base/ui/cursor_useable.dds",
+      "bytes": 4224,
+      "sha256": "a9e170fbe9a0c3bbce1509f7c9664ff2e089aae75e89e72ea83507cd85108b6d",
+      "prefix16_hex": "444453207c0000000710080020000000"
+    },
+    {
+      "path": "base/ui/eye.dds",
+      "bytes": 16512,
+      "sha256": "58806dfd0ce33097bd36d7530e331f0a3d502b8614cccd06bc186320464b9746",
+      "prefix16_hex": "444453207c0000000710080080000000"
+    },
+    {
+      "path": "base/ui/gamma1.dds",
+      "bytes": 262272,
+      "sha256": "f4dd77167e8aeb5687a1e50a6aac1dcd8f89e9ea62cc0624615991b7f90e6f3f",
+      "prefix16_hex": "444453207c0000000710080000010000"
+    },
+    {
+      "path": "base/ui/ikvlogo.dds",
+      "bytes": 16512,
+      "sha256": "08be7abc64dc7236159f9279ecdeb50ffdd6c179e021b7ef5eab729b571ddc36",
+      "prefix16_hex": "444453207c0000000710080040000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0535.DDS",
+      "bytes": 16512,
+      "sha256": "cf0b8205801d3e9827fc9d13a31cdca865014ce22c4c18dca0d915bd776565bb",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0536.DDS",
+      "bytes": 16512,
+      "sha256": "b5ef73fb62fc8d08ad0f5f2411f63e4fa9701f300b4b9e99ea1d12b5a9e4fccc",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0537.DDS",
+      "bytes": 16512,
+      "sha256": "ac685c148512099934eca9c21743a1b716a879b051723669fa03f0fb5c529bf6",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0538.DDS",
+      "bytes": 16512,
+      "sha256": "0af45e45afe4d7d1ac0157ecd838b748100fe320f64503af6569fc053c2c38c6",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0539.DDS",
+      "bytes": 16512,
+      "sha256": "3756aee4007ae1c22cba777fb4576c1bcbc9f06c29d14588bf4bde66f26f82ba",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0540.DDS",
+      "bytes": 16512,
+      "sha256": "28b14e409a057696f3a4447a02047087484e6de3cbef1840207f7d1eebbe7f47",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0541.DDS",
+      "bytes": 16512,
+      "sha256": "81fad494af15845488d9603f9aacb7c16ea672f61eafd054280f514266e2214f",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0542.DDS",
+      "bytes": 16512,
+      "sha256": "f5c719daaeecb37fa849c1753f7a482621d3e0409cbcf3a3ad84efd4f4361993",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0543.DDS",
+      "bytes": 16512,
+      "sha256": "d7fde3af69aa17f49f19b4f6bdee500c48bbc1748884fb4265dd0fa212fa34b9",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0544.DDS",
+      "bytes": 16512,
+      "sha256": "a9559547f17cff2b1479e84a08ee3ef6ebf24b7a48daf9af72b2aeaf1840a58c",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0545.DDS",
+      "bytes": 16512,
+      "sha256": "a6befa8392bc931c75cdc195e12b552f8887493e9e895a329832ad191b221109",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0546.DDS",
+      "bytes": 16512,
+      "sha256": "e095e7dd075f40cbbad6c50436fcbd67b939a933eea876e576930c00822dc6bb",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0547.DDS",
+      "bytes": 16512,
+      "sha256": "a0f68f48dd436c25c7b8a9581e223d0f8596d96919fe89d16b567cc3a22b1ae2",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0548.DDS",
+      "bytes": 16512,
+      "sha256": "8fdd899adbb4b3eb53c575761eebe466e8b2d48a65601d15dda30110814ee56f",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0549.DDS",
+      "bytes": 16512,
+      "sha256": "442a94dd4af20dbfe53a320eee9d401f8f1ed0abc9ef18a5fcfc638b9699a018",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0550.DDS",
+      "bytes": 16512,
+      "sha256": "1ea7e687ce1a3abe0d7318c189d4679da5a1e50ddf455ee77e3718cdcdcc0403",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0551.DDS",
+      "bytes": 16512,
+      "sha256": "19f58d4cba4d482790fa06e0d2e9bd974022ccfa6d717cf6aad839241a2df7e7",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0552.DDS",
+      "bytes": 16512,
+      "sha256": "1cf6635493426d2658442ac7b2d45583e2fe9f5bf508226349a58f97b81994ad",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0553.DDS",
+      "bytes": 16512,
+      "sha256": "81acc1482b190296b66c90400328370e61ec442f6a23b366502db4f1a3426fb1",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0554.DDS",
+      "bytes": 16512,
+      "sha256": "45f400d1286bc5efa976244b019e840cb70a37148e43271434177bbf9fc79372",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0555.DDS",
+      "bytes": 16512,
+      "sha256": "868929fc0beff19c0502f78c552c3df6497f85d4eeecdbc08abe2e1b2038d56e",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0556.DDS",
+      "bytes": 16512,
+      "sha256": "f0e5bfb0869329c6ceb01292279bfda91a966be88f8c40fa9b5be3341fcbd1b6",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0557.DDS",
+      "bytes": 16512,
+      "sha256": "495c62e0a3f8a698703ebb0405e887b3d312823197079ae1624daa09e4c9affa",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0558.DDS",
+      "bytes": 16512,
+      "sha256": "c347db5a5c907c2c30b69c062ecd1fc0b09c4d40be5fa667acb5596d73142772",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0559.DDS",
+      "bytes": 16512,
+      "sha256": "1160ec72dd66eec95a582432b12f40e6794241b818a7548e7902967c76f08e22",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0560.DDS",
+      "bytes": 16512,
+      "sha256": "7390157d44abf01754d7bd026faaeda484aff93ebcc97a7a65fc9b97a64b0918",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0561.DDS",
+      "bytes": 16512,
+      "sha256": "6acae51fc4c75a93f721d5166a23e13e4cfd12aac3cb4483604790a9989faaa2",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0562.DDS",
+      "bytes": 16512,
+      "sha256": "bcdbe546ae8ae9baf4ea30de7ee6dfc8f88877e2df0e0bd617377dbcbc035350",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0563.DDS",
+      "bytes": 16512,
+      "sha256": "0bd02a7617196d3f7f0a9dd05e43e756555e42879ed9276ab327723563b05405",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0564.DDS",
+      "bytes": 16512,
+      "sha256": "10302cac6e5c330a90a22170db55bc3c411f34ee1c59d6f0bb1bb8a3be3620cb",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0565.DDS",
+      "bytes": 16512,
+      "sha256": "d50d76430e8c3b11f3034fa034fbbbf9f83937c30c9498cafeb3c58e7574bbf9",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0566.DDS",
+      "bytes": 16512,
+      "sha256": "23da2d1046a5aa8878c377d9c88ae2c8749b110549add0b83d942e9ff2dc9645",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0567.DDS",
+      "bytes": 16512,
+      "sha256": "65ed49351ceb37977e625aee7adf923ce20bf377d11f33604ad20c373e49382e",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0568.DDS",
+      "bytes": 16512,
+      "sha256": "2f0db42acb659cd7c60dd0aa90ea180400f5aa7ac443d0d0a15382acc3d14d50",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0569.DDS",
+      "bytes": 16512,
+      "sha256": "470d7ef54cc32b618fca6f301863e686983c1ff6569d33620e8abd8d55916853",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0570.DDS",
+      "bytes": 16512,
+      "sha256": "69f25643843ff44929aeb667f4770bd58d66fa2878569f2ea8312111bb439e5d",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0571.DDS",
+      "bytes": 16512,
+      "sha256": "f8cd75c02912eb5f815ece1ede6af46379870a8083bf08cf2199471be9bd5e6d",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0572.DDS",
+      "bytes": 16512,
+      "sha256": "8fe54afb9c945848f677a7d349b0194191cc20def0cb2ddc15b6afbe020e053b",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0573.DDS",
+      "bytes": 16512,
+      "sha256": "cac96a051fc1f85c93c6fe07fd229b8641f9b4d8970c4a29372b797b629008a6",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/load_anim/gobi0574.DDS",
+      "bytes": 16512,
+      "sha256": "e29b9834042e938c4d80aeae33ad3a2c45ddcdb7be6a774c8743e5dc63459e58",
+      "prefix16_hex": "444453207c0000000710000080000000"
+    },
+    {
+      "path": "base/ui/loading1.jpg",
+      "bytes": 508121,
+      "sha256": "4c5ed908490ece3799c6313c1aa680ff0789468979f07d210242af36fcabca10",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading10.jpg",
+      "bytes": 81350,
+      "sha256": "cb37ea70b5e900329c83ce6b875f2bc74d9cfb76dd4c44f1c758eff6211f9394",
+      "prefix16_hex": "ffd8ffe000104a464946000101010048"
+    },
+    {
+      "path": "base/ui/loading11.jpg",
+      "bytes": 100121,
+      "sha256": "9fcc98e3b53925e85db5cad8e8feab6219eaad4d6a64c2039ede95d20ff7fe3e",
+      "prefix16_hex": "ffd8ffe1001845786966000049492a00"
+    },
+    {
+      "path": "base/ui/loading12.jpg",
+      "bytes": 100121,
+      "sha256": "9fcc98e3b53925e85db5cad8e8feab6219eaad4d6a64c2039ede95d20ff7fe3e",
+      "prefix16_hex": "ffd8ffe1001845786966000049492a00"
+    },
+    {
+      "path": "base/ui/loading2.jpg",
+      "bytes": 477987,
+      "sha256": "456a64bd0c2ef29e76f03a783c120ff2bbc84f42406124e25bb78144a565975b",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading3.jpg",
+      "bytes": 788741,
+      "sha256": "71d4bd369834e6f87114accd1696624ca2123856e7de9df2c6413ec119c2e807",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading4.jpg",
+      "bytes": 403863,
+      "sha256": "fac33a131053dab645bc3866e6046535d8dfedec9478189d78eb187eaa73e9c4",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading5.jpg",
+      "bytes": 375394,
+      "sha256": "cc33b7cbb229ef30b62661fc435c478604546558d313523aa8f7fe95c2b089f7",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading6.jpg",
+      "bytes": 344413,
+      "sha256": "bc647f450072997d0b4538da47d6e21d534503394b606065adf6ef15e6d67b76",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading7.jpg",
+      "bytes": 354731,
+      "sha256": "5e123da25772cedb4e8d07aa69e2c0c8c0e874103f2a81c3c5d119fc1e55d040",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading8.jpg",
+      "bytes": 373889,
+      "sha256": "6b51d30ee7cf5a481d8165b166b6f309b24e5c3f30212a90c600b2a4a7184499",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loading9.jpg",
+      "bytes": 345040,
+      "sha256": "9fe88a5a58cc1a669af3d0089c863c5763474217513eeab53789ecf439dbfb17",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/ui/loadingadvert.jpg",
+      "bytes": 280019,
+      "sha256": "36b98ab91f955fc1321e96398c263134ba8b080f21372d4a70d007ed2f5882fe",
+      "prefix16_hex": "ffd8ffe000104a464946000102000064"
+    },
+    {
+      "path": "base/ui/pattern1.dds",
+      "bytes": 2176,
+      "sha256": "a14f1eaf2a2070ee5705f6009e616551e142be4ad34ec115bdf7990c366ffbbd",
+      "prefix16_hex": "444453207c0000000710080040000000"
+    },
+    {
+      "path": "base/ui/pattern2.dds",
+      "bytes": 8320,
+      "sha256": "2a476dce84fb4f6109619b1b6bcb13b59bbfe82c2ffae6da53d66d6826057fd7",
+      "prefix16_hex": "444453207c0000000710080040000000"
+    },
+    {
+      "path": "base/ui/pattern3.dds",
+      "bytes": 8320,
+      "sha256": "528e8653d8a468f42faf6b804fb0b1186411a14a79197a21feb6ad36c0a01123",
+      "prefix16_hex": "444453207c0000000710080040000000"
+    },
+    {
+      "path": "base/ui/pattern4.dds",
+      "bytes": 8320,
+      "sha256": "41aee407e38e0a528059e423230662257f5fb7130ca252caf28c4bdbdad084fe",
+      "prefix16_hex": "444453207c0000000710080040000000"
+    },
+    {
+      "path": "base/ui/userinterface.dds",
+      "bytes": 4194432,
+      "sha256": "ca2d419ef682c0a886fd6cd3806a7681d51823ee162044698df2ac0670d71805",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/userinterface2.dds",
+      "bytes": 4194432,
+      "sha256": "4a32d02ca894888ae7b99a44370e1e50098f31d27306dc93bb82b60ddcf083df",
+      "prefix16_hex": "444453207c0000000710080000040000"
+    },
+    {
+      "path": "base/ui/zone00.dds",
+      "bytes": 2097280,
+      "sha256": "7ff1c77d6ec4a7c33189100e734f69a794f6bf81f678ff8be7096b9f794b434a",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone01.dds",
+      "bytes": 2097280,
+      "sha256": "957d4bf188a68fb6aaa4f550fbf6196bb8e01b853b8b6f87aa0b8dbb99ae74a0",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone02.dds",
+      "bytes": 2097280,
+      "sha256": "be923301be12242a5d30d6f8f94f1dd526b4b9d8f08fd639a76b57f98631bcfd",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone03.dds",
+      "bytes": 2097280,
+      "sha256": "99ebacb7b09701684892a16ce1a005fda00754b3039c9a15424d069e19790d51",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone04.dds",
+      "bytes": 2097280,
+      "sha256": "d3347bc3d86574cfb9ffb4fcc9fcacf6cd9b88f6c628862cf545f7954f740ea7",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone05.dds",
+      "bytes": 2097280,
+      "sha256": "e209a5b4eaa8fde3bac17293fd147f7d5410efa90543d5c555b63adadb571231",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone06.dds",
+      "bytes": 2097280,
+      "sha256": "7ffbbd2b178222b59dbaed40dcd626ca4fc3f6ade7d516e3798b7c2505858ca0",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone07.dds",
+      "bytes": 2097280,
+      "sha256": "19c31a529ec2a6363a5e59540791e9924a981eea3b37b1939e1d1b16ab580388",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone08.dds",
+      "bytes": 2097280,
+      "sha256": "ba6af547cf94005e7bd5d7c1a07525d3cd5bcb62774b4befbb6c1d3fceada3b5",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone09.dds",
+      "bytes": 2097280,
+      "sha256": "5df7b9ff9af8e9b970ff6daa2918a7bf4be08fa93363ebc218635ca523e50f2e",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone10.dds",
+      "bytes": 2097280,
+      "sha256": "ed069f0b1e387bf943dc7d1071ca84089974e07f0b769d7126871530217821d5",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone11.dds",
+      "bytes": 2097280,
+      "sha256": "c68ea8eeda2603b18780ee6dbefdb825cc148f2a97e9bdb2312a4b66219cc53a",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone12.dds",
+      "bytes": 2097280,
+      "sha256": "540006bf895f78583c08df464382fb3b014e22ae55ee7dece9ae1c673ff75a66",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone13.dds",
+      "bytes": 2097280,
+      "sha256": "3509ecfb7d9f5cdb2cb44a370459ae7b177c4516b32bbf4a2f6542d166a0aea3",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone14.dds",
+      "bytes": 2097280,
+      "sha256": "ba6af547cf94005e7bd5d7c1a07525d3cd5bcb62774b4befbb6c1d3fceada3b5",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone15.dds",
+      "bytes": 2097280,
+      "sha256": "5df7b9ff9af8e9b970ff6daa2918a7bf4be08fa93363ebc218635ca523e50f2e",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone16.dds",
+      "bytes": 2097280,
+      "sha256": "ed069f0b1e387bf943dc7d1071ca84089974e07f0b769d7126871530217821d5",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/ui/zone17.dds",
+      "bytes": 2097280,
+      "sha256": "bc6c8cf3d873a447910529edf01c262a39de5bc2fca980187d897f59a32487dd",
+      "prefix16_hex": "444453207c0000000710080000080000"
+    },
+    {
+      "path": "base/zone00.bin",
+      "bytes": 4194304,
+      "sha256": "0df71c6c7891704bf838957d10f57332d4ad3f5a8afb865f11a5cc14fda95faa",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone00_height.bin",
+      "bytes": 16777216,
+      "sha256": "7a22bc09b0ccca02c7fc75cf182e8cfdee8b777492e416667950c47f016ab34d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone00_ls.jpg",
+      "bytes": 739891,
+      "sha256": "d0843c0e98df092c66175124ffc3c899f06ff653e08f5bb2b2c5ccea3b28ef42",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone01.bin",
+      "bytes": 4194304,
+      "sha256": "f7c6d43a14b76b4601614b919b16b87abd63174bbc0245f9b0f2f7c07b339678",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone01_height.bin",
+      "bytes": 16777216,
+      "sha256": "4f4eff89fde52a62064ff881bdcf43b8f47572fbf395d9c51c75b6e76a83468d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone01_ls.jpg",
+      "bytes": 297987,
+      "sha256": "c71fc5468c5d8f042f6f8011d0f5d7b58ca56bc96ca3376fa7e431d17db71aeb",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone02.bin",
+      "bytes": 4194304,
+      "sha256": "23ce20dfaf2b7860a31e242e4e02b5a10321c98502ce106b57c090aef55d7b32",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone02_height.bin",
+      "bytes": 16777216,
+      "sha256": "7f954ceb5e5b387dab7689d9b8e096833f450cb5c046718610db8a1516c3f856",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone02_ls.jpg",
+      "bytes": 354635,
+      "sha256": "5d32a6dfeb1514b26cc531519888fb8d39138558537808cfeb3d7ce2ae799b53",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone03.bin",
+      "bytes": 4194304,
+      "sha256": "113f76ce30e2ff5e1fa646090d15b3f6bd127e6fb6d87fd96582e95addc34516",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone03_height.bin",
+      "bytes": 16777216,
+      "sha256": "af4a289c4b42a700e5acf55cbfc639fa3265625a0666ab98945087bdce4b655f",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone03_ls.jpg",
+      "bytes": 267285,
+      "sha256": "fd8a73c683b0c38bbfd3533dea1c66cb48ffa89813a0ce6a38de58a1845bedf0",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone04.bin",
+      "bytes": 4194304,
+      "sha256": "4583515963dbc9b6a0141dcfe86b6a159ff7df78399231a35a72387ba5b3e8eb",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone04_height.bin",
+      "bytes": 16777216,
+      "sha256": "4adb0942237cb9d2b78897cf932c780702aa310276942ad56b4d5c65044c07e9",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone04_ls.jpg",
+      "bytes": 389773,
+      "sha256": "34aa3299181b2f485d3d10eb0a836843ae194bfb9db249f43e66f7066cef47b9",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone05.bin",
+      "bytes": 4194304,
+      "sha256": "60f0112e6aea29f4d9009dd6695e9fd8d8b0314ebd58b7a1be3cd052e931bbea",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone05_height.bin",
+      "bytes": 16777216,
+      "sha256": "5947c1b3ab810d764db8b7baebc7cf22cfe546c351cc5177eb362c3fe60d2223",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone05_ls.jpg",
+      "bytes": 384724,
+      "sha256": "c231d1cb049a7a5948ec9bd90d4d65f0707383cd70d70d4dcc98139a474d8b52",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone06.bin",
+      "bytes": 4194304,
+      "sha256": "bb2807bb063525780db3edbadf8555418e5a35866b399b749ac6de48c38f3c09",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone06_height.bin",
+      "bytes": 16777216,
+      "sha256": "97a9d10c8c42b82a332bc10b531a093d11be2afb40b364d4acc68cd8131b36f7",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone06_ls.jpg",
+      "bytes": 346640,
+      "sha256": "599c43a75ac195d12a83f19860adf015f446a45231d047124d03571c89864185",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone07.bin",
+      "bytes": 4194304,
+      "sha256": "c632ca95d3b1f7343efee6405412e799fbc9be8524210021e7ee524b2badd526",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone07_height.bin",
+      "bytes": 16777216,
+      "sha256": "758929dae73f446c3a63c9bab0176e1a67b724fe95b7f9e1199b62b0eaa7f869",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone07_ls.jpg",
+      "bytes": 327735,
+      "sha256": "ce5a0885e8f9b23371b90170510616cf920c6509e9de3f386fb377a1b8e7e8e2",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone08.bin",
+      "bytes": 4194304,
+      "sha256": "809d9d65c1daf070d086438164485aeb8ddf56138d61bca37734b76a94339cb7",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone08_height.bin",
+      "bytes": 16777216,
+      "sha256": "1fdd1e384573672ec1f545ad89f8a9f254b36f5689374568da03f17d1165ec83",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone08_ls.jpg",
+      "bytes": 248560,
+      "sha256": "d618c7fcc967726e761c0c83281eff4adfc58127f78453366c1b0b0fbb24e4b2",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone09.bin",
+      "bytes": 4194304,
+      "sha256": "fe92eb46e7e79dc8842cf7e6e48c0219d200a5429d1e43f8aa8dec969a77097b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone09_height.bin",
+      "bytes": 16777216,
+      "sha256": "3a973d445e2ccba5cbb883aa1155782950bbd48d68650475c4ff9da92117a4a0",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone09_ls.jpg",
+      "bytes": 170980,
+      "sha256": "25cc4b3b9f61c3a0b0dad9deeaebafaf859ee362593346f73277bc3bfc895c93",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone10.bin",
+      "bytes": 4194304,
+      "sha256": "0532af57ea5b4bcd6e6ee8dde19848c4b6bc60d4ce54a1a99ca942e96691ee12",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone10_height.bin",
+      "bytes": 16777216,
+      "sha256": "4069be9e6981ee116858b2d21963e7eb59236bd98a3ed724e9e0915f418b6297",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone10_ls.jpg",
+      "bytes": 443908,
+      "sha256": "f1925004f3ed681ed73ddee240d685b54949d2df177755ad206d921a3daf6382",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone11.bin",
+      "bytes": 4194304,
+      "sha256": "9be1c138f27453505a9ee22bff29931fbc7c8c5f1706f6dbb4e4674300fab2b2",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone11_height.bin",
+      "bytes": 16777216,
+      "sha256": "2b4701bcdae4389654027ebda3b6905286eca982512235b3604b19ec06335a3d",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone11_ls.jpg",
+      "bytes": 167206,
+      "sha256": "8604605a4bd10fb1fec922efb1b863d6869711bc043e5fb85753fa02efd374be",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone12.bin",
+      "bytes": 4194304,
+      "sha256": "10d9c6c7f45627f66605342c50d190102f93bd86e6c60e6b8b4d7ec10c95a175",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone12_height.bin",
+      "bytes": 16777216,
+      "sha256": "6620d90205e060a797319c4a07d3bba41ed2bd2d55c2b73192392cd65a3c5caf",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone12_ls.jpg",
+      "bytes": 421552,
+      "sha256": "dd43a6a88f56d9bda3a82150699f3466adf8594958eefbce8580867ab334add5",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone13.bin",
+      "bytes": 4194304,
+      "sha256": "3cb95c1f3e81598e6fc7a6c716a58c52cf40b49e0d2a356e400f572551865c46",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone13_height.bin",
+      "bytes": 16777216,
+      "sha256": "752453496aace71c01cddfd58b3c01575630b0445728b0f6fddbe93fc7ee0664",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone13_ls.jpg",
+      "bytes": 422612,
+      "sha256": "472413be1175b6dd21ae0df39f903686da9114b5702ac58e3e0f2675f227605e",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone14.bin",
+      "bytes": 4194304,
+      "sha256": "809d9d65c1daf070d086438164485aeb8ddf56138d61bca37734b76a94339cb7",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone14_height.bin",
+      "bytes": 16777216,
+      "sha256": "1fdd1e384573672ec1f545ad89f8a9f254b36f5689374568da03f17d1165ec83",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone14_ls.jpg",
+      "bytes": 248560,
+      "sha256": "d618c7fcc967726e761c0c83281eff4adfc58127f78453366c1b0b0fbb24e4b2",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone15.bin",
+      "bytes": 4194304,
+      "sha256": "fe92eb46e7e79dc8842cf7e6e48c0219d200a5429d1e43f8aa8dec969a77097b",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone15_height.bin",
+      "bytes": 16777216,
+      "sha256": "3a973d445e2ccba5cbb883aa1155782950bbd48d68650475c4ff9da92117a4a0",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone15_ls.jpg",
+      "bytes": 170980,
+      "sha256": "25cc4b3b9f61c3a0b0dad9deeaebafaf859ee362593346f73277bc3bfc895c93",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone16.bin",
+      "bytes": 4194304,
+      "sha256": "0532af57ea5b4bcd6e6ee8dde19848c4b6bc60d4ce54a1a99ca942e96691ee12",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone16_height.bin",
+      "bytes": 16777216,
+      "sha256": "4069be9e6981ee116858b2d21963e7eb59236bd98a3ed724e9e0915f418b6297",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone16_ls.jpg",
+      "bytes": 443908,
+      "sha256": "f1925004f3ed681ed73ddee240d685b54949d2df177755ad206d921a3daf6382",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "base/zone17.bin",
+      "bytes": 4194304,
+      "sha256": "152a4d5b23e8a45df70283ec2590343cdc950e577cb86441773777438e086c1f",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone17_height.bin",
+      "bytes": 16777216,
+      "sha256": "4ad4dea6db41e069d00500cb6a9a6bf5b8d0f2197d812983411d5ae6d1f0ccae",
+      "prefix16_hex": "00000000000000000000000000000000"
+    },
+    {
+      "path": "base/zone17_ls.jpg",
+      "bytes": 93413,
+      "sha256": "7c76587aafec1a09ab57474b3be11aa450defefd409781a5ab3fc536f9ad530b",
+      "prefix16_hex": "ffd8ffe000104a464946000102010048"
+    },
+    {
+      "path": "d3dx9_31.dll",
+      "bytes": 2414360,
+      "sha256": "e2065619fe6eb0034833b1dc0369deb4a6edc3110e38a1132eeafcf430c578a5",
+      "prefix16_hex": "4d5a90000300000004000000ffff0000"
+    },
+    {
+      "path": "ikv_oyun_rehberi.pdf",
+      "bytes": 3001896,
+      "sha256": "b93c1f6ab1f1ac76f74124cde9a21081b05fe72cb2da09ed0a3a39aa37f95fa3",
+      "prefix16_hex": "255044462d312e370a25e2e3cfd30a32"
+    },
+    {
+      "path": "istanbul.exe",
+      "bytes": 1077656,
+      "sha256": "bff4cffe753a04e237e3ed32c3798eda10a602d73424a2b228024762da44aba6",
+      "prefix16_hex": "4d5a90000300000004000000ffff0000"
+    },
+    {
+      "path": "launch_helper.exe",
+      "bytes": 111616,
+      "sha256": "df082b4536ab552bb6445203a03cc50e7469b48c08ff0a1c462e5f3cc46890b3",
+      "prefix16_hex": "4d5a90000300000004000000ffff0000"
+    },
+    {
+      "path": "launcher.exe",
+      "bytes": 2259352,
+      "sha256": "096a9fa7c3bd701d5b486fee9862786b8c0a4cacbc0656250910364e10890e2e",
+      "prefix16_hex": "4d5a90000300000004000000ffff0000"
+    },
+    {
+      "path": "setup_icon.ico",
+      "bytes": 280982,
+      "sha256": "1435574eb51ebdca8a7fd14ebc6bd0ef9d013a6da0129542aaf1e0f99f4fc1d4",
+      "prefix16_hex": "00000100060000000000010018002820"
+    }
+  ]
+}

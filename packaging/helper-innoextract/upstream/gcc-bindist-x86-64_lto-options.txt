@@ -1,0 +1,5 @@
+export CFLAGS="-Wno-odr -static-libgcc -flto"
+export CXXFLAGS="-Wno-odr -static-libgcc -flto -static-libstdc++"
+export LDFLAGS="-static-libgcc -static-libstdc++ -flto -fuse-linker-plugin"
+cmake --no-warn-unused-cli innoextract/ -DCMAKE_INSTALL_PREFIX=/ "-DCMAKE_TOOLCHAIN_FILE=Toolchains/x86_64-bindist-linux-gnu-toolchain.cmake" -DUSE_STATIC_LIBS=1 "-DCMAKE_PREFIX_PATH=Deps/Qt-5.1-64"
+make --keep-going --no-print-directory

@@ -1,0 +1,12 @@
+[GNUPG:] NEWSIG
+[GNUPG:] KEY_CONSIDERED ADE9653703D4ADE0E997758128555A66D7E1DEC9 0
+[GNUPG:] SIG_ID Mdk0Dc/8h/ePDAUchY0wxeLn9yM 2020-08-09 1596999494
+[GNUPG:] GOODSIG 28555A66D7E1DEC9 Daniel Scharrer <daniel@constexpr.org>
+[GNUPG:] VALIDSIG ADE9653703D4ADE0E997758128555A66D7E1DEC9 2020-08-09 1596999494 0 4 0 1 8 00 ADE9653703D4ADE0E997758128555A66D7E1DEC9
+[GNUPG:] TRUST_UNDEFINED 0 pgp
+gpg: Signature made Sun 09 Aug 2020 02:58:14 PM EDT
+gpg:                using RSA key ADE9653703D4ADE0E997758128555A66D7E1DEC9
+gpg: Good signature from "Daniel Scharrer <daniel@constexpr.org>" [unknown]
+gpg: WARNING: This key is not certified with a trusted signature!
+gpg:          There is no indication that the signature belongs to the owner.
+Primary key fingerprint: ADE9 6537 03D4 ADE0 E997  7581 2855 5A66 D7E1 DEC9

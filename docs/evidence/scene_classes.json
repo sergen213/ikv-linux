@@ -1,0 +1,132 @@
+{
+  "schema": "ikv-original-scene-class-evidence-1",
+  "proprietary_payloads_included": false,
+  "source": {
+    "objects_archive": "original/app/base/objects.dat",
+    "objects_sha256": "fd72b8e69d5d811bc4e9e1ca9bcc200d21c71497128072de2e2ca0e65a75afb2",
+    "executable": "analysis/unpacked/istanbul.exe",
+    "isolated_project": "analysis/skeleton-project",
+    "native_execution": false,
+    "native_builds_or_tests": false
+  },
+  "item_dispatch": {
+    "function": "0x004a2e70",
+    "item_record_bytes": 256,
+    "item_type_offset": 20,
+    "item_name_offset": 192,
+    "eligible_types": [1, 4],
+    "name_matcher": "0x004a0270 compares raw characters case-sensitively until the pattern ends. It is an exact case-sensitive prefix matcher, not substring or case-insensitive matching.",
+    "precedence": ["sky", "ocean", "isik_huzme", "occ_", "generic_mesh"],
+    "literal_addresses": {"sky": "0x00596b20", "ocean": "0x00596b54", "isik_huzme": "0x00596c08", "occ_": "0x00598424"},
+    "other_types": "Type11 has an independent particle-resource branch. These name rules must not classify type11 or unsupported item types.",
+    "particle_color_visibility": "Not established by this slice; inspector preserves unknown/null rather than treating it as an ordinary triangle mesh."
+  },
+  "classes": {
+    "generic_mesh": {
+      "constructor": "0x0047f330",
+      "vtable": "0x005972bc",
+      "render_slot": 32,
+      "render_function": "0x0047ee50",
+      "visible_color_geometry": true
+    },
+    "occluder": {
+      "name_prefix": "occ_",
+      "constructor": "0x0047fbf0",
+      "vtable": "0x0059730c",
+      "render_slot": 32,
+      "render_function": "0x00476860",
+      "render_machine_code": "ret4; no body or device draw calls",
+      "visible_color_geometry": false,
+      "additional_noop_slots": [16, 20, 24, 40, 44],
+      "transform_slot_28": "0x00480450",
+      "update_slot_4": "0x0047ff80",
+      "debug_slot_36": "0x0047fc70",
+      "debug_behavior": "Draws an eight-corner box with line topology in the separate debug slot; it does not restore color rendering to normal slot32.",
+      "constructor_raw_flag": {"runtime_offset": 596, "u32_value": 1},
+      "update_behavior": "0x0047ff80 computes camera-related depth and tests a transformed bounding volume using0x00462750, writing runtime visibility byte+0xf4, then recursively updates children.",
+      "replacement_rule": "Retain metadata/hierarchy/bounds needed for occlusion, but do not emit the occluder box as visible scene triangles or include it in visible-geometry camera fitting. This exclusion follows actual virtual dispatch, not a guessed prefix rule."
+    },
+    "ocean": {
+      "name_prefix": "ocean",
+      "constructor": "0x004800f0",
+      "vtable": "0x0059735c",
+      "render_function": "0x00480190",
+      "visible_color_geometry": true,
+      "constructor_raw_flag": {"runtime_byte_offset": 736, "value": 1},
+      "render_behavior": "Updates four UV scroll values, uploads one float4 to vertex shader constant40, then delegates to generic mesh render0x0047ee50.",
+      "velocity_update": "Each component draws rand()%1000, shifts by-500 when current velocity is in the source middle interval, adds/subtracts randomValue*0.00005 according to source velocity bounds.",
+      "scroll_integration": "scroll += velocity * unsignedElapsedMilliseconds *0.0001",
+      "shader_evidence": "v_ocean.vsh: textureSlide atC40; oT0.xy=UV0+slide.xy and oT1.xy=UV0+slide.zw. Source shader also computes time-dependent wave deformation fromC38 and view-dependent shading inputs.",
+      "constants": {"velocity_step_address": "0x005973ac", "velocity_step": 0.00005, "elapsed_scale_address": "0x00595c3c", "elapsed_scale": 0.0001}
+    },
+    "isik_huzme": {
+      "name_prefix": "isik_huzme",
+      "constructor": "0x004800f0",
+      "vtable": "0x0059735c",
+      "render_function": "0x00480190",
+      "visible_color_geometry": true,
+      "behavior": "Same model subclass and UV-scroll render method as ocean; material/shader selection remains its own original resource contract."
+    },
+    "sky": {
+      "name_prefix": "sky",
+      "constructor": "0x004806e0",
+      "vtable": "0x0059740c",
+      "render_function": "0x00480770",
+      "visible_color_geometry": true,
+      "camera_relative_transform": "Translation from source camera globals0x0077c07c/0x0077c080/0x0077c084 and Y rotation driven by unsigned millisecond tick*0.000005.",
+      "rotation_scale_address": "0x0059745c",
+      "rotation_radians_per_millisecond": 0.000005,
+      "depth_write": "Disabled during sky pass by0x0046c530(0), which calls SetRenderState(D3DRS_ZWRITEENABLE=14,0); restored to1 after the pass.",
+      "shader_override": {"vertex_global": "0x0077c1bc", "pixel_global": "0x0077c200"},
+      "shader_resources": ["original/app/base/shaders/v_sky_dif_lit.vsh", "original/app/base/shaders/t_sky_dif_lit.psh"],
+      "replacement_rule": "Sky is genuine color geometry with a camera-relative transform, depth-write control and original specialized shader, not ordinary world geometry or a solid background replacement."
+    }
+  },
+  "duplicate_model_identity": {
+    "registration": "0x004a2ba0 is unique-map operator[]: returns existing node+0x10 for equal ID, then item loader assigns the newly created model pointer. ID lookup therefore selects the last registered occurrence.",
+    "qkey_reserve": "0x004a1f50 preserves existing elements when growing capacity: helper0x004a02e0 copies [oldbegin,oldend) pointer elements; instructions0x004a1fd1..1fd6 recover oldcount,0x004a1feb computes newend=newbuffer+oldcount*4,0x004a1ff1 stores it. Duplicate qkey chunks always append; apparent reset in truncated decompilation is false.",
+    "lookup": "0x004a0310 returns the unique map node; its value at+0x10 is the latest model pointer.",
+    "geometry_binding": "vert/mver/tris loaders write the current model DAT0x005ea94c set by the preceding item, without an ID lookup. Preserve every item and its sequential geometry; ID last-registration is not permission to discard earlier geometry.",
+    "deferred_binding": "qkey/lmpd/ambd use current-model matching-ID fast path, otherwise unique ID lookup. Deferred chunks bind the last registered matching occurrence; do not invent round-robin attachment.",
+    "qkey_accumulation": "0x004a2890 appends decoded keys to the resolved track. It does not consume one duplicate model per qkey chunk or replace the whole track.",
+    "eminonu_sky": "Three deferred skydome qkey chunks at directory indices5630,6261,9712 execute when current itemID is0x93416c3e, not the sky ID0xcc59049b, so each resolves the latest registered sky through the ID map.",
+    "evidence": ["analysis/duplicates-game/decompile/004a2ba0.c", "analysis/duplicates-game/decompile/004a0310.c", "analysis/duplicates-game/decompile/0049ff10.c", "analysis/duplicates-game/decompile/004a1870.c"]
+  },
+  "per_model_fog_enable": {
+    "producer": "0x0047cf50",
+    "runtime_byte_offset": 534,
+    "rule": "Enable fog when any of the eight original world-bounds corners has squared Euclidean distance to camera greater than DAT0x0077c310.",
+    "threshold": "Original renderer FogSetter0x0046b630 maintains DAT0x0077c310 as squared scaled fog-start distance.",
+    "bounds_corner_storage": "model+0x13c onward, eight xyz triples",
+    "serialized_half_extents": "float32(item+0x6c,+0x74,+0x70)*0.05; scalarDAT0x00596f78 has original bits0x3d4ccccd.",
+    "bounds_producer": "0x0046dc70 refreshes model transform via virtual+0x1c and calls0x0046b780 to populate corners. No decoded mesh AABB participates.",
+    "bounds_center_accessor": "0x00410800 first follows model+0x248 geometry/reference model and returns its center. Otherwise parent+0x2bc contributes its center plus the current model local position+0x28c, without parent rotation. Root center is local position.",
+    "bounds_corner_math": "center +/- halfExtentX*worldBasisX +/- halfExtentY*worldBasisY +/- halfExtentZ*worldBasisZ; helper ignores matrix translation because its center is separately supplied.",
+    "bounds_corner_sign_order": ["---", "+--", "++-", "-+-", "--+", "+-+", "+++", "-++"],
+    "bounds_evidence": ["analysis/classes-bounds-game/decompile/00410800.c", "analysis/classes-bounds-game/decompile/0046b780.c", "analysis/classes-bounds-game/decompile/0046dc70.c", "analysis/classes-game/decompile/004a2e70.c:329-334"],
+    "sky_override": "0x00480710 calls generic update then forces visible+0xf4=1, depth+0x244=200000 and fog byte+0x216=0.",
+    "initialization_note": "Generic constructor does not initialize+0x216; update computes it. Fog is not a fixed true default or a serialized lmpd field.",
+    "evidence": ["analysis/classes-fog-game/decompile/0047cf50.c:102-119", "analysis/classes-fog-game/decompile/00480710.c"]
+  },
+  "static_map_corpus": {
+    "adf_members": 30,
+    "item_records": 26393,
+    "class_counts": {"mesh": 21465, "ocean": 26, "occluder": 16, "sky": 5, "particle": 4881},
+    "eminonu": {"occluder": 16, "mesh": 4091, "sky": 3, "ocean": 1},
+    "eminonu_occluder_examples": [{"id": 4111103115, "name": "occ_misir_03"}, {"id": 1802428712, "name": "occ_misir_04"}, {"id": 3030180512, "name": "occ_gar_01"}],
+    "eminonu_sky_duplicate_identity": "All three original skydome item records have model ID3428385947. Preserve separate recorded geometry/resources; do not drop original item records merely because their identity/name repeats."
+  },
+  "evidence_files": [
+    "analysis/classes-game/decompile/004a0270.c",
+    "analysis/assets-game/decompile/004a2e70.c",
+    "analysis/classes-game/decompile/0047fbf0.c",
+    "analysis/classes-game/decompile/0047ff80.c",
+    "analysis/classes-game/decompile/0047fc70.c",
+    "analysis/classes-game/decompile/00480190.c",
+    "analysis/classes-game/decompile/00480770.c",
+    "original/app/base/shaders/v_ocean.vsh",
+    "original/app/base/shaders/t_ocean.psh"
+  ],
+  "metadata_tool": "tools/asset_classes.py",
+  "integrator_check": "Inspect original map with tools/asset_classes.py original/app/base/objects.dat --member objects/maps/eminonu.ADF --output analysis/scene-classes.json; native renderer checks remain main integration's responsibility."
+}

@@ -1,0 +1,99 @@
+{
+  "schema": "ikv-original-lightmap-abi-evidence-1",
+  "proprietary_payloads_included": false,
+  "source": {
+    "objects_archive": "original/app/base/objects.dat",
+    "objects_sha256": "fd72b8e69d5d811bc4e9e1ca9bcc200d21c71497128072de2e2ca0e65a75afb2",
+    "isolated_project": "analysis/skeleton-project",
+    "native_execution": false,
+    "native_builds_or_tests": false
+  },
+  "lmpd": {
+    "tag": "lmpd",
+    "dispatch": "0x004a3570 -> 0x004a1930",
+    "observed_record_bytes": 76,
+    "observed_records": 18732,
+    "fields_consumed_by_original_loader": {
+      "0": "little-endian u32 target model ID",
+      "4": "NUL-terminated narrow filename; original helper converts to a wide resource path"
+    },
+    "identity": "All 18732 payload IDs equal their chunk IDs and reference an existing item/model in the same ADF.",
+    "max_observed_filename_bytes": 47,
+    "trailing_bytes": "Original 0x004a1930 does not consume post-name numeric fields. Post-NUL bytes include stale process values and uninitialized padding; do not interpret them as float atlas transforms. Exact unused field semantics are intentionally not claimed.",
+    "duplicate_binding_rule": "The loader binds each lmpd to its model as encountered; a later binding replaces the previous texture handle.",
+    "atlas_transform": "No lmpd atlas affine transform exists in the recovered loader/shader path. Stored triangle UV1 is used directly."
+  },
+  "resource_path": {
+    "zone_selected": "lightmaps/<original current zone name>/<filename>",
+    "no_zone_selected": "lightmaps/<filename> when original zone identifier is0xffffffff",
+    "prefix_evidence": "UTF-16 literal at0x005983cc is lightmaps\\; separator literal at0x005929cc is \\.",
+    "fallback": "If initial filename does not load, remove its final three characters and append jpg (UTF-16 literal at0x005983c4). This is an original-resource fallback, not permission to generate replacements.",
+    "case_resolution": "Inspector uses case-insensitive archive member matching, consistent with original Windows resource paths.",
+    "missing_resources": "Report unresolved original references; do not invent a texture or atlas layout. Original shader selection tests resource availability."
+  },
+  "per_model_binding": {
+    "function": "0x0047e4f0",
+    "model_draw_group_vector": "runtime model+0x280 begin, model+0x284 end",
+    "draw_group_stride": 76,
+    "material_base_in_draw_group": 20,
+    "lightmap_handle_in_draw_group": 24,
+    "lightmap_handle_in_material": 4,
+    "handle_assignment": "0x0045eeb0 releases previous reference, assigns selected texture resource, increments new resource+0x34 reference count.",
+    "shader_selection": "0x00443c60 executes after assigning each group lightmap handle.",
+    "critical_offset_distinction": "drawGroup+0x18 is material+0x04. Binder0x00444190 material+0x18 is a DIFFERENT custom shader override and is not the lmpd lightmap handle.",
+    "assembly_evidence": "0x0047e547 lea ebx,[group+0x18];0x0047e55b ecx=ebx;0x0047e55d call0x0045eeb0;0x0047e562 lea ecx,[group+0x14];0x0047e566 call0x00443c60.",
+    "instance_specialization": "All draw groups of the target model receive its lightmap; a replacement sharing mesh/material geometry across differently bound instances must specialize their binding, not mutate a global material index.",
+    "sampler_selection": "Original0x00444190 uses material[1] lightmap at sampler1 when no intermediate env/normal texture is bound, otherwise at sampler2."
+  },
+  "uv1": {
+    "tris": {"record_bytes": 160, "corner0_uv1": 20, "corner1_uv1": 52, "corner2_uv1": 84},
+    "ptri": {"record_bytes": 116, "corner0_uv1": 16, "corner1_uv1": 48, "corner2_uv1": 80},
+    "source_pair": "IEEE754 float32 u,v at each offset",
+    "decode": "(u,1-v)",
+    "runtime_vertex_uv1_offset": 36,
+    "vertex_shader": "original/app/base/shaders/v_dif_lit_shd.vsh lines45,54,60: TEXCOORD1/ATTR8 consumed as v8; mov oT1.xy,v8.xyxx. No scale/offset transformation.",
+    "consumer_evidence": ["analysis/skeleton-game/decompile/00469580.c", "analysis/skeleton-game/decompile/00469850.c"]
+  },
+  "fragment_shader": {
+    "lightmapped_variant": "original/app/base/shaders/t_dif_lit_shd.psh",
+    "lightmapped_math": "rgb=vertexColor.rgb*(diffuse(uv0).rgb-lightmap(uv1).rgb*lighting_multipliers_1.a);alpha=vertexColor.a*diffuse(uv0).a",
+    "instruction_evidence": "lines31..36:tex t0;tex t1;mul t1.rgb,t1,c4.a;mul r0.a,v0.a,t0.a;add t0.rgb,t0,-t1;mul r0.rgb,v0,t0.",
+    "important": "This variant subtracts the supplied luminance/occlusion map. It does NOT multiply diffuse.rgb by lightmap.rgb.",
+    "non_lightmapped_variant": "t_dif_lit.psh lines26..27 samples diffuse and multiplies by vertex color without sampling lightmap.",
+    "multiplier": "Original shader constant c4.a comes from lighting_multipliers_1.a; its runtime value must be supplied by the renderer's recovered lighting contract, not invented here.",
+    "scope": "Other env/normal/fade shader variants retain their own original contracts; this evidence does not equate all shader variants."
+  },
+  "static_corpus": {
+    "scene_count": 16,
+    "binding_count": 18732,
+    "unique_filenames": 18179,
+    "malformed_binding_records": 0,
+    "texture_archives": {
+      "lightmaps_1.DAT": {"entries": 18404, "zone_matches": 18166, "root_matches": 162, "neither_candidate_matches": 407},
+      "lightmaps_2.DAT": {"entries": 18404, "zone_matches": 18166, "root_matches": 162, "neither_candidate_matches": 407},
+      "lightmaps_4.DAT": {"entries": 18383, "zone_matches": 18146, "root_matches": 162, "neither_candidate_matches": 427}
+    },
+    "match_count_note": "Zone/root candidates are reported separately; some bindings match both. Root candidate is not a speculative fallback for an active-zone binding.",
+    "eminonu": {"bindings": 4101, "unique_filenames": 4101, "all_zone_resources_resolved_at_each_quality": true},
+    "sample": {
+      "model_id": 4111103115,
+      "member": "lightmaps/eminonu/l_occ_misir_03.dds",
+      "quality1": {"width": 64, "height": 64, "format": "DXT1", "bytes": 2872},
+      "quality2": {"width": 32, "height": 32, "format": "DXT1", "bytes": 824},
+      "quality4": {"width": 16, "height": 16, "format": "DXT1", "bytes": 312}
+    },
+    "unresolved_examples": ["ada/l_ada_kaya_model_kurshad_0<TAB>.dds", "cemberli/l_Cem_YM_Mansur_Tablo.dds", "charsel/l_c_character0_.dds"],
+    "unresolved_note": "Some original filenames contain a literal tab. Inspector does not silently sanitize or trim them."
+  },
+  "evidence_files": [
+    "analysis/lightmap-game/decompile/004a1930.c",
+    "analysis/lightmap-game/decompile/0047e4f0.c",
+    "analysis/lightmap-binding-game/decompile/0045eeb0.c",
+    "analysis/lightmap-binding-game/decompile/00443c60.c",
+    "analysis/graphics-materials/decompile/00444190.c",
+    "original/app/base/shaders/v_dif_lit_shd.vsh",
+    "original/app/base/shaders/t_dif_lit_shd.psh"
+  ],
+  "metadata_tool": "tools/asset_lightmap.py",
+  "integrator_check": "Run tools/asset_lightmap.py original/app/base/objects.dat --member objects/maps/eminonu.ADF --lightmaps original/app/base/lightmaps_1.DAT --lightmaps original/app/base/lightmaps_2.DAT --lightmaps original/app/base/lightmaps_4.DAT --output analysis/lightmap-corpus.json; renderer builds/checks belong to main integration."
+}

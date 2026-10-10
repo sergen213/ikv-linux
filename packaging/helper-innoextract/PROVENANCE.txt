@@ -1,0 +1,161 @@
+innoextract 1.9 Linux amd64 upstream helper
+=========================================
+
+Origin and acquisition
+----------------------
+Author: Daniel Scharrer <daniel@constexpr.org>
+Upstream page: https://constexpr.org/innoextract/
+Acquired 2026-10-06 over HTTPS, including redirects restricted to HTTPS.
+Binary archive: https://constexpr.org/innoextract/files/innoextract-1.9-linux.tar.xz
+Detached signature: https://constexpr.org/innoextract/files/innoextract-1.9-linux.tar.xz.sig
+Author key: https://constexpr.org/dscharrer.asc
+Source archive: https://constexpr.org/innoextract/files/innoextract-1.9.tar.gz
+Source signature: https://constexpr.org/innoextract/files/innoextract-1.9.tar.gz.sig
+
+The upstream page advertises signing key 28555A66D7E1DEC9. The retained key's
+primary fingerprint is ADE9653703D4ADE0E997758128555A66D7E1DEC9.
+Both detached signatures were verified with gpg in fresh private temporary
+keyrings containing only the retained author key. Both returned GOODSIG and
+VALIDSIG for that fingerprint; signature dates are 2020-08-09. Retained logs:
+upstream/signature-verification.txt and upstream/source-signature-verification.txt.
+This authenticates the archives against the official HTTPS-published key, not
+an independent OpenPGP web-of-trust certification; gpg reports unknown trust.
+
+SHA256
+------
+upstream/innoextract-1.9-linux.tar.xz:
+  008efe5011476ccc4aae17c3e22038b5a1bc5c7aad2b9d4d869537bf3874d21f
+upstream/innoextract-1.9-linux.tar.xz.sig:
+  5d775eb4570fe12246a931e92dc803da0c2de2c58df2eeb5ef386ac714071112
+upstream/dscharrer.asc:
+  d089564d3e767fe2d06319fbaa26965ac3b24115386a43b58302ff9df6d1eef6
+bin/amd64/innoextract:
+  7a8ad941deeb0de8d1f804830f339fd17e27cfbce473615d79d1d65c106884e9
+upstream/innoextract-1.9.tar.gz:
+  6344a69fc1ed847d4ed3e272e0da5998948c6b828cb7af39c6321aba6cf88126
+
+Extraction and identity
+-----------------------
+Only the regular file innoextract-1.9-linux/bin/amd64/innoextract and the
+original README, VERSION, CHANGELOG and every license/* regular file were
+extracted. Absolute paths, traversal and non-regular selected members were
+rejected; no archive extract-all operation or upstream shell wrapper was used.
+The helper bytes are unchanged; only executable permissions were assigned.
+The complete original archive, detached signature and author key remain under
+upstream/ for auditing. The packaged license inventory may omit the helper
+executable and original binary archive, which remain in this repository.
+
+Observed --version output is retained in upstream/helper-version.txt:
+  innoextract 1.9
+  Extracts installers created by Inno Setup 1.2.10 to 6.0.5
+This is the actual archive helper's report, not the current upstream webpage's
+newer compatibility table. No extraction, build or package smoke was run.
+
+Observed ELF and baseline limitations
+------------------------------------
+See upstream/elf-inspection.txt and upstream/compiler-identification.txt.
+ELF64 little-endian EXEC, machine AMD x86-64, System V ABI.
+Interpreter: /lib64/ld-linux-x86-64.so.2
+DT_NEEDED: libm.so.6, libc.so.6, ld-linux-x86-64.so.2 only.
+RUNPATH: $ORIGIN. GNU_STACK is RW (not executable).
+GNU ABI note: Linux 2.6.9.
+GNU build ID: 685029d4de72a886ce3f9c10aeb949bf5b7b717b.
+Imported symbol versions: GLIBC_2.2.5, GLIBC_2.3, GLIBC_2.3.4, GLIBC_2.6.
+Highest observed glibc symbol version: 2.6 (utimensat).
+No GLIBCXX or CXXABI imported symbol versions; the C++ runtime is statically
+included. iconv and iconv_open are GLIBC_2.2.5 imports from the system libc;
+there is no separate bundled libiconv dependency in the observed ELF.
+GNU notes contain no GNU_PROPERTY_X86_ISA_1_NEEDED or other .note.gnu.property
+CPU-level requirement. Compiler comments identify Gentoo GCC 4.7.2 and 8.4.0.
+Upstream README advertises amd64 glibc 2.6+.
+
+[INFERENCE] This is an upstream generic amd64, old-glibc candidate, rather
+than a locally built -march=native helper. Neither ELF architecture, absent
+GNU ISA properties, low glibc symbol versions nor executing --version proves
+x86-64-v1 instruction compatibility on every code path. No baseline CPU
+emulator, complete instruction audit or older-machine execution was done.
+Do not describe the helper as independently proven baseline-CPU portable.
+
+Licenses and redistribution
+---------------------------
+The complete original notices are retained verbatim under license/:
+  innoextract.LICENSE: zlib-style license, Daniel Scharrer 2011-2020.
+  Boost.LICENSE_1_0: Boost Software License 1.0.
+  libbz2.LICENSE: bzip2/libbzip2 permissive license, Julian R Seward.
+  zlib.copyright: zlib license and Jean-loup Gailly/Mark Adler notices.
+  liblzma.COPYING: XZ licensing statement; liblzma itself is public domain.
+  libstdc++.COPYING3: GNU GPLv3.
+  libstdc++.COPYING.RUNTIME: GCC Runtime Library Exception 3.1.
+
+liblzma.COPYING distinguishes public-domain liblzma from LGPL getopt_long
+inside some XZ command-line tools and GPL scripts/build-system files. Those
+command-line tools/scripts are not shipped by this helper package. The C++
+runtime GPL license is accompanied by the GCC Runtime Library Exception,
+which permits redistribution of independent combined target code produced
+by eligible compilation processes; retain both texts, not GPLv3 alone.
+System glibc/libm/loader are dynamically referenced, not bundled here.
+Verified upstream innoextract source is retained with its own original
+notices and build files in upstream/innoextract-1.9.tar.gz.
+
+Release build-script evidence
+-----------------------------
+The upstream webpage links https://github.com/arx/ArxPackages as its packaging
+scripts. Release revision 748ed8670fcb132242c237ca23c7aadc006a9711 is dated
+2020-08-09 and titled "innoextract: Release version 1.9".
+Inspected that release-record revision via its GitHub snapshot. No blanket
+redistribution license for the packaging repository was located, so the
+downloaded script snapshot is not retained or redistributed here. Original
+Inno Setup test executables and unrelated project payloads are not included.
+Recipe facts below refer to the named revision's original source at:
+  https://github.com/arx/ArxPackages/tree/748ed8670fcb132242c237ca23c7aadc006a9711
+No packaging scripts were executed.
+
+innoextract/config requests USE_STATIC_LIBS=1 and USE_DYNAMIC_UTIMENSAT=1;
+innoextract/config.linux selects amd64 and WITH_CONV=iconv. Root config selects
+x86_64-bindist-linux-gnu and a glibc maximum of 2.6. Common scripts retain the
+source-to-license inventory and allowlisted system-library rules. The verified
+innoextract source CMakeLists.txt adds -static-libstdc++ and -static-libgcc for
+USE_STATIC_LIBS. The observed ELF and bundled notices are consistent with
+statically included Boost, zlib, libbzip2, liblzma and GCC runtime, while system
+glibc/iconv remain dynamic. No statically linked ordinary LGPL component was
+identified, so no LGPL relink-object obligation was identified for this helper.
+The GPL GCC runtime carries its explicit exception as described above.
+
+The recipe does not establish the exact build-time checkout or reproduce the
+historical external toolchain/sysroot. The generic amd64 target and lack of
+-march=native in the inspected configs do not prove the instruction baseline
+of every prebuilt dependency or the resulting binary.
+
+Official build logs for the innoextract 1.9 source commit
+81fd9b95b76ee5115ce116bfdbc3bc6b887b809d are retained as:
+  upstream/gcc-bindist-x86-64_lto-config.txt
+  upstream/gcc-bindist-x86-64_lto-options.txt
+Their source URL prefix is:
+  https://constexpr.org/innoextract/buildlogs/commits/81fd9b95b76ee5115ce116bfdbc3bc6b887b809d/
+The config log reports GCC 8.4.0, Boost 1.73.0, static liblzma 5.2.5,
+static zlib 1.2.11 and static bzip2 1.0.8. Options select static GCC/C++ runtime,
+LTO and x86_64-bindist-linux-gnu. These logs are build-matrix evidence for the
+source commit, not a checksum-bound manifest of the published binary or
+proof of its exact dependency versions. The archive's original libbz2 notice
+says 1.0.6 and zlib has 1995-2012 dates: retained verbatim, not treated as
+authoritative binary version markers.
+
+Published release digests are retained in upstream/published-SHA256SUMS,
+downloaded from https://constexpr.org/innoextract/files/innoextract-1.9/SHA256SUMS.
+They list the same binary and source archive SHA256 values recorded above;
+the detached archive signatures, not this unsigned list, authenticate them.
+
+Reference source availability for log-reported dependency versions:
+  Boost 1.73.0: https://archives.boost.io/release/1.73.0/source/boost_1_73_0.tar.bz2
+  XZ 5.2.5: https://github.com/tukaani-project/xz/tree/v5.2.5
+  zlib 1.2.11: https://zlib.net/fossils/zlib-1.2.11.tar.gz
+  bzip2 1.0.8: https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz
+  GCC 8.4.0: https://ftp.gnu.org/gnu/gcc/gcc-8.4.0/gcc-8.4.0.tar.xz
+No guessed corresponding-source kit or runtime-library relink objects are
+claimed: permissive/public-domain components and eligible GCC runtime combined
+target code do not impose such delivery here. Exception eligibility and exact
+file-specific historical runtime patches have not been exhaustively attested.
+Shipping standalone GPL/LGPL runtime libraries would need a separate license/
+source assessment; those libraries are not shipped by this helper slice.
+Original notices and available verified innoextract source/build evidence are
+retained without claiming a reproducible historical build.

@@ -1,0 +1,118 @@
+cmake version 3.18.1
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+Not searching for unused variables given on the command line.
+-- The C compiler identification is GNU 8.4.0
+-- The CXX compiler identification is GNU 8.4.0
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/x86_64-bindist-linux-gnu-gcc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/x86_64-bindist-linux-gnu-g++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Looking for _LIBCPP_VERSION
+-- Looking for _LIBCPP_VERSION - not found
+-- Checking linker flag: -fuse-ld=gold
+-- Checking compiler flag: -flto
+-- Checking linker flag: -fuse-linker-plugin
+-- Checking linker flag: -Wl,--gc-sections
+-- Checking linker flag: -Wl,--icf=all
+-- Checking compiler flag: -fmerge-all-constants
+-- Checking compiler flag: -Wall
+-- Checking compiler flag: -Wextra
+-- Checking compiler flag: -Warray-bounds=2
+-- Checking compiler flag: -Wbool-conversions - unsupported
+-- Checking compiler flag: -Wcast-qual
+-- Checking compiler flag: -Wcatch-value=3
+-- Checking compiler flag: -Wconversion
+-- Checking compiler flag: -Wdocumentation - unsupported
+-- Checking compiler flag: -Wdouble-promotion
+-- Checking compiler flag: -Wduplicated-cond
+-- Checking compiler flag: -Wextra-semi
+-- Checking compiler flag: -Wformat=2
+-- Checking compiler flag: -Wheader-guard - unsupported
+-- Checking compiler flag: -Winit-self
+-- Checking compiler flag: -Wkeyword-macro - unsupported
+-- Checking compiler flag: -Wliteral-conversion - unsupported
+-- Checking compiler flag: -Wlogical-op
+-- Checking compiler flag: -Wmissing-declarations
+-- Checking compiler flag: -Wnoexcept
+-- Checking compiler flag: -Woverflow
+-- Checking compiler flag: -Woverloaded-virtual
+-- Checking compiler flag: -Wpessimizing-move - unsupported
+-- Checking compiler flag: -Wpointer-arith
+-- Checking compiler flag: -Wredundant-decls
+-- Checking compiler flag: -Wreserved-id-macro - unsupported
+-- Checking compiler flag: -Wshift-overflow
+-- Checking compiler flag: -Wsign-conversion
+-- Checking compiler flag: -Wstrict-null-sentinel
+-- Checking compiler flag: -Wstringop-overflow=4
+-- Checking compiler flag: -Wundef
+-- Checking compiler flag: -Wunused-const-variable=1
+-- Checking compiler flag: -Wunused-macros
+-- Checking compiler flag: -Wvla
+-- Checking compiler flag: -Wold-style-cast
+-- Checking compiler flag: -Wshadow
+-- Checking linker flag: -Wl,--no-undefined
+-- Checking compiler flag: -Wmaybe-uninitialized
+-- Checking compiler flag: -Wno-maybe-uninitialized
+-- Checking linker flag: -Wl,--as-needed
+-- Checking compiler flag: -g2
+-- Checking compiler flag: -ffast-math
+-- Found Doxygen: /usr/bin/doxygen (found version "1.8.17") found components: doxygen dot 
+-- Found PythonInterp: /usr/bin/python (found version "3.9") 
+-- Checking linker flag: -static-libstdc++
+-- Checking linker flag: -static-libgcc
+-- Checking for module 'liblzma'
+--   Found liblzma, version 5.2.5
+-- Found LZMA: /usr/x86_64-bindist-linux-gnu/usr/lib/liblzma.a  
+-- Found Boost: /usr/x86_64-bindist-linux-gnu/usr/include (found version "1.73.0") found components: iostreams filesystem date_time system program_options regex 
+-- Found ZLIB: /usr/x86_64-bindist-linux-gnu/usr/lib/libz.a (found version "1.2.11") 
+-- Found BZip2: /usr/x86_64-bindist-linux-gnu/usr/lib/libbz2.a (found version "1.0.8") 
+-- Looking for BZ2_bzCompressInit
+-- Looking for BZ2_bzCompressInit - found
+-- Found iconv: /usr/x86_64-bindist-linux-gnu/usr/include  
+-- Checking compiler flag: -std=c++17
+-- Checking compiler flag: -pedantic
+-- Checking C++11 feature: alignof
+-- Checking C++11 feature: std::unique_ptr
+-- Checking compiler flag: -fvisibility=hidden
+-- Checking compiler flag: -fvisibility-inlines-hidden
+-- Looking for __GLIBC__
+-- Looking for __GLIBC__ - found
+-- Looking for isatty
+-- Looking for isatty - found
+-- Looking for ioctl
+-- Looking for ioctl - found
+-- Looking for timegm
+-- Looking for timegm - found
+-- Looking for gmtime_r
+-- Looking for gmtime_r - found
+-- Looking for AT_FDCWD
+-- Looking for AT_FDCWD - found
+-- Looking for utimensat
+-- Looking for utimensat - found
+-- Looking for posix_spawnp
+-- Looking for posix_spawnp - found
+-- Looking for environ
+-- Looking for environ - found
+-- Looking for waitpid
+-- Looking for waitpid - found
+-- Checking compiler builtin: __builtin_bswap16
+-- Checking compiler builtin: __builtin_bswap32
+-- Checking compiler builtin: __builtin_bswap64
+
+Configuration:
+ - Build type: Release
+ - ARC4 decryption: enabled
+ - LZMA decompression: enabled
+ - File time precision: nanoseconds
+ - Charset conversion: iconv, builtin
+
+-- Configuring done
+-- Generating done
+-- Build files have been written to: Build/work

@@ -1,0 +1,4520 @@
+{
+  "schema": "ikv-original-audio-format-1",
+  "metadata_source": "saved read-only asset inventory; hashes not remeasured by this tool",
+  "proof": {
+    "unpacked_pe_sha256": "44ffa8389a9f6e4c35841103ad4f40a90513e4deb518ab5605b0a1ebfae0be2d",
+    "image_base": "0x00400000",
+    "selector": "0x004580f0 raw string0x005937b0 ->0x00457770 ->0x004534f0 vtable0x00593580 ->0x00453580",
+    "format_stores": "0x004535db-0x00453600",
+    "buffer_create": "0x00453753 IDirectSound::CreateSoundBuffer vtable+0x0c",
+    "buffer_lock": "0x004537a3 IDirectSoundBuffer::Lock vtable+0x2c flags2 (entire buffer)",
+    "file_size": "0x00452d90 fseek/fgetpos; call0x0045365a",
+    "payload_read": "0x00452e60 fread(dst,1,count); call0x004537be",
+    "buffer_unlock": "0x00453803 IDirectSoundBuffer::Unlock vtable+0x4c"
+  },
+  "raw_format": {
+    "encoding": "PCM_S16LE",
+    "wave_format_tag": 1,
+    "sample_rate": 44100,
+    "channels": 1,
+    "bits_per_sample": 16,
+    "block_align": 2,
+    "average_bytes_per_second": 88200,
+    "header_bytes": 0,
+    "compression": "none",
+    "interleaving": "mono"
+  },
+  "native_policy": "Reject empty, odd-byte, over32MiB or non-audio-root RAW; do not pad/drop samples. This is not recovered original malformed-input behavior.",
+  "counts": {
+    "raw_total": 371,
+    "audio_raw": 347,
+    "audio_ogg": 77,
+    "non_audio_raw": 24,
+    "native_raw_accepted": 328,
+    "native_raw_rejected": 19
+  },
+  "raw_families": {
+    "ambient": 18,
+    "monster": 156,
+    "nesneler": 9,
+    "npc": 18,
+    "pc": 58,
+    "skills": 42,
+    "ui": 13,
+    "weapon": 33
+  },
+  "raw_audio_bytes": 72396875,
+  "accepted_frames": 36194352,
+  "rejected_original_files": [
+    {
+      "path": "base/audio/ambient/single_wave_1.raw",
+      "bytes": 113,
+      "sha256": "8ccb523522b0d574c56a9be166e0e3007bc946733800a5cc47cb1bdbd6a62981",
+      "prefix16_hex": "c2ff9eff98fd32ff8001d808040d0a8e"
+    },
+    {
+      "path": "base/audio/ambient/wind_1.raw",
+      "bytes": 889,
+      "sha256": "f79c3b820290ae636e48059299ab657a8fa76f29645deaf20ebca3b770b74646",
+      "prefix16_hex": "fcffe4ffa9ff60ff15ffcefe98fe80fe"
+    },
+    {
+      "path": "base/audio/ui/craft.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/itemuse.raw",
+      "bytes": 683,
+      "sha256": "4a3f17c17f45041ad6bee978922675f0d2f58273098e6bafa05b1233e58bb31f",
+      "prefix16_hex": "2c016c019f017f014401380134013a01"
+    },
+    {
+      "path": "base/audio/ui/repair.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/warning.raw",
+      "bytes": 237,
+      "sha256": "48590cca19f96b37b431f6fdf6db7ad04198c557243d0584cfc7f5fc53e26062",
+      "prefix16_hex": "e7fe0eff35ff5bff83ffacffd4fff7ff"
+    },
+    {
+      "path": "base/audio/ui/windowclose.raw",
+      "bytes": 747,
+      "sha256": "9f477413a5bd9ff69b288dc8380cdabacae549e2b7531085a2e06be0dc9390b0",
+      "prefix16_hex": "4cff5bffa0fff3ff33005a005b003d00"
+    },
+    {
+      "path": "base/audio/ui/windowopen.raw",
+      "bytes": 449,
+      "sha256": "b8855ac6d08d520349b5b13d12ecedf35c31f6fd25a3b8ebd3040f575cfac8d8",
+      "prefix16_hex": "4500f6ff9c0033003eff550079019a00"
+    },
+    {
+      "path": "base/audio/weapon/barehand/hit2.raw",
+      "bytes": 1015,
+      "sha256": "4bdc25158708ad6e69ba510d7c950747ab779d02513dadadb9a016667ed77aca",
+      "prefix16_hex": "6efd73fd76fd69fd49fd22fd08fd08fd"
+    },
+    {
+      "path": "base/audio/weapon/barehand/hit3.raw",
+      "bytes": 39,
+      "sha256": "dd190448a6fc602e54e99810c1e155fea1d4b3ae68993421975c537646e3b7c6",
+      "prefix16_hex": "0000050000001400120012001c001400"
+    },
+    {
+      "path": "base/audio/weapon/handgun/gunshot_1.raw",
+      "bytes": 153,
+      "sha256": "6d42f4dc92d095cb7b258458f9ed24189f9c909cc1f107c619bad77af29e94b4",
+      "prefix16_hex": "2400380040000d0a00faffe8ffe6ff26"
+    },
+    {
+      "path": "base/audio/weapon/handgun/gunshot_2.raw",
+      "bytes": 45,
+      "sha256": "f817b9e96515d0fce0e5231a59ad28e2a73fdb0be149e9fdd2a1be05277a9840",
+      "prefix16_hex": "1e028a01d60050011e011eff98fe10fe"
+    },
+    {
+      "path": "base/audio/weapon/handgun/hit1.raw",
+      "bytes": 243,
+      "sha256": "e3f7ff07a1e559fa642db53215eb108a23a3c816818333c7385342dd0feba991",
+      "prefix16_hex": "1b002a0030000700fdffefffeeff1c00"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg2.raw",
+      "bytes": 265,
+      "sha256": "e3026624cca92c426daa96f9e8f54e8ee6fd9cee9b65058078a30acdfcda810d",
+      "prefix16_hex": "3f00feff1b000d0a00abff88ffc9ffb1"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg3.raw",
+      "bytes": 381,
+      "sha256": "321ec731bf19ec3a97d5f3f77cdb6abc3d4395b039fab1fb26d302ed509c5ee1",
+      "prefix16_hex": "5bfeaffe0eff5effa4ffb0ff8bff42ff"
+    },
+    {
+      "path": "base/audio/weapon/sword/dmg4.raw",
+      "bytes": 813,
+      "sha256": "7997b02cf36802eafcca04e1ed6fa330a87d808de6036c4c79a5ad5ced48d4a2",
+      "prefix16_hex": "bbff0e0046001800a7ffb0ff0d0a00f5"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit2.raw",
+      "bytes": 417,
+      "sha256": "1268f77d40336a63285945c686a70d469b8083acc836dbb3008a1500ce565174",
+      "prefix16_hex": "71ffabff2700a200be0097007b006500"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit3.raw",
+      "bytes": 575,
+      "sha256": "c83391e7cb25d660ba4c424110714085edb0e2fb36313b85bbc32118fce7b592",
+      "prefix16_hex": "14ff06fff9feeafee4fedafec5fec0fe"
+    },
+    {
+      "path": "base/audio/weapon/sword/hit4.raw",
+      "bytes": 633,
+      "sha256": "4524dbd17c5c44f5ffad6e2b680b5e9382a336c47fea07aacacbbe8ef2dba75d",
+      "prefix16_hex": "d000fa001f013e01540161015d015901"
+    }
+  ],
+  "non_audio_raw_files": [
+    {
+      "path": "base/music00.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music01.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music02.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music03.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music04.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music05.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music06.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music07.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music08.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music09.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music10.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music11.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music12.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music13.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music14.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music15.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music16.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/music17.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound00.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound04.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound05.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound07.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound13.raw",
+      "bytes": 4194304
+    },
+    {
+      "path": "base/sound17.raw",
+      "bytes": 4194304
+    }
+  ],
+  "raw_duration_audit": {
+    "metadata_source": "saved inventory byte lengths and statically recovered PCM_S16LE mono44100 descriptor; no current RAW reads",
+    "formula": "inventory bytes / 88200",
+    "incomplete_frame_note": "Odd lengths have nominal byte-derived durations only, not playable complete-frame durations; native rejects them without padding or truncation.",
+    "non_audio_grid_note": "The 24 non-audio RAW selection grids are excluded; no PCM interpretation.",
+    "summary": {
+      "file_count": 347,
+      "total_duration_seconds": 820.8262471655329,
+      "longest": {
+        "path": "base/audio/ambient/hakirpropaganda.raw",
+        "inventory_bytes": 7205668,
+        "duration_seconds": 81.69691609977325,
+        "complete_frames": 3602834,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      "exceeding_loop_300s": {
+        "count": 0,
+        "paths": []
+      },
+      "exceeding_fx_10s": {
+        "count": 9,
+        "paths": [
+          "base/audio/ambient/domuzpropoganda.raw",
+          "base/audio/ambient/gramofon.raw",
+          "base/audio/ambient/hakirpropaganda.raw",
+          "base/audio/ambient/hakirpropaganda1.raw",
+          "base/audio/ambient/hakirpropaganda3.raw",
+          "base/audio/ambient/piano.raw",
+          "base/audio/ambient/radyo.raw",
+          "base/audio/monster/kadimhidra/deprem.raw",
+          "base/audio/nesneler/kule.raw"
+        ]
+      }
+    },
+    "files": [
+      {
+        "path": "base/audio/ambient/break_desk.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/domuzpropoganda.raw",
+        "inventory_bytes": 2863104,
+        "duration_seconds": 32.46149659863946,
+        "complete_frames": 1431552,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/forge.raw",
+        "inventory_bytes": 796686,
+        "duration_seconds": 9.032721088435375,
+        "complete_frames": 398343,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/gbm0.raw",
+        "inventory_bytes": 349272,
+        "duration_seconds": 3.96,
+        "complete_frames": 174636,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/gramofon.raw",
+        "inventory_bytes": 1527752,
+        "duration_seconds": 17.321451247165534,
+        "complete_frames": 763876,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakircagri1.raw",
+        "inventory_bytes": 632156,
+        "duration_seconds": 7.167301587301587,
+        "complete_frames": 316078,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakircagri2.raw",
+        "inventory_bytes": 583136,
+        "duration_seconds": 6.611519274376417,
+        "complete_frames": 291568,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakirpropaganda.raw",
+        "inventory_bytes": 7205668,
+        "duration_seconds": 81.69691609977325,
+        "complete_frames": 3602834,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakirpropaganda1.raw",
+        "inventory_bytes": 2831718,
+        "duration_seconds": 32.1056462585034,
+        "complete_frames": 1415859,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakirpropaganda2.raw",
+        "inventory_bytes": 771096,
+        "duration_seconds": 8.742585034013606,
+        "complete_frames": 385548,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakirpropaganda3.raw",
+        "inventory_bytes": 1437588,
+        "duration_seconds": 16.299183673469386,
+        "complete_frames": 718794,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/hakirpropaganda4.raw",
+        "inventory_bytes": 862972,
+        "duration_seconds": 9.784263038548753,
+        "complete_frames": 431486,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/piano.raw",
+        "inventory_bytes": 933680,
+        "duration_seconds": 10.585941043083901,
+        "complete_frames": 466840,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/radyo.raw",
+        "inventory_bytes": 1527808,
+        "duration_seconds": 17.322086167800453,
+        "complete_frames": 763904,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/single_wave_1.raw",
+        "inventory_bytes": 113,
+        "duration_seconds": 0.0012811791383219955,
+        "complete_frames": 56,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ambient/single_wave_2.raw",
+        "inventory_bytes": 28,
+        "duration_seconds": 0.00031746031746031746,
+        "complete_frames": 14,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/tower_collapse.raw",
+        "inventory_bytes": 158184,
+        "duration_seconds": 1.793469387755102,
+        "complete_frames": 79092,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ambient/wind_1.raw",
+        "inventory_bytes": 889,
+        "duration_seconds": 0.010079365079365079,
+        "complete_frames": 444,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/monster/bbuyucu/skill.raw",
+        "inventory_bytes": 340608,
+        "duration_seconds": 3.861768707482993,
+        "complete_frames": 170304,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/bbuyucu/skill2.raw",
+        "inventory_bytes": 793800,
+        "duration_seconds": 9.0,
+        "complete_frames": 396900,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/bomb.raw",
+        "inventory_bytes": 570196,
+        "duration_seconds": 6.464807256235828,
+        "complete_frames": 285098,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/break.raw",
+        "inventory_bytes": 70884,
+        "duration_seconds": 0.8036734693877551,
+        "complete_frames": 35442,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/centhit1.raw",
+        "inventory_bytes": 43874,
+        "duration_seconds": 0.497437641723356,
+        "complete_frames": 21937,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/centhit2.raw",
+        "inventory_bytes": 71642,
+        "duration_seconds": 0.8122675736961451,
+        "complete_frames": 35821,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/centskl01.raw",
+        "inventory_bytes": 88200,
+        "duration_seconds": 1.0,
+        "complete_frames": 44100,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/centskl02.raw",
+        "inventory_bytes": 89376,
+        "duration_seconds": 1.0133333333333334,
+        "complete_frames": 44688,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/die.raw",
+        "inventory_bytes": 242198,
+        "duration_seconds": 2.7460090702947846,
+        "complete_frames": 121099,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/evoskl.raw",
+        "inventory_bytes": 130036,
+        "duration_seconds": 1.4743310657596371,
+        "complete_frames": 65018,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/centurion/fundhit.raw",
+        "inventory_bytes": 161630,
+        "duration_seconds": 1.8325396825396825,
+        "complete_frames": 80815,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_erkek/attack1.raw",
+        "inventory_bytes": 52480,
+        "duration_seconds": 0.5950113378684807,
+        "complete_frames": 26240,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_erkek/damage1.raw",
+        "inventory_bytes": 50432,
+        "duration_seconds": 0.5717913832199546,
+        "complete_frames": 25216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_erkek/die.raw",
+        "inventory_bytes": 77804,
+        "duration_seconds": 0.8821315192743764,
+        "complete_frames": 38902,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_erkek/run.raw",
+        "inventory_bytes": 43136,
+        "duration_seconds": 0.4890702947845805,
+        "complete_frames": 21568,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_kadin/attack1.raw",
+        "inventory_bytes": 52480,
+        "duration_seconds": 0.5950113378684807,
+        "complete_frames": 26240,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_kadin/damage1.raw",
+        "inventory_bytes": 50432,
+        "duration_seconds": 0.5717913832199546,
+        "complete_frames": 25216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_kadin/die.raw",
+        "inventory_bytes": 77804,
+        "duration_seconds": 0.8821315192743764,
+        "complete_frames": 38902,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/ceteci_kadin/run.raw",
+        "inventory_bytes": 43136,
+        "duration_seconds": 0.4890702947845805,
+        "complete_frames": 21568,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/deli/bite.raw",
+        "inventory_bytes": 450674,
+        "duration_seconds": 5.10968253968254,
+        "complete_frames": 225337,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/deli/breathe.raw",
+        "inventory_bytes": 88248,
+        "duration_seconds": 1.000544217687075,
+        "complete_frames": 44124,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/deli/scream.raw",
+        "inventory_bytes": 127512,
+        "duration_seconds": 1.4457142857142857,
+        "complete_frames": 63756,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/dusunen/die.raw",
+        "inventory_bytes": 222264,
+        "duration_seconds": 2.52,
+        "complete_frames": 111132,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/dusunen/headache.raw",
+        "inventory_bytes": 186984,
+        "duration_seconds": 2.12,
+        "complete_frames": 93492,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/dusunen/scream.raw",
+        "inventory_bytes": 311980,
+        "duration_seconds": 3.53718820861678,
+        "complete_frames": 155990,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/dusunen/smash.raw",
+        "inventory_bytes": 176224,
+        "duration_seconds": 1.9980045351473923,
+        "complete_frames": 88112,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fare/attack1.raw",
+        "inventory_bytes": 53360,
+        "duration_seconds": 0.6049886621315193,
+        "complete_frames": 26680,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fare/damage.raw",
+        "inventory_bytes": 43584,
+        "duration_seconds": 0.4941496598639456,
+        "complete_frames": 21792,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fare/die.raw",
+        "inventory_bytes": 61568,
+        "duration_seconds": 0.6980498866213152,
+        "complete_frames": 30784,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fare/showteeth.raw",
+        "inventory_bytes": 85372,
+        "duration_seconds": 0.967936507936508,
+        "complete_frames": 42686,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fare/walk.raw",
+        "inventory_bytes": 85372,
+        "duration_seconds": 0.967936507936508,
+        "complete_frames": 42686,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/attack1.raw",
+        "inventory_bytes": 52480,
+        "duration_seconds": 0.5950113378684807,
+        "complete_frames": 26240,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/attack2.raw",
+        "inventory_bytes": 31364,
+        "duration_seconds": 0.35560090702947844,
+        "complete_frames": 15682,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/damage1.raw",
+        "inventory_bytes": 50432,
+        "duration_seconds": 0.5717913832199546,
+        "complete_frames": 25216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/die.raw",
+        "inventory_bytes": 77804,
+        "duration_seconds": 0.8821315192743764,
+        "complete_frames": 38902,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/run.raw",
+        "inventory_bytes": 73642,
+        "duration_seconds": 0.8349433106575964,
+        "complete_frames": 36821,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/yolskill.raw",
+        "inventory_bytes": 239754,
+        "duration_seconds": 2.7182993197278913,
+        "complete_frames": 119877,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/fareadam/yolsvhit.raw",
+        "inventory_bytes": 118870,
+        "duration_seconds": 1.3477324263038548,
+        "complete_frames": 59435,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gaffar/kaos.raw",
+        "inventory_bytes": 449280,
+        "duration_seconds": 5.093877551020408,
+        "complete_frames": 224640,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/alev.raw",
+        "inventory_bytes": 247520,
+        "duration_seconds": 2.806349206349206,
+        "complete_frames": 123760,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/asit.raw",
+        "inventory_bytes": 215600,
+        "duration_seconds": 2.4444444444444446,
+        "complete_frames": 107800,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/down.raw",
+        "inventory_bytes": 250102,
+        "duration_seconds": 2.83562358276644,
+        "complete_frames": 125051,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/hit1.raw",
+        "inventory_bytes": 87858,
+        "duration_seconds": 0.9961224489795918,
+        "complete_frames": 43929,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/hit2.raw",
+        "inventory_bytes": 110812,
+        "duration_seconds": 1.2563718820861678,
+        "complete_frames": 55406,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/impact.raw",
+        "inventory_bytes": 164148,
+        "duration_seconds": 1.8610884353741497,
+        "complete_frames": 82074,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/korteks.raw",
+        "inventory_bytes": 105276,
+        "duration_seconds": 1.1936054421768707,
+        "complete_frames": 52638,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/mitralyoz.raw",
+        "inventory_bytes": 307834,
+        "duration_seconds": 3.4901814058956915,
+        "complete_frames": 153917,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/run.raw",
+        "inventory_bytes": 116242,
+        "duration_seconds": 1.317936507936508,
+        "complete_frames": 58121,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/saw.raw",
+        "inventory_bytes": 141056,
+        "duration_seconds": 1.5992743764172335,
+        "complete_frames": 70528,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/walk.raw",
+        "inventory_bytes": 189786,
+        "duration_seconds": 2.151768707482993,
+        "complete_frames": 94893,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/xdeath.raw",
+        "inventory_bytes": 494720,
+        "duration_seconds": 5.609070294784581,
+        "complete_frames": 247360,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbm/xhit.raw",
+        "inventory_bytes": 65786,
+        "duration_seconds": 0.7458730158730159,
+        "complete_frames": 32893,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/die.raw",
+        "inventory_bytes": 220722,
+        "duration_seconds": 2.502517006802721,
+        "complete_frames": 110361,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/gun1.raw",
+        "inventory_bytes": 275900,
+        "duration_seconds": 3.1281179138321997,
+        "complete_frames": 137950,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/gun2.raw",
+        "inventory_bytes": 312688,
+        "duration_seconds": 3.5452154195011336,
+        "complete_frames": 156344,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/hit.raw",
+        "inventory_bytes": 187612,
+        "duration_seconds": 2.1271201814058958,
+        "complete_frames": 93806,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/missile.raw",
+        "inventory_bytes": 220722,
+        "duration_seconds": 2.502517006802721,
+        "complete_frames": 110361,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/walk1.raw",
+        "inventory_bytes": 40466,
+        "duration_seconds": 0.4587981859410431,
+        "complete_frames": 20233,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/walk2.raw",
+        "inventory_bytes": 44144,
+        "duration_seconds": 0.500498866213152,
+        "complete_frames": 22072,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gbz/walk3.raw",
+        "inventory_bytes": 33108,
+        "duration_seconds": 0.37537414965986393,
+        "complete_frames": 16554,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/b_molotov.raw",
+        "inventory_bytes": 220720,
+        "duration_seconds": 2.5024943310657597,
+        "complete_frames": 110360,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/f_hit1-1.raw",
+        "inventory_bytes": 69894,
+        "duration_seconds": 0.7924489795918367,
+        "complete_frames": 34947,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/f_hit1.raw",
+        "inventory_bytes": 58860,
+        "duration_seconds": 0.6673469387755102,
+        "complete_frames": 29430,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/f_hit2.raw",
+        "inventory_bytes": 66216,
+        "duration_seconds": 0.7507482993197279,
+        "complete_frames": 33108,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/g_hit1-1.raw",
+        "inventory_bytes": 55180,
+        "duration_seconds": 0.6256235827664399,
+        "complete_frames": 27590,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/g_hit1.raw",
+        "inventory_bytes": 55180,
+        "duration_seconds": 0.6256235827664399,
+        "complete_frames": 27590,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/g_hit2.raw",
+        "inventory_bytes": 73574,
+        "duration_seconds": 0.834172335600907,
+        "complete_frames": 36787,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/g_hit3.raw",
+        "inventory_bytes": 55180,
+        "duration_seconds": 0.6256235827664399,
+        "complete_frames": 27590,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/h_gunshot.raw",
+        "inventory_bytes": 198648,
+        "duration_seconds": 2.2522448979591836,
+        "complete_frames": 99324,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/h_mortar.raw",
+        "inventory_bytes": 331080,
+        "duration_seconds": 3.7537414965986393,
+        "complete_frames": 165540,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/i_flame.raw",
+        "inventory_bytes": 286938,
+        "duration_seconds": 3.253265306122449,
+        "complete_frames": 143469,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/i_rage.raw",
+        "inventory_bytes": 158184,
+        "duration_seconds": 1.793469387755102,
+        "complete_frames": 79092,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/yk_dblhit.raw",
+        "inventory_bytes": 206004,
+        "duration_seconds": 2.3356462585034015,
+        "complete_frames": 103002,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/yk_hit.raw",
+        "inventory_bytes": 121398,
+        "duration_seconds": 1.3763945578231294,
+        "complete_frames": 60699,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/yk_tail.raw",
+        "inventory_bytes": 143470,
+        "duration_seconds": 1.6266439909297052,
+        "complete_frames": 71735,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/gizit/yk_talk.raw",
+        "inventory_bytes": 250150,
+        "duration_seconds": 2.8361678004535147,
+        "complete_frames": 125075,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/attack1.raw",
+        "inventory_bytes": 23744,
+        "duration_seconds": 0.2692063492063492,
+        "complete_frames": 11872,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/attack2.raw",
+        "inventory_bytes": 29440,
+        "duration_seconds": 0.33378684807256237,
+        "complete_frames": 14720,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/attack3.raw",
+        "inventory_bytes": 37888,
+        "duration_seconds": 0.4295691609977324,
+        "complete_frames": 18944,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/damage1.raw",
+        "inventory_bytes": 63360,
+        "duration_seconds": 0.7183673469387755,
+        "complete_frames": 31680,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/damage2.raw",
+        "inventory_bytes": 32768,
+        "duration_seconds": 0.37151927437641724,
+        "complete_frames": 16384,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/die.raw",
+        "inventory_bytes": 65280,
+        "duration_seconds": 0.7401360544217687,
+        "complete_frames": 32640,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/goblin/run.raw",
+        "inventory_bytes": 63360,
+        "duration_seconds": 0.7183673469387755,
+        "complete_frames": 31680,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/attack1.raw",
+        "inventory_bytes": 52480,
+        "duration_seconds": 0.5950113378684807,
+        "complete_frames": 26240,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/attack2.raw",
+        "inventory_bytes": 54272,
+        "duration_seconds": 0.615328798185941,
+        "complete_frames": 27136,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/attack3.raw",
+        "inventory_bytes": 54256,
+        "duration_seconds": 0.6151473922902494,
+        "complete_frames": 27128,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/damage1.raw",
+        "inventory_bytes": 50432,
+        "duration_seconds": 0.5717913832199546,
+        "complete_frames": 25216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/damage2.raw",
+        "inventory_bytes": 43136,
+        "duration_seconds": 0.4890702947845805,
+        "complete_frames": 21568,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/die.raw",
+        "inventory_bytes": 77804,
+        "duration_seconds": 0.8821315192743764,
+        "complete_frames": 38902,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/iskelet/run.raw",
+        "inventory_bytes": 63360,
+        "duration_seconds": 0.7183673469387755,
+        "complete_frames": 31680,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/istihbarat/doublehit.raw",
+        "inventory_bytes": 267776,
+        "duration_seconds": 3.0360090702947846,
+        "complete_frames": 133888,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/istihbarat/hit1.raw",
+        "inventory_bytes": 171332,
+        "duration_seconds": 1.9425396825396826,
+        "complete_frames": 85666,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/istihbarat/hit2.raw",
+        "inventory_bytes": 229950,
+        "duration_seconds": 2.607142857142857,
+        "complete_frames": 114975,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/istihbarat/hit3.raw",
+        "inventory_bytes": 128466,
+        "duration_seconds": 1.456530612244898,
+        "complete_frames": 64233,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/junon/arma.raw",
+        "inventory_bytes": 442550,
+        "duration_seconds": 5.017573696145124,
+        "complete_frames": 221275,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/junon/curse.raw",
+        "inventory_bytes": 134506,
+        "duration_seconds": 1.5250113378684806,
+        "complete_frames": 67253,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/junon/kiss.raw",
+        "inventory_bytes": 152888,
+        "duration_seconds": 1.7334240362811792,
+        "complete_frames": 76444,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/junon/spell.raw",
+        "inventory_bytes": 115432,
+        "duration_seconds": 1.3087528344671202,
+        "complete_frames": 57716,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/deprem.raw",
+        "inventory_bytes": 891874,
+        "duration_seconds": 10.111950113378684,
+        "complete_frames": 445937,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/dodge.raw",
+        "inventory_bytes": 324658,
+        "duration_seconds": 3.6809297052154193,
+        "complete_frames": 162329,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/hidradie.raw",
+        "inventory_bytes": 410998,
+        "duration_seconds": 4.6598412698412695,
+        "complete_frames": 205499,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/hit2.raw",
+        "inventory_bytes": 348034,
+        "duration_seconds": 3.945963718820862,
+        "complete_frames": 174017,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/hit3.raw",
+        "inventory_bytes": 146916,
+        "duration_seconds": 1.6657142857142857,
+        "complete_frames": 73458,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/nefes.raw",
+        "inventory_bytes": 312792,
+        "duration_seconds": 3.5463945578231293,
+        "complete_frames": 156396,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/scream2.raw",
+        "inventory_bytes": 460594,
+        "duration_seconds": 5.2221541950113375,
+        "complete_frames": 230297,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/wait.raw",
+        "inventory_bytes": 154586,
+        "duration_seconds": 1.7526757369614512,
+        "complete_frames": 77293,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kadimhidra/walk.raw",
+        "inventory_bytes": 131400,
+        "duration_seconds": 1.489795918367347,
+        "complete_frames": 65700,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/karabasan/die.raw",
+        "inventory_bytes": 260040,
+        "duration_seconds": 2.9482993197278913,
+        "complete_frames": 130020,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/karabasan/hit.raw",
+        "inventory_bytes": 130324,
+        "duration_seconds": 1.4775963718820861,
+        "complete_frames": 65162,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/karabasan/hit2.raw",
+        "inventory_bytes": 111638,
+        "duration_seconds": 1.2657369614512473,
+        "complete_frames": 55819,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/karabasan/moan.raw",
+        "inventory_bytes": 352800,
+        "duration_seconds": 4.0,
+        "complete_frames": 176400,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kenan/die.raw",
+        "inventory_bytes": 99962,
+        "duration_seconds": 1.1333560090702948,
+        "complete_frames": 49981,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kenan/fedaiskl.raw",
+        "inventory_bytes": 195336,
+        "duration_seconds": 2.2146938775510203,
+        "complete_frames": 97668,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kenan/laugh.raw",
+        "inventory_bytes": 222456,
+        "duration_seconds": 2.522176870748299,
+        "complete_frames": 111228,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kenan/roast.raw",
+        "inventory_bytes": 402192,
+        "duration_seconds": 4.56,
+        "complete_frames": 201096,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kenan/zhrdie.raw",
+        "inventory_bytes": 88890,
+        "duration_seconds": 1.0078231292517006,
+        "complete_frames": 44445,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kralice_tirtil/die.raw",
+        "inventory_bytes": 209684,
+        "duration_seconds": 2.377369614512472,
+        "complete_frames": 104842,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kralice_tirtil/hide.raw",
+        "inventory_bytes": 419370,
+        "duration_seconds": 4.754761904761905,
+        "complete_frames": 209685,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kralice_tirtil/hit1-1.raw",
+        "inventory_bytes": 128754,
+        "duration_seconds": 1.459795918367347,
+        "complete_frames": 64377,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kralice_tirtil/hit1.raw",
+        "inventory_bytes": 128754,
+        "duration_seconds": 1.459795918367347,
+        "complete_frames": 64377,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kralice_tirtil/hit2.raw",
+        "inventory_bytes": 125074,
+        "duration_seconds": 1.4180725623582766,
+        "complete_frames": 62537,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/attack1.raw",
+        "inventory_bytes": 80776,
+        "duration_seconds": 0.915827664399093,
+        "complete_frames": 40388,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/attack2.raw",
+        "inventory_bytes": 20236,
+        "duration_seconds": 0.22943310657596372,
+        "complete_frames": 10118,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/damage1.raw",
+        "inventory_bytes": 51688,
+        "duration_seconds": 0.586031746031746,
+        "complete_frames": 25844,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/die.raw",
+        "inventory_bytes": 26248,
+        "duration_seconds": 0.29759637188208615,
+        "complete_frames": 13124,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/howl.raw",
+        "inventory_bytes": 171284,
+        "duration_seconds": 1.9419954648526077,
+        "complete_frames": 85642,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/kurtadam/run.raw",
+        "inventory_bytes": 120542,
+        "duration_seconds": 1.3666893424036282,
+        "complete_frames": 60271,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/motorin/burn.raw",
+        "inventory_bytes": 264188,
+        "duration_seconds": 2.995328798185941,
+        "complete_frames": 132094,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/motorin/die.raw",
+        "inventory_bytes": 225738,
+        "duration_seconds": 2.559387755102041,
+        "complete_frames": 112869,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/philotheos/aeiu.raw",
+        "inventory_bytes": 529200,
+        "duration_seconds": 6.0,
+        "complete_frames": 264600,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/philotheos/die.raw",
+        "inventory_bytes": 220880,
+        "duration_seconds": 2.504308390022676,
+        "complete_frames": 110440,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/philotheos/hit.raw",
+        "inventory_bytes": 36006,
+        "duration_seconds": 0.4082312925170068,
+        "complete_frames": 18003,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/solucan/hit.raw",
+        "inventory_bytes": 126850,
+        "duration_seconds": 1.4382086167800454,
+        "complete_frames": 63425,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/stuart/energy.raw",
+        "inventory_bytes": 216554,
+        "duration_seconds": 2.4552607709750567,
+        "complete_frames": 108277,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/stuart/mana.raw",
+        "inventory_bytes": 382240,
+        "duration_seconds": 4.333786848072562,
+        "complete_frames": 191120,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tepegoz/die.raw",
+        "inventory_bytes": 176400,
+        "duration_seconds": 2.0,
+        "complete_frames": 88200,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tepegoz/hit.raw",
+        "inventory_bytes": 31828,
+        "duration_seconds": 0.36086167800453517,
+        "complete_frames": 15914,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tepegoz/hit3.raw",
+        "inventory_bytes": 40504,
+        "duration_seconds": 0.45922902494331064,
+        "complete_frames": 20252,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tepegoz/taunt.raw",
+        "inventory_bytes": 165376,
+        "duration_seconds": 1.8750113378684807,
+        "complete_frames": 82688,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tirtil/die.raw",
+        "inventory_bytes": 198648,
+        "duration_seconds": 2.2522448979591836,
+        "complete_frames": 99324,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tirtil/hit1-1.raw",
+        "inventory_bytes": 95644,
+        "duration_seconds": 1.0843990929705216,
+        "complete_frames": 47822,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tirtil/hit1-2.raw",
+        "inventory_bytes": 95644,
+        "duration_seconds": 1.0843990929705216,
+        "complete_frames": 47822,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tirtil/hit1.raw",
+        "inventory_bytes": 95644,
+        "duration_seconds": 1.0843990929705216,
+        "complete_frames": 47822,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/tirtil/hit2.raw",
+        "inventory_bytes": 114040,
+        "duration_seconds": 1.29297052154195,
+        "complete_frames": 57020,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/dodge.raw",
+        "inventory_bytes": 321066,
+        "duration_seconds": 3.640204081632653,
+        "complete_frames": 160533,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/hidradie.raw",
+        "inventory_bytes": 388452,
+        "duration_seconds": 4.40421768707483,
+        "complete_frames": 194226,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/hit1.raw",
+        "inventory_bytes": 230066,
+        "duration_seconds": 2.608458049886621,
+        "complete_frames": 115033,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/hit2.raw",
+        "inventory_bytes": 335986,
+        "duration_seconds": 3.8093650793650795,
+        "complete_frames": 167993,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/hit3.raw",
+        "inventory_bytes": 274932,
+        "duration_seconds": 3.117142857142857,
+        "complete_frames": 137466,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/look.raw",
+        "inventory_bytes": 319762,
+        "duration_seconds": 3.625419501133787,
+        "complete_frames": 159881,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/scream.raw",
+        "inventory_bytes": 224034,
+        "duration_seconds": 2.5400680272108844,
+        "complete_frames": 112017,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yesilhidra/walk.raw",
+        "inventory_bytes": 166048,
+        "duration_seconds": 1.8826303854875284,
+        "complete_frames": 83024,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yilan/attack.raw",
+        "inventory_bytes": 69392,
+        "duration_seconds": 0.7867573696145125,
+        "complete_frames": 34696,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yilan/crawl.raw",
+        "inventory_bytes": 49146,
+        "duration_seconds": 0.5572108843537414,
+        "complete_frames": 24573,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yilan/damage.raw",
+        "inventory_bytes": 49146,
+        "duration_seconds": 0.5572108843537414,
+        "complete_frames": 24573,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/monster/yilan/die.raw",
+        "inventory_bytes": 49146,
+        "duration_seconds": 0.5572108843537414,
+        "complete_frames": 24573,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/forge.raw",
+        "inventory_bytes": 796686,
+        "duration_seconds": 9.032721088435375,
+        "complete_frames": 398343,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/guvercin.raw",
+        "inventory_bytes": 347748,
+        "duration_seconds": 3.9427210884353743,
+        "complete_frames": 173874,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/hurda.raw",
+        "inventory_bytes": 372732,
+        "duration_seconds": 4.2259863945578235,
+        "complete_frames": 186366,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/kule.raw",
+        "inventory_bytes": 893200,
+        "duration_seconds": 10.126984126984127,
+        "complete_frames": 446600,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/labr.raw",
+        "inventory_bytes": 610566,
+        "duration_seconds": 6.922517006802721,
+        "complete_frames": 305283,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/ors.raw",
+        "inventory_bytes": 95232,
+        "duration_seconds": 1.0797278911564625,
+        "complete_frames": 47616,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/rüstemstrech.raw",
+        "inventory_bytes": 93712,
+        "duration_seconds": 1.0624943310657597,
+        "complete_frames": 46856,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/terzi.raw",
+        "inventory_bytes": 308224,
+        "duration_seconds": 3.4946031746031747,
+        "complete_frames": 154112,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/nesneler/tripod.raw",
+        "inventory_bytes": 41010,
+        "duration_seconds": 0.46496598639455783,
+        "complete_frames": 20505,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/bozayi/doublehit.raw",
+        "inventory_bytes": 64704,
+        "duration_seconds": 0.7336054421768707,
+        "complete_frames": 32352,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/bozayi/hit1.raw",
+        "inventory_bytes": 58944,
+        "duration_seconds": 0.6682993197278911,
+        "complete_frames": 29472,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/bozayi/hit2.raw",
+        "inventory_bytes": 44520,
+        "duration_seconds": 0.5047619047619047,
+        "complete_frames": 22260,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/domuz/talk.raw",
+        "inventory_bytes": 509294,
+        "duration_seconds": 5.774308390022676,
+        "complete_frames": 254647,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/gozcu/idle.raw",
+        "inventory_bytes": 116516,
+        "duration_seconds": 1.3210430839002267,
+        "complete_frames": 58258,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/gozcu/teslahit.raw",
+        "inventory_bytes": 159892,
+        "duration_seconds": 1.8128344671201815,
+        "complete_frames": 79946,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/bark.raw",
+        "inventory_bytes": 67510,
+        "duration_seconds": 0.7654195011337869,
+        "complete_frames": 33755,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/bark2.raw",
+        "inventory_bytes": 235100,
+        "duration_seconds": 2.665532879818594,
+        "complete_frames": 117550,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/death.raw",
+        "inventory_bytes": 61216,
+        "duration_seconds": 0.6940589569160998,
+        "complete_frames": 30608,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/hit.raw",
+        "inventory_bytes": 29364,
+        "duration_seconds": 0.3329251700680272,
+        "complete_frames": 14682,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/hit2.raw",
+        "inventory_bytes": 33074,
+        "duration_seconds": 0.37498866213151927,
+        "complete_frames": 16537,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/smell.raw",
+        "inventory_bytes": 226568,
+        "duration_seconds": 2.568798185941043,
+        "complete_frames": 113284,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/kangal/whine.raw",
+        "inventory_bytes": 211932,
+        "duration_seconds": 2.402857142857143,
+        "complete_frames": 105966,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/lider/gasp.raw",
+        "inventory_bytes": 311382,
+        "duration_seconds": 3.530408163265306,
+        "complete_frames": 155691,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/sarapci/drink.raw",
+        "inventory_bytes": 228860,
+        "duration_seconds": 2.594784580498866,
+        "complete_frames": 114430,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/sarapci/sleep.raw",
+        "inventory_bytes": 188928,
+        "duration_seconds": 2.1420408163265305,
+        "complete_frames": 94464,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/sarapci/song.raw",
+        "inventory_bytes": 284148,
+        "duration_seconds": 3.2216326530612247,
+        "complete_frames": 142074,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/npc/suzan/kiss.raw",
+        "inventory_bytes": 182252,
+        "duration_seconds": 2.0663492063492064,
+        "complete_frames": 91126,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/attack1.raw",
+        "inventory_bytes": 55180,
+        "duration_seconds": 0.6256235827664399,
+        "complete_frames": 27590,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/attack2.raw",
+        "inventory_bytes": 88288,
+        "duration_seconds": 1.000997732426304,
+        "complete_frames": 44144,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/attack3.raw",
+        "inventory_bytes": 47824,
+        "duration_seconds": 0.5422222222222223,
+        "complete_frames": 23912,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/attack4.raw",
+        "inventory_bytes": 36786,
+        "duration_seconds": 0.4170748299319728,
+        "complete_frames": 18393,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/common_resurrection.raw",
+        "inventory_bytes": 115328,
+        "duration_seconds": 1.3075736961451248,
+        "complete_frames": 57664,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/common_run.raw",
+        "inventory_bytes": 63968,
+        "duration_seconds": 0.7252607709750567,
+        "complete_frames": 31984,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/common_walk.raw",
+        "inventory_bytes": 101468,
+        "duration_seconds": 1.1504308390022675,
+        "complete_frames": 50734,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_attack1.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_attack2.raw",
+        "inventory_bytes": 47822,
+        "duration_seconds": 0.5421995464852608,
+        "complete_frames": 23911,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_attack3.raw",
+        "inventory_bytes": 47822,
+        "duration_seconds": 0.5421995464852608,
+        "complete_frames": 23911,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_damage1.raw",
+        "inventory_bytes": 27456,
+        "duration_seconds": 0.3112925170068027,
+        "complete_frames": 13728,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_die.raw",
+        "inventory_bytes": 167164,
+        "duration_seconds": 1.895283446712018,
+        "complete_frames": 83582,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp1.raw",
+        "inventory_bytes": 154504,
+        "duration_seconds": 1.7517460317460318,
+        "complete_frames": 77252,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp10.raw",
+        "inventory_bytes": 132432,
+        "duration_seconds": 1.5014965986394557,
+        "complete_frames": 66216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp11.raw",
+        "inventory_bytes": 114038,
+        "duration_seconds": 1.2929478458049886,
+        "complete_frames": 57019,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp2.raw",
+        "inventory_bytes": 106682,
+        "duration_seconds": 1.209546485260771,
+        "complete_frames": 53341,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp3.raw",
+        "inventory_bytes": 69896,
+        "duration_seconds": 0.7924716553287982,
+        "complete_frames": 34948,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp4.raw",
+        "inventory_bytes": 143468,
+        "duration_seconds": 1.6266213151927438,
+        "complete_frames": 71734,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp5.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp6.raw",
+        "inventory_bytes": 95646,
+        "duration_seconds": 1.084421768707483,
+        "complete_frames": 47823,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp7.raw",
+        "inventory_bytes": 66216,
+        "duration_seconds": 0.7507482993197279,
+        "complete_frames": 33108,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp8.raw",
+        "inventory_bytes": 103004,
+        "duration_seconds": 1.1678458049886622,
+        "complete_frames": 51502,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp9.raw",
+        "inventory_bytes": 99326,
+        "duration_seconds": 1.1261451247165533,
+        "complete_frames": 49663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp9_1.raw",
+        "inventory_bytes": 99326,
+        "duration_seconds": 1.1261451247165533,
+        "complete_frames": 49663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/female_rp9_2.raw",
+        "inventory_bytes": 99326,
+        "duration_seconds": 1.1261451247165533,
+        "complete_frames": 49663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack1.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack2.raw",
+        "inventory_bytes": 47822,
+        "duration_seconds": 0.5421995464852608,
+        "complete_frames": 23911,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack3.raw",
+        "inventory_bytes": 47822,
+        "duration_seconds": 0.5421995464852608,
+        "complete_frames": 23911,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack4.raw",
+        "inventory_bytes": 44344,
+        "duration_seconds": 0.502766439909297,
+        "complete_frames": 22172,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack5.raw",
+        "inventory_bytes": 28574,
+        "duration_seconds": 0.32396825396825396,
+        "complete_frames": 14287,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_attack6.raw",
+        "inventory_bytes": 20236,
+        "duration_seconds": 0.22943310657596372,
+        "complete_frames": 10118,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage1.raw",
+        "inventory_bytes": 44624,
+        "duration_seconds": 0.5059410430839002,
+        "complete_frames": 22312,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage2.raw",
+        "inventory_bytes": 43328,
+        "duration_seconds": 0.49124716553287984,
+        "complete_frames": 21664,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage3.raw",
+        "inventory_bytes": 46398,
+        "duration_seconds": 0.5260544217687075,
+        "complete_frames": 23199,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage4.raw",
+        "inventory_bytes": 37894,
+        "duration_seconds": 0.4296371882086168,
+        "complete_frames": 18947,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage5.raw",
+        "inventory_bytes": 39718,
+        "duration_seconds": 0.45031746031746034,
+        "complete_frames": 19859,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage6.raw",
+        "inventory_bytes": 46938,
+        "duration_seconds": 0.5321768707482993,
+        "complete_frames": 23469,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage7.raw",
+        "inventory_bytes": 33940,
+        "duration_seconds": 0.3848072562358277,
+        "complete_frames": 16970,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage8.raw",
+        "inventory_bytes": 33940,
+        "duration_seconds": 0.3848072562358277,
+        "complete_frames": 16970,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_damage9.raw",
+        "inventory_bytes": 35384,
+        "duration_seconds": 0.4011791383219955,
+        "complete_frames": 17692,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_die.raw",
+        "inventory_bytes": 136998,
+        "duration_seconds": 1.553265306122449,
+        "complete_frames": 68499,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_melee1.raw",
+        "inventory_bytes": 43266,
+        "duration_seconds": 0.49054421768707485,
+        "complete_frames": 21633,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_melee2.raw",
+        "inventory_bytes": 19328,
+        "duration_seconds": 0.21913832199546485,
+        "complete_frames": 9664,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_melee3.raw",
+        "inventory_bytes": 44344,
+        "duration_seconds": 0.502766439909297,
+        "complete_frames": 22172,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp1.raw",
+        "inventory_bytes": 154504,
+        "duration_seconds": 1.7517460317460318,
+        "complete_frames": 77252,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp10.raw",
+        "inventory_bytes": 132432,
+        "duration_seconds": 1.5014965986394557,
+        "complete_frames": 66216,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp11.raw",
+        "inventory_bytes": 95646,
+        "duration_seconds": 1.084421768707483,
+        "complete_frames": 47823,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp2.raw",
+        "inventory_bytes": 91968,
+        "duration_seconds": 1.0427210884353741,
+        "complete_frames": 45984,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp3.raw",
+        "inventory_bytes": 69896,
+        "duration_seconds": 0.7924716553287982,
+        "complete_frames": 34948,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp4.raw",
+        "inventory_bytes": 143468,
+        "duration_seconds": 1.6266213151927438,
+        "complete_frames": 71734,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp5.raw",
+        "inventory_bytes": 106682,
+        "duration_seconds": 1.209546485260771,
+        "complete_frames": 53341,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp6.raw",
+        "inventory_bytes": 84610,
+        "duration_seconds": 0.959297052154195,
+        "complete_frames": 42305,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp7.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp7_1.raw",
+        "inventory_bytes": 80930,
+        "duration_seconds": 0.9175736961451247,
+        "complete_frames": 40465,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp8.raw",
+        "inventory_bytes": 103004,
+        "duration_seconds": 1.1678458049886622,
+        "complete_frames": 51502,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp9.raw",
+        "inventory_bytes": 99326,
+        "duration_seconds": 1.1261451247165533,
+        "complete_frames": 49663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp9_1.raw",
+        "inventory_bytes": 121398,
+        "duration_seconds": 1.3763945578231294,
+        "complete_frames": 60699,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/pc/male_rp9_2.raw",
+        "inventory_bytes": 99326,
+        "duration_seconds": 1.1261451247165533,
+        "complete_frames": 49663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/agirvurus_erkek.raw",
+        "inventory_bytes": 128754,
+        "duration_seconds": 1.459795918367347,
+        "complete_frames": 64377,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/agirvurus_kadin.raw",
+        "inventory_bytes": 128754,
+        "duration_seconds": 1.459795918367347,
+        "complete_frames": 64377,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/asitsaldirisi.raw",
+        "inventory_bytes": 110250,
+        "duration_seconds": 1.25,
+        "complete_frames": 55125,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/atescemberi.raw",
+        "inventory_bytes": 158182,
+        "duration_seconds": 1.7934467120181405,
+        "complete_frames": 79091,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/bombaci.raw",
+        "inventory_bytes": 170496,
+        "duration_seconds": 1.933061224489796,
+        "complete_frames": 85248,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/buyubozmabuyucu.raw",
+        "inventory_bytes": 134406,
+        "duration_seconds": 1.5238775510204081,
+        "complete_frames": 67203,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/buyubozmasifaci.raw",
+        "inventory_bytes": 529200,
+        "duration_seconds": 6.0,
+        "complete_frames": 264600,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/buzoku.raw",
+        "inventory_bytes": 143326,
+        "duration_seconds": 1.6250113378684807,
+        "complete_frames": 71663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/defansifdovus.raw",
+        "inventory_bytes": 203962,
+        "duration_seconds": 2.3124943310657597,
+        "complete_frames": 101981,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/depar.raw",
+        "inventory_bytes": 308700,
+        "duration_seconds": 3.5,
+        "complete_frames": 154350,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/dikkatdagitma.raw",
+        "inventory_bytes": 198450,
+        "duration_seconds": 2.25,
+        "complete_frames": 99225,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/direnckirmaalani.raw",
+        "inventory_bytes": 441000,
+        "duration_seconds": 5.0,
+        "complete_frames": 220500,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/durdurma.raw",
+        "inventory_bytes": 308700,
+        "duration_seconds": 3.5,
+        "complete_frames": 154350,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/elementdirencialani.raw",
+        "inventory_bytes": 308700,
+        "duration_seconds": 3.5,
+        "complete_frames": 154350,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/fizikseldirencalani.raw",
+        "inventory_bytes": 242550,
+        "duration_seconds": 2.75,
+        "complete_frames": 121275,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/hizlidovus.raw",
+        "inventory_bytes": 176400,
+        "duration_seconds": 2.0,
+        "complete_frames": 88200,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/iyilestirme.raw",
+        "inventory_bytes": 273050,
+        "duration_seconds": 3.0958049886621315,
+        "complete_frames": 136525,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/kanatma.raw",
+        "inventory_bytes": 264600,
+        "duration_seconds": 3.0,
+        "complete_frames": 132300,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/kiskirtma.raw",
+        "inventory_bytes": 161862,
+        "duration_seconds": 1.835170068027211,
+        "complete_frames": 80931,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/konsantrasyon.raw",
+        "inventory_bytes": 708356,
+        "duration_seconds": 8.03124716553288,
+        "complete_frames": 354178,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/kutupruzgari.raw",
+        "inventory_bytes": 206006,
+        "duration_seconds": 2.335668934240363,
+        "complete_frames": 103003,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/meteorit.raw",
+        "inventory_bytes": 143326,
+        "duration_seconds": 1.6250113378684807,
+        "complete_frames": 71663,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/ruhkalkani.raw",
+        "inventory_bytes": 788478,
+        "duration_seconds": 8.939659863945579,
+        "complete_frames": 394239,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sakinlestirme.raw",
+        "inventory_bytes": 237038,
+        "duration_seconds": 2.6875056689342403,
+        "complete_frames": 118519,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sakinma.raw",
+        "inventory_bytes": 231526,
+        "duration_seconds": 2.6250113378684805,
+        "complete_frames": 115763,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sarsilmaz.raw",
+        "inventory_bytes": 396900,
+        "duration_seconds": 4.5,
+        "complete_frames": 198450,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sarsilmaz_erkek.raw",
+        "inventory_bytes": 226728,
+        "duration_seconds": 2.5706122448979594,
+        "complete_frames": 113364,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sarsilmaz_kadin.raw",
+        "inventory_bytes": 224400,
+        "duration_seconds": 2.54421768707483,
+        "complete_frames": 112200,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/savasnarasi.raw",
+        "inventory_bytes": 220500,
+        "duration_seconds": 2.5,
+        "complete_frames": 110250,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/savasnarasi_erkek.raw",
+        "inventory_bytes": 169220,
+        "duration_seconds": 1.91859410430839,
+        "complete_frames": 84610,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/savasnarasi_kadin.raw",
+        "inventory_bytes": 169220,
+        "duration_seconds": 1.91859410430839,
+        "complete_frames": 84610,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sertvurus.raw",
+        "inventory_bytes": 250818,
+        "duration_seconds": 2.8437414965986396,
+        "complete_frames": 125409,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sertvurus_erkek.raw",
+        "inventory_bytes": 117718,
+        "duration_seconds": 1.334671201814059,
+        "complete_frames": 58859,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/sertvurus_kadin.raw",
+        "inventory_bytes": 117718,
+        "duration_seconds": 1.334671201814059,
+        "complete_frames": 58859,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/supurme.raw",
+        "inventory_bytes": 125074,
+        "duration_seconds": 1.4180725623582766,
+        "complete_frames": 62537,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/supurme_erkek.raw",
+        "inventory_bytes": 125074,
+        "duration_seconds": 1.4180725623582766,
+        "complete_frames": 62537,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/supurme_kadin.raw",
+        "inventory_bytes": 125074,
+        "duration_seconds": 1.4180725623582766,
+        "complete_frames": 62537,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/teslakuresi.raw",
+        "inventory_bytes": 165540,
+        "duration_seconds": 1.8768707482993197,
+        "complete_frames": 82770,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/yildirim.raw",
+        "inventory_bytes": 308700,
+        "duration_seconds": 3.5,
+        "complete_frames": 154350,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/zehirleme.raw",
+        "inventory_bytes": 441000,
+        "duration_seconds": 5.0,
+        "complete_frames": 220500,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/zihinsaldirisi.raw",
+        "inventory_bytes": 121398,
+        "duration_seconds": 1.3763945578231294,
+        "complete_frames": 60699,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/skills/zihintoplama.raw",
+        "inventory_bytes": 341776,
+        "duration_seconds": 3.8750113378684805,
+        "complete_frames": 170888,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/alert.raw",
+        "inventory_bytes": 682,
+        "duration_seconds": 0.007732426303854875,
+        "complete_frames": 341,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/click.raw",
+        "inventory_bytes": 682,
+        "duration_seconds": 0.007732426303854875,
+        "complete_frames": 341,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/craft.raw",
+        "inventory_bytes": 237,
+        "duration_seconds": 0.0026870748299319728,
+        "complete_frames": 118,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ui/drink.raw",
+        "inventory_bytes": 250,
+        "duration_seconds": 0.002834467120181406,
+        "complete_frames": 125,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/eat.raw",
+        "inventory_bytes": 98,
+        "duration_seconds": 0.0011111111111111111,
+        "complete_frames": 49,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/gold.raw",
+        "inventory_bytes": 400,
+        "duration_seconds": 0.0045351473922902496,
+        "complete_frames": 200,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/itemdrop.raw",
+        "inventory_bytes": 402,
+        "duration_seconds": 0.0045578231292517,
+        "complete_frames": 201,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/itemuse.raw",
+        "inventory_bytes": 683,
+        "duration_seconds": 0.007743764172335601,
+        "complete_frames": 341,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ui/kritik.raw",
+        "inventory_bytes": 65066,
+        "duration_seconds": 0.7377097505668935,
+        "complete_frames": 32533,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/ui/repair.raw",
+        "inventory_bytes": 237,
+        "duration_seconds": 0.0026870748299319728,
+        "complete_frames": 118,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ui/warning.raw",
+        "inventory_bytes": 237,
+        "duration_seconds": 0.0026870748299319728,
+        "complete_frames": 118,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ui/windowclose.raw",
+        "inventory_bytes": 747,
+        "duration_seconds": 0.00846938775510204,
+        "complete_frames": 373,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/ui/windowopen.raw",
+        "inventory_bytes": 449,
+        "duration_seconds": 0.005090702947845805,
+        "complete_frames": 224,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/barehand/1.raw",
+        "inventory_bytes": 33108,
+        "duration_seconds": 0.37537414965986393,
+        "complete_frames": 16554,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/2.raw",
+        "inventory_bytes": 66216,
+        "duration_seconds": 0.7507482993197279,
+        "complete_frames": 33108,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/3.raw",
+        "inventory_bytes": 55182,
+        "duration_seconds": 0.6256462585034014,
+        "complete_frames": 27591,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/4.raw",
+        "inventory_bytes": 47822,
+        "duration_seconds": 0.5421995464852608,
+        "complete_frames": 23911,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/5.raw",
+        "inventory_bytes": 62536,
+        "duration_seconds": 0.7090249433106576,
+        "complete_frames": 31268,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/6.raw",
+        "inventory_bytes": 55180,
+        "duration_seconds": 0.6256235827664399,
+        "complete_frames": 27590,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/dmg1.raw",
+        "inventory_bytes": 586,
+        "duration_seconds": 0.006643990929705215,
+        "complete_frames": 293,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/dmg2.raw",
+        "inventory_bytes": 54,
+        "duration_seconds": 0.0006122448979591836,
+        "complete_frames": 27,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/hit1.raw",
+        "inventory_bytes": 200,
+        "duration_seconds": 0.0022675736961451248,
+        "complete_frames": 100,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/barehand/hit2.raw",
+        "inventory_bytes": 1015,
+        "duration_seconds": 0.011507936507936509,
+        "complete_frames": 507,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/barehand/hit3.raw",
+        "inventory_bytes": 39,
+        "duration_seconds": 0.0004421768707482993,
+        "complete_frames": 19,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/handgun/arbalet.raw",
+        "inventory_bytes": 29760,
+        "duration_seconds": 0.33741496598639453,
+        "complete_frames": 14880,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/ateslisilah1.raw",
+        "inventory_bytes": 77252,
+        "duration_seconds": 0.8758730158730159,
+        "complete_frames": 38626,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/ateslisilah2.raw",
+        "inventory_bytes": 88288,
+        "duration_seconds": 1.000997732426304,
+        "complete_frames": 44144,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/ateslisilah3.raw",
+        "inventory_bytes": 103002,
+        "duration_seconds": 1.1678231292517007,
+        "complete_frames": 51501,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/ateslisilahtekli.raw",
+        "inventory_bytes": 92928,
+        "duration_seconds": 1.0536054421768708,
+        "complete_frames": 46464,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/dmg1.raw",
+        "inventory_bytes": 586,
+        "duration_seconds": 0.006643990929705215,
+        "complete_frames": 293,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/dmg2.raw",
+        "inventory_bytes": 54,
+        "duration_seconds": 0.0006122448979591836,
+        "complete_frames": 27,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/faretetikcisilah.raw",
+        "inventory_bytes": 61260,
+        "duration_seconds": 0.6945578231292517,
+        "complete_frames": 30630,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/faretetikcisilah2.raw",
+        "inventory_bytes": 61132,
+        "duration_seconds": 0.6931065759637188,
+        "complete_frames": 30566,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/handgun/gunshot_1.raw",
+        "inventory_bytes": 153,
+        "duration_seconds": 0.0017346938775510204,
+        "complete_frames": 76,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/handgun/gunshot_2.raw",
+        "inventory_bytes": 45,
+        "duration_seconds": 0.0005102040816326531,
+        "complete_frames": 22,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/handgun/hit1.raw",
+        "inventory_bytes": 243,
+        "duration_seconds": 0.0027551020408163266,
+        "complete_frames": 121,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/heavyfire/gustav.raw",
+        "inventory_bytes": 247020,
+        "duration_seconds": 2.8006802721088437,
+        "complete_frames": 123510,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/heavyfire/zeplin_bomba.raw",
+        "inventory_bytes": 570194,
+        "duration_seconds": 6.464784580498867,
+        "complete_frames": 285097,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/sword/dmg1.raw",
+        "inventory_bytes": 306,
+        "duration_seconds": 0.0034693877551020408,
+        "complete_frames": 153,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/sword/dmg2.raw",
+        "inventory_bytes": 265,
+        "duration_seconds": 0.0030045351473922902,
+        "complete_frames": 132,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/sword/dmg3.raw",
+        "inventory_bytes": 381,
+        "duration_seconds": 0.004319727891156463,
+        "complete_frames": 190,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/sword/dmg4.raw",
+        "inventory_bytes": 813,
+        "duration_seconds": 0.009217687074829933,
+        "complete_frames": 406,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/sword/hit1.raw",
+        "inventory_bytes": 1024,
+        "duration_seconds": 0.011609977324263039,
+        "complete_frames": 512,
+        "trailing_bytes": 0,
+        "frame_status": "complete_frames",
+        "native_raw_accepted": true
+      },
+      {
+        "path": "base/audio/weapon/sword/hit2.raw",
+        "inventory_bytes": 417,
+        "duration_seconds": 0.004727891156462585,
+        "complete_frames": 208,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/sword/hit3.raw",
+        "inventory_bytes": 575,
+        "duration_seconds": 0.006519274376417234,
+        "complete_frames": 287,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      },
+      {
+        "path": "base/audio/weapon/sword/hit4.raw",
+        "inventory_bytes": 633,
+        "duration_seconds": 0.007176870748299319,
+        "complete_frames": 316,
+        "trailing_bytes": 1,
+        "frame_status": "incomplete_frame",
+        "native_raw_accepted": false
+      }
+    ]
+  },
+  "native_duration_policy": {
+    "loop_limit_seconds": 300,
+    "fx_limit_seconds": 10,
+    "decoded_format": "PCM_S16LE stereo48000",
+    "pcm_cache_bytes": 67108864,
+    "significance": "Independent native decoder/cache limits, not canonical original asset constraints. Both thresholds are compared to every audio resource; paths do not prove loop/FX assignment."
+  },
+  "examples": [
+    {
+      "path": "base/audio/ambient/break_desk.raw",
+      "bytes": 80930,
+      "sha256": "4268bad69c1b23e6d8d8c4f1ec935b43161bbd3f651eea1dac723bdc1a9c640c",
+      "prefix16_hex": "bb4edc3fea301e38923428347d298612",
+      "frames": 40465,
+      "seconds": 0.9175736961451247
+    },
+    {
+      "path": "base/audio/ambient/hakirpropaganda.raw",
+      "bytes": 7205668,
+      "sha256": "7aa423ba812fd9ad55b8e945e9a31b7c6f885c84d30256635e65dcb308c019da",
+      "prefix16_hex": "00000000000001000100020003000500",
+      "frames": 3602834,
+      "seconds": 81.69691609977325
+    },
+    {
+      "path": "base/audio/skills/atescemberi.raw",
+      "bytes": 158182,
+      "sha256": "35e13e7c9c152b74b8abcdd229ed2cf86be030024fdb18e940747a6ba53f6293",
+      "prefix16_hex": "00000000000000000000000000000000",
+      "frames": 79091,
+      "seconds": 1.7934467120181405
+    },
+    {
+      "path": "base/audio/ui/kritik.raw",
+      "bytes": 65066,
+      "sha256": "fd6e0542bba7424f2be3b194fef44848c8ba68841a81de8b1b75d7bd3201e00e",
+      "prefix16_hex": "6904d7000cf93bf007ec1aee12ed73e5",
+      "frames": 32533,
+      "seconds": 0.7377097505668935
+    }
+  ],
+  "remaining_unknowns": [
+    "Original malformed odd-byte DirectSound acceptance/failure behavior was not exercised.",
+    "Original exact asset-selection/spatial sound gain/pitch semantics are outside this fixed-format recovery.",
+    "Zone musicNN.raw/soundNN.raw select resources and must never be PCM-decoded."
+  ],
+  "ogg_duration_audit": {
+    "metadata_source": "actual read-only ffprobe of installation files; no decoding or playback",
+    "encoded_bytes_source": "actual installation file stat; inventory_bytes are saved lengths, neither rehashes",
+    "installation_root": "/mnt/2nd4TB/IKV/original/app",
+    "ffprobe_arguments": [
+      "-v",
+      "error",
+      "-show_entries",
+      "stream=codec_name,sample_rate,channels:format=duration",
+      "-of",
+      "json"
+    ],
+    "timeout_seconds_per_file": 20,
+    "inventory_file_count": 77,
+    "probed_file_count": 77,
+    "error_count": 0,
+    "errors": [],
+    "decoded_byte_estimate": {
+      "formula": "ceil(ffprobe format duration * 48000) * 4",
+      "encoding": "PCM_S16LE",
+      "sample_rate": 48000,
+      "channels": 2,
+      "status": "estimate from reported container duration, not measured decoded length"
+    },
+    "summary": {
+      "file_count": 77,
+      "total_duration_seconds": 15700.942026,
+      "longest": {
+        "path": "base/audio/music/tuneller.ogg",
+        "inventory_bytes": 7929237,
+        "encoded_bytes": 7929237,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 527.281633,
+        "ffprobe_duration_text": "527.281633",
+        "estimated_decoded_48000_stereo_s16le_bytes": 101238076
+      },
+      "exceeding_loop_300s": {
+        "count": 17,
+        "paths": [
+          "base/audio/music/anatema.ogg",
+          "base/audio/music/balyoznazima.ogg",
+          "base/audio/music/buyukyalan.ogg",
+          "base/audio/music/deprem.ogg",
+          "base/audio/music/fedailer.ogg",
+          "base/audio/music/hakir.ogg",
+          "base/audio/music/kanklan.ogg",
+          "base/audio/music/kopru.ogg",
+          "base/audio/music/makine.ogg",
+          "base/audio/music/masal.ogg",
+          "base/audio/music/meranlabirenti.ogg",
+          "base/audio/music/mezar.ogg",
+          "base/audio/music/migrat.ogg",
+          "base/audio/music/olumdensonra.ogg",
+          "base/audio/music/sonsavas.ogg",
+          "base/audio/music/tamamlanmamissenfoni.ogg",
+          "base/audio/music/tuneller.ogg"
+        ]
+      },
+      "exceeding_fx_10s": {
+        "count": 76,
+        "paths": [
+          "base/audio/atmospheric/antipater.ogg",
+          "base/audio/atmospheric/buyuluugultu.ogg",
+          "base/audio/atmospheric/dalgalar.ogg",
+          "base/audio/atmospheric/dalgalaruzak.ogg",
+          "base/audio/atmospheric/dergi.ogg",
+          "base/audio/atmospheric/domuzsehriendustri.ogg",
+          "base/audio/atmospheric/fanatikler.ogg",
+          "base/audio/atmospheric/polikarp.ogg",
+          "base/audio/atmospheric/projector.ogg",
+          "base/audio/atmospheric/projektor.ogg",
+          "base/audio/atmospheric/ruzgarkisa.ogg",
+          "base/audio/atmospheric/ruzgaruzun.ogg",
+          "base/audio/atmospheric/sipirdama.ogg",
+          "base/audio/atmospheric/sogutucu.ogg",
+          "base/audio/atmospheric/taksim.ogg",
+          "base/audio/atmospheric/ugultukisabuyulu.ogg",
+          "base/audio/atmospheric/yasamunitesi.ogg",
+          "base/audio/atmospheric/zeplin.ogg",
+          "base/audio/atmospheric/zulum.ogg",
+          "base/audio/music/ahistanbul.ogg",
+          "base/audio/music/akrep.ogg",
+          "base/audio/music/anatema.ogg",
+          "base/audio/music/avlu.ogg",
+          "base/audio/music/azulazul.ogg",
+          "base/audio/music/azulcinsarkisi.ogg",
+          "base/audio/music/balyoznazima.ogg",
+          "base/audio/music/buyukyalan.ogg",
+          "base/audio/music/cehennem.ogg",
+          "base/audio/music/cemberlitasteaser.ogg",
+          "base/audio/music/dahasiyok.ogg",
+          "base/audio/music/darsokak.ogg",
+          "base/audio/music/deprem.ogg",
+          "base/audio/music/eminonu.ogg",
+          "base/audio/music/esinti.ogg",
+          "base/audio/music/farelerinofkesi.ogg",
+          "base/audio/music/fedailer.ogg",
+          "base/audio/music/gaffar.ogg",
+          "base/audio/music/gustav.ogg",
+          "base/audio/music/hakir.ogg",
+          "base/audio/music/halic.ogg",
+          "base/audio/music/hidra.ogg",
+          "base/audio/music/hybandakoy.ogg",
+          "base/audio/music/istanbulda.ogg",
+          "base/audio/music/istanbulunruyasi.ogg",
+          "base/audio/music/junon.ogg",
+          "base/audio/music/kanklan.ogg",
+          "base/audio/music/kayip.ogg",
+          "base/audio/music/kenan.ogg",
+          "base/audio/music/kiyametninnisi.ogg",
+          "base/audio/music/komutan.ogg",
+          "base/audio/music/kopru.ogg",
+          "base/audio/music/koradam.ogg",
+          "base/audio/music/makine.ogg",
+          "base/audio/music/masal.ogg",
+          "base/audio/music/mehtaplibirgece.ogg",
+          "base/audio/music/meran.ogg",
+          "base/audio/music/meranlabirenti.ogg",
+          "base/audio/music/mezar.ogg",
+          "base/audio/music/migrat.ogg",
+          "base/audio/music/misircarsisi.ogg",
+          "base/audio/music/misircarsisipiano.ogg",
+          "base/audio/music/olumdensonra.ogg",
+          "base/audio/music/sahil.ogg",
+          "base/audio/music/savas.ogg",
+          "base/audio/music/sifaci.ogg",
+          "base/audio/music/siginak.ogg",
+          "base/audio/music/sis.ogg",
+          "base/audio/music/sonsavas.ogg",
+          "base/audio/music/tamamlanmamissenfoni.ogg",
+          "base/audio/music/tangriss.ogg",
+          "base/audio/music/tarih.ogg",
+          "base/audio/music/teskilatmarsiradyo.ogg",
+          "base/audio/music/tuneller.ogg",
+          "base/audio/music/uyan.ogg",
+          "base/audio/music/welcometowar.ogg",
+          "base/audio/music/zahir.ogg"
+        ]
+      },
+      "codec_counts": {
+        "vorbis": 77
+      },
+      "sample_rate_counts": {
+        "24000": 1,
+        "44100": 76
+      },
+      "channel_counts": {
+        "1": 9,
+        "2": 68
+      },
+      "total_estimated_decoded_48000_stereo_s16le_bytes": 3014581032,
+      "largest_encoded_ogg": {
+        "path": "base/audio/music/tuneller.ogg",
+        "inventory_bytes": 7929237,
+        "encoded_bytes": 7929237,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 527.281633,
+        "ffprobe_duration_text": "527.281633",
+        "estimated_decoded_48000_stereo_s16le_bytes": 101238076
+      },
+      "total_encoded_bytes": 243787574,
+      "exceeding_encoded_32MiB": {
+        "count": 0,
+        "paths": []
+      },
+      "exceeding_estimated_decoded_64MiB": {
+        "count": 13,
+        "paths": [
+          "base/audio/music/anatema.ogg",
+          "base/audio/music/balyoznazima.ogg",
+          "base/audio/music/buyukyalan.ogg",
+          "base/audio/music/kanklan.ogg",
+          "base/audio/music/kopru.ogg",
+          "base/audio/music/makine.ogg",
+          "base/audio/music/meranlabirenti.ogg",
+          "base/audio/music/mezar.ogg",
+          "base/audio/music/migrat.ogg",
+          "base/audio/music/olumdensonra.ogg",
+          "base/audio/music/sonsavas.ogg",
+          "base/audio/music/tamamlanmamissenfoni.ogg",
+          "base/audio/music/tuneller.ogg"
+        ]
+      }
+    },
+    "longestOgg": {
+      "path": "base/audio/music/tuneller.ogg",
+      "inventory_bytes": 7929237,
+      "encoded_bytes": 7929237,
+      "codec_name": "vorbis",
+      "sample_rate": 44100,
+      "channels": 2,
+      "duration_seconds": 527.281633,
+      "ffprobe_duration_text": "527.281633",
+      "estimated_decoded_48000_stereo_s16le_bytes": 101238076
+    },
+    "files": [
+      {
+        "path": "base/audio/atmospheric/antipater.ogg",
+        "inventory_bytes": 1562587,
+        "encoded_bytes": 1562587,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 210.295374,
+        "ffprobe_duration_text": "210.295374",
+        "estimated_decoded_48000_stereo_s16le_bytes": 40376712
+      },
+      {
+        "path": "base/audio/atmospheric/buyuluugultu.ogg",
+        "inventory_bytes": 1395949,
+        "encoded_bytes": 1395949,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 59.350204,
+        "ffprobe_duration_text": "59.350204",
+        "estimated_decoded_48000_stereo_s16le_bytes": 11395240
+      },
+      {
+        "path": "base/audio/atmospheric/dalgalar.ogg",
+        "inventory_bytes": 2736058,
+        "encoded_bytes": 2736058,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 134.478367,
+        "ffprobe_duration_text": "134.478367",
+        "estimated_decoded_48000_stereo_s16le_bytes": 25819848
+      },
+      {
+        "path": "base/audio/atmospheric/dalgalaruzak.ogg",
+        "inventory_bytes": 2663923,
+        "encoded_bytes": 2663923,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 134.478367,
+        "ffprobe_duration_text": "134.478367",
+        "estimated_decoded_48000_stereo_s16le_bytes": 25819848
+      },
+      {
+        "path": "base/audio/atmospheric/dergi.ogg",
+        "inventory_bytes": 1194886,
+        "encoded_bytes": 1194886,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 91.724966,
+        "ffprobe_duration_text": "91.724966",
+        "estimated_decoded_48000_stereo_s16le_bytes": 17611196
+      },
+      {
+        "path": "base/audio/atmospheric/domuzsehriendustri.ogg",
+        "inventory_bytes": 3319331,
+        "encoded_bytes": 3319331,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 141.084444,
+        "ffprobe_duration_text": "141.084444",
+        "estimated_decoded_48000_stereo_s16le_bytes": 27088216
+      },
+      {
+        "path": "base/audio/atmospheric/fanatikler.ogg",
+        "inventory_bytes": 811214,
+        "encoded_bytes": 811214,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 60.093356,
+        "ffprobe_duration_text": "60.093356",
+        "estimated_decoded_48000_stereo_s16le_bytes": 11537928
+      },
+      {
+        "path": "base/audio/atmospheric/polikarp.ogg",
+        "inventory_bytes": 661686,
+        "encoded_bytes": 661686,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 105.666893,
+        "ffprobe_duration_text": "105.666893",
+        "estimated_decoded_48000_stereo_s16le_bytes": 20288044
+      },
+      {
+        "path": "base/audio/atmospheric/projector.ogg",
+        "inventory_bytes": 341213,
+        "encoded_bytes": 341213,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 22.105397,
+        "ffprobe_duration_text": "22.105397",
+        "estimated_decoded_48000_stereo_s16le_bytes": 4244240
+      },
+      {
+        "path": "base/audio/atmospheric/projektor.ogg",
+        "inventory_bytes": 346670,
+        "encoded_bytes": 346670,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 22.105397,
+        "ffprobe_duration_text": "22.105397",
+        "estimated_decoded_48000_stereo_s16le_bytes": 4244240
+      },
+      {
+        "path": "base/audio/atmospheric/ruzgarkisa.ogg",
+        "inventory_bytes": 439394,
+        "encoded_bytes": 439394,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 36.195556,
+        "ffprobe_duration_text": "36.195556",
+        "estimated_decoded_48000_stereo_s16le_bytes": 6949548
+      },
+      {
+        "path": "base/audio/atmospheric/ruzgaruzun.ogg",
+        "inventory_bytes": 1588011,
+        "encoded_bytes": 1588011,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 132.493061,
+        "ffprobe_duration_text": "132.493061",
+        "estimated_decoded_48000_stereo_s16le_bytes": 25438668
+      },
+      {
+        "path": "base/audio/atmospheric/sipirdama.ogg",
+        "inventory_bytes": 781402,
+        "encoded_bytes": 781402,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 50.155102,
+        "ffprobe_duration_text": "50.155102",
+        "estimated_decoded_48000_stereo_s16le_bytes": 9629780
+      },
+      {
+        "path": "base/audio/atmospheric/sogutucu.ogg",
+        "inventory_bytes": 384897,
+        "encoded_bytes": 384897,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 24.102313,
+        "ffprobe_duration_text": "24.102313",
+        "estimated_decoded_48000_stereo_s16le_bytes": 4627648
+      },
+      {
+        "path": "base/audio/atmospheric/taksim.ogg",
+        "inventory_bytes": 991570,
+        "encoded_bytes": 991570,
+        "codec_name": "vorbis",
+        "sample_rate": 24000,
+        "channels": 2,
+        "duration_seconds": 125.269333,
+        "ffprobe_duration_text": "125.269333",
+        "estimated_decoded_48000_stereo_s16le_bytes": 24051712
+      },
+      {
+        "path": "base/audio/atmospheric/ugultukisabuyulu.ogg",
+        "inventory_bytes": 539220,
+        "encoded_bytes": 539220,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 23.127075,
+        "ffprobe_duration_text": "23.127075",
+        "estimated_decoded_48000_stereo_s16le_bytes": 4440400
+      },
+      {
+        "path": "base/audio/atmospheric/yaratiksesi.ogg",
+        "inventory_bytes": 157086,
+        "encoded_bytes": 157086,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 1,
+        "duration_seconds": 8.962902,
+        "ffprobe_duration_text": "8.962902",
+        "estimated_decoded_48000_stereo_s16le_bytes": 1720880
+      },
+      {
+        "path": "base/audio/atmospheric/yasamunitesi.ogg",
+        "inventory_bytes": 923639,
+        "encoded_bytes": 923639,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 55.774331,
+        "ffprobe_duration_text": "55.774331",
+        "estimated_decoded_48000_stereo_s16le_bytes": 10708672
+      },
+      {
+        "path": "base/audio/atmospheric/zeplin.ogg",
+        "inventory_bytes": 942283,
+        "encoded_bytes": 942283,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 80.31356,
+        "ffprobe_duration_text": "80.313560",
+        "estimated_decoded_48000_stereo_s16le_bytes": 15420204
+      },
+      {
+        "path": "base/audio/atmospheric/zulum.ogg",
+        "inventory_bytes": 506028,
+        "encoded_bytes": 506028,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 42.409025,
+        "ffprobe_duration_text": "42.409025",
+        "estimated_decoded_48000_stereo_s16le_bytes": 8142536
+      },
+      {
+        "path": "base/audio/music/ahistanbul.ogg",
+        "inventory_bytes": 817428,
+        "encoded_bytes": 817428,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 74.919184,
+        "ffprobe_duration_text": "74.919184",
+        "estimated_decoded_48000_stereo_s16le_bytes": 14384484
+      },
+      {
+        "path": "base/audio/music/akrep.ogg",
+        "inventory_bytes": 3126482,
+        "encoded_bytes": 3126482,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 194.39746,
+        "ffprobe_duration_text": "194.397460",
+        "estimated_decoded_48000_stereo_s16le_bytes": 37324316
+      },
+      {
+        "path": "base/audio/music/anatema.ogg",
+        "inventory_bytes": 7001695,
+        "encoded_bytes": 7001695,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 435.792109,
+        "ffprobe_duration_text": "435.792109",
+        "estimated_decoded_48000_stereo_s16le_bytes": 83672088
+      },
+      {
+        "path": "base/audio/music/avlu.ogg",
+        "inventory_bytes": 968769,
+        "encoded_bytes": 968769,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 59.837823,
+        "ffprobe_duration_text": "59.837823",
+        "estimated_decoded_48000_stereo_s16le_bytes": 11488864
+      },
+      {
+        "path": "base/audio/music/azulazul.ogg",
+        "inventory_bytes": 4134565,
+        "encoded_bytes": 4134565,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 264.0,
+        "ffprobe_duration_text": "264.000000",
+        "estimated_decoded_48000_stereo_s16le_bytes": 50688000
+      },
+      {
+        "path": "base/audio/music/azulcinsarkisi.ogg",
+        "inventory_bytes": 3356025,
+        "encoded_bytes": 3356025,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 207.865034,
+        "ffprobe_duration_text": "207.865034",
+        "estimated_decoded_48000_stereo_s16le_bytes": 39910088
+      },
+      {
+        "path": "base/audio/music/balyoznazima.ogg",
+        "inventory_bytes": 5782443,
+        "encoded_bytes": 5782443,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 364.088889,
+        "ffprobe_duration_text": "364.088889",
+        "estimated_decoded_48000_stereo_s16le_bytes": 69905068
+      },
+      {
+        "path": "base/audio/music/buyukyalan.ogg",
+        "inventory_bytes": 6663216,
+        "encoded_bytes": 6663216,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 422.50449,
+        "ffprobe_duration_text": "422.504490",
+        "estimated_decoded_48000_stereo_s16le_bytes": 81120864
+      },
+      {
+        "path": "base/audio/music/cehennem.ogg",
+        "inventory_bytes": 2329537,
+        "encoded_bytes": 2329537,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 145.798095,
+        "ffprobe_duration_text": "145.798095",
+        "estimated_decoded_48000_stereo_s16le_bytes": 27993236
+      },
+      {
+        "path": "base/audio/music/cemberlitasteaser.ogg",
+        "inventory_bytes": 2156099,
+        "encoded_bytes": 2156099,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 146.12898,
+        "ffprobe_duration_text": "146.128980",
+        "estimated_decoded_48000_stereo_s16le_bytes": 28056768
+      },
+      {
+        "path": "base/audio/music/dahasiyok.ogg",
+        "inventory_bytes": 4627692,
+        "encoded_bytes": 4627692,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 267.467755,
+        "ffprobe_duration_text": "267.467755",
+        "estimated_decoded_48000_stereo_s16le_bytes": 51353812
+      },
+      {
+        "path": "base/audio/music/darsokak.ogg",
+        "inventory_bytes": 2170095,
+        "encoded_bytes": 2170095,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 141.400816,
+        "ffprobe_duration_text": "141.400816",
+        "estimated_decoded_48000_stereo_s16le_bytes": 27148960
+      },
+      {
+        "path": "base/audio/music/deprem.ogg",
+        "inventory_bytes": 5538951,
+        "encoded_bytes": 5538951,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 345.094966,
+        "ffprobe_duration_text": "345.094966",
+        "estimated_decoded_48000_stereo_s16le_bytes": 66258236
+      },
+      {
+        "path": "base/audio/music/eminonu.ogg",
+        "inventory_bytes": 2620909,
+        "encoded_bytes": 2620909,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 163.7239,
+        "ffprobe_duration_text": "163.723900",
+        "estimated_decoded_48000_stereo_s16le_bytes": 31434992
+      },
+      {
+        "path": "base/audio/music/esinti.ogg",
+        "inventory_bytes": 1929424,
+        "encoded_bytes": 1929424,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 120.070385,
+        "ffprobe_duration_text": "120.070385",
+        "estimated_decoded_48000_stereo_s16le_bytes": 23053516
+      },
+      {
+        "path": "base/audio/music/farelerinofkesi.ogg",
+        "inventory_bytes": 2698483,
+        "encoded_bytes": 2698483,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 167.973152,
+        "ffprobe_duration_text": "167.973152",
+        "estimated_decoded_48000_stereo_s16le_bytes": 32250848
+      },
+      {
+        "path": "base/audio/music/fedailer.ogg",
+        "inventory_bytes": 4654853,
+        "encoded_bytes": 4654853,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 326.478367,
+        "ffprobe_duration_text": "326.478367",
+        "estimated_decoded_48000_stereo_s16le_bytes": 62683848
+      },
+      {
+        "path": "base/audio/music/gaffar.ogg",
+        "inventory_bytes": 4660144,
+        "encoded_bytes": 4660144,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 294.4,
+        "ffprobe_duration_text": "294.400000",
+        "estimated_decoded_48000_stereo_s16le_bytes": 56524800
+      },
+      {
+        "path": "base/audio/music/gustav.ogg",
+        "inventory_bytes": 2538071,
+        "encoded_bytes": 2538071,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 157.709932,
+        "ffprobe_duration_text": "157.709932",
+        "estimated_decoded_48000_stereo_s16le_bytes": 30280308
+      },
+      {
+        "path": "base/audio/music/hakir.ogg",
+        "inventory_bytes": 5257604,
+        "encoded_bytes": 5257604,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 325.543764,
+        "ffprobe_duration_text": "325.543764",
+        "estimated_decoded_48000_stereo_s16le_bytes": 62504404
+      },
+      {
+        "path": "base/audio/music/halic.ogg",
+        "inventory_bytes": 4469614,
+        "encoded_bytes": 4469614,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 277.292698,
+        "ffprobe_duration_text": "277.292698",
+        "estimated_decoded_48000_stereo_s16le_bytes": 53240200
+      },
+      {
+        "path": "base/audio/music/hidra.ogg",
+        "inventory_bytes": 2353335,
+        "encoded_bytes": 2353335,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 146.337959,
+        "ffprobe_duration_text": "146.337959",
+        "estimated_decoded_48000_stereo_s16le_bytes": 28096892
+      },
+      {
+        "path": "base/audio/music/hybandakoy.ogg",
+        "inventory_bytes": 3099044,
+        "encoded_bytes": 3099044,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 192.400544,
+        "ffprobe_duration_text": "192.400544",
+        "estimated_decoded_48000_stereo_s16le_bytes": 36940908
+      },
+      {
+        "path": "base/audio/music/istanbulda.ogg",
+        "inventory_bytes": 2780536,
+        "encoded_bytes": 2780536,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 173.081542,
+        "ffprobe_duration_text": "173.081542",
+        "estimated_decoded_48000_stereo_s16le_bytes": 33231660
+      },
+      {
+        "path": "base/audio/music/istanbulunruyasi.ogg",
+        "inventory_bytes": 2998694,
+        "encoded_bytes": 2998694,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 187.129615,
+        "ffprobe_duration_text": "187.129615",
+        "estimated_decoded_48000_stereo_s16le_bytes": 35928888
+      },
+      {
+        "path": "base/audio/music/junon.ogg",
+        "inventory_bytes": 3153680,
+        "encoded_bytes": 3153680,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 214.543673,
+        "ffprobe_duration_text": "214.543673",
+        "estimated_decoded_48000_stereo_s16le_bytes": 41192388
+      },
+      {
+        "path": "base/audio/music/kanklan.ogg",
+        "inventory_bytes": 7416283,
+        "encoded_bytes": 7416283,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 426.396735,
+        "ffprobe_duration_text": "426.396735",
+        "estimated_decoded_48000_stereo_s16le_bytes": 81868176
+      },
+      {
+        "path": "base/audio/music/kayip.ogg",
+        "inventory_bytes": 3010356,
+        "encoded_bytes": 3010356,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 206.040635,
+        "ffprobe_duration_text": "206.040635",
+        "estimated_decoded_48000_stereo_s16le_bytes": 39559804
+      },
+      {
+        "path": "base/audio/music/kenan.ogg",
+        "inventory_bytes": 4216201,
+        "encoded_bytes": 4216201,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 250.749388,
+        "ffprobe_duration_text": "250.749388",
+        "estimated_decoded_48000_stereo_s16le_bytes": 48143884
+      },
+      {
+        "path": "base/audio/music/kiyametninnisi.ogg",
+        "inventory_bytes": 2820818,
+        "encoded_bytes": 2820818,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 164.675918,
+        "ffprobe_duration_text": "164.675918",
+        "estimated_decoded_48000_stereo_s16le_bytes": 31617780
+      },
+      {
+        "path": "base/audio/music/komutan.ogg",
+        "inventory_bytes": 2275928,
+        "encoded_bytes": 2275928,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 141.084444,
+        "ffprobe_duration_text": "141.084444",
+        "estimated_decoded_48000_stereo_s16le_bytes": 27088216
+      },
+      {
+        "path": "base/audio/music/kopru.ogg",
+        "inventory_bytes": 7852135,
+        "encoded_bytes": 7852135,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 488.269206,
+        "ffprobe_duration_text": "488.269206",
+        "estimated_decoded_48000_stereo_s16le_bytes": 93747688
+      },
+      {
+        "path": "base/audio/music/koradam.ogg",
+        "inventory_bytes": 2029468,
+        "encoded_bytes": 2029468,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 129.462857,
+        "ffprobe_duration_text": "129.462857",
+        "estimated_decoded_48000_stereo_s16le_bytes": 24856872
+      },
+      {
+        "path": "base/audio/music/makine.ogg",
+        "inventory_bytes": 5666231,
+        "encoded_bytes": 5666231,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 360.829388,
+        "ffprobe_duration_text": "360.829388",
+        "estimated_decoded_48000_stereo_s16le_bytes": 69279244
+      },
+      {
+        "path": "base/audio/music/masal.ogg",
+        "inventory_bytes": 5038048,
+        "encoded_bytes": 5038048,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 315.744943,
+        "ffprobe_duration_text": "315.744943",
+        "estimated_decoded_48000_stereo_s16le_bytes": 60623032
+      },
+      {
+        "path": "base/audio/music/mehtaplibirgece.ogg",
+        "inventory_bytes": 3371707,
+        "encoded_bytes": 3371707,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 208.718367,
+        "ffprobe_duration_text": "208.718367",
+        "estimated_decoded_48000_stereo_s16le_bytes": 40073928
+      },
+      {
+        "path": "base/audio/music/meran.ogg",
+        "inventory_bytes": 3520422,
+        "encoded_bytes": 3520422,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 219.080272,
+        "ffprobe_duration_text": "219.080272",
+        "estimated_decoded_48000_stereo_s16le_bytes": 42063416
+      },
+      {
+        "path": "base/audio/music/meranlabirenti.ogg",
+        "inventory_bytes": 6298772,
+        "encoded_bytes": 6298772,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 419.996735,
+        "ffprobe_duration_text": "419.996735",
+        "estimated_decoded_48000_stereo_s16le_bytes": 80639376
+      },
+      {
+        "path": "base/audio/music/mezar.ogg",
+        "inventory_bytes": 5161238,
+        "encoded_bytes": 5161238,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 356.649796,
+        "ffprobe_duration_text": "356.649796",
+        "estimated_decoded_48000_stereo_s16le_bytes": 68476764
+      },
+      {
+        "path": "base/audio/music/migrat.ogg",
+        "inventory_bytes": 7112716,
+        "encoded_bytes": 7112716,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 504.084898,
+        "ffprobe_duration_text": "504.084898",
+        "estimated_decoded_48000_stereo_s16le_bytes": 96784304
+      },
+      {
+        "path": "base/audio/music/misircarsisi.ogg",
+        "inventory_bytes": 3086488,
+        "encoded_bytes": 3086488,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 192.075465,
+        "ffprobe_duration_text": "192.075465",
+        "estimated_decoded_48000_stereo_s16le_bytes": 36878492
+      },
+      {
+        "path": "base/audio/music/misircarsisipiano.ogg",
+        "inventory_bytes": 1874623,
+        "encoded_bytes": 1874623,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 116.076553,
+        "ffprobe_duration_text": "116.076553",
+        "estimated_decoded_48000_stereo_s16le_bytes": 22286700
+      },
+      {
+        "path": "base/audio/music/olumdensonra.ogg",
+        "inventory_bytes": 5891272,
+        "encoded_bytes": 5891272,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 367.711202,
+        "ffprobe_duration_text": "367.711202",
+        "estimated_decoded_48000_stereo_s16le_bytes": 70600552
+      },
+      {
+        "path": "base/audio/music/sahil.ogg",
+        "inventory_bytes": 2982002,
+        "encoded_bytes": 2982002,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 185.179138,
+        "ffprobe_duration_text": "185.179138",
+        "estimated_decoded_48000_stereo_s16le_bytes": 35554396
+      },
+      {
+        "path": "base/audio/music/savas.ogg",
+        "inventory_bytes": 4511710,
+        "encoded_bytes": 4511710,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 280.566712,
+        "ffprobe_duration_text": "280.566712",
+        "estimated_decoded_48000_stereo_s16le_bytes": 53868812
+      },
+      {
+        "path": "base/audio/music/sifaci.ogg",
+        "inventory_bytes": 3305388,
+        "encoded_bytes": 3305388,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 206.402177,
+        "ffprobe_duration_text": "206.402177",
+        "estimated_decoded_48000_stereo_s16le_bytes": 39629220
+      },
+      {
+        "path": "base/audio/music/siginak.ogg",
+        "inventory_bytes": 3651114,
+        "encoded_bytes": 3651114,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 245.420408,
+        "ffprobe_duration_text": "245.420408",
+        "estimated_decoded_48000_stereo_s16le_bytes": 47120720
+      },
+      {
+        "path": "base/audio/music/sis.ogg",
+        "inventory_bytes": 4667577,
+        "encoded_bytes": 4667577,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 296.280816,
+        "ffprobe_duration_text": "296.280816",
+        "estimated_decoded_48000_stereo_s16le_bytes": 56885920
+      },
+      {
+        "path": "base/audio/music/sonsavas.ogg",
+        "inventory_bytes": 6145112,
+        "encoded_bytes": 6145112,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 416.078367,
+        "ffprobe_duration_text": "416.078367",
+        "estimated_decoded_48000_stereo_s16le_bytes": 79887048
+      },
+      {
+        "path": "base/audio/music/tamamlanmamissenfoni.ogg",
+        "inventory_bytes": 7775833,
+        "encoded_bytes": 7775833,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 487.572608,
+        "ffprobe_duration_text": "487.572608",
+        "estimated_decoded_48000_stereo_s16le_bytes": 93613944
+      },
+      {
+        "path": "base/audio/music/tangriss.ogg",
+        "inventory_bytes": 791403,
+        "encoded_bytes": 791403,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 56.868571,
+        "ffprobe_duration_text": "56.868571",
+        "estimated_decoded_48000_stereo_s16le_bytes": 10918768
+      },
+      {
+        "path": "base/audio/music/tarih.ogg",
+        "inventory_bytes": 2079440,
+        "encoded_bytes": 2079440,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 129.079728,
+        "ffprobe_duration_text": "129.079728",
+        "estimated_decoded_48000_stereo_s16le_bytes": 24783308
+      },
+      {
+        "path": "base/audio/music/teskilatmarsiradyo.ogg",
+        "inventory_bytes": 881389,
+        "encoded_bytes": 881389,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 103.47102,
+        "ffprobe_duration_text": "103.471020",
+        "estimated_decoded_48000_stereo_s16le_bytes": 19866436
+      },
+      {
+        "path": "base/audio/music/tuneller.ogg",
+        "inventory_bytes": 7929237,
+        "encoded_bytes": 7929237,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 527.281633,
+        "ffprobe_duration_text": "527.281633",
+        "estimated_decoded_48000_stereo_s16le_bytes": 101238076
+      },
+      {
+        "path": "base/audio/music/uyan.ogg",
+        "inventory_bytes": 2162156,
+        "encoded_bytes": 2162156,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 133.929796,
+        "ffprobe_duration_text": "133.929796",
+        "estimated_decoded_48000_stereo_s16le_bytes": 25714524
+      },
+      {
+        "path": "base/audio/music/welcometowar.ogg",
+        "inventory_bytes": 4499145,
+        "encoded_bytes": 4499145,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 280.171973,
+        "ffprobe_duration_text": "280.171973",
+        "estimated_decoded_48000_stereo_s16le_bytes": 53793020
+      },
+      {
+        "path": "base/audio/music/zahir.ogg",
+        "inventory_bytes": 1588927,
+        "encoded_bytes": 1588927,
+        "codec_name": "vorbis",
+        "sample_rate": 44100,
+        "channels": 2,
+        "duration_seconds": 108.826122,
+        "ffprobe_duration_text": "108.826122",
+        "estimated_decoded_48000_stereo_s16le_bytes": 20894616
+      }
+    ]
+  },
+  "inventory_path": "docs/evidence/asset_inventory.json"
+}

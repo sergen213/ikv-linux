@@ -1,0 +1,119 @@
+{
+  "schema": "ikv-original-skeleton-abi-evidence-1",
+  "proprietary_payloads_included": false,
+  "source": {
+    "archive": "original/app/base/objects.dat",
+    "bytes": 607138652,
+    "sha256": "fd72b8e69d5d811bc4e9e1ca9bcc200d21c71497128072de2e2ca0e65a75afb2",
+    "executable": "analysis/unpacked/istanbul.exe",
+    "executable_sha256": "44ffa8389a9f6e4c35841103ad4f40a90513e4deb518ab5605b0a1ebfae0be2d",
+    "analysis_isolation": "analysis/skeleton-project copied from analysis/unpacked-project; shared projects not mutated",
+    "endianness": "little",
+    "float": "IEEE-754 binary32"
+  },
+  "archive": {
+    "members": 1482,
+    "index_bytes": 202986,
+    "layout": "SKYF u16 version1; recursive directory{name64,u16 child_count,u16 file_count,files{name128,u32 offset,u32 size},children}",
+    "adf_header_bytes": 24,
+    "chunk_directory_stride": 32,
+    "chunk_record": "tag4,u32 id,u32 stored_bytes,u32 decoded_bytes,u32 compressed,u32 offset,u32 stale_pointer,u32 stale_pointer",
+    "zlib_members": 1446,
+    "arithmetic_members": 36,
+    "codec_selector": "ADF root u32 at offset12 equals255 for zlib; otherwise original adaptive arithmetic decoder 0x0040fcc0",
+    "arithmetic": {
+      "state_bits": 16,
+      "byte_bit_order": "least-significant bit first",
+      "initial_low": 0,
+      "initial_high": 65535,
+      "symbol_count": 257,
+      "end_symbol": 257,
+      "initial_frequency": "freq[0]=0;freq[1..257]=1;cum[i]=257-i;symbol[1..256]=0..255",
+      "rescale_total": 16383,
+      "rescale_rule": "freq=(freq+1)/2; rebuild descending cumulative counts",
+      "update_rule": "swap decoded symbol with the first entry in its equal-frequency run; increment frequency and previous cumulative counts",
+      "bounded_finish": "emit final required output symbol and finish before unnecessary next-state renormalization; finite original streams need not contain those subsequent bits",
+      "evidence": ["0x0040fcc0", "0x0040fba0", "0x0040f860", "0x0040fa10", "0x0040fc00"]
+    }
+  },
+  "bone": {
+    "tag": "bone",
+    "dispatch": "0x004a3570 -> 0x004a2c70",
+    "stride": 256,
+    "fields": {"8": "u32 bone_id", "12": "u32 owner_mesh_id", "16": "u32 parent_bone_id", "192": "NUL-terminated name, capacity64"},
+    "root_rule": "Parent resolution happens before inserting the bone. Missing parent, including self-parent root, falls back to owner mesh; runtime root marker clears the owner's skinned vertex accumulator.",
+    "runtime_owner_offset": 280,
+    "runtime_parent_offset": 700,
+    "runtime_root_marker_offset": 744,
+    "runtime_world_matrix_offset": 80,
+    "warnings": "Other serialized pointer-looking fields are stale process addresses, not portable references. Bone IDs are u32 identities, not dense indices."
+  },
+  "wmap": {
+    "tag": "wmap",
+    "dispatch": "0x004a3570 -> 0x004a0590",
+    "stride": 32,
+    "chunk_id": "owning bone ID",
+    "fields": {"0": "u32 destination vertex index", "4": "f32 weight", "8": "f32[3] bone-local position", "20": "f32[3] bone-local normal"},
+    "position_conversion": "0.1*(-source.x,source.z,source.y)",
+    "normal_conversion": "(-source.x,source.z,source.y)",
+    "duplicate_chunk_rule": "Last wmap chunk for a given bone replaces previous chunks, matching writes to bone+0x2e0 and bone+0x2e4; do not append maps.",
+    "skinning": "worldPosition[vertex] += weight * boneWorld * vec4(boneLocalPosition,1)",
+    "inverse_bind_matrix": "Not required: per-influence rest points are already in bone-local space.",
+    "weight_normalization": "None: original runtime accumulates the supplied weights without division by their sum.",
+    "skinned_instance_transform": "Identity when storing recovered world-space vertices, to avoid double application of owner transform.",
+    "normal_note": "Original 0x00476eb0 branch clears position and normal buffers but accumulates only position. Replacement renderer intentionally accumulates weighted rotated supplied normals and normalizes the result for valid shading.",
+    "evidence": ["analysis/skeleton-return-game/decompile/004a0590.c", "analysis/skeleton-math-game/decompile/00476eb0.c"]
+  },
+  "qkey": {
+    "tag": "qkey",
+    "dispatch": "0x004a3570 -> 0x004a2890",
+    "stride": 64,
+    "chunk_id": "target model or bone ID",
+    "fields": {"0": "f32[3] translation", "32": "f32[4] raw quaternion", "48": "f32 time in seconds"},
+    "translation_conversion": "0.1*(source.x,source.y,source.z), no wmap axis permutation",
+    "time_evidence": "0x0045c9e0 accumulates unsigned millisecond tick difference multiplied by float at0x0058d7c4=0.001; update threshold at0x00592018=33milliseconds.",
+    "translation_interpolation": "Linear between adjacent key times; single-key tracks are constant.",
+    "rotation_interpolation": "Shortest-arc Slerp on raw four-component quaternions; negate second contribution when dot<0; linear branch when1-abs(dot)<1e-6 (0x00592ef8).",
+    "matrix_quaternion": "For standard column-major quaternion-to-matrix formula, map raw(qx,qy,qz,qw) to effective(qx,-qz,-qy,qw). Raw xyzw must not be used unchanged.",
+    "matrix_evidence": "0x004444a0: m[1]=2*(-qx*qz-qw*qy),m[2]=2*(-qx*qy+qw*qz),m[4]=2*(-qx*qz+qw*qy),m[6]=2*(qy*qz+qw*qx),m[8]=2*(-qx*qy-qw*qz),m[9]=2*(qy*qz-qw*qx).",
+    "hierarchy": "Original row-vector D3DX local*parentWorld (0x004769c0); equivalent column-major parentWorld*local in replacement.",
+    "evidence": ["analysis/assets-game/decompile/004a2890.c", "analysis/assets-game/decompile/0045c9e0.c", "analysis/skeleton-math-game/decompile/00444f40.c", "analysis/skeleton-math-game/decompile/004444a0.c", "analysis/assets-game/decompile/004769c0.c"]
+  },
+  "mver": {
+    "tag": "mver",
+    "dispatch": "0x0049ff10 -> vertex virtual slot8 -> 0x00476190",
+    "stride": 16,
+    "fields": {"0": "u32 packed normal11/11/10bits", "4": "f32[3] position"},
+    "position_scale": 0.1,
+    "normal_decode": "normalize(2*((packed&2047)/1023-1),2*(((packed>>11)&2047)/1023-1),2*((packed>>22)/511-1))",
+    "evidence": "analysis/skeleton-return-game/decompile/00476190.c; original instructions0x00476240..0x00476265 use movss/mulss for FLOAT positions despite decompiler uint casts"
+  },
+  "ptri": {
+    "tag": "ptri",
+    "dispatch": "0x004a0c70 -> 0x00469850",
+    "stride": 116,
+    "fields": {"0": "u16[3] vertex indices", "8": "corner0 UV0 f32[2]", "16": "corner0 UV1 f32[2]", "40": "corner1 UV0", "48": "corner1 UV1", "72": "corner2 UV0", "80": "corner2 UV1", "104": "u16[3] packed ARGB4 corner colors", "112": "u32 material group"},
+    "winding": "Runtime index output is source index2,index1,index0.",
+    "uv_conversion": "(u,1-v)",
+    "color_expansion": "Each four-bit channel shifted to high nibble of its corresponding eight-bit output channel; exact original does not replicate low nibble.",
+    "evidence": ["analysis/assets-game/decompile/004a0c70.c", "analysis/skeleton-game/decompile/00469850.c"]
+  },
+  "static_corpus_inspection": {
+    "members_inspected": 1482,
+    "native_execution": false,
+    "native_builds_or_tests": false,
+    "chunk_counts": {"item": 27862, "mate": 2910, "qkey": 82327, "tris": 8425, "vert": 1467, "sinf": 576, "pack": 4, "ptri": 4, "bone": 42095, "wmap": 14070, "lite": 40, "ambd": 21466, "lmpd": 18732, "mver": 6958},
+    "bone_records": 42095,
+    "effective_skin_influences": 1870719,
+    "members_with_multikey_tracks": 350,
+    "nonunit_weight_sample": {"member": "objects/npc/ID_ZIRHLI_TUFEKCI01.ADF", "vertices": 9, "sum_range": [0.0, 1.0000001089665602]},
+    "duplicate_map_sample": {"member": "objects/loc/kapi_balikpazari_dis.ADF", "wmap_chunks_same_bone": 12, "bone_id": 3865827356, "owner_vertex_count": 22, "last_map_vertex_count": 22, "earlier_map_max_vertex": 29, "last_map_max_vertex": 21},
+    "animated_sample": {"member": "objects/npc/AGAH.ADF", "bones": 39, "tracks": 49, "animated_tracks": 38, "keys": 8979, "effective_influences": 3853, "weighted_vertices": 2419, "weight_sum_range": [0.999999881722033, 1.0000000975560397], "time_seconds_range": [0.0, 7.833333492279053]}
+  },
+  "implementation": {
+    "metadata_tool": "tools/asset_skeleton.py",
+    "animation": "src/scene_animation.cpp",
+    "check_to_run_by_integrator": "Build scene target, invoke scene_decoder_self_test including scene_animation_self_test; optionally run tools/asset_skeleton.py original/app/base/objects.dat --output analysis/skeleton-corpus.json.",
+    "animation_selfcheck_not_executed": true
+  }
+}

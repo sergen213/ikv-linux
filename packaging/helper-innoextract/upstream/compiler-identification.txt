@@ -1,0 +1,6 @@
+
+String dump of section '.comment':
+  [     1]  GCC: (Gentoo 4.7.2 p1.3, pie-0.5.5) 4.7.2
+  [    2b]  GCC: (Gentoo 8.4.0-r1 p2) 8.4.0
+  [    4b]  GCC: (Gentoo 8.4.0 p1) 8.4.0
+

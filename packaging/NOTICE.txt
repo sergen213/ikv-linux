@@ -1,0 +1,41 @@
+IKV native Linux AppImage — packaging notice
+
+tools/package_appimage.py builds the IKV native programs from this source tree in the
+pinned Ubuntu 24.04 container tools/appimage/Dockerfile.ubuntu24 and assembles a Type-2
+ELF + SquashFS AppImage. It contains no original game data, installer, artwork or
+credentials: the launcher imports the original files only from the user's own installer
+or installation folder. The icon is generic packaging artwork.
+
+Bundled third-party components and their notices (this directory):
+  FidelityFX SDK 1.1.4 / FSR 3.1.4   MIT, ../../doc/ikv_native/third_party/FidelityFX-SDK-LICENSE.txt
+                                     (local patches: third_party/FidelityFX-SDK/IKV-PROVENANCE.txt)
+  SDL 3.4.18 (static, from the pinned release tarball)      zlib, SDL3-3.4.18-LICENSE.txt
+  OpenSSL 3.5.9 (shared, from the pinned release tarball)   Apache-2.0, openssl-3.5.9-LICENSE.txt
+  libjpeg-turbo 3.2.0 (static libturbojpeg, pinned tarball) IJG/BSD-3/zlib, libjpeg-turbo/
+  Vulkan-Headers 1.4.363 (build-time headers only)          Apache-2.0/MIT, Vulkan-Headers/
+  innoextract 1.9 (signed upstream amd64 helper, unmodified) zlib + static deps, innoextract/
+  uruntime v0.8.1 static AppImage runtime                   MIT + static deps (libfuse LGPL-2.1 etc.),
+                                     uruntime/ including the complete corresponding sources
+  Ubuntu 24.04 packages: Qt 6.4.2 (LGPL-3.0), PostgreSQL 16 server/client and libpq
+  (PostgreSQL licence), ICU, libarchive, libjpeg-turbo, libstdc++ (GPL-3.0 with the
+  GCC runtime library exception) and their dependencies   ubuntu/<package>.copyright,
+                                     common-licenses/; exact versions in packaging.json
+
+LGPL / GPL source offer
+  Every bundled Ubuntu library is unmodified and dynamically linked. Its corresponding
+  source is the Ubuntu source package at the exact version listed in packaging.json,
+  available from the pinned archive snapshot
+    https://snapshot.ubuntu.com/ubuntu/20261007T000000Z/
+  (e.g. `apt-get source qt6-base=6.4.2+dfsg-21.1build5` with that snapshot as deb-src).
+  The project maintainers will also provide these sources on request through the project's
+  issue tracker for at least three years after each release. To use a modified Qt or other
+  LGPL library, run the AppImage with --appimage-extract and replace the library in
+  squashfs-root/usr/lib (or point squashfs-root/usr/bin/qt.conf at other plugins).
+
+Host requirements (deliberately not bundled)
+  glibc >= 2.38, the GPU drivers and loaders (libGL/libEGL/libGLX via libglvnd, libvulkan,
+  Mesa or vendor ICDs, libdrm/libgbm), Wayland and X11/xcb client libraries, fontconfig,
+  FreeType and HarfBuzz (AppImage excludelist policy), plus the X11/audio libraries SDL loads
+  at run time (libXext, libXcursor, libXi, libXrandr, libXfixes, libXss, libxkbcommon,
+  libdecor, PipeWire/PulseAudio/ALSA). The bundled PostgreSQL uses the host time-zone
+  database (/usr/share/zoneinfo, tzdata).

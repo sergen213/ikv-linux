@@ -1,0 +1,39 @@
+# User-owned proprietary originals and extracted assets: never publish.
+/istanbulkur6_0.exe
+/original/
+/assets/
+/extracted/
+*.exe
+*.dll
+*.pak
+
+# Locally acquired tools and proprietary reverse-engineering project data.
+/.tools/
+/analysis/
+*.gpr
+*.rep/
+*.idb
+*.i64
+
+# Native builds, generated framebuffer captures and Python caches.
+/build*/
+/cmake-build*/
+CMakeUserPresets.json
+*.ppm
+__pycache__/
+*.py[cod]
+
+# Private deployment secrets, local installs, persisted account data and backups.
+/deploy/secrets/
+/.env
+*.pem
+*.key
+*.pgpass
+*.dump
+/backups/
+/install/
+
+# Local release outputs and private project notes.
+/dist/
+*.AppImage
+/Goal

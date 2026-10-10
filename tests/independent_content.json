@@ -1,0 +1,24 @@
+{
+  "provenance": "NONCANONICAL independently authored mechanics test fixture content: tests/isolated_services.py and tests/world_test.cpp overlay these keys onto config/gameplay.json so mechanics assertions do not depend on generated original content.",
+  "zones": {
+    "eminonu": {"bounds":[-10000,-10000,10000,10000],"spawn":[0,0],"collision":[[1000,300,1200,900]]},
+    "old_town": {"bounds":[-10000,-10000,10000,10000],"spawn":[0,0],"collision":[]}
+  },
+  "defaults": {"zone":"eminonu","x":0,"y":0,"hp":248,"max_hp":248,"mana":1206,"max_mana":1206,"level":1,"xp":0,"currency":100,"inventory":[{"item":"training_blade","quantity":1},{"item":"healing_tonic","quantity":3}]},
+  "items": {
+    "training_blade": {"name":"Talım Kılıcı (bağımsız)","stack":1,"price":50,"slot":"weapon","level":1,"damage":10,"crit":[0,2],"source_uid":13014,"source_slot":11,"visual_provenance":"NONCANONICAL cosmetic association with original Uzun Kılıç UID13014; private training stats/classes remain independent."},
+    "healing_tonic": {"name":"Şifa Toniği (bağımsız)","stack":20,"price":10,"level":1,"heal":40},
+    "rat_tail": {"name":"Talım Faresi Kuyruğu (bağımsız)","stack":20,"price":5,"level":1}
+  },
+  "quests": {
+    "first_hunt": {"name":"İlk Talım (bağımsız)","giver":2147493649,"level":1,"objective":{"kind":"kill","target":"training_rat","count":1},"objective_text":"1 adet Talım Faresi öldür.","description":"Talım faresiyle savaş, sonra ödülünü almak için bana gel.","reward":{"xp":1500,"currency":25,"items":[{"item":"healing_tonic","quantity":1}]}}
+  },
+  "npcs": [
+    {"id":2147493649,"source_uid":1001,"source_class":16,"kind":"questgiver","name":"Talım Rehberi (bağımsız)","zone":"eminonu","x":200,"y":0,"hp":100,"dialogue":"Talım faresiyle savaş, sonra ödülünü al.","quests":["first_hunt"],"shop":[]},
+    {"id":2147493650,"source_uid":1002,"source_class":17,"kind":"merchant","name":"Talım Tüccarı (bağımsız)","zone":"eminonu","x":400,"y":0,"hp":100,"dialogue":"Bağımsız talım malzemeleri.","quests":[],"shop":["training_blade","healing_tonic"]},
+    {"id":2147493651,"source_uid":16001,"source_class":9,"kind":"enemy","template":"training_rat","name":"Talım Faresi (bağımsız)","zone":"eminonu","x":800,"y":0,"hp":60,"damage":5,"attack_cooldown":20,"aggro":250,"leash":1000,"speed":25,"respawn":200,"xp":30,"currency":5,"loot":[{"item":"rat_tail","quantity":1}],"patrol":[[800,0],[900,0]],"quests":[],"shop":[]},
+    {"id":2147493652,"source_uid":30000,"source_class":1,"kind":"door","name":"Talım Kapısı (bağımsız)","zone":"eminonu","x":-1000,"y":0,"hp":100,"dialogue":"Kapı","quests":[],"shop":[],"door":{"to":"old_town","arrive":[0,0]}},
+    {"id":2147493653,"source_uid":30001,"source_class":1,"kind":"door","name":"Talım Kapısı (bağımsız)","zone":"old_town","x":-1000,"y":0,"hp":100,"dialogue":"Kapı","quests":[],"shop":[],"door":{"to":"eminonu","arrive":[0,0]}}
+  ],
+  "activities": {"lockout": 1800, "arena": {"zone": "old_town", "duration": 18000, "kill_points": 1, "banner_points": 5, "guardian_points": 3, "stake": 100, "homes": {"1": "eminonu", "2": "eminonu"}, "capture_ticks": 200, "areas": []}}
+}

@@ -1,0 +1,94 @@
+{
+  "CHANGELOG": {
+    "sha256": "3cb1eb3a5c4b0c03ec654e916359e9ea40616b6c8a2932bef2400e47e43ee112",
+    "size": 8170
+  },
+  "PROVENANCE.txt": {
+    "sha256": "6dc13761fb0872adad88aed8f6328ff0151186b0a89af4783d75b800aa61343a",
+    "size": 9392
+  },
+  "README": {
+    "sha256": "77bddc5b4b0c9b147e5e57afcf7b836dd6b9b647dbf0f55219a4559cd0e773ca",
+    "size": 2258
+  },
+  "VERSION": {
+    "sha256": "c66434248dbb1af9d4a03776b5ee6c6db6de8bbe454772bf1b8cb07d5069e863",
+    "size": 134
+  },
+  "license/Boost.LICENSE_1_0": {
+    "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+    "size": 1338
+  },
+  "license/innoextract.LICENSE": {
+    "sha256": "7cd6f3bf0c83f2c3ce8438aab20a4827a5de934fb87dd7966f6f3f2651685127",
+    "size": 886
+  },
+  "license/libbz2.LICENSE": {
+    "sha256": "4919cfb14a73cd64fcef67b107613970cf1659a09aa675dba31314f373bc7204",
+    "size": 1901
+  },
+  "license/liblzma.COPYING": {
+    "sha256": "c4f8e14fafe458d84808a4cd8b69f94673ebe2bf8fc992291629a69ac12218f8",
+    "size": 2774
+  },
+  "license/libstdc++.COPYING.RUNTIME": {
+    "sha256": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+    "size": 3324
+  },
+  "license/libstdc++.COPYING3": {
+    "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+    "size": 35147
+  },
+  "license/zlib.copyright": {
+    "sha256": "3fd70780ec86ca3e88317c5c1b0e99d822944bd6ae6bc7c4707e11932c08d581",
+    "size": 1817
+  },
+  "upstream/compiler-identification.txt": {
+    "sha256": "55b6657f1b2f0b11874b42735528d6d7f4bff736291b8eacd43b1a33dc827dd5",
+    "size": 176
+  },
+  "upstream/dscharrer.asc": {
+    "sha256": "d089564d3e767fe2d06319fbaa26965ac3b24115386a43b58302ff9df6d1eef6",
+    "size": 3113
+  },
+  "upstream/elf-inspection.txt": {
+    "sha256": "ce03a27e0d8ba74edf4469ed57c3177ebb36ebbd8d9609fa504fe015ddf5c99e",
+    "size": 19138
+  },
+  "upstream/gcc-bindist-x86-64_lto-config.txt": {
+    "sha256": "3c703c90f15bf388b6bbd704fb9c72ede0bb5fd1a9e98c2ee955cd457833a776",
+    "size": 4927
+  },
+  "upstream/gcc-bindist-x86-64_lto-options.txt": {
+    "sha256": "fab37e3bc5363dce7d784a140849535e235051d2e462c9e066a61b921e975111",
+    "size": 426
+  },
+  "upstream/helper-version.txt": {
+    "sha256": "e2d458f7962d57b89722123559690f15c55a2c293316735a84d4cb8c61fc7738",
+    "size": 74
+  },
+  "upstream/innoextract-1.9-linux.tar.xz.sig": {
+    "sha256": "5d775eb4570fe12246a931e92dc803da0c2de2c58df2eeb5ef386ac714071112",
+    "size": 566
+  },
+  "upstream/innoextract-1.9.tar.gz": {
+    "sha256": "6344a69fc1ed847d4ed3e272e0da5998948c6b828cb7af39c6321aba6cf88126",
+    "size": 206931
+  },
+  "upstream/innoextract-1.9.tar.gz.sig": {
+    "sha256": "bdbd03c3dd0c8a38f09a491f10b65177f35a991e15a077a0ca2fa94a176e33e6",
+    "size": 566
+  },
+  "upstream/published-SHA256SUMS": {
+    "sha256": "a1649f902089eae8b849841f5e25792a34e44c4f856800b8e462204f9d4d4219",
+    "size": 278
+  },
+  "upstream/signature-verification.txt": {
+    "sha256": "ee1b1936efe630c1b0eb3289d8b0488ab58ff2f074dcb11d3d6506b5c9121c2e",
+    "size": 811
+  },
+  "upstream/source-signature-verification.txt": {
+    "sha256": "172a0925caffc9b1c5b24272799ff3e3f0f352e8a98068b5c5a592eb2898b18f",
+    "size": 811
+  }
+}

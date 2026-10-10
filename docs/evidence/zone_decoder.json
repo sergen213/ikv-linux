@@ -1,0 +1,2949 @@
+{
+  "schema": "ikv-original-zone-decoder-1",
+  "root": "app",
+  "evidence_kind": "static original executable plus full raw-grid corpus scan",
+  "original_dynamic_confirmation": false,
+  "original_executable_sha256": "44ffa8389a9f6e4c35841103ad4f40a90513e4deb518ab5605b0a1ebfae0be2d",
+  "format": {
+    "width": 2048,
+    "height": 2048,
+    "index": "z*2048+x",
+    "cell_encoding": "uint8 support mask",
+    "height_encoding": "IEEE754 float32 little-endian",
+    "header_bytes": 0,
+    "height_scale": 1.0,
+    "vertical_axis": "Y",
+    "pitch_world_units": 1.5,
+    "nominal_origin_xz": [
+      -1536.0,
+      -1536.0
+    ],
+    "world_zero_grid_xz": [
+      1024,
+      1024
+    ],
+    "world_to_grid_multiplier_float32": 0.6666666865348816,
+    "world_to_grid_multiplier_bits_hex": "3f2aaaab",
+    "runtime_index": "roundAway(f32(f32(world_xz)*f32(2/3))+1024), each axis bounds [0,2048)",
+    "cell_255": "all four downward rays accepted; cached support height usable",
+    "cell_0": "at least one support query failed or hit rejection list; no cached support",
+    "height_source": "fourth ray hit Y (not mean, bilinear sample or vertex height)",
+    "ray_origin_y": 2500.0,
+    "ray_direction_xyz": [
+      0.0,
+      -1.0,
+      0.0
+    ],
+    "generator_corners": "x0=roundAway(sx*1.5), x1=roundAway((sx+.5)*1.5), z0=roundAway(sz)*1.5, z1=roundAway(sz+.5)*1.5; order (x0,z0),(x1,z0),(x1,z1),(x0,z1)",
+    "alternate_helper_index": "(roundAway(z*f32(2/3))+1024)*2048+roundAway(x*f32(2/3))+1024",
+    "alternate_helper_difference": "negative half ties differ from primary runtime; original linear-only bound/final-cell fallback not used by safe decoder"
+  },
+  "limitations": [
+    "Support cache is not complete collision geometry or a proven walkability map.",
+    "Physical meter scale and scene-object-list category names are not recovered.",
+    "No interpolation: original stored Y is fourth accepted ray hit; scene triangles remain separate.",
+    "Primary runtime absent support uses a separate scene query; decoder returns None instead of inventing its result."
+  ],
+  "source_evidence": [
+    {
+      "claim": "Headerless byte and four-byte height buffers; selected filename uses zone-ID table.",
+      "source": "analysis/zone-game/decompile/00402140.c",
+      "lines": [
+        25,
+        64
+      ],
+      "addresses": [
+        "00402140",
+        "0040220e",
+        "004022b4"
+      ]
+    },
+    {
+      "claim": "Two signed loops [-1024,1023], x-fastest; consecutive byte and float stores.",
+      "source": "analysis/zone-game/decompile/00402310.c",
+      "lines": [
+        66,
+        131
+      ],
+      "addresses": [
+        "004023a2",
+        "004023e6",
+        "0040266e",
+        "00402673",
+        "0040267b",
+        "00402698"
+      ]
+    },
+    {
+      "claim": "Four downward scene queries; 255/all accepted or 0/any failed; stored height is fourth hit Y.",
+      "source": "analysis/zone-game/decompile/00402310.c",
+      "lines": [
+        71,
+        124
+      ],
+      "addresses": [
+        "00402488",
+        "0040251e",
+        "004025a5",
+        "0040262a",
+        "0040264a",
+        "00402653",
+        "00402656",
+        "00402667",
+        "0040266a"
+      ]
+    },
+    {
+      "claim": "Float32 world-to-grid multiplier, center offset, pitch and ray constants read from executable memory.",
+      "source": "analysis/zone-index/trace.tsv",
+      "lines": [
+        1,
+        18
+      ],
+      "addresses": [
+        "0058d35c",
+        "00592ee8",
+        "0058d374",
+        "0058d3b8",
+        "0058d360",
+        "0058d368"
+      ]
+    },
+    {
+      "claim": "Primary runtime rounds after float32 scale and +1024; bounds each axis; accepts byte255, reads Y float.",
+      "source": "analysis/zone-index/trace.tsv",
+      "lines": [
+        453,
+        482
+      ],
+      "addresses": [
+        "00477b85",
+        "00477b8d",
+        "00477b9b",
+        "00477bae",
+        "00477bbd",
+        "00477bcd",
+        "00477bdd",
+        "00477bf1",
+        "00477bfc"
+      ]
+    },
+    {
+      "claim": "Signed nearest integer rounding with ties away from zero.",
+      "source": "analysis/zone-index/00444af0.c",
+      "lines": [
+        2,
+        12
+      ],
+      "addresses": [
+        "00444af0",
+        "00444b0b",
+        "00444b3a"
+      ]
+    },
+    {
+      "claim": "Negative rounding branch calls ceil(value-.5).",
+      "source": "analysis/zone-index/0056e040.c",
+      "lines": [
+        17,
+        36
+      ],
+      "addresses": [
+        "0056e040"
+      ]
+    },
+    {
+      "claim": "Nonnegative rounding branch calls floor(value+.5).",
+      "source": "analysis/zone-index/005702e0.c",
+      "lines": [
+        17,
+        37
+      ],
+      "addresses": [
+        "005702e0"
+      ]
+    },
+    {
+      "claim": "Separate helper rounds before centered offset; linear-only bounds and final-cell fallback are original quirks.",
+      "source": "analysis/zone-index/00401060.c",
+      "lines": [
+        9,
+        15
+      ],
+      "addresses": [
+        "00401060",
+        "0040109a",
+        "004010bb"
+      ]
+    },
+    {
+      "claim": "Direct byte helper also rounds before offset; 0x200400 = 1024*2048+1024.",
+      "source": "analysis/zone-index/004b37a0.c",
+      "lines": [
+        8,
+        10
+      ],
+      "addresses": [
+        "004b37a0"
+      ]
+    },
+    {
+      "claim": "First scene-object list hit rejects support; second list hit returns XYZ and normal.",
+      "source": "analysis/zone-index/00446cc0.c",
+      "lines": [
+        8,
+        36
+      ],
+      "addresses": [
+        "00446cc0",
+        "00446ce3",
+        "00446d1c"
+      ]
+    },
+    {
+      "claim": "Ray setter negates input direction; generator passes (0,1,0), producing (0,-1,0).",
+      "source": "analysis/zone-index/00446a50.c",
+      "lines": [
+        2,
+        6
+      ],
+      "addresses": [
+        "00446a50"
+      ]
+    },
+    {
+      "claim": "Original loader callsites.",
+      "source": "analysis/zone-game/functions.tsv",
+      "lines": [
+        2,
+        3
+      ],
+      "addresses": [
+        "0041cba8",
+        "004b2e8f",
+        "004b29bb"
+      ]
+    }
+  ],
+  "zone_count": 18,
+  "zones": [
+    {
+      "zone_id": 0,
+      "cells": {
+        "path": "base/zone00.bin",
+        "bytes": 4194304,
+        "sha256": "0df71c6c7891704bf838957d10f57332d4ad3f5a8afb865f11a5cc14fda95faa",
+        "histogram": {
+          "0": 3422522,
+          "255": 771782
+        }
+      },
+      "heights": {
+        "path": "base/zone00_height.bin",
+        "bytes": 16777216,
+        "sha256": "7a22bc09b0ccca02c7fc75cf182e8cfdee8b777492e416667950c47f016ab34d",
+        "finite_count": 4194304,
+        "supported_min_y": -2.3193359375,
+        "supported_max_y": 116.4541015625,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 771782,
+      "supported_grid_bounds_inclusive": [
+        93,
+        290,
+        2047,
+        2047
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 594517,
+          "grid_x": 597,
+          "grid_z": 290,
+          "nominal_world_xz": [
+            -640.5,
+            -1101.0
+          ],
+          "generator_ray_xz": [
+            [
+              -641,
+              -1101.0
+            ],
+            [
+              -640,
+              -1101.0
+            ],
+            [
+              -640,
+              -1101.0
+            ],
+            [
+              -641,
+              -1101.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 113.853759765625
+        },
+        {
+          "kind": "last_supported",
+          "index": 4194022,
+          "grid_x": 1766,
+          "grid_z": 2047,
+          "nominal_world_xz": [
+            1113.0,
+            1534.5
+          ],
+          "generator_ray_xz": [
+            [
+              1113,
+              1534.5
+            ],
+            [
+              1114,
+              1534.5
+            ],
+            [
+              1114,
+              1536.0
+            ],
+            [
+              1113,
+              1536.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 7.359375
+        },
+        {
+          "kind": "minimum_height",
+          "index": 3343501,
+          "grid_x": 1165,
+          "grid_z": 1632,
+          "nominal_world_xz": [
+            211.5,
+            912.0
+          ],
+          "generator_ray_xz": [
+            [
+              212,
+              912.0
+            ],
+            [
+              212,
+              912.0
+            ],
+            [
+              212,
+              913.5
+            ],
+            [
+              212,
+              913.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -2.3193359375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 596608,
+          "grid_x": 640,
+          "grid_z": 291,
+          "nominal_world_xz": [
+            -576.0,
+            -1099.5
+          ],
+          "generator_ray_xz": [
+            [
+              -576,
+              -1099.5
+            ],
+            [
+              -575,
+              -1099.5
+            ],
+            [
+              -575,
+              -1099.5
+            ],
+            [
+              -576,
+              -1099.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 116.4541015625
+        }
+      ]
+    },
+    {
+      "zone_id": 1,
+      "cells": {
+        "path": "base/zone01.bin",
+        "bytes": 4194304,
+        "sha256": "f7c6d43a14b76b4601614b919b16b87abd63174bbc0245f9b0f2f7c07b339678",
+        "histogram": {
+          "0": 4185896,
+          "255": 8408
+        }
+      },
+      "heights": {
+        "path": "base/zone01_height.bin",
+        "bytes": 16777216,
+        "sha256": "4f4eff89fde52a62064ff881bdcf43b8f47572fbf395d9c51c75b6e76a83468d",
+        "finite_count": 4194304,
+        "supported_min_y": -15.7236328125,
+        "supported_max_y": -15.322265625,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 8408,
+      "supported_grid_bounds_inclusive": [
+        921,
+        921,
+        1191,
+        1275
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1887148,
+          "grid_x": 940,
+          "grid_z": 921,
+          "nominal_world_xz": [
+            -126.0,
+            -154.5
+          ],
+          "generator_ray_xz": [
+            [
+              -126,
+              -154.5
+            ],
+            [
+              -125,
+              -154.5
+            ],
+            [
+              -125,
+              -154.5
+            ],
+            [
+              -126,
+              -154.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -15.72314453125
+        },
+        {
+          "kind": "last_supported",
+          "index": 2612152,
+          "grid_x": 952,
+          "grid_z": 1275,
+          "nominal_world_xz": [
+            -108.0,
+            376.5
+          ],
+          "generator_ray_xz": [
+            [
+              -108,
+              376.5
+            ],
+            [
+              -107,
+              376.5
+            ],
+            [
+              -107,
+              378.0
+            ],
+            [
+              -108,
+              378.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -15.322509765625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 1950618,
+          "grid_x": 922,
+          "grid_z": 952,
+          "nominal_world_xz": [
+            -153.0,
+            -108.0
+          ],
+          "generator_ray_xz": [
+            [
+              -153,
+              -108.0
+            ],
+            [
+              -152,
+              -108.0
+            ],
+            [
+              -152,
+              -108.0
+            ],
+            [
+              -153,
+              -108.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -15.7236328125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2399162,
+          "grid_x": 954,
+          "grid_z": 1171,
+          "nominal_world_xz": [
+            -105.0,
+            220.5
+          ],
+          "generator_ray_xz": [
+            [
+              -105,
+              220.5
+            ],
+            [
+              -104,
+              220.5
+            ],
+            [
+              -104,
+              222.0
+            ],
+            [
+              -105,
+              222.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -15.322265625
+        }
+      ]
+    },
+    {
+      "zone_id": 2,
+      "cells": {
+        "path": "base/zone02.bin",
+        "bytes": 4194304,
+        "sha256": "23ce20dfaf2b7860a31e242e4e02b5a10321c98502ce106b57c090aef55d7b32",
+        "histogram": {
+          "0": 4141040,
+          "255": 53264
+        }
+      },
+      "heights": {
+        "path": "base/zone02_height.bin",
+        "bytes": 16777216,
+        "sha256": "7f954ceb5e5b387dab7689d9b8e096833f450cb5c046718610db8a1516c3f856",
+        "finite_count": 4194304,
+        "supported_min_y": -16.07666015625,
+        "supported_max_y": 2.208251953125,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 53264,
+      "supported_grid_bounds_inclusive": [
+        696,
+        937,
+        1243,
+        1075
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1919706,
+          "grid_x": 730,
+          "grid_z": 937,
+          "nominal_world_xz": [
+            -441.0,
+            -130.5
+          ],
+          "generator_ray_xz": [
+            [
+              -441,
+              -130.5
+            ],
+            [
+              -440,
+              -130.5
+            ],
+            [
+              -440,
+              -130.5
+            ],
+            [
+              -441,
+              -130.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -16.059326171875
+        },
+        {
+          "kind": "last_supported",
+          "index": 2202720,
+          "grid_x": 1120,
+          "grid_z": 1075,
+          "nominal_world_xz": [
+            144.0,
+            76.5
+          ],
+          "generator_ray_xz": [
+            [
+              144,
+              76.5
+            ],
+            [
+              145,
+              76.5
+            ],
+            [
+              145,
+              78.0
+            ],
+            [
+              144,
+              78.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -16.059326171875
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2135160,
+          "grid_x": 1144,
+          "grid_z": 1042,
+          "nominal_world_xz": [
+            180.0,
+            27.0
+          ],
+          "generator_ray_xz": [
+            [
+              180,
+              27.0
+            ],
+            [
+              181,
+              27.0
+            ],
+            [
+              181,
+              28.5
+            ],
+            [
+              180,
+              28.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -16.07666015625
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2126766,
+          "grid_x": 942,
+          "grid_z": 1038,
+          "nominal_world_xz": [
+            -123.0,
+            21.0
+          ],
+          "generator_ray_xz": [
+            [
+              -123,
+              21.0
+            ],
+            [
+              -122,
+              21.0
+            ],
+            [
+              -122,
+              22.5
+            ],
+            [
+              -123,
+              22.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 2.208251953125
+        }
+      ]
+    },
+    {
+      "zone_id": 3,
+      "cells": {
+        "path": "base/zone03.bin",
+        "bytes": 4194304,
+        "sha256": "113f76ce30e2ff5e1fa646090d15b3f6bd127e6fb6d87fd96582e95addc34516",
+        "histogram": {
+          "0": 4003541,
+          "255": 190763
+        }
+      },
+      "heights": {
+        "path": "base/zone03_height.bin",
+        "bytes": 16777216,
+        "sha256": "af4a289c4b42a700e5acf55cbfc639fa3265625a0666ab98945087bdce4b655f",
+        "finite_count": 4194304,
+        "supported_min_y": -48.0703125,
+        "supported_max_y": 0.149658203125,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 190763,
+      "supported_grid_bounds_inclusive": [
+        525,
+        144,
+        1781,
+        1133
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 296087,
+          "grid_x": 1175,
+          "grid_z": 144,
+          "nominal_world_xz": [
+            226.5,
+            -1320.0
+          ],
+          "generator_ray_xz": [
+            [
+              227,
+              -1320.0
+            ],
+            [
+              227,
+              -1320.0
+            ],
+            [
+              227,
+              -1320.0
+            ],
+            [
+              227,
+              -1320.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -9.78515625
+        },
+        {
+          "kind": "last_supported",
+          "index": 2320937,
+          "grid_x": 553,
+          "grid_z": 1133,
+          "nominal_world_xz": [
+            -706.5,
+            163.5
+          ],
+          "generator_ray_xz": [
+            [
+              -707,
+              163.5
+            ],
+            [
+              -706,
+              163.5
+            ],
+            [
+              -706,
+              165.0
+            ],
+            [
+              -707,
+              165.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.123779296875
+        },
+        {
+          "kind": "minimum_height",
+          "index": 964191,
+          "grid_x": 1631,
+          "grid_z": 470,
+          "nominal_world_xz": [
+            910.5,
+            -831.0
+          ],
+          "generator_ray_xz": [
+            [
+              911,
+              -831.0
+            ],
+            [
+              911,
+              -831.0
+            ],
+            [
+              911,
+              -831.0
+            ],
+            [
+              911,
+              -831.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -48.0703125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 1420178,
+          "grid_x": 914,
+          "grid_z": 693,
+          "nominal_world_xz": [
+            -165.0,
+            -496.5
+          ],
+          "generator_ray_xz": [
+            [
+              -165,
+              -496.5
+            ],
+            [
+              -164,
+              -496.5
+            ],
+            [
+              -164,
+              -496.5
+            ],
+            [
+              -165,
+              -496.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.149658203125
+        }
+      ]
+    },
+    {
+      "zone_id": 4,
+      "cells": {
+        "path": "base/zone04.bin",
+        "bytes": 4194304,
+        "sha256": "4583515963dbc9b6a0141dcfe86b6a159ff7df78399231a35a72387ba5b3e8eb",
+        "histogram": {
+          "0": 3781836,
+          "255": 412468
+        }
+      },
+      "heights": {
+        "path": "base/zone04_height.bin",
+        "bytes": 16777216,
+        "sha256": "4adb0942237cb9d2b78897cf932c780702aa310276942ad56b4d5c65044c07e9",
+        "finite_count": 4194304,
+        "supported_min_y": -113.077392578125,
+        "supported_max_y": 103.385009765625,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 4
+      },
+      "supported_cells": 412468,
+      "supported_grid_bounds_inclusive": [
+        256,
+        315,
+        1689,
+        1819
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 645622,
+          "grid_x": 502,
+          "grid_z": 315,
+          "nominal_world_xz": [
+            -783.0,
+            -1063.5
+          ],
+          "generator_ray_xz": [
+            [
+              -783,
+              -1063.5
+            ],
+            [
+              -782,
+              -1063.5
+            ],
+            [
+              -782,
+              -1063.5
+            ],
+            [
+              -783,
+              -1063.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 2.81591796875
+        },
+        {
+          "kind": "last_supported",
+          "index": 3725718,
+          "grid_x": 406,
+          "grid_z": 1819,
+          "nominal_world_xz": [
+            -927.0,
+            1192.5
+          ],
+          "generator_ray_xz": [
+            [
+              -927,
+              1192.5
+            ],
+            [
+              -926,
+              1192.5
+            ],
+            [
+              -926,
+              1194.0
+            ],
+            [
+              -927,
+              1194.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -31.907958984375
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2347400,
+          "grid_x": 392,
+          "grid_z": 1146,
+          "nominal_world_xz": [
+            -948.0,
+            183.0
+          ],
+          "generator_ray_xz": [
+            [
+              -948,
+              183.0
+            ],
+            [
+              -947,
+              183.0
+            ],
+            [
+              -947,
+              184.5
+            ],
+            [
+              -948,
+              184.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -113.077392578125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 1485624,
+          "grid_x": 824,
+          "grid_z": 725,
+          "nominal_world_xz": [
+            -300.0,
+            -448.5
+          ],
+          "generator_ray_xz": [
+            [
+              -300,
+              -448.5
+            ],
+            [
+              -299,
+              -448.5
+            ],
+            [
+              -299,
+              -448.5
+            ],
+            [
+              -300,
+              -448.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 103.385009765625
+        }
+      ]
+    },
+    {
+      "zone_id": 5,
+      "cells": {
+        "path": "base/zone05.bin",
+        "bytes": 4194304,
+        "sha256": "60f0112e6aea29f4d9009dd6695e9fd8d8b0314ebd58b7a1be3cd052e931bbea",
+        "histogram": {
+          "0": 3162287,
+          "255": 1032017
+        }
+      },
+      "heights": {
+        "path": "base/zone05_height.bin",
+        "bytes": 16777216,
+        "sha256": "5947c1b3ab810d764db8b7baebc7cf22cfe546c351cc5177eb362c3fe60d2223",
+        "finite_count": 4194304,
+        "supported_min_y": 1.828125,
+        "supported_max_y": 388.2197265625,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 1032017,
+      "supported_grid_bounds_inclusive": [
+        480,
+        195,
+        1831,
+        1901
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 400370,
+          "grid_x": 1010,
+          "grid_z": 195,
+          "nominal_world_xz": [
+            -21.0,
+            -1243.5
+          ],
+          "generator_ray_xz": [
+            [
+              -21,
+              -1243.5
+            ],
+            [
+              -20,
+              -1243.5
+            ],
+            [
+              -20,
+              -1243.5
+            ],
+            [
+              -21,
+              -1243.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 8.228759765625
+        },
+        {
+          "kind": "last_supported",
+          "index": 3894490,
+          "grid_x": 1242,
+          "grid_z": 1901,
+          "nominal_world_xz": [
+            327.0,
+            1315.5
+          ],
+          "generator_ray_xz": [
+            [
+              327,
+              1315.5
+            ],
+            [
+              328,
+              1315.5
+            ],
+            [
+              328,
+              1317.0
+            ],
+            [
+              327,
+              1317.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 8.177734375
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2991554,
+          "grid_x": 1474,
+          "grid_z": 1460,
+          "nominal_world_xz": [
+            675.0,
+            654.0
+          ],
+          "generator_ray_xz": [
+            [
+              675,
+              654.0
+            ],
+            [
+              676,
+              654.0
+            ],
+            [
+              676,
+              655.5
+            ],
+            [
+              675,
+              655.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 1.828125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 1071882,
+          "grid_x": 778,
+          "grid_z": 523,
+          "nominal_world_xz": [
+            -369.0,
+            -751.5
+          ],
+          "generator_ray_xz": [
+            [
+              -369,
+              -751.5
+            ],
+            [
+              -368,
+              -751.5
+            ],
+            [
+              -368,
+              -751.5
+            ],
+            [
+              -369,
+              -751.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 388.2197265625
+        }
+      ]
+    },
+    {
+      "zone_id": 6,
+      "cells": {
+        "path": "base/zone06.bin",
+        "bytes": 4194304,
+        "sha256": "bb2807bb063525780db3edbadf8555418e5a35866b399b749ac6de48c38f3c09",
+        "histogram": {
+          "0": 3824125,
+          "255": 370179
+        }
+      },
+      "heights": {
+        "path": "base/zone06_height.bin",
+        "bytes": 16777216,
+        "sha256": "97a9d10c8c42b82a332bc10b531a093d11be2afb40b364d4acc68cd8131b36f7",
+        "finite_count": 4194304,
+        "supported_min_y": -24.095703125,
+        "supported_max_y": 25.22607421875,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 7
+      },
+      "supported_cells": 370179,
+      "supported_grid_bounds_inclusive": [
+        711,
+        607,
+        1439,
+        1445
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1244159,
+          "grid_x": 1023,
+          "grid_z": 607,
+          "nominal_world_xz": [
+            -1.5,
+            -625.5
+          ],
+          "generator_ray_xz": [
+            [
+              -2,
+              -625.5
+            ],
+            [
+              -1,
+              -625.5
+            ],
+            [
+              -1,
+              -625.5
+            ],
+            [
+              -2,
+              -625.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 24.947509765625
+        },
+        {
+          "kind": "last_supported",
+          "index": 2960397,
+          "grid_x": 1037,
+          "grid_z": 1445,
+          "nominal_world_xz": [
+            19.5,
+            631.5
+          ],
+          "generator_ray_xz": [
+            [
+              20,
+              631.5
+            ],
+            [
+              20,
+              631.5
+            ],
+            [
+              20,
+              633.0
+            ],
+            [
+              20,
+              633.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 25.19189453125
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2124826,
+          "grid_x": 1050,
+          "grid_z": 1037,
+          "nominal_world_xz": [
+            39.0,
+            19.5
+          ],
+          "generator_ray_xz": [
+            [
+              39,
+              19.5
+            ],
+            [
+              40,
+              19.5
+            ],
+            [
+              40,
+              21.0
+            ],
+            [
+              39,
+              21.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -24.095703125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 1246202,
+          "grid_x": 1018,
+          "grid_z": 608,
+          "nominal_world_xz": [
+            -9.0,
+            -624.0
+          ],
+          "generator_ray_xz": [
+            [
+              -9,
+              -624.0
+            ],
+            [
+              -8,
+              -624.0
+            ],
+            [
+              -8,
+              -624.0
+            ],
+            [
+              -9,
+              -624.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 25.22607421875
+        }
+      ]
+    },
+    {
+      "zone_id": 7,
+      "cells": {
+        "path": "base/zone07.bin",
+        "bytes": 4194304,
+        "sha256": "c632ca95d3b1f7343efee6405412e799fbc9be8524210021e7ee524b2badd526",
+        "histogram": {
+          "0": 3126205,
+          "255": 1068099
+        }
+      },
+      "heights": {
+        "path": "base/zone07_height.bin",
+        "bytes": 16777216,
+        "sha256": "758929dae73f446c3a63c9bab0176e1a67b724fe95b7f9e1199b62b0eaa7f869",
+        "finite_count": 4194304,
+        "supported_min_y": -274.2333984375,
+        "supported_max_y": 445.97607421875,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 1068099,
+      "supported_grid_bounds_inclusive": [
+        41,
+        61,
+        2036,
+        2006
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 125190,
+          "grid_x": 262,
+          "grid_z": 61,
+          "nominal_world_xz": [
+            -1143.0,
+            -1444.5
+          ],
+          "generator_ray_xz": [
+            [
+              -1143,
+              -1444.5
+            ],
+            [
+              -1142,
+              -1444.5
+            ],
+            [
+              -1142,
+              -1444.5
+            ],
+            [
+              -1143,
+              -1444.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 218.145263671875
+        },
+        {
+          "kind": "last_supported",
+          "index": 4108458,
+          "grid_x": 170,
+          "grid_z": 2006,
+          "nominal_world_xz": [
+            -1281.0,
+            1473.0
+          ],
+          "generator_ray_xz": [
+            [
+              -1281,
+              1473.0
+            ],
+            [
+              -1280,
+              1473.0
+            ],
+            [
+              -1280,
+              1474.5
+            ],
+            [
+              -1281,
+              1474.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -269.473388671875
+        },
+        {
+          "kind": "minimum_height",
+          "index": 4108452,
+          "grid_x": 164,
+          "grid_z": 2006,
+          "nominal_world_xz": [
+            -1290.0,
+            1473.0
+          ],
+          "generator_ray_xz": [
+            [
+              -1290,
+              1473.0
+            ],
+            [
+              -1289,
+              1473.0
+            ],
+            [
+              -1289,
+              1474.5
+            ],
+            [
+              -1290,
+              1474.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -274.2333984375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2800633,
+          "grid_x": 1017,
+          "grid_z": 1367,
+          "nominal_world_xz": [
+            -10.5,
+            514.5
+          ],
+          "generator_ray_xz": [
+            [
+              -11,
+              514.5
+            ],
+            [
+              -10,
+              514.5
+            ],
+            [
+              -10,
+              516.0
+            ],
+            [
+              -11,
+              516.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 445.97607421875
+        }
+      ]
+    },
+    {
+      "zone_id": 8,
+      "cells": {
+        "path": "base/zone08.bin",
+        "bytes": 4194304,
+        "sha256": "809d9d65c1daf070d086438164485aeb8ddf56138d61bca37734b76a94339cb7",
+        "histogram": {
+          "0": 4093488,
+          "255": 100816
+        }
+      },
+      "heights": {
+        "path": "base/zone08_height.bin",
+        "bytes": 16777216,
+        "sha256": "1fdd1e384573672ec1f545ad89f8a9f254b36f5689374568da03f17d1165ec83",
+        "finite_count": 4194304,
+        "supported_min_y": -45.503173828125,
+        "supported_max_y": 78.339111328125,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 100816,
+      "supported_grid_bounds_inclusive": [
+        369,
+        578,
+        1727,
+        1942
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1185085,
+          "grid_x": 1341,
+          "grid_z": 578,
+          "nominal_world_xz": [
+            475.5,
+            -669.0
+          ],
+          "generator_ray_xz": [
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.484130859375
+        },
+        {
+          "kind": "last_supported",
+          "index": 3978304,
+          "grid_x": 1088,
+          "grid_z": 1942,
+          "nominal_world_xz": [
+            96.0,
+            1377.0
+          ],
+          "generator_ray_xz": [
+            [
+              96,
+              1377.0
+            ],
+            [
+              97,
+              1377.0
+            ],
+            [
+              97,
+              1378.5
+            ],
+            [
+              96,
+              1378.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 74.64013671875
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2752940,
+          "grid_x": 428,
+          "grid_z": 1344,
+          "nominal_world_xz": [
+            -894.0,
+            480.0
+          ],
+          "generator_ray_xz": [
+            [
+              -894,
+              480.0
+            ],
+            [
+              -893,
+              480.0
+            ],
+            [
+              -893,
+              481.5
+            ],
+            [
+              -894,
+              481.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -45.503173828125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 3922997,
+          "grid_x": 1077,
+          "grid_z": 1915,
+          "nominal_world_xz": [
+            79.5,
+            1336.5
+          ],
+          "generator_ray_xz": [
+            [
+              80,
+              1336.5
+            ],
+            [
+              80,
+              1336.5
+            ],
+            [
+              80,
+              1338.0
+            ],
+            [
+              80,
+              1338.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 78.339111328125
+        }
+      ]
+    },
+    {
+      "zone_id": 9,
+      "cells": {
+        "path": "base/zone09.bin",
+        "bytes": 4194304,
+        "sha256": "fe92eb46e7e79dc8842cf7e6e48c0219d200a5429d1e43f8aa8dec969a77097b",
+        "histogram": {
+          "0": 4136206,
+          "255": 58098
+        }
+      },
+      "heights": {
+        "path": "base/zone09_height.bin",
+        "bytes": 16777216,
+        "sha256": "3a973d445e2ccba5cbb883aa1155782950bbd48d68650475c4ff9da92117a4a0",
+        "finite_count": 4194304,
+        "supported_min_y": -0.012939453125,
+        "supported_max_y": 19.267333984375,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 34057
+      },
+      "supported_cells": 58098,
+      "supported_grid_bounds_inclusive": [
+        656,
+        676,
+        1350,
+        1371
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1385590,
+          "grid_x": 1142,
+          "grid_z": 676,
+          "nominal_world_xz": [
+            177.0,
+            -522.0
+          ],
+          "generator_ray_xz": [
+            [
+              177,
+              -522.0
+            ],
+            [
+              178,
+              -522.0
+            ],
+            [
+              178,
+              -522.0
+            ],
+            [
+              177,
+              -522.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.000244140625
+        },
+        {
+          "kind": "last_supported",
+          "index": 2808864,
+          "grid_x": 1056,
+          "grid_z": 1371,
+          "nominal_world_xz": [
+            48.0,
+            520.5
+          ],
+          "generator_ray_xz": [
+            [
+              48,
+              520.5
+            ],
+            [
+              49,
+              520.5
+            ],
+            [
+              49,
+              522.0
+            ],
+            [
+              48,
+              522.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.000244140625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 1740101,
+          "grid_x": 1349,
+          "grid_z": 849,
+          "nominal_world_xz": [
+            487.5,
+            -262.5
+          ],
+          "generator_ray_xz": [
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.012939453125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2271900,
+          "grid_x": 668,
+          "grid_z": 1109,
+          "nominal_world_xz": [
+            -534.0,
+            127.5
+          ],
+          "generator_ray_xz": [
+            [
+              -534,
+              127.5
+            ],
+            [
+              -533,
+              127.5
+            ],
+            [
+              -533,
+              129.0
+            ],
+            [
+              -534,
+              129.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 19.267333984375
+        }
+      ]
+    },
+    {
+      "zone_id": 10,
+      "cells": {
+        "path": "base/zone10.bin",
+        "bytes": 4194304,
+        "sha256": "0532af57ea5b4bcd6e6ee8dde19848c4b6bc60d4ce54a1a99ca942e96691ee12",
+        "histogram": {
+          "0": 3974884,
+          "255": 219420
+        }
+      },
+      "heights": {
+        "path": "base/zone10_height.bin",
+        "bytes": 16777216,
+        "sha256": "4069be9e6981ee116858b2d21963e7eb59236bd98a3ed724e9e0915f418b6297",
+        "finite_count": 4194304,
+        "supported_min_y": 161.96484375,
+        "supported_max_y": 427.19677734375,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 219420,
+      "supported_grid_bounds_inclusive": [
+        467,
+        51,
+        1536,
+        1765
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 105691,
+          "grid_x": 1243,
+          "grid_z": 51,
+          "nominal_world_xz": [
+            328.5,
+            -1459.5
+          ],
+          "generator_ray_xz": [
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 183.858154296875
+        },
+        {
+          "kind": "last_supported",
+          "index": 3616078,
+          "grid_x": 1358,
+          "grid_z": 1765,
+          "nominal_world_xz": [
+            501.0,
+            1111.5
+          ],
+          "generator_ray_xz": [
+            [
+              501,
+              1111.5
+            ],
+            [
+              502,
+              1111.5
+            ],
+            [
+              502,
+              1113.0
+            ],
+            [
+              501,
+              1113.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 391.390625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 130347,
+          "grid_x": 1323,
+          "grid_z": 63,
+          "nominal_world_xz": [
+            448.5,
+            -1441.5
+          ],
+          "generator_ray_xz": [
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 161.96484375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 3554497,
+          "grid_x": 1217,
+          "grid_z": 1735,
+          "nominal_world_xz": [
+            289.5,
+            1066.5
+          ],
+          "generator_ray_xz": [
+            [
+              290,
+              1066.5
+            ],
+            [
+              290,
+              1066.5
+            ],
+            [
+              290,
+              1068.0
+            ],
+            [
+              290,
+              1068.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 427.19677734375
+        }
+      ]
+    },
+    {
+      "zone_id": 11,
+      "cells": {
+        "path": "base/zone11.bin",
+        "bytes": 4194304,
+        "sha256": "9be1c138f27453505a9ee22bff29931fbc7c8c5f1706f6dbb4e4674300fab2b2",
+        "histogram": {
+          "0": 4098306,
+          "255": 95998
+        }
+      },
+      "heights": {
+        "path": "base/zone11_height.bin",
+        "bytes": 16777216,
+        "sha256": "2b4701bcdae4389654027ebda3b6905286eca982512235b3604b19ec06335a3d",
+        "finite_count": 4194304,
+        "supported_min_y": -2.768798828125,
+        "supported_max_y": 14.868896484375,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 1802
+      },
+      "supported_cells": 95998,
+      "supported_grid_bounds_inclusive": [
+        784,
+        892,
+        1222,
+        1266
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1827838,
+          "grid_x": 1022,
+          "grid_z": 892,
+          "nominal_world_xz": [
+            -3.0,
+            -198.0
+          ],
+          "generator_ray_xz": [
+            [
+              -3,
+              -198.0
+            ],
+            [
+              -2,
+              -198.0
+            ],
+            [
+              -2,
+              -198.0
+            ],
+            [
+              -3,
+              -198.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 1.2763671875
+        },
+        {
+          "kind": "last_supported",
+          "index": 2593689,
+          "grid_x": 921,
+          "grid_z": 1266,
+          "nominal_world_xz": [
+            -154.5,
+            363.0
+          ],
+          "generator_ray_xz": [
+            [
+              -155,
+              363.0
+            ],
+            [
+              -154,
+              363.0
+            ],
+            [
+              -154,
+              364.5
+            ],
+            [
+              -155,
+              364.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.4541015625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2559106,
+          "grid_x": 1154,
+          "grid_z": 1249,
+          "nominal_world_xz": [
+            195.0,
+            337.5
+          ],
+          "generator_ray_xz": [
+            [
+              195,
+              337.5
+            ],
+            [
+              196,
+              337.5
+            ],
+            [
+              196,
+              339.0
+            ],
+            [
+              195,
+              339.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -2.768798828125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2247590,
+          "grid_x": 934,
+          "grid_z": 1097,
+          "nominal_world_xz": [
+            -135.0,
+            109.5
+          ],
+          "generator_ray_xz": [
+            [
+              -135,
+              109.5
+            ],
+            [
+              -134,
+              109.5
+            ],
+            [
+              -134,
+              111.0
+            ],
+            [
+              -135,
+              111.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 14.868896484375
+        }
+      ]
+    },
+    {
+      "zone_id": 12,
+      "cells": {
+        "path": "base/zone12.bin",
+        "bytes": 4194304,
+        "sha256": "10d9c6c7f45627f66605342c50d190102f93bd86e6c60e6b8b4d7ec10c95a175",
+        "histogram": {
+          "0": 3669565,
+          "255": 524739
+        }
+      },
+      "heights": {
+        "path": "base/zone12_height.bin",
+        "bytes": 16777216,
+        "sha256": "6620d90205e060a797319c4a07d3bba41ed2bd2d55c2b73192392cd65a3c5caf",
+        "finite_count": 4194304,
+        "supported_min_y": -49.4443359375,
+        "supported_max_y": 210.729248046875,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 524739,
+      "supported_grid_bounds_inclusive": [
+        42,
+        35,
+        2009,
+        2002
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 72594,
+          "grid_x": 914,
+          "grid_z": 35,
+          "nominal_world_xz": [
+            -165.0,
+            -1483.5
+          ],
+          "generator_ray_xz": [
+            [
+              -165,
+              -1483.5
+            ],
+            [
+              -164,
+              -1483.5
+            ],
+            [
+              -164,
+              -1483.5
+            ],
+            [
+              -165,
+              -1483.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 14.639892578125
+        },
+        {
+          "kind": "last_supported",
+          "index": 4101225,
+          "grid_x": 1129,
+          "grid_z": 2002,
+          "nominal_world_xz": [
+            157.5,
+            1467.0
+          ],
+          "generator_ray_xz": [
+            [
+              158,
+              1467.0
+            ],
+            [
+              158,
+              1467.0
+            ],
+            [
+              158,
+              1468.5
+            ],
+            [
+              158,
+              1468.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -49.4443359375
+        },
+        {
+          "kind": "minimum_height",
+          "index": 4101225,
+          "grid_x": 1129,
+          "grid_z": 2002,
+          "nominal_world_xz": [
+            157.5,
+            1467.0
+          ],
+          "generator_ray_xz": [
+            [
+              158,
+              1467.0
+            ],
+            [
+              158,
+              1467.0
+            ],
+            [
+              158,
+              1468.5
+            ],
+            [
+              158,
+              1468.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -49.4443359375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 739431,
+          "grid_x": 103,
+          "grid_z": 361,
+          "nominal_world_xz": [
+            -1381.5,
+            -994.5
+          ],
+          "generator_ray_xz": [
+            [
+              -1382,
+              -994.5
+            ],
+            [
+              -1381,
+              -994.5
+            ],
+            [
+              -1381,
+              -994.5
+            ],
+            [
+              -1382,
+              -994.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 210.729248046875
+        }
+      ]
+    },
+    {
+      "zone_id": 13,
+      "cells": {
+        "path": "base/zone13.bin",
+        "bytes": 4194304,
+        "sha256": "3cb95c1f3e81598e6fc7a6c716a58c52cf40b49e0d2a356e400f572551865c46",
+        "histogram": {
+          "0": 3312089,
+          "255": 882215
+        }
+      },
+      "heights": {
+        "path": "base/zone13_height.bin",
+        "bytes": 16777216,
+        "sha256": "752453496aace71c01cddfd58b3c01575630b0445728b0f6fddbe93fc7ee0664",
+        "finite_count": 4194304,
+        "supported_min_y": 0.04833984375,
+        "supported_max_y": 98.544189453125,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 882215,
+      "supported_grid_bounds_inclusive": [
+        0,
+        20,
+        1809,
+        2035
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 42034,
+          "grid_x": 1074,
+          "grid_z": 20,
+          "nominal_world_xz": [
+            75.0,
+            -1506.0
+          ],
+          "generator_ray_xz": [
+            [
+              75,
+              -1506.0
+            ],
+            [
+              76,
+              -1506.0
+            ],
+            [
+              76,
+              -1506.0
+            ],
+            [
+              75,
+              -1506.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 11.2529296875
+        },
+        {
+          "kind": "last_supported",
+          "index": 4168263,
+          "grid_x": 583,
+          "grid_z": 2035,
+          "nominal_world_xz": [
+            -661.5,
+            1516.5
+          ],
+          "generator_ray_xz": [
+            [
+              -662,
+              1516.5
+            ],
+            [
+              -661,
+              1516.5
+            ],
+            [
+              -661,
+              1518.0
+            ],
+            [
+              -662,
+              1518.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 54.878662109375
+        },
+        {
+          "kind": "minimum_height",
+          "index": 1175811,
+          "grid_x": 259,
+          "grid_z": 574,
+          "nominal_world_xz": [
+            -1147.5,
+            -675.0
+          ],
+          "generator_ray_xz": [
+            [
+              -1148,
+              -675.0
+            ],
+            [
+              -1147,
+              -675.0
+            ],
+            [
+              -1147,
+              -675.0
+            ],
+            [
+              -1148,
+              -675.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.04833984375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 1995512,
+          "grid_x": 760,
+          "grid_z": 974,
+          "nominal_world_xz": [
+            -396.0,
+            -75.0
+          ],
+          "generator_ray_xz": [
+            [
+              -396,
+              -75.0
+            ],
+            [
+              -395,
+              -75.0
+            ],
+            [
+              -395,
+              -75.0
+            ],
+            [
+              -396,
+              -75.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 98.544189453125
+        }
+      ]
+    },
+    {
+      "zone_id": 14,
+      "cells": {
+        "path": "base/zone14.bin",
+        "bytes": 4194304,
+        "sha256": "809d9d65c1daf070d086438164485aeb8ddf56138d61bca37734b76a94339cb7",
+        "histogram": {
+          "0": 4093488,
+          "255": 100816
+        }
+      },
+      "heights": {
+        "path": "base/zone14_height.bin",
+        "bytes": 16777216,
+        "sha256": "1fdd1e384573672ec1f545ad89f8a9f254b36f5689374568da03f17d1165ec83",
+        "finite_count": 4194304,
+        "supported_min_y": -45.503173828125,
+        "supported_max_y": 78.339111328125,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 100816,
+      "supported_grid_bounds_inclusive": [
+        369,
+        578,
+        1727,
+        1942
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1185085,
+          "grid_x": 1341,
+          "grid_z": 578,
+          "nominal_world_xz": [
+            475.5,
+            -669.0
+          ],
+          "generator_ray_xz": [
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ],
+            [
+              476,
+              -669.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.484130859375
+        },
+        {
+          "kind": "last_supported",
+          "index": 3978304,
+          "grid_x": 1088,
+          "grid_z": 1942,
+          "nominal_world_xz": [
+            96.0,
+            1377.0
+          ],
+          "generator_ray_xz": [
+            [
+              96,
+              1377.0
+            ],
+            [
+              97,
+              1377.0
+            ],
+            [
+              97,
+              1378.5
+            ],
+            [
+              96,
+              1378.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 74.64013671875
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2752940,
+          "grid_x": 428,
+          "grid_z": 1344,
+          "nominal_world_xz": [
+            -894.0,
+            480.0
+          ],
+          "generator_ray_xz": [
+            [
+              -894,
+              480.0
+            ],
+            [
+              -893,
+              480.0
+            ],
+            [
+              -893,
+              481.5
+            ],
+            [
+              -894,
+              481.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -45.503173828125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 3922997,
+          "grid_x": 1077,
+          "grid_z": 1915,
+          "nominal_world_xz": [
+            79.5,
+            1336.5
+          ],
+          "generator_ray_xz": [
+            [
+              80,
+              1336.5
+            ],
+            [
+              80,
+              1336.5
+            ],
+            [
+              80,
+              1338.0
+            ],
+            [
+              80,
+              1338.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 78.339111328125
+        }
+      ]
+    },
+    {
+      "zone_id": 15,
+      "cells": {
+        "path": "base/zone15.bin",
+        "bytes": 4194304,
+        "sha256": "fe92eb46e7e79dc8842cf7e6e48c0219d200a5429d1e43f8aa8dec969a77097b",
+        "histogram": {
+          "0": 4136206,
+          "255": 58098
+        }
+      },
+      "heights": {
+        "path": "base/zone15_height.bin",
+        "bytes": 16777216,
+        "sha256": "3a973d445e2ccba5cbb883aa1155782950bbd48d68650475c4ff9da92117a4a0",
+        "finite_count": 4194304,
+        "supported_min_y": -0.012939453125,
+        "supported_max_y": 19.267333984375,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 34057
+      },
+      "supported_cells": 58098,
+      "supported_grid_bounds_inclusive": [
+        656,
+        676,
+        1350,
+        1371
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 1385590,
+          "grid_x": 1142,
+          "grid_z": 676,
+          "nominal_world_xz": [
+            177.0,
+            -522.0
+          ],
+          "generator_ray_xz": [
+            [
+              177,
+              -522.0
+            ],
+            [
+              178,
+              -522.0
+            ],
+            [
+              178,
+              -522.0
+            ],
+            [
+              177,
+              -522.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.000244140625
+        },
+        {
+          "kind": "last_supported",
+          "index": 2808864,
+          "grid_x": 1056,
+          "grid_z": 1371,
+          "nominal_world_xz": [
+            48.0,
+            520.5
+          ],
+          "generator_ray_xz": [
+            [
+              48,
+              520.5
+            ],
+            [
+              49,
+              520.5
+            ],
+            [
+              49,
+              522.0
+            ],
+            [
+              48,
+              522.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.000244140625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 1740101,
+          "grid_x": 1349,
+          "grid_z": 849,
+          "nominal_world_xz": [
+            487.5,
+            -262.5
+          ],
+          "generator_ray_xz": [
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ],
+            [
+              488,
+              -262.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": -0.012939453125
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2271900,
+          "grid_x": 668,
+          "grid_z": 1109,
+          "nominal_world_xz": [
+            -534.0,
+            127.5
+          ],
+          "generator_ray_xz": [
+            [
+              -534,
+              127.5
+            ],
+            [
+              -533,
+              127.5
+            ],
+            [
+              -533,
+              129.0
+            ],
+            [
+              -534,
+              129.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 19.267333984375
+        }
+      ]
+    },
+    {
+      "zone_id": 16,
+      "cells": {
+        "path": "base/zone16.bin",
+        "bytes": 4194304,
+        "sha256": "0532af57ea5b4bcd6e6ee8dde19848c4b6bc60d4ce54a1a99ca942e96691ee12",
+        "histogram": {
+          "0": 3974884,
+          "255": 219420
+        }
+      },
+      "heights": {
+        "path": "base/zone16_height.bin",
+        "bytes": 16777216,
+        "sha256": "4069be9e6981ee116858b2d21963e7eb59236bd98a3ed724e9e0915f418b6297",
+        "finite_count": 4194304,
+        "supported_min_y": 161.96484375,
+        "supported_max_y": 427.19677734375,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 0
+      },
+      "supported_cells": 219420,
+      "supported_grid_bounds_inclusive": [
+        467,
+        51,
+        1536,
+        1765
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 105691,
+          "grid_x": 1243,
+          "grid_z": 51,
+          "nominal_world_xz": [
+            328.5,
+            -1459.5
+          ],
+          "generator_ray_xz": [
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ],
+            [
+              329,
+              -1459.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 183.858154296875
+        },
+        {
+          "kind": "last_supported",
+          "index": 3616078,
+          "grid_x": 1358,
+          "grid_z": 1765,
+          "nominal_world_xz": [
+            501.0,
+            1111.5
+          ],
+          "generator_ray_xz": [
+            [
+              501,
+              1111.5
+            ],
+            [
+              502,
+              1111.5
+            ],
+            [
+              502,
+              1113.0
+            ],
+            [
+              501,
+              1113.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 391.390625
+        },
+        {
+          "kind": "minimum_height",
+          "index": 130347,
+          "grid_x": 1323,
+          "grid_z": 63,
+          "nominal_world_xz": [
+            448.5,
+            -1441.5
+          ],
+          "generator_ray_xz": [
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ],
+            [
+              449,
+              -1441.5
+            ]
+          ],
+          "cell": 255,
+          "height_y": 161.96484375
+        },
+        {
+          "kind": "maximum_height",
+          "index": 3554497,
+          "grid_x": 1217,
+          "grid_z": 1735,
+          "nominal_world_xz": [
+            289.5,
+            1066.5
+          ],
+          "generator_ray_xz": [
+            [
+              290,
+              1066.5
+            ],
+            [
+              290,
+              1066.5
+            ],
+            [
+              290,
+              1068.0
+            ],
+            [
+              290,
+              1068.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 427.19677734375
+        }
+      ]
+    },
+    {
+      "zone_id": 17,
+      "cells": {
+        "path": "base/zone17.bin",
+        "bytes": 4194304,
+        "sha256": "152a4d5b23e8a45df70283ec2590343cdc950e577cb86441773777438e086c1f",
+        "histogram": {
+          "0": 4156919,
+          "255": 37385
+        }
+      },
+      "heights": {
+        "path": "base/zone17_height.bin",
+        "bytes": 16777216,
+        "sha256": "4ad4dea6db41e069d00500cb6a9a6bf5b8d0f2197d812983411d5ae6d1f0ccae",
+        "finite_count": 4194304,
+        "supported_min_y": -2.49560546875,
+        "supported_max_y": 125.58935546875,
+        "unsupported_nonzero_count": 0,
+        "supported_zero_count": 19820
+      },
+      "supported_cells": 37385,
+      "supported_grid_bounds_inclusive": [
+        219,
+        420,
+        1607,
+        1583
+      ],
+      "samples": [
+        {
+          "kind": "first_supported",
+          "index": 860830,
+          "grid_x": 670,
+          "grid_z": 420,
+          "nominal_world_xz": [
+            -531.0,
+            -906.0
+          ],
+          "generator_ray_xz": [
+            [
+              -531,
+              -906.0
+            ],
+            [
+              -530,
+              -906.0
+            ],
+            [
+              -530,
+              -906.0
+            ],
+            [
+              -531,
+              -906.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 121.0966796875
+        },
+        {
+          "kind": "last_supported",
+          "index": 3243545,
+          "grid_x": 1561,
+          "grid_z": 1583,
+          "nominal_world_xz": [
+            805.5,
+            838.5
+          ],
+          "generator_ray_xz": [
+            [
+              806,
+              838.5
+            ],
+            [
+              806,
+              838.5
+            ],
+            [
+              806,
+              840.0
+            ],
+            [
+              806,
+              840.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 0.0
+        },
+        {
+          "kind": "minimum_height",
+          "index": 2488556,
+          "grid_x": 236,
+          "grid_z": 1215,
+          "nominal_world_xz": [
+            -1182.0,
+            286.5
+          ],
+          "generator_ray_xz": [
+            [
+              -1182,
+              286.5
+            ],
+            [
+              -1181,
+              286.5
+            ],
+            [
+              -1181,
+              288.0
+            ],
+            [
+              -1182,
+              288.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": -2.49560546875
+        },
+        {
+          "kind": "maximum_height",
+          "index": 2068989,
+          "grid_x": 509,
+          "grid_z": 1010,
+          "nominal_world_xz": [
+            -772.5,
+            -21.0
+          ],
+          "generator_ray_xz": [
+            [
+              -773,
+              -21.0
+            ],
+            [
+              -772,
+              -21.0
+            ],
+            [
+              -772,
+              -21.0
+            ],
+            [
+              -773,
+              -21.0
+            ]
+          ],
+          "cell": 255,
+          "height_y": 125.58935546875
+        }
+      ]
+    }
+  ]
+}
