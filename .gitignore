@@ -27,6 +27,7 @@ __pycache__/
 /deploy/secrets/
 /.env
 *.pem
+!/packaging/ikv-release-public.pem
 *.key
 *.pgpass
 *.dump

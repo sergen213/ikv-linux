@@ -20,11 +20,14 @@ layout(set=0,binding=0,std140) uniform Frame {
     vec4 cameraForward;
     vec4 previousEye;
     vec4 previousForward;
-    // Original C38.xy: native low-32 millisecond tick and seconds.
+    // Original C38.xy: native low-32 millisecond tick and seconds. z: death-view grayscale; w: fullscreen (gamma ramp).
     vec4 sourceTime;
     // xy: this frame's sub-pixel projection jitter in NDC (vp includes it); zw: the previous frame's (previousVP).
     vec4 jitter;
 } frame;
+// Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
+// Applied once to display values on every present path (scene in post.frag, HUD in overlay.frag), fullscreen only.
+vec3 sourceGammaRamp(vec3 c){return frame.sourceTime.w>.5?min(pow(max(c,vec3(0)),vec3(1./1.2))*1.005,vec3(1)):c;}
 // Independently expressed v_ocean.vsh EXPP fraction and authored polynomial.
 vec4 sourceOceanPosition(vec4 world) {
     float phase=fract((world.x/32+world.y/13+frame.sourceTime.y)*.15915494-.25);

@@ -215,6 +215,10 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
         if name.lower() in ("http_proxy", "https_proxy", "all_proxy"):
             del environment[name]
     environment["NO_PROXY"] = environment["no_proxy"] = "localhost,127.0.0.1"
+    # Startup handoff would exec the installed fixture "AppImage" instead of updating; it is exercised
+    # explicitly by handoff() below. Restart after Güncelle sets the same guard itself.
+    unguarded = dict(environment)
+    environment["IKV_UPDATE_HANDOFF"] = "1"
 
     def publish(release):
         _, package, manifest, signature, document = release
@@ -225,10 +229,12 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
             responses["/" + name] = path.read_bytes()
             download_path = "/redirect/manifest.sig" if name == "manifest.sig" else "/" + name
             assets.append({"name": name, "browser_download_url": origin + download_path})
-        responses["/releases"] = json.dumps([{
-            "tag_name": document["version"], "draft": False, "prerelease": False,
-            "assets": assets,
-        }]).encode("ascii")
+        # Drafts and non-vX.Y.Z tags are never offered, even when they would sort first.
+        responses["/releases"] = json.dumps([
+            {"tag_name": "nightly", "draft": False, "prerelease": False, "assets": assets},
+            {"tag_name": "v99.0.0", "draft": True, "prerelease": False, "assets": assets},
+            {"tag_name": "v" + document["version"], "draft": False, "prerelease": False, "assets": assets},
+        ]).encode("ascii")
 
     def launch(ca=ca_cert, succeeds=True, timeout_ms=2000):
         result = run([launcher, "--update-once", "--install-root", root,
@@ -239,6 +245,15 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
         for name, expected in preserved.items():
             assert tree_snapshot(root / name) == expected, "launcher modified " + name
         return result
+
+    def restarted(result, version):
+        # Güncelle installed the release and the launcher exec'd its AppImage in the same process.
+        assert "v" + version + " kuruldu" in result.stdout, result.stdout
+        assert ("fixture-appimage " + version + " handoff=1 args=--update-once") in result.stdout, result.stdout
+
+    def handoff():
+        # Startup handoff: the installed, verified newer release replaces this launcher process.
+        return run([launcher, "--version"], env=unguarded, timeout=15)
 
     def launch_fault(path, fault, succeeds=False):
         faults[path] = fault
@@ -260,10 +275,11 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
 
     try:
         publish(releases[0])
-        launch()
-        assert os.readlink(root / "current") == "releases/v1"
-        assert json.loads(run([helper, "verify", "--version", "v1", "--trust",
+        restarted(launch(), "1.0.0")
+        assert os.readlink(root / "current") == "releases/1.0.0"
+        assert json.loads(run([helper, "verify", "--version", "1.0.0", "--trust",
                                public_key, "--root", root]).stdout) == releases[0][4]
+        assert handoff().stdout == "fixture-appimage 1.0.0 handoff=1 args=--version\n"
         assert set(requests) >= {"/releases", "/manifest.json", "/redirect/manifest.sig",
                                  "/manifest.sig", "/" + releases[0][1].name}, requests
         active = (os.readlink(root / "current"), tree_snapshot((root / "current").resolve()))
@@ -318,34 +334,44 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
         # Following headers must not wait for this valid redirect's never-ending body.
         start = len(requests)
         fault = make_fault(302, "stream", location=origin + "/manifest.sig")
-        launch_fault("/redirect/manifest.sig", fault, succeeds=True)
+        restarted(launch_fault("/redirect/manifest.sig", fault, succeeds=True), "2.0.0")
         assert "/manifest.sig" in requests[start:], requests[start:]
-        assert os.readlink(root / "current") == "releases/v2"
-        assert os.readlink(root / "previous") == "releases/v1"
-        assert json.loads(run([helper, "verify", "--version", "v2", "--trust",
+        assert os.readlink(root / "current") == "releases/2.0.0"
+        assert os.readlink(root / "previous") == "releases/1.0.0"
+        assert json.loads(run([helper, "verify", "--version", "2.0.0", "--trust",
                                public_key, "--root", root]).stdout) == releases[1][4]
         highwater = root / ".update-highwater/stable.json"
         accepted_highwater = highwater.read_bytes()
         publish(releases[0])
         launch(succeeds=False)
-        assert os.readlink(root / "current") == "releases/v2", "HTTPS replay downgraded release"
-        assert os.readlink(root / "previous") == "releases/v1"
+        assert os.readlink(root / "current") == "releases/2.0.0", "HTTPS replay downgraded release"
+        assert os.readlink(root / "previous") == "releases/1.0.0"
         assert highwater.read_bytes() == accepted_highwater
         assert json.loads(run([helper, "rollback", "--trust", public_key,
                                "--root", root]).stdout) == releases[0][4]
-        assert os.readlink(root / "current") == "releases/v1"
-        assert os.readlink(root / "previous") == "releases/v2"
+        assert os.readlink(root / "current") == "releases/1.0.0"
+        assert os.readlink(root / "previous") == "releases/2.0.0"
+        assert handoff().stdout.startswith("fixture-appimage 1.0.0 "), "handoff ignored rollback"
         launch(succeeds=False)
-        assert os.readlink(root / "current") == "releases/v1"
-        assert os.readlink(root / "previous") == "releases/v2"
+        assert os.readlink(root / "current") == "releases/1.0.0"
+        assert os.readlink(root / "previous") == "releases/2.0.0"
         assert highwater.read_bytes() == accepted_highwater, "HTTPS replay reset rollback freshness"
         publish(releases[1])
-        launch()
-        assert os.readlink(root / "current") == "releases/v2"
-        assert os.readlink(root / "previous") == "releases/v1"
+        restarted(launch(), "2.0.0")
+        assert os.readlink(root / "current") == "releases/2.0.0"
+        assert os.readlink(root / "previous") == "releases/1.0.0"
         assert highwater.read_bytes() == accepted_highwater
         for name, expected in preserved.items():
             assert tree_snapshot(root / name) == expected, "rollback modified " + name
+        # A modified installed release is never executed: this build reports it and stays in charge.
+        altered = root / "releases/2.0.0/data.txt"
+        original = altered.read_bytes()
+        altered.write_bytes(b"tampered")
+        result = handoff()
+        assert result.stdout.startswith("IKVLauncher ") and "fixture-appimage" not in result.stdout, result.stdout
+        assert "Kurulu güncelleme kullanılamadı" in result.stderr, result.stderr
+        altered.write_bytes(original)
+        assert handoff().stdout.startswith("fixture-appimage 2.0.0 ")
     finally:
         for fault in all_faults:
             fault["cancel"].set()
@@ -392,13 +418,19 @@ def main():
                     "--version", version, "--channel", "stable", "--sequence", str(sequence),
                     "--output", manifest, "--signature", signature, "--key-file", private_key]
 
-        def make_release(version, sequence):
+        def make_release(version, sequence, appimage=False):
             directory = workspace / version
             directory.mkdir()
             payload = directory / "payload"
             (payload / "bin").mkdir(parents=True)
             (payload / "bin/ikv").write_bytes(b"#!/bin/sh\necho " + version.encode("ascii") + b"\n")
             (payload / "bin/ikv").chmod(0o755)
+            if appimage:
+                # Stand-in for the release AppImage that the launcher execs on restart/handoff.
+                (payload / "bin/ikv-linux.AppImage").write_bytes(
+                    b'#!/bin/sh\necho "fixture-appimage ' + version.encode("ascii")
+                    + b' handoff=${IKV_UPDATE_HANDOFF:-unset} args=$*"\n')
+                (payload / "bin/ikv-linux.AppImage").chmod(0o755)
             (payload / "data.txt").write_bytes(b"release " + version.encode("ascii") + b"\n")
             (payload / "data.txt").chmod(0o644)
             package = directory / (version + ".tar.gz")
@@ -415,7 +447,8 @@ def main():
             document = json.loads(first_manifest)
             assert document["schema"] == 2 and document["sequence"] == sequence
             assert document["package_sha256"] == sha256(package.read_bytes())
-            assert [entry["path"] for entry in document["files"]] == ["bin/ikv", "data.txt"]
+            assert [entry["path"] for entry in document["files"]] == (
+                ["bin/ikv", "bin/ikv-linux.AppImage", "data.txt"] if appimage else ["bin/ikv", "data.txt"])
             return payload, package, manifest, signature, document
 
         def install(release, succeeds=True):
@@ -756,7 +789,9 @@ def main():
         retained_signature.write_bytes(saved_signature)
         check_preserved()
         if args.launcher:
-            launcher_tls_check(Path(args.launcher).resolve(), helper, workspace, public_key, (first, second))
+            # The launcher offers vX.Y.Z tags only and restarts into the installed AppImage.
+            launcher_tls_check(Path(args.launcher).resolve(), helper, workspace, public_key,
+                               (make_release("1.0.0", 1, appimage=True), make_release("2.0.0", 2, appimage=True)))
     print("signed updater integration checks passed")
 
 

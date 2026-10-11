@@ -8,6 +8,7 @@
 #include <array>
 #include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -86,6 +87,39 @@ struct ClientUI::Impl {
     bool missing_reported = false;
     int ascender = 0, line_height = 0;
     Overlay overlay;
+    // World layer (see begin_world): transparent outside world_ink. world_shown are the boxes composited into overlay and
+    // under the HUD pixels they cover there. Boxes are left, top, right, bottom.
+    using Box = std::array<int, 4>;
+    Overlay world;
+    bool world_active = false, fresh = true; // fresh: overlay is the HUD alone (after begin)
+    std::vector<Box> world_ink, world_shown;
+    std::vector<std::vector<std::uint8_t>> under;
+    std::vector<std::array<int, 4>> changed;
+    Overlay& target() { return world_active ? world : overlay; }
+    void ink(std::int64_t left, std::int64_t top, std::int64_t right, std::int64_t bottom) {
+        if (!world_active || left >= right || top >= bottom) return;
+        const Box box{int(left), int(top), int(right), int(bottom)};
+        if (!world_ink.empty() && overlap(world_ink.back(), box)) unite(world_ink.back(), box); // a label's shadow and text
+        else world_ink.push_back(box);
+    }
+    static bool overlap(const Box& a, const Box& b) { return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]; }
+    static void unite(Box& a, const Box& b) { a = {std::min(a[0], b[0]), std::min(a[1], b[1]), std::max(a[2], b[2]), std::max(a[3], b[3])}; }
+    // ponytail: quadratic merge until no two boxes overlap; fine for the few dozen name tags a view holds.
+    static void merge(std::vector<Box>& boxes) {
+        for (bool merged = true; merged;) {
+            merged = false;
+            for (std::size_t i = 0; i < boxes.size(); ++i)
+                for (std::size_t j = i + 1; j < boxes.size();)
+                    if (overlap(boxes[i], boxes[j])) { unite(boxes[i], boxes[j]); boxes.erase(boxes.begin() + std::ptrdiff_t(j)); merged = true; }
+                    else ++j;
+        }
+    }
+    void clear_world_ink() {
+        for (const auto& box : world_ink)
+            for (int row = box[1]; row < box[3]; ++row)
+                std::fill_n(world.rgba.begin() + (std::ptrdiff_t(row) * world.width + box[0]) * 4, std::size_t(box[2] - box[0]) * 4, 0);
+        world_ink.clear();
+    }
     std::unordered_map<std::uint64_t, Glyph> glyphs; // key: pixel size << 33 | bold << 32 | codepoint
     // Sampled colours of recent image() calls, keyed by image storage/size and every draw parameter. HUD repaints redraw
     // the same sprites each frame; a hit skips the bilinear sampling and only blends. begin() drops entries the previous
@@ -228,7 +262,11 @@ ClientUI::ClientUI(const std::filesystem::path& font, int pixelSize) : impl_(std
         !FcPatternAddBool(pattern.get(), FC_SCALABLE, FcTrue) ||
         !FcConfigSubstitute(impl_->font_config, pattern.get(), FcMatchPattern))
         throw std::runtime_error("Cannot configure native UI font fallback");
+#if FC_VERSION >= 21700  // FcDefaultSubstitute would load (and keep) a second, global current config since 2.17
+    FcConfigSetDefaultSubstitute(impl_->font_config, pattern.get());
+#else
     FcDefaultSubstitute(pattern.get());
+#endif
     FcResult match_result{};
     impl_->native_fonts = FcFontSort(impl_->font_config, pattern.get(), FcFalse, nullptr, &match_result);
     if (!impl_->native_fonts) throw std::runtime_error("Cannot discover native UI font fallback");
@@ -275,17 +313,23 @@ void ClientUI::begin(int width, int height) {
     output.height = height;
     std::erase_if(impl_->sprites, [](const auto& entry) { return !entry.second.used; });
     for (auto& entry : impl_->sprites) entry.second.used = false;
+    auto& world = impl_->world;
+    if (world.width != width || world.height != height) {
+        world.width = width; world.height = height; world.rgba.assign(bytes, 0); impl_->world_ink.clear();
+    } else impl_->clear_world_ink();
+    impl_->world_active = false; impl_->fresh = true; impl_->world_shown.clear(); impl_->under.clear();
 }
 
 void ClientUI::rect(int x, int y, int w, int h, std::array<std::uint8_t, 4> color) {
     if (w <= 0 || h <= 0 || !color[3]) return;
-    auto& output = impl_->overlay;
+    auto& output = impl_->target();
     const auto left = std::max<std::int64_t>(0, x), top = std::max<std::int64_t>(0, y);
     const auto right = std::min<std::int64_t>(output.width, static_cast<std::int64_t>(x) + w);
     const auto bottom = std::min<std::int64_t>(output.height, static_cast<std::int64_t>(y) + h);
     for (auto row = top; row < bottom; ++row)
         for (auto column = left; column < right; ++column)
             blend(output.rgba.data() + (static_cast<std::size_t>(row) * output.width + column) * 4, color);
+    impl_->ink(left, top, right, bottom);
 }
 
 void ClientUI::image(const assets::DdsImage& image, std::array<float, 4> destination,
@@ -306,7 +350,7 @@ void ClientUI::image(const assets::DdsImage& image, std::array<float, 4> destina
             if (!std::isfinite(value)) throw std::invalid_argument("UI image UV is nonfinite");
     if (destination[2] <= 0 || destination[3] <= 0 || !tint[3]) return;
 
-    auto& output = impl_->overlay;
+    auto& output = impl_->target();
     const double x = destination[0], y = destination[1];
     const double width = destination[2], height = destination[3];
     // Pixel-center coverage; clamp before converting even enormous finite float coordinates.
@@ -334,6 +378,44 @@ void ClientUI::image(const assets::DdsImage& image, std::array<float, 4> destina
         sprite.colors.resize(span * static_cast<std::size_t>(bottom - top));
         const double inverse_width = 1 / width, inverse_height = 1 / height;
         auto* sampled = sprite.colors.data();
+        if (uv[0][1] == uv[1][1] && uv[2][1] == uv[3][1] && uv[0][0] == uv[2][0] && uv[1][0] == uv[3][0]) {
+            // An axis-aligned UV rectangle maps x and y independently: both source triangles reduce to the same affine map,
+            // so the texel taps are per column and per row and each source row is filtered horizontally once. The
+            // bilinear terms keep the general path's order; only the coordinate rounding of the triangle form can differ.
+            // (Large first paints, e.g. a 9-sliced Yardım window, took ~38 ms through the per-pixel path.)
+            struct Tap { std::uint32_t first, second; double weight; };
+            const auto tap = [](double s, double a, double b, std::uint32_t extent) {
+                const double t = std::clamp(std::clamp((1 - s) * a + s * b, 0.0, 1.0) * extent - 0.5, 0.0, static_cast<double>(extent - 1));
+                const auto first = static_cast<std::uint32_t>(t);
+                return Tap{first, std::min(first + 1, extent - 1), t - first};
+            };
+            std::vector<Tap> columns(span);
+            for (std::size_t i = 0; i < span; ++i)
+                columns[i] = tap(std::clamp((left + static_cast<int>(i) + 0.5 - x) * inverse_width, 0.0, 1.0), uv[0][0], uv[1][0], mip.width);
+            std::vector<double> upper(span * 4), lower(span * 4);
+            std::uint32_t upper_row = UINT32_MAX, lower_row = UINT32_MAX;
+            const auto filter = [&](std::uint32_t row, std::vector<double>& out) {
+                const auto* line = source + static_cast<std::size_t>(row) * mip.width * 4;
+                for (std::size_t i = 0; i < span; ++i)
+                    for (unsigned channel = 0; channel < 4; ++channel)
+                        out[i * 4 + channel] = line[columns[i].first * 4 + channel] * (1 - columns[i].weight) +
+                                               line[columns[i].second * 4 + channel] * columns[i].weight;
+            };
+            for (int row = top; row < bottom; ++row) {
+                const auto v = tap(std::clamp((row + 0.5 - y) * inverse_height, 0.0, 1.0), uv[0][1], uv[2][1], mip.height);
+                if (v.first != upper_row) {
+                    if (v.first == lower_row) { std::swap(upper, lower); std::swap(upper_row, lower_row); }
+                    else { filter(v.first, upper); upper_row = v.first; }
+                }
+                if (v.second != lower_row) { filter(v.second, lower); lower_row = v.second; }
+                for (std::size_t i = 0; i < span; ++i) {
+                    auto& color = *sampled++;
+                    for (unsigned channel = 0; channel < 4; ++channel)
+                        color[channel] = static_cast<std::uint8_t>(std::clamp(
+                            (upper[i * 4 + channel] * (1 - v.weight) + lower[i * 4 + channel] * v.weight) * tint[channel] / 255 + 0.5, 0.0, 255.0));
+                }
+            }
+        } else
         for (int row = top; row < bottom; ++row) {
             const double sy = std::clamp((row + 0.5 - y) * inverse_height, 0.0, 1.0);
             for (int column = left; column < right; ++column) {
@@ -370,10 +452,12 @@ void ClientUI::image(const assets::DdsImage& image, std::array<float, 4> destina
         auto* target = output.rgba.data() + (static_cast<std::size_t>(row) * output.width + left) * 4;
         for (std::size_t column = 0; column < span; ++column, target += 4) blend(target, *sampled++);
     }
+    impl_->ink(left, top, right, bottom);
 }
 
 void ClientUI::text(int x, int y, std::string_view utf8, std::array<std::uint8_t, 4> color) {
-    auto& output = impl_->overlay;
+    auto& output = impl_->target();
+    std::int64_t ink_left = INT64_MAX, ink_top = INT64_MAX, ink_right = INT64_MIN, ink_bottom = INT64_MIN;
     std::int64_t pen = x, baseline = static_cast<std::int64_t>(y) + impl_->ascender;
     const Impl::Glyph* previous = nullptr;
     for (std::size_t position = 0; position < utf8.size();) {
@@ -394,9 +478,14 @@ void ClientUI::text(int x, int y, std::string_view utf8, std::array<std::uint8_t
             for (auto column = first_x; column < last_x; ++column)
                 blend(output.rgba.data() + (static_cast<std::size_t>(top + row) * output.width + left + column) * 4,
                       color, glyph.alpha[static_cast<std::size_t>(row) * glyph.width + column]);
+        if (first_x < last_x && first_y < last_y) {
+            ink_left = std::min(ink_left, left + first_x); ink_top = std::min(ink_top, top + first_y);
+            ink_right = std::max(ink_right, left + last_x); ink_bottom = std::max(ink_bottom, top + last_y);
+        }
         pen += glyph.advance;
         previous = &glyph;
     }
+    impl_->ink(ink_left, ink_top, ink_right, ink_bottom);
 }
 
 int ClientUI::text_width(std::string_view utf8) {
@@ -420,4 +509,50 @@ int ClientUI::text_width(std::string_view utf8) {
 int ClientUI::line_height() const { return impl_->line_height; }
 
 const Overlay& ClientUI::overlay() const { return impl_->overlay; }
+
+void ClientUI::begin_world() { impl_->clear_world_ink(); impl_->world_active = true; }
+void ClientUI::end_world() { impl_->world_active = false; }
+
+std::span<const std::array<int, 4>> ClientUI::compose() {
+    auto& m = *impl_;
+    auto& output = m.overlay;
+    std::vector<Impl::Box> boxes;
+    if (!m.fresh) { // put the HUD back where the previous world boxes were composited
+        for (std::size_t i = 0; i < m.world_shown.size(); ++i) {
+            const auto& box = m.world_shown[i];
+            const auto row_bytes = std::size_t(box[2] - box[0]) * 4;
+            for (int row = box[1]; row < box[3]; ++row)
+                std::copy_n(m.under[i].begin() + std::ptrdiff_t(std::size_t(row - box[1]) * row_bytes), row_bytes,
+                            output.rgba.begin() + (std::ptrdiff_t(row) * output.width + box[0]) * 4);
+        }
+        boxes = m.world_shown;
+    }
+    Impl::merge(m.world_ink);
+    m.under.resize(m.world_ink.size());
+    for (std::size_t i = 0; i < m.world_ink.size(); ++i) { // overlay = HUD over world inside each (disjoint) box
+        const auto& box = m.world_ink[i];
+        const auto row_bytes = std::size_t(box[2] - box[0]) * 4;
+        auto& under = m.under[i];
+        under.resize(row_bytes * std::size_t(box[3] - box[1]));
+        for (int row = box[1]; row < box[3]; ++row) {
+            const auto offset = (std::ptrdiff_t(row) * output.width + box[0]) * 4;
+            auto* hud = under.data() + std::size_t(row - box[1]) * row_bytes;
+            std::copy_n(output.rgba.begin() + offset, row_bytes, hud);
+            auto* target = output.rgba.data() + offset;
+            std::copy_n(m.world.rgba.begin() + offset, row_bytes, target);
+            for (std::size_t column = 0; column < row_bytes; column += 4) blend(target + column, {hud[column], hud[column + 1], hud[column + 2], hud[column + 3]});
+        }
+    }
+    m.changed.clear();
+    if (m.fresh) m.changed.push_back({0, 0, output.width, output.height});
+    else {
+        boxes.insert(boxes.end(), m.world_ink.begin(), m.world_ink.end());
+        Impl::merge(boxes);
+        for (const auto& box : boxes) m.changed.push_back({box[0], box[1], box[2] - box[0], box[3] - box[1]});
+    }
+    m.world_shown = m.world_ink;
+    m.clear_world_ink();
+    m.fresh = false;
+    return m.changed;
+}
 } // namespace ikv

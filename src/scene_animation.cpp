@@ -369,11 +369,28 @@ void update_scene(Scene& scene, float seconds) {
             changed=true;
         }
     }
-    if (pose_changed || scene.geometry_revision==0) {
+    // Held actors (skin_held) skip skinning. One released after skipping a pose change is re-skinned; when that is the
+    // only reason for this pass (unchanged bones), every other mesh is skipped too.
+    bool resumed = false;
+    for (const auto& assembly : scene.actor_assemblies) resumed |= assembly.skin_stale && !assembly.skin_held;
+    if (pose_changed || resumed || scene.geometry_revision==0) {
         for (auto& surface : scene.source_surfaces) surface.positions_changed=false;
         static thread_local SurfaceIndex by_mesh; // reused buffers
         index_surfaces(scene,by_mesh);
+        const bool all = pose_changed || scene.geometry_revision==0;
+        static thread_local std::vector<std::uint8_t> held; // per mesh: 1 = not skinned in this pass
+        held.assign(scene.meshes.size(),all ? 0 : 1);
+        const bool initial = scene.geometry_revision==0;
+        for (auto& assembly : scene.actor_assemblies) {
+            if (assembly.end[0]>held.size() || assembly.begin[0]>assembly.end[0])
+                throw std::runtime_error("invalid actor assembly mesh range");
+            const bool hold = !initial && assembly.skin_held;
+            const bool skip = hold || (!all && !assembly.skin_stale);
+            if (all || !hold) assembly.skin_stale = hold;
+            std::fill(held.begin()+static_cast<std::ptrdiff_t>(assembly.begin[0]),held.begin()+static_cast<std::ptrdiff_t>(assembly.end[0]),std::uint8_t{skip});
+        }
         for (std::size_t mesh_index=0; mesh_index<scene.meshes.size(); ++mesh_index) {
+            if (held[mesh_index]) continue;
             auto& mesh=scene.meshes[mesh_index];
             bool surface_changed=false;
             bool positions_changed=false;
@@ -606,6 +623,17 @@ void scene_animation_self_test() {
     require(near(scene.nodes[0].local.matrix[12],-2) && near(scene.nodes[0].local.matrix[0],-1));
     require(scene.geometry_revision>revision);
     require(scene.meshes[0].revision>mesh_revision && scene.meshes[1].revision==0);
+    // skin_held (original 00476eb0 skips roots whose +0xf4 frustum flag is clear): bones advance, the skin waits.
+    scene.actor_assemblies.emplace_back();
+    scene.actor_assemblies[0].entity_id=1; scene.actor_assemblies[0].end[0]=1; scene.actor_assemblies[0].skin_held=true;
+    const auto held_revision=scene.meshes[0].revision;
+    update_scene(scene,0.5f);
+    require(near(scene.nodes[0].world.matrix[12],11) && !near(vertex.x,11.5f) &&
+            scene.meshes[0].revision==held_revision && scene.actor_assemblies[0].skin_stale);
+    scene.actor_assemblies[0].skin_held=false;
+    update_scene(scene,0.5f); // no pose change: the release alone re-skins
+    require(near(vertex.x,11.5f) && scene.meshes[0].revision>held_revision && !scene.actor_assemblies[0].skin_stale);
+    scene.actor_assemblies.clear();
 
     Scene zero_time;
     zero_time.nodes.resize(1);

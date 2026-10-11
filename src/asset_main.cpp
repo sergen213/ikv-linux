@@ -153,8 +153,10 @@ int main(int argc, char** argv) {
             ikv::update_scene(scene,time);
             std::size_t vertices=0,indices=0,keys=0,influences=0;
             for(const auto& m:scene.meshes){vertices+=m.vertices.size();indices+=m.indices.size();influences+=m.influences.size();}
+            std::uint64_t texture_bytes=0; // resident GPU payload: authored BC blocks or RGBA8
             for(const auto& t:scene.animation)keys+=t.keys.size();
-            std::cout << "{\"meshes\":" << scene.meshes.size() << ",\"vertices\":" << vertices << ",\"indices\":" << indices << ",\"instances\":" << scene.instances.size() << ",\"materials\":" << scene.materials.size() << ",\"textures\":" << scene.textures.size() << ",\"nodes\":" << scene.nodes.size() << ",\"animation_keys\":" << keys << ",\"skin_influences\":" << influences << ",\"help_pages\":" << scene.help.size() << ",\"geometry_revision\":" << scene.geometry_revision << ",\"diagnostics\":";
+            for(const auto& t:scene.textures)texture_bytes+=t.data.size();
+            std::cout << "{\"meshes\":" << scene.meshes.size() << ",\"vertices\":" << vertices << ",\"indices\":" << indices << ",\"instances\":" << scene.instances.size() << ",\"materials\":" << scene.materials.size() << ",\"textures\":" << scene.textures.size() << ",\"texture_bytes\":" << texture_bytes << ",\"nodes\":" << scene.nodes.size() << ",\"animation_keys\":" << keys << ",\"skin_influences\":" << influences << ",\"help_pages\":" << scene.help.size() << ",\"geometry_revision\":" << scene.geometry_revision << ",\"diagnostics\":";
             std::cout << nlohmann::json(scene.diagnostics).dump() << "}\n";return 0;
         }
         if (!((command == "list" && argc == 3) || (command == "inspect" && argc == 4))) {

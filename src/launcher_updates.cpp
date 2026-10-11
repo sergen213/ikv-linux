@@ -7,6 +7,7 @@
 #include <openssl/pem.h>
 
 #include <algorithm>
+#include <charconv>
 #include <array>
 #include <cerrno>
 #include <cstring>
@@ -541,7 +542,50 @@ Manifest verify_release_locked(const fs::path& root, const std::string& version,
     require(files.empty(), "installed release missing signed files");
     return manifest;
 }
+struct SemVer { std::array<std::uint64_t, 3> core{}; std::vector<std::string_view> pre; };
+bool digits(std::string_view s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; }); }
+SemVer parse_version(std::string_view text) {
+    const auto invalid = "invalid version (MAJOR.MINOR.PATCH[-PRERELEASE] required): " + std::string(text.substr(0, 96));
+    require(text.size() <= 96, invalid);
+    SemVer version;
+    const auto dash = text.find('-');
+    auto core = text.substr(0, dash);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto dot = core.find('.');
+        require((i < 2) == (dot != core.npos), invalid);
+        const auto part = core.substr(0, dot);
+        require(digits(part) && (part.size() == 1 || part.front() != '0') && part.size() <= 19, invalid);
+        std::from_chars(part.data(), part.data() + part.size(), version.core[i]);
+        core = dot == core.npos ? std::string_view{} : core.substr(dot + 1);
+    }
+    if (dash == text.npos) return version;
+    for (auto pre = text.substr(dash + 1);;) {
+        const auto dot = pre.find('.');
+        const auto id = pre.substr(0, dot);
+        require(!id.empty() && std::all_of(id.begin(), id.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-'; }), invalid);
+        require(!digits(id) || id.size() == 1 || id.front() != '0', invalid);
+        version.pre.push_back(id);
+        if (dot == pre.npos) return version;
+        pre = pre.substr(dot + 1);
+    }
+}
 } // namespace
+
+int compare_versions(std::string_view left, std::string_view right) {
+    const auto a = parse_version(left), b = parse_version(right);
+    if (a.core != b.core) return a.core < b.core ? -1 : 1;
+    if (a.pre.empty() || b.pre.empty()) return a.pre.empty() == b.pre.empty() ? 0 : a.pre.empty() ? 1 : -1;
+    for (std::size_t i = 0; i < std::min(a.pre.size(), b.pre.size()); ++i) {
+        const auto x = a.pre[i], y = b.pre[i];
+        if (x == y) continue;
+        const bool xn = digits(x), yn = digits(y);
+        if (xn != yn) return xn ? -1 : 1; // numeric identifiers sort before alphanumeric ones
+        if (xn && x.size() != y.size()) return x.size() < y.size() ? -1 : 1; // no leading zeroes
+        return x < y ? -1 : 1;
+    }
+    return a.pre.size() == b.pre.size() ? 0 : a.pre.size() < b.pre.size() ? -1 : 1;
+}
 
 Manifest verify_manifest(const fs::path& manifest, const fs::path& signature, const fs::path& trusted_pem) {
     return load_signed(manifest, signature, trusted_pem).manifest;

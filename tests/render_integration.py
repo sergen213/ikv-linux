@@ -181,6 +181,8 @@ def render(services, args, output, identities, backends, evidence):
                         '--asset-root', args.asset_root, '--renderer', backend,
                         '--appearance', 'enhanced' if rt == 'required' else 'original', '--rt', rt, '--width', '960', '--height', '640',
                         '--ticks', '400', '--screenshot', str(screenshot)]
+                if rt == 'required':
+                    argv += ['--rt-style', getattr(args, 'rt_style', 'faithful')]
                 if getattr(args, 'model_map', ''):
                     argv += ['--model-map', args.model_map]
                 stdout = open(Path(temporary) / (label + '.stdout'), 'w+b')
@@ -245,14 +247,17 @@ def render(services, args, output, identities, backends, evidence):
             if record['rt_policy'] == 'required':
                 diagnostics = record.get('runtime_diagnostics', [])
                 device = any(line.startswith('Vulkan device=') and 'hardwareRT=1' in line for line in diagnostics)
+                # Faithful RT (default) traces only Sun-ray actor shadows; physical adds reflections and diffuse GI.
+                style = getattr(args, 'rt_style', 'faithful')
+                effects = '1' if style == 'physical' else '0'
                 submitted = any(line.startswith('Vulkan submitted frame=') and
-                                all(flag in line for flag in ('provider=vulkan', 'appearance=enhanced',
-                                    'hardwareRayQueries=1', 'accelerationStructure=1',
-                                    'reflections=1', 'shadows=1', 'diffuseGI=1')) for line in diagnostics)
+                                all(flag in line for flag in ('provider=vulkan', 'appearance=enhanced', 'rtStyle=' + style,
+                                    'hardwareRayQueries=1', 'accelerationStructure=1', 'shadows=1',
+                                    'reflections=' + effects, 'diffuseGI=' + effects)) for line in diagnostics)
                 completed = any(re.search(r'^Vulkan completed frames=[1-9][0-9]* provider=vulkan hardwareRayQueries=1(?: |$)', line)
                                 for line in diagnostics)
                 if not (device and submitted and completed):
-                    raise ValueError('required RT lacks actual GPU capability, enhanced RT submission, or completed RT frame diagnostics')
+                    raise ValueError('required RT lacks actual GPU capability, ' + style + ' RT submission, or completed RT frame diagnostics')
         ids = ','.join(str(identity['id']) for identity in identities)
         services.until(lambda: services.sql('SELECT count(*) FROM characters WHERE id IN (' + ids + ') AND lease_instance IS NOT NULL') == '0', 'native render client lease release')
 
@@ -263,6 +268,8 @@ def main():
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--model-map', default='')
     parser.add_argument('--require-rt', action='store_true')
+    parser.add_argument('--rt-style', choices=('faithful', 'physical'), default='faithful',
+                        help='RT lighting style of the --require-rt case')
     parser.add_argument('--six-pc', action='store_true',
                         help='classes 1..3 x sexes 0/1: six real identities; default two individualized cosmetic peers')
     args = parser.parse_args()

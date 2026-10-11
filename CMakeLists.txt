@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.3.0 LANGUAGES CXX)
+project(ikv_native VERSION 0.4.0 LANGUAGES CXX)
 
 if(NOT UNIX)
     message(FATAL_ERROR "The native implementation targets Linux/POSIX.")
@@ -73,7 +73,7 @@ if(IKV_BUILD_CLIENT)
             set(output "${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan/${shader}.spv")
             set(shader_includes)
             if(shader MATCHES "^(scene|shadow|particle|contour)\\.vert$" OR shader MATCHES "^scene.*\\.frag$" OR
-               shader STREQUAL "post.frag" OR shader STREQUAL "temporal.frag")
+               shader STREQUAL "post.frag" OR shader STREQUAL "overlay.frag" OR shader STREQUAL "temporal.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl")
             endif()
             if(shader STREQUAL "scene.frag" OR shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
@@ -155,6 +155,21 @@ if(IKV_BUILD_LAUNCHER)
     add_executable(ikv-launcher src/launcher_main.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
     target_link_libraries(ikv-launcher PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets nlohmann_json::nlohmann_json)
     target_compile_definitions(ikv-launcher PRIVATE IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
+    # Self-update defaults compiled into the launcher (docs/LAUNCHER_UPDATES.md); settings may override repo/channel/trust.
+    set(IKV_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version compiled into the launcher")
+    set(IKV_UPDATE_REPOSITORY "sergen213/ikv-linux" CACHE STRING "Default GitHub OWNER/REPOSITORY for launcher updates")
+    set(IKV_UPDATE_CHANNEL "experimental" CACHE STRING "Default launcher update channel (stable|experimental)")
+    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem" IKV_RELEASE_TRUST_PEM)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem")
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv/release_defaults.hpp" @ONLY CONTENT [=[#pragma once
+namespace ikv::release {
+inline constexpr char version[] = "@IKV_VERSION@";
+inline constexpr char repository[] = "@IKV_UPDATE_REPOSITORY@";
+inline constexpr char channel[] = "@IKV_UPDATE_CHANNEL@";
+inline constexpr char trust_pem[] = R"PEM(@IKV_RELEASE_TRUST_PEM@)PEM";
+}
+]=])
+    target_include_directories(ikv-launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     add_executable(ikv-updater src/update_helper_main.cpp)
     target_link_libraries(ikv-updater PRIVATE ikv-updates)
     list(APPEND ikv_targets ikv-updates ikv-launcher ikv-updater)
@@ -216,6 +231,11 @@ if(BUILD_TESTING)
         target_compile_features(client_font_diagnostic PRIVATE cxx_std_20)
         target_link_libraries(client_font_diagnostic PRIVATE Freetype::Freetype PkgConfig::Fontconfig)
         list(APPEND ikv_targets client_font_diagnostic)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/original/app/base/fonts/verdana.ttf")
+            # HUD text raster, image sampling and the name-label world layer (composite, dirty rectangles).
+            add_test(NAME client-ui-raster COMMAND client_font_diagnostic "${CMAKE_CURRENT_SOURCE_DIR}/original/app/base/fonts/verdana.ttf")
+            set_tests_properties(client-ui-raster PROPERTIES TIMEOUT 30)
+        endif()
         add_executable(render-math-test tests/render_math_test.cpp)
         target_link_libraries(render-math-test PRIVATE ikv-renderers)
         list(APPEND ikv_targets render-math-test)
@@ -247,6 +267,7 @@ if(BUILD_TESTING)
         add_executable(launcher-gui-smoke tests/launcher_gui_smoke.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
         target_link_libraries(launcher-gui-smoke PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets nlohmann_json::nlohmann_json)
         target_compile_definitions(launcher-gui-smoke PRIVATE IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
+        target_include_directories(launcher-gui-smoke PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
         list(APPEND ikv_targets launcher-gui-smoke)
         list(APPEND ikv_targets launcher-assets-test)
         add_test(NAME launcher-asset-import COMMAND launcher-assets-test)
@@ -266,12 +287,10 @@ if(BUILD_TESTING)
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_integration.py"
                 --helper "$<TARGET_FILE:ikv-updater>" --launcher "$<TARGET_FILE:ikv-launcher>")
         set_tests_properties(signed-update PROPERTIES TIMEOUT 120)
-        find_program(IKV_GH_EXECUTABLE gh REQUIRED)
-        find_program(IKV_GIT_EXECUTABLE git REQUIRED)
-        find_program(IKV_OPENSSL_EXECUTABLE openssl REQUIRED)
-        add_test(NAME release-publication-policy
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/release_publication_test.py")
-        set_tests_properties(release-publication-policy PROPERTIES TIMEOUT 360)
+        add_executable(update-version-test tests/update_version_test.cpp)
+        target_link_libraries(update-version-test PRIVATE ikv-updates)
+        list(APPEND ikv_targets update-version-test)
+        add_test(NAME update-version-order COMMAND update-version-test)
     endif()
 endif()
 

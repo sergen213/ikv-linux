@@ -80,7 +80,7 @@ Json read_json(const std::filesystem::path& path, std::uintmax_t cap) {
     return Json::parse(file);
 }
 struct Options {
-    std::string host,renderer="opengl",appearance="original",rt="off",auth;
+    std::string host,renderer="opengl",appearance="original",rt="off",rt_style="faithful",auth;
     std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map;
     std::uint16_t port=7000;
     std::uint64_t character=0;
@@ -95,6 +95,8 @@ struct Options {
     std::string upscaler="bilinear",fsr_mode="quality";
     double fsr_sharpness=.5;
     bool frame_generation=false; // FSR 3.1.4 frame generation (Vulkan + fsr3 only)
+    // Original Doku Detay / Gölge Detay prefs (004619d0): 0 = *_4.DAT, 1 = *_2.DAT, 2 = *_1.DAT; launcher >=1700 MB defaults.
+    int texture_detail=2,lightmap_detail=1;
     ikv::Camera camera;
 };
 Options parse_options(int argc,char** argv) {
@@ -109,7 +111,7 @@ Options parse_options(int argc,char** argv) {
         o.width=s.value("width",o.width); o.height=s.value("height",o.height);
         o.fullscreen=s.value("fullscreen",false); o.volume=s.value("volume",o.volume); o.music_volume=s.value("music_volume",o.music_volume);
         o.renderer=s.value("renderer",o.renderer); o.appearance=s.value("appearance",o.appearance);
-        o.rt=s.value("rt",o.rt);
+        o.rt=s.value("rt",o.rt); o.rt_style=s.value("rt_style",o.rt_style);
         if (s.contains("render_scale") && !s.at("render_scale").is_number())
             throw std::invalid_argument("saved render_scale requires a finite number in [.25,1]");
         o.render_scale=s.value("render_scale",o.render_scale);
@@ -119,6 +121,10 @@ Options parse_options(int argc,char** argv) {
             throw std::invalid_argument("saved upscaler/fsr_mode/fsr_sharpness/frame_generation have invalid types");
         o.upscaler=s.value("upscaler",o.upscaler); o.fsr_mode=s.value("fsr_mode",o.fsr_mode);
         o.fsr_sharpness=s.value("fsr_sharpness",o.fsr_sharpness); o.frame_generation=s.value("frame_generation",o.frame_generation);
+        if ((s.contains("texture_detail") && !s.at("texture_detail").is_number_integer()) ||
+            (s.contains("lightmap_detail") && !s.at("lightmap_detail").is_number_integer()))
+            throw std::invalid_argument("saved texture_detail/lightmap_detail require an integer in 0..2");
+        o.texture_detail=s.value("texture_detail",o.texture_detail); o.lightmap_detail=s.value("lightmap_detail",o.lightmap_detail);
         if (s.contains("camera")) {
             const auto& c=s.at("camera");
             o.camera.yaw=c.value("yaw",o.camera.yaw); o.camera.pitch=c.value("pitch",o.camera.pitch);
@@ -136,9 +142,11 @@ Options parse_options(int argc,char** argv) {
                 "[--asset-root DIR --renderer opengl|vulkan --appearance original|enhanced]\n"
                 "[--model-map JSON --sound-map JSON --audio ORIGINAL_OGG (replaces zone music)]\n"
                 "[--settings JSON --width N --height N --fullscreen --screenshot PPM --rt off|auto|required --render-scale .25..1 (Vulkan only)]\n"
+                "[--rt-style faithful|physical]  RT lighting: original equation + RT actor shadows (default), or physically based GI\n"
                 "[--upscaler bilinear|fsr3 --fsr-mode native|quality|balanced|performance|ultra_performance --fsr-sharpness 0..1]\n"
                 "  fsr3: AMD FidelityFX Super Resolution 3.1.4 temporal upscaling (Vulkan only; replaces --render-scale)\n"
                 "[--frame-generation on|off]  FSR 3.1.4 frame generation (Vulkan + --upscaler fsr3; default off)\n"
+                "[--texture-detail 0|1|2 --lightmap-detail 0|1|2]  original texture/lightmap packs _4/_2/_1 (default 2 and 1)\n"
                 "Ground click moves; WASD/arrows control camera; F1 displays recovered Turkish help.\n"
                 "Graphical scene, grid and character appearance follow the admitted authoritative source registry.\n";
             std::exit(0);
@@ -147,8 +155,9 @@ Options parse_options(int argc,char** argv) {
         if (flag=="--session-stdin") { o.session_stdin=true; continue; }
         if (flag=="--fullscreen") { o.fullscreen=true; continue; }
         if (flag!="--host" && flag!="--port" && flag!="--ca" && flag!="--character" && flag!="--auth" &&
-            flag!="--asset-root" && flag!="--renderer" && flag!="--appearance" && flag!="--rt" && flag!="--render-scale" &&
+            flag!="--asset-root" && flag!="--renderer" && flag!="--appearance" && flag!="--rt" && flag!="--rt-style" && flag!="--render-scale" &&
             flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" &&
+            flag!="--texture-detail" && flag!="--lightmap-detail" &&
             flag!="--settings" && flag!="--width" && flag!="--height" && flag!="--ticks" &&
             flag!="--commands" && flag!="--screenshot" && flag!="--audio" && flag!="--dx" && flag!="--dy" &&
             flag!="--model-map" && flag!="--sound-map")
@@ -164,6 +173,7 @@ Options parse_options(int argc,char** argv) {
         else if (flag=="--renderer") o.renderer=value;
         else if (flag=="--appearance") o.appearance=value;
         else if (flag=="--rt") o.rt=value;
+        else if (flag=="--rt-style") o.rt_style=value;
         else if (flag=="--render-scale") o.render_scale=decimal_number(value,"--render-scale requires a finite number in [.25,1]");
         else if (flag=="--upscaler") o.upscaler=value;
         else if (flag=="--fsr-mode") o.fsr_mode=value;
@@ -172,6 +182,8 @@ Options parse_options(int argc,char** argv) {
             if (value!="on" && value!="off") throw std::invalid_argument("--frame-generation requires on|off");
             o.frame_generation=value=="on";
         }
+        else if (flag=="--texture-detail") o.texture_detail=number(value,0,2);
+        else if (flag=="--lightmap-detail") o.lightmap_detail=number(value,0,2);
         else if (flag=="--settings") o.settings=value;
         else if (flag=="--commands") o.commands=value;
         else if (flag=="--screenshot") o.screenshot=value;
@@ -194,6 +206,8 @@ Options parse_options(int argc,char** argv) {
         throw std::invalid_argument("fsr_sharpness requires a finite number in [0,1]");
     if (o.renderer=="opengl" && (o.upscaler!="bilinear" || o.frame_generation))
         throw std::invalid_argument("OpenGL renders natively; select Vulkan for FSR 3.1.4");
+    if (o.texture_detail<0 || o.texture_detail>2 || o.lightmap_detail<0 || o.lightmap_detail>2)
+        throw std::invalid_argument("texture_detail/lightmap_detail require an integer in 0..2");
     if (o.frame_generation && o.upscaler!="fsr3") throw std::invalid_argument("--frame-generation on requires --upscaler fsr3");
     if (o.host.empty() || o.ca.empty() || !o.session_stdin || (!o.character && (o.headless || o.auth.empty())))
         throw std::invalid_argument("explicit host, CA, --session-stdin and --character (or graphical --auth) are required");
@@ -202,6 +216,7 @@ Options parse_options(int argc,char** argv) {
     if (o.renderer!="opengl" && o.renderer!="vulkan") throw std::invalid_argument("unknown renderer");
     if (o.appearance!="original" && o.appearance!="enhanced") throw std::invalid_argument("unknown appearance");
     if (o.rt!="off" && o.rt!="auto" && o.rt!="required") throw std::invalid_argument("unknown RT policy");
+    if (o.rt_style!="faithful" && o.rt_style!="physical") throw std::invalid_argument("unknown RT style");
     if (o.width<640 || o.width>3840 || o.height<480 || o.height>2160 || !std::isfinite(o.volume) || o.volume<0 || o.volume>1 ||
         !std::isfinite(o.music_volume) || o.music_volume<0 || o.music_volume>1 ||
         std::any_of(o.prefs.begin(),o.prefs.end(),[](float p){return !std::isfinite(p) || p<0 || p>1;}))
@@ -498,6 +513,8 @@ class Application {
     bool quit_=false,disconnected_=false,editing_=false,reconnect_=false,captured_=false;
     std::string screenshot_request_; // PrintScreen file name, written after the next rendered frame (00468010)
     bool hud_dirty_=true;
+    bool world_dirty_=false; // only name labels/floaters changed: paint_world alone (hud_dirty_ repaints both)
+    std::size_t label_hits_=0; // hits_ prefix painted by paint_labels
     int clock_minute_=-1; // last painted server clock minute
     Json hud_values_=Json::object(),hud_entities_=Json::array();
     std::string input_,selected_uid_;
@@ -526,8 +543,17 @@ class Application {
         Clock::time_point died_at{}; // death seen (entity +0x1a8 stamp): Ölü Yok Olma Süresi hides the body later
         float height=head_height; // label/floater anchor above the feet: classes.dat bounds box top (see class_bounds)
         std::array<float,3> bounds{}; // classes.dat half extents; the hover/click ray box (entity_at)
+        bool skin_offscreen=false; // hold_offscreen_skins: last frame's skin was held because the actor was out of view
+        std::uint64_t assembly=0; // serial of the latest model request (attach_models); older worker results are dropped
     };
     std::vector<ActorState> actors_;
+    struct AssemblyRequest { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::string member; ikv::SourceAppearance source; };
+    struct AssemblyResult { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::optional<ikv::PreparedActor> actor; std::string error; std::exception_ptr fatal; };
+    struct AssemblyBatch { std::vector<AssemblyResult> results; std::vector<ikv::Texture> textures; }; // textures: decoded once per batch
+    std::vector<AssemblyRequest> assembly_queue_;
+    std::uint64_t assembly_serial_=0;
+    ikv::Scene actor_context_; // actor tables and decoded models, kept across zones; the worker's alone while assembly_ runs
+    std::future<AssemblyBatch> assembly_; // declared after actor_context_, so destruction joins the worker first
     ikv::assets::DdsImage original_ui1_{},original_ui2_{};
     std::vector<std::pair<std::string,ikv::assets::DdsImage>> help_images_;
     std::vector<ikv::SourceSkill> source_skills_;
@@ -763,7 +789,7 @@ private:
             const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=mutation.source;
             if (loading) begin_loading();
             load_authoritative_scene(mutation.source);
-            attach_models(mutation);
+            attach_models(mutation,loading);
             if (loading) { loading_stage(1); loading_=false; } // the first real frame's GPU upload keeps this frame presented
             for (std::size_t i=0;i<mutation.actors.size();++i) {
                 const auto& row=*mutation.actors[i];
@@ -773,6 +799,7 @@ private:
             }
             handle_events(mutation.events);
         }
+        poll_assembly();
         const bool changed_state=state_pending_;
         if (changed_state) { state_=session_->state; state_pending_=false; }
         bool changed_snapshot=false;
@@ -805,6 +832,7 @@ private:
         renderer_.reset();
         ikv::RendererOptions ro; ro.camera=camera; ro.original_appearance=options_.appearance=="original";
         ro.ray_tracing=options_.rt=="required"?ikv::RayTracing::required:options_.rt=="auto"?ikv::RayTracing::automatic:ikv::RayTracing::off;
+        ro.rt_style=options_.rt_style=="physical"?ikv::RtStyle::physical:ikv::RtStyle::faithful;
         ro.render_scale=static_cast<float>(options_.render_scale);
         ro.upscaler=options_.upscaler=="fsr3"?ikv::Upscaler::fsr3:ikv::Upscaler::bilinear;
         ro.fsr_quality=fsr_quality(options_.fsr_mode); ro.fsr_sharpness=static_cast<float>(options_.fsr_sharpness);
@@ -1200,6 +1228,40 @@ private:
         }
         return true;
     }
+    // Original 00476eb0 skins an actor only while its root's frustum flag (+0xf4, root_visible above) is set; held actors
+    // keep their clip clocks and bones (SceneActorAssembly::skin_held). Here the box is padded (swings and falls leave
+    // the classes.dat box) and swept along the sun shadow, which RT casts into view from outside it. Uses this frame's
+    // poses and camera; returns whether an actor held off screen came into view, whose skin must be redone before render.
+    bool hold_offscreen_skins() {
+        bool released=false;
+        if (!renderer_ || width_<=0 || height_<=0) return released;
+        const auto planes=ikv::frustum_planes(ikv::camera_view_projection(renderer_->camera(),width_,height_));
+        const auto& light=scene_.lighting;
+        const auto sun=light.source_values?light.sun_direction:std::array<float,3>{.48f,.78f,.4f};
+        // The shadow of the box top lands h·(sun.xz/sun.y) away from the sun; low suns are capped at 80 units.
+        const float horizontal=std::hypot(sun[0],sun[2]),run=sun[1]>0?horizontal/sun[1]:1e9f;
+        for (auto& assembly:scene_.actor_assemblies) {
+            auto* actor=actor_state(assembly.entity_id);
+            const auto* p=actor?pose(assembly.entity_id):nullptr;
+            bool visible=true; // no pose: not drawn this frame, keep its skin current for when it is
+            if (p && !(session_ && p->id==session_->self)) {
+                const float h=actor->height,rx=std::max({actor->bounds[0],actor->bounds[2],1.5f})*1.5f+1,ry=h*.75f+1;
+                const float cx=p->x,cy=p->ground_y+h*.5f,cz=p->z;
+                const float length=std::min(h*run,80.f),dx=horizontal>0?-sun[0]/horizontal*length:0,dz=horizontal>0?-sun[2]/horizontal*length:0;
+                for (const auto& n:planes) {
+                    const float r=rx*(std::abs(n[0])+std::abs(n[2]))+ry*std::abs(n[1]);
+                    const float d=n[0]*cx+n[1]*cy+n[2]*cz+n[3];
+                    if (d<-r && d+n[0]*dx-n[1]*h*.5f+n[2]*dz<-r) { visible=false; break; }
+                }
+            }
+            if (actor) {
+                released|=visible && actor->skin_offscreen && assembly.skin_held;
+                actor->skin_offscreen=!visible;
+            }
+            assembly.skin_held=!visible;
+        }
+        return released;
+    }
     // Project visible actors for body picking and name tags; repaint the overlay only when a tag moves.
     // Original name tags (0046fdb0 loop 00471a00..00471c9b): only for another PC (classid +0x1a4 < 8, entity type
     // flags & 0xf == 1) whose root passed the frustum visibility test (+0xf4, 0047cf50/0047c820; the box occlusion
@@ -1234,8 +1296,8 @@ private:
         for (;;++a,++b) {
             while (a!=labels_.cend() && !a->name) ++a;
             while (b!=next.cend() && !b->name) ++b;
-            if (a==labels_.cend() || b==next.cend()) { if (a!=labels_.cend() || b!=next.cend()) hud_dirty_=true; break; }
-            if (a->id!=b->id || a->tx!=b->tx || a->ty!=b->ty) { hud_dirty_=true; break; }
+            if (a==labels_.cend() || b==next.cend()) { if (a!=labels_.cend() || b!=next.cend()) world_dirty_=true; break; }
+            if (a->id!=b->id || a->tx!=b->tx || a->ty!=b->ty) { world_dirty_=true; break; }
         }
         labels_=std::move(next);
     }
@@ -2513,7 +2575,7 @@ private:
         for (auto it=floaters_.rbegin();it!=floaters_.rend();++it) if (it->id==id) { const float shown=floater_offset(*it,now); if (shown<static_cast<float>(lh()-2)) start=shown-static_cast<float>(lh()+2); break; }
         if (floaters_.size()==64) floaters_.pop_front();
         floaters_.push_back({id,std::move(text),original_rgba(argb),now,start});
-        hud_dirty_=true;
+        world_dirty_=true;
     }
     // Called with the new state before hud_values_ records it. Shown for self, group members and monsters (0047c1ba).
     void stat_floaters(const Json& state) {
@@ -2633,8 +2695,9 @@ private:
     // Per-frame HUD upkeep before paint_hud: text expiry, map repaint, F4 camera lock, cursor.
     void hud_frame() {
         const auto now=Clock::now();
+        const auto floating=floaters_.size();
         while (!floaters_.empty() && now-floaters_.front().born>=std::chrono::milliseconds(2000)) floaters_.pop_front(); // 00479720: 0x7d0 ms
-        if (!floaters_.empty()) hud_dirty_=true;
+        if (!floaters_.empty() || floaters_.size()!=floating) world_dirty_=true; // the frame after the last expiry clears it
         if (const auto* self=session_?pose(session_->self):nullptr) {
             // ponytail: CPU overlay repaints per moved map texel and 4x/s for dots; a GPU map quad if HUD cost shows up.
             const std::array<int,2> center{static_cast<int>(1024-self->x*map_scale),static_cast<int>(1024-self->z*map_scale)};
@@ -2782,13 +2845,23 @@ private:
         const auto [mx,my]=pixel(mouse_x,mouse_y);
         return inside({x,y,w,h},mx,my);
     }
+    // Name labels and floaters are world-anchored and beneath every HUD window (painted first), so they live on ClientUI's
+    // world layer: when only they moved, paint_world alone repaints and uploads their old and new boxes. Their hits stay the
+    // lowest-priority prefix of hits_.
+    void paint_world() {
+        hits_.erase(hits_.begin(),hits_.begin()+static_cast<std::ptrdiff_t>(label_hits_));
+        const auto rest=hits_.size();
+        ui_->begin_world(); paint_labels(); paint_floaters(); ui_->end_world();
+        std::rotate(hits_.begin(),hits_.begin()+static_cast<std::ptrdiff_t>(rest),hits_.end());
+        label_hits_=hits_.size()-rest; world_dirty_=false;
+    }
+    void present_hud() { if (const auto changed=ui_->compose(); !changed.empty()) renderer_->set_overlay(ui_->overlay(),changed); }
     void paint_hud() {
-        ui_->begin(width_,height_); hits_.clear(); drags_.clear(); window_rects_.clear(); tip_.clear();
+        ui_->begin(width_,height_); hits_.clear(); label_hits_=0; drags_.clear(); window_rects_.clear(); tip_.clear();
         const auto& st=character_state(state_);
         std::string name="Karakter doğrulanıyor";
         if (session_ && state_.contains("character")) name=state_.at("character").value("name",name);
-        paint_labels();
-        paint_floaters();
+        paint_world();
         paint_frames(st,name);
         paint_chat();
         paint_bar();
@@ -2805,7 +2878,7 @@ private:
             Json traced=Json::array(); for (const auto& [r,payload]:drags_) traced.push_back({r[0],r[1],r[2],r[3],payload});
             if (auto text=traced.dump(); text!=drag_trace_) { drag_trace_=std::move(text); std::cerr<<"HUD drags="<<drag_trace_<<'\n'; }
         }
-        renderer_->set_overlay(ui_->overlay()); hud_dirty_=false;
+        present_hud(); hud_dirty_=false;
     }
     void source_icon(float x,float y,float size,int selector,std::uint32_t tint=0xffffffff) {
         if (selector<0) return; // Source selector UINT32_MAX has an empty UV extent.
@@ -2832,7 +2905,11 @@ private:
         const auto found=std::find_if(actors_.begin(),actors_.end(),[id](const auto& actor){return actor.id==id;});
         return found==actors_.end()?nullptr:&*found;
     }
-    void attach_models(const PendingMutation& mutation) {
+    // Actor models are assembled on a worker (prepare_* against actor_context_) and installed on a later frame: an actor
+    // entering view mid-session appears when ready instead of stalling the frame loop. Zone entry still waits behind the
+    // loading screen, as the original zone load does. Each request carries a serial; a result whose actor despawned or was
+    // re-dressed meanwhile is dropped.
+    void attach_models(const PendingMutation& mutation,bool loading) {
         struct ModelChange {
             std::shared_ptr<const Json> data;
             std::string member;
@@ -2873,46 +2950,83 @@ private:
             changes.push_back(std::move(change));
         }
         if (changes.empty() && removed.empty()) return;
-        auto& scene=scene_; const auto& root=options_.assets;
-        std::vector<std::uint32_t> unassembled;
-        load_cpu([&] {
-            for (const auto id:removed) ikv::detach_source_actor(scene,id);
-            for (const auto& change:changes) {
-                const auto id=change.data->at("id").get<std::uint32_t>();
-                if (!change.member.empty()) { ikv::attach_entity_model(scene,root,change.member,id); continue; }
-                // An original record the source client could not assemble either (e.g. classes.dat uid 900/901
-                // templates) leaves only the entity's name label; it must not end the session.
-                const bool pc=change.data->at("pc").get<bool>();
-                const auto uid=change.data->value("source_uid",0u);
-                try {
-                    if (pc) ikv::attach_source_actor(scene,root,change.source,id);
-                    else ikv::attach_source_npc(scene,root,uid,id,change.source.equipment);
-                } catch (const std::exception& error) {
-                    std::cerr<<"actor "<<id<<(pc?" class ":" source uid ")<<(pc?change.source.source_class:uid)<<" not rendered: "<<error.what()<<'\n';
-                    unassembled.push_back(id);
-                }
-            }
-        });
+        for (const auto id:removed) ikv::detach_source_actor(scene_,id);
         std::erase_if(actors_,[&](const auto& actor){return std::find(removed.begin(),removed.end(),actor.id)!=removed.end();});
-        for (const auto& change:changes) {
+        for (auto& change:changes) {
             const auto& data=*change.data;
             const auto id=data.at("id").get<std::uint32_t>();
             auto* actor=actor_state(id);
-            if (actor) actor->locomotion_dirty=true;
-            else { actors_.push_back({}); actor=&actors_.back(); actor->id=id; }
+            if (!actor) { actors_.push_back({}); actor=&actors_.back(); actor->id=id; }
             actor->binding={{"member",change.member},{"appearance",data.at("appearance")},
                 {"equipment",data.at("equipment")},{"uid",data.value("source_uid",0u)}};
-            actor->source_class=change.source.source_class; actor->bounds=class_bounds(actor->source_class);
-            actor->height=actor->bounds[1]>0?2*actor->bounds[1]:head_height; hud_dirty_=true;
-            // 00473e69 copies the class record's shadowtype (absent = empty = no shadow; PC body roots carry none).
-            actor->shadow.clear();
-            if (const auto uid=data.value("source_uid",0u); uid && !data.at("pc").get<bool>() && std::find(unassembled.begin(),unassembled.end(),id)==unassembled.end())
-                for (const auto& record:scene_.actor_tables.source_records) if (record.uid==uid && (record.tag=="npc" || record.tag=="monster")) { actor->shadow=record.shadow; break; }
-            actor->node=data.value("kind",std::string{})=="node";
-            actor->weapon.clear(); actor->pose=2;
-            for (const auto& item:data.at("equipment")) if (item.at("slot")==11)
-                for (const auto& record:scene_.actor_tables.source_records)
-                    if (record.tag=="object" && record.uid==item.at("source_uid").get<unsigned>()) { actor->weapon=record.object_type; actor->pose=record.pose>0?static_cast<unsigned>(record.pose):6; break; }
+            actor->source_class=change.source.source_class; actor->assembly=++assembly_serial_;
+            // Bounds, weapon and stance apply at once (labels, picking, locomotion); the shadow waits for the new model.
+            if (scene_.actor_tables.loaded) describe_actor(*actor,data,actor_controller(id)!=nullptr);
+            assembly_queue_.push_back({actor->assembly,std::move(change.data),std::move(change.member),std::move(change.source)});
+        }
+        if (!loading && scene_.actor_tables.loaded) return; // poll_assembly starts the worker
+        if (assembly_.valid()) install_models(load_cpu([&]{return assembly_.get();}));
+        // ponytail: whole-cache reset at a zone entry past half the 4096-model budget; LRU if long sessions thrash it.
+        if (actor_context_.model_resources.size()>2048) actor_context_.model_resources.clear();
+        install_models(load_cpu([&,requests=std::move(assembly_queue_),resident=resident_textures()]{return assemble(requests,resident);}));
+        assembly_queue_.clear();
+    }
+    // Each frame after the mutations: install a finished batch, then start the next one.
+    void poll_assembly() {
+        if (assembly_.valid() && assembly_.wait_for(std::chrono::seconds(0))==std::future_status::ready) install_models(assembly_.get());
+        if (assembly_.valid() || assembly_queue_.empty()) return;
+        assembly_=std::async(std::launch::async,[this,requests=std::move(assembly_queue_),resident=resident_textures()]{return assemble(requests,resident);});
+        assembly_queue_.clear();
+    }
+    ikv::Scene resident_textures() const { // names only: the worker decodes just what the scene lacks
+        ikv::Scene resident; resident.textures.resize(scene_.textures.size());
+        for (std::size_t i=0;i<scene_.textures.size();++i) resident.textures[i].name=scene_.textures[i].name;
+        return resident;
+    }
+    // Worker side: touches actor_context_ and the requests only.
+    AssemblyBatch assemble(const std::vector<AssemblyRequest>& requests,ikv::Scene resident) {
+        AssemblyBatch batch; batch.results.reserve(requests.size());
+        const auto& root=options_.assets;
+        for (const auto& request:requests) {
+            auto& result=batch.results.emplace_back(); result.serial=request.serial; result.data=request.data;
+            const auto id=request.data->at("id").get<std::uint32_t>();
+            const bool pc=request.data->at("pc").get<bool>();
+            try {
+                if (!request.member.empty()) result.actor=ikv::prepare_entity_model(actor_context_,root,request.member,id,&resident);
+                else if (pc) result.actor=ikv::prepare_source_actor(actor_context_,root,request.source,id,&resident);
+                else result.actor=ikv::prepare_source_npc(actor_context_,root,request.data->value("source_uid",0u),id,request.source.equipment,&resident);
+            } catch (const std::exception& error) {
+                if (!request.member.empty()) result.fatal=std::current_exception(); // an explicit model override must exist
+                else result.error=error.what();
+            }
+            // One decoded copy per batch: later requests see it as resident, install adds the pool before any model.
+            if (result.actor) for (auto& texture:result.actor->model.textures) {
+                resident.textures.emplace_back().name=texture.name;
+                batch.textures.push_back(std::move(texture));
+            }
+            if (result.actor) result.actor->model.textures.clear();
+        }
+        return batch;
+    }
+    void install_models(AssemblyBatch batch) {
+        for (auto& message:actor_context_.diagnostics) scene_.diagnostics.push_back(std::move(message));
+        actor_context_.diagnostics.clear();
+        if (!scene_.actor_tables.loaded && actor_context_.actor_tables.loaded) scene_.actor_tables=actor_context_.actor_tables;
+        if (std::none_of(batch.results.begin(),batch.results.end(),[&](const auto& r){const auto* a=actor_state(r.data->at("id").template get<std::uint32_t>());return a && a->assembly==r.serial;})) return;
+        for (auto& texture:batch.textures)
+            if (std::none_of(scene_.textures.begin(),scene_.textures.end(),[&](const auto& old){return old.name==texture.name;})) scene_.textures.push_back(std::move(texture));
+        for (auto& result:batch.results) {
+            if (result.fatal) std::rethrow_exception(result.fatal);
+            const auto& data=*result.data;
+            const auto id=data.at("id").get<std::uint32_t>();
+            auto* actor=actor_state(id);
+            if (!actor || actor->assembly!=result.serial) continue;
+            const bool fresh=!actor_controller(id);
+            if (result.actor) { ikv::install_actor(scene_,std::move(*result.actor)); if (!fresh) actor->locomotion_dirty=true; }
+            // An original record the source client could not assemble either (e.g. classes.dat uid 900/901 templates) leaves
+            // only the entity's name label; it must not end the session.
+            else { const bool pc=data.at("pc").get<bool>(); std::cerr<<"actor "<<id<<(pc?" class ":" source uid ")<<(pc?actor->source_class:data.value("source_uid",0u))<<" not rendered: "<<result.error<<'\n'; }
+            describe_actor(*actor,data,result.actor.has_value());
             // A rebuilt model starts in its bind pose: a body re-dressed while dead (equipment/durability change) keeps lying.
             if (!actor->alive && !actor->node) lie(*actor);
             // Original hcpe handler 004a6720 starts the own character on clip 27 (Idle_LookAround) when it enters the world.
@@ -2926,7 +3040,23 @@ private:
             else if (!actor->node && pick_clip(*actor,[](const ikv::ActorClip& c){return c.id==2 && c.state==8;})!=UINT32_MAX) {
                 if (const auto clip=state_clip(*actor,3); clip!=UINT32_MAX) actor_action(*actor,clip);
             }
+            // A node whose life arrived while it assembled gets actor_life's initial clip now.
+            if (actor->node && fresh && actor->hp>=0)
+                if (const auto clip=pick_clip(*actor,[&](const ikv::ActorClip& c){return c.id==(actor->alive?1u:3u);}); clip!=UINT32_MAX) actor_action(*actor,clip,false,!actor->alive);
         }
+    }
+    void describe_actor(ActorState& actor,const Json& data,bool assembled) {
+        actor.bounds=class_bounds(actor.source_class);
+        actor.height=actor.bounds[1]>0?2*actor.bounds[1]:head_height; hud_dirty_=true;
+        // 00473e69 copies the class record's shadowtype (absent = empty = no shadow; PC body roots carry none).
+        actor.shadow.clear();
+        if (const auto uid=data.value("source_uid",0u); uid && !data.at("pc").get<bool>() && assembled)
+            for (const auto& record:scene_.actor_tables.source_records) if (record.uid==uid && (record.tag=="npc" || record.tag=="monster")) { actor.shadow=record.shadow; break; }
+        actor.node=data.value("kind",std::string{})=="node";
+        actor.weapon.clear(); actor.pose=2;
+        for (const auto& item:data.at("equipment")) if (item.at("slot")==11)
+            for (const auto& record:scene_.actor_tables.source_records)
+                if (record.tag=="object" && record.uid==item.at("source_uid").get<unsigned>()) { actor.weapon=record.object_type; actor.pose=record.pose>0?static_cast<unsigned>(record.pose):6; break; }
     }
     void actor_action(ActorState& actor,unsigned clip,bool restart=false,bool terminal=false) {
         if (!actor.binding.at("member").get_ref<const std::string&>().empty()) return; // Explicit inspection override has no canonical action policy.
@@ -4085,6 +4215,7 @@ private:
             if (const long long shown=ms<1?-1:ms/1000; shown!=resurrect_shown_) { resurrect_shown_=shown; hud_dirty_=true; }
         }
         if (hud_dirty_) paint_hud();
+        else if (world_dirty_) { paint_world(); present_hud(); }
         if (effects_) {
             effects_->update(dt,poses_);
             for (const auto& actor:actors_) if (!actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);
@@ -4141,6 +4272,8 @@ private:
             const Json* e=entity(pose.id);
             if (e && !(e->value("kind",std::string{})=="enemy" && !e->value("alive",true))) pose.contour={1,0,0};
         }
+        // Next frame's update_scene skips actors out of view; one that came into view now is skinned before it is drawn.
+        if (hold_offscreen_skins()) ikv::update_scene(scene_,elapsed_);
         renderer_->render(scene_,poses_,session_?session_->self:0,dt);
         if (trade_pending_present_) {
             if (trade_.active() && trade_.revision()==trade_painted_revision_) {
@@ -4169,9 +4302,10 @@ private:
         w=std::clamp(w,640,3840); h=std::clamp(h,480,2160);
         const auto& c=renderer_->camera();
         Json settings{{"width",w},{"height",h},{"fullscreen",options_.fullscreen},{"volume",options_.volume},{"music_volume",options_.music_volume},{"renderer",options_.renderer},
-            {"appearance",options_.appearance},{"rt",options_.rt},{"render_scale",options_.render_scale},
+            {"appearance",options_.appearance},{"rt",options_.rt},{"rt_style",options_.rt_style},{"render_scale",options_.render_scale},
             {"upscaler",options_.upscaler},{"fsr_mode",options_.fsr_mode},{"fsr_sharpness",options_.fsr_sharpness},
-            {"frame_generation",options_.frame_generation},{"preferences",options_.prefs},
+            {"frame_generation",options_.frame_generation},{"texture_detail",options_.texture_detail},
+            {"lightmap_detail",options_.lightmap_detail},{"preferences",options_.prefs},
             {"camera",{{"yaw",c.yaw},{"pitch",c.pitch},{"distance",options_.camera.distance}}}};
         const auto temp=options_.settings.string()+".tmp";
         std::ofstream file(temp,std::ios::trunc); file << settings.dump(2) << '\n'; file.close();
@@ -4183,6 +4317,7 @@ private:
 int main(int argc,char** argv) {
     try {
         const auto options=parse_options(argc,argv);
+        ikv::set_texture_detail(static_cast<unsigned>(options.texture_detail),static_cast<unsigned>(options.lightmap_detail));
 #if !IKV_HAS_VULKAN
         if (options.renderer=="vulkan")
             throw std::runtime_error("Vulkan renderer is unavailable in this OpenGL-only build; rebuild with IKV_BUILD_VULKAN=ON");

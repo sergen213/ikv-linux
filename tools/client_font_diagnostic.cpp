@@ -159,7 +159,11 @@ struct Reference {
         require(FcPatternAddString(pattern.get(), FC_FAMILY, reinterpret_cast<const FcChar8*>("sans-serif")) &&
                 FcPatternAddBool(pattern.get(), FC_SCALABLE, FcTrue), "Fontconfig family/scalable setup failed");
         require(FcConfigSubstitute(config.get(), pattern.get(), FcMatchPattern), "Fontconfig substitution failed");
+#if FC_VERSION >= 21700  // as ClientUI: FcDefaultSubstitute would load (and keep) a second, global current config
+        FcConfigSetDefaultSubstitute(config.get(), pattern.get());
+#else
         FcDefaultSubstitute(pattern.get());
+#endif
         FcResult result{};
         fonts.reset(FcFontSort(config.get(), pattern.get(), FcFalse, nullptr, &result));
         require(fonts != nullptr && fonts->nfont > 0, "No native Fontconfig faces");
@@ -397,6 +401,60 @@ void check_image_api(ikv::ClientUI& ui) {
     std::cout << "PASS synthetic decoded image API edges (not original raster-parity evidence)\n";
 }
 
+// ClientUI's world layer (name labels, floaters) beneath the HUD: compose() must show what painting both into one overlay,
+// world text first, shows, and a later world-only pass must equal a full repaint while listing every changed pixel.
+void check_world_layer(const std::filesystem::path& font) {
+    const int width = 200, height = 90;
+    const auto hud = [](ikv::ClientUI& ui) {
+        ui.rect(0, 0, 70, 40, {40, 50, 60, 255});      // opaque window
+        ui.rect(120, 30, 80, 60, {200, 30, 20, 140});  // translucent panel
+        ui.text(4, 4, "HUD", {255, 255, 255, 255});
+    };
+    const auto world = [](ikv::ClientUI& ui, int x, int y) {
+        for (const auto& [dx, dy] : std::array<std::array<int, 2>, 2>{{{1, 1}, {0, 0}}}) // label(): shadow, then text
+            ui.text(x + dx, y + dy, "Şükrü <Lonca>", dx ? std::array<std::uint8_t, 4>{0, 0, 0, 255} : std::array<std::uint8_t, 4>{51, 204, 204, 255});
+    };
+    const auto full = [&](int x, int y, bool layered) {
+        auto ui = std::make_unique<ikv::ClientUI>(font, 16);
+        ui->begin(width, height);
+        if (layered) ui->begin_world();
+        world(*ui, x, y);
+        if (layered) ui->end_world();
+        hud(*ui);
+        if (layered) {
+            const auto changed = ui->compose();
+            require(changed.size() == 1 && changed[0] == std::array<int, 4>{0, 0, width, height}, "world layer: a full paint changes all");
+        }
+        return ui;
+    };
+    // Away from translucent HUD pixels the composite equals sequential painting exactly.
+    equal_pixels(full(80, 2, true)->overlay(), full(80, 2, false)->overlay(), "world layer composite == sequential paint");
+    auto ui = full(10, 30, true); // under the opaque window and in the open
+    for (const auto& [x, y] : std::array<std::array<int, 2>, 4>{{{11, 31}, {100, 50}, {150, 60}, {-30, 80}}}) {
+        const auto before = ui->overlay();
+        ui->begin_world(); world(*ui, x, y); ui->end_world();
+        const auto changed = ui->compose();
+        equal_pixels(ui->overlay(), full(x, y, true)->overlay(), "world-only pass == full repaint");
+        for (std::size_t i = 0; i < changed.size(); ++i)
+            for (std::size_t j = i + 1; j < changed.size(); ++j)
+                require(changed[i][0] + changed[i][2] <= changed[j][0] || changed[j][0] + changed[j][2] <= changed[i][0] ||
+                        changed[i][1] + changed[i][3] <= changed[j][1] || changed[j][1] + changed[j][3] <= changed[i][1],
+                        "world layer: changed rectangles overlap");
+        for (int py = 0; py < height; ++py)
+            for (int px = 0; px < width; ++px) {
+                const auto at = (std::size_t(py) * width + std::size_t(px)) * 4;
+                if (std::equal(before.rgba.begin() + std::ptrdiff_t(at), before.rgba.begin() + std::ptrdiff_t(at + 4), ui->overlay().rgba.begin() + std::ptrdiff_t(at))) continue;
+                require(std::any_of(changed.begin(), changed.end(), [&](const auto& r) { return px >= r[0] && px < r[0] + r[2] && py >= r[1] && py < r[1] + r[3]; }),
+                        "world layer: a changed pixel lies outside every changed rectangle");
+            }
+    }
+    ui->begin_world(); ui->end_world();
+    require(!ui->compose().empty(), "world layer: removing the last label must clear its box");
+    ui->begin_world(); ui->end_world();
+    require(ui->compose().empty(), "world layer: an unchanged empty pass uploads nothing");
+    std::cout << "PASS world layer composite, dirty rectangles and world-only repaint\n";
+}
+
 void exercise(const std::filesystem::path& font, int size, bool human, bool print_metadata,
               const std::filesystem::path& raster_directory) {
     std::cout << "role=" << (human ? "human text" : "explicit icon resource API")
@@ -547,7 +605,7 @@ void exercise(const std::filesystem::path& font, int size, bool human, bool prin
                  "Translated raster alignment");
     std::cout << "PASS multiline max-width and translated measured-advance alignment advance=" << advance
               << " dx=" << dx << " dy=" << dy << '\n';
-    if (human && size == 16) check_image_api(ui);
+    if (human && size == 16) { check_image_api(ui); check_world_layer(font); }
 }
 } // namespace
 

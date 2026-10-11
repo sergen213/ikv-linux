@@ -1,3 +1,4 @@
+#include "ikv/release_defaults.hpp"
 #include "ikv/updates.hpp"
 #include "ikv/launcher_assets.hpp"
 #include "ikv/launcher_extraction.hpp"
@@ -16,6 +17,8 @@
 #include <QSslSocket>
 #include <QTextDocument>
 #include <QThread>
+#include <cstring>
+#include <vector>
 #include <cstdio>
 #include <algorithm>
 #include <QCheckBox>
@@ -55,6 +58,7 @@
 #include <QStandardPaths>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -108,18 +112,81 @@ bool frameProcessLines(QByteArray& pending, const QByteArray& chunk, const QByte
     if (finished && !pending.isEmpty()) publish();
     return true;
 }
+// Startup argv before QApplication strips Qt options; handoff/restart re-exec with exactly these.
+std::vector<QByteArray> startArguments;
+// ikv-updater and verify_release take a PEM path: an empty trust setting selects the compiled-in
+// release key, materialised once per process in a private temporary file (removed before exec).
+std::unique_ptr<QTemporaryFile> builtinTrust;
+QString trustPem(const QString& configured) {
+    if (!configured.isEmpty()) return configured;
+    if (!builtinTrust) {
+        auto file = std::make_unique<QTemporaryFile>(QDir::tempPath() + "/ikv-release-trust-XXXXXX.pem");
+        const QByteArray pem(ikv::release::trust_pem);
+        if (!file->open() || file->write(pem) != pem.size() || !file->flush())
+            throw std::runtime_error("Yerleşik sürüm anahtarı hazırlanamadı");
+        builtinTrust = std::move(file);
+    }
+    return builtinTrust->fileName();
+}
+// The signed, hash-verified bin/ikv-linux.AppImage of <root>/current; empty when nothing is installed
+// or (onlyNewer) the installed release is not SemVer-newer than this build.
+QString installedAppImage(const QString& root, const QString& trust, bool onlyNewer) {
+    if (!QFileInfo(root + "/current").isSymLink()) return {};
+    const auto release = std::filesystem::canonical(fs(root) / "current");
+    const auto version = release.filename().string();
+    if (onlyNewer && ikv::updates::compare_versions(version, ikv::release::version) <= 0) return {};
+    const auto manifest = ikv::updates::verify_release(fs(root), version, fs(trustPem(trust)));
+    if (release != std::filesystem::canonical(fs(root) / "releases" / version))
+        throw std::runtime_error("Kurulu sürüm işaretçisi releases/ dışına çıkıyor");
+    if (std::none_of(manifest.files.begin(), manifest.files.end(), [](const auto& file) { return file.path == "bin/ikv-linux.AppImage" && file.executable; }))
+        throw std::runtime_error("Kurulu " + version + " sürümü bir AppImage (bin/ikv-linux.AppImage) içermiyor");
+    return QString::fromStdString((release / "bin/ikv-linux.AppImage").string());
+}
+// Replace this process with appImage (same argv). IKV_UPDATE_HANDOFF stops a handoff loop even if a
+// release's manifest version disagrees with its compiled version. Returns only by throwing.
+[[noreturn]] void execInto(const QString& appImage) {
+    builtinTrust.reset();
+    ::setenv("IKV_UPDATE_HANDOFF", "1", 1);
+    const QByteArray path = QFile::encodeName(appImage);
+    std::vector<char*> argv{const_cast<char*>(path.constData())};
+    for (std::size_t i = 1; i < startArguments.size(); ++i) argv.push_back(startArguments[i].data());
+    argv.push_back(nullptr);
+    std::fflush(nullptr);
+    ::execv(path.constData(), argv.data());
+    throw std::runtime_error("Yeni sürüm başlatılamadı (" + path.toStdString() + "): " + std::strerror(errno));
+}
+// Startup handoff: an installed, verified release newer than this build takes over. Returns the
+// Turkish reason when an installed release exists but cannot be used (shown, never ignored).
+QString handoff() {
+    if (qEnvironmentVariableIsSet("IKV_UPDATE_HANDOFF")) return {};
+    try {
+        QSettings settings;
+        const QString target = installedAppImage(settings.value("installation/root", dataRoot()).toString(),
+                                                 settings.value("updates/trust").toString(), true);
+        if (!target.isEmpty()) execInto(target);
+        return {};
+    } catch (const std::exception& e) {
+        return "Kurulu güncelleme kullanılamadı; bu sürümle devam ediliyor: " + failure(e);
+    }
+}
 class Launcher final : public QWidget {
     QSettings settings;
     QNetworkAccessManager network;
     QLineEdit *root{}, *assetSource{}, *extractor{}, *username{}, *password{}, *repo{}, *trust{},
         *updateCa{}, *releaseApi{}, *modelMap{}, *audioPath{}, *soundMap{}, *serverName{}, *serverAddress{}, *serverCa{};
-    QComboBox *profiles{}, *renderer{}, *appearance{}, *rayTracing{}, *channel{};
+    QComboBox *profiles{}, *renderer{}, *appearance{}, *rayTracing{}, *rtStyle{}, *channel{};
+    QComboBox *textureDetail{}, *lightmapDetail{}; // index = original TextureDetail/LightmapDetail pref (0 = *_4.DAT .. 2 = *_1.DAT)
     QSpinBox *width{}, *height{}, *volume{};
     QDoubleSpinBox *renderScale{}, *fsrSharpness{};
     QComboBox *upscaler{}; // data: off (bilinear render scale) or an FSR 3.1.4 preset
     QCheckBox *fullscreen{}, *frameGeneration{}, *hostAfterInstall{};
     QPlainTextEdit *logs{};
-    QLabel *status{}, *installNote{};
+    QLabel *status{}, *installNote{}, *updateLabel{};
+    QWidget* updateBanner{}; // 'Güncelleme mevcut' + Güncelle / Yeniden başlat
+    QPushButton* updateNow{};
+    QJsonObject offeredRelease; // newest channel release newer than this build (from the release API)
+    QString offeredVersion;
+    bool updateInstalled = false;
     QProgressBar *progress{};
     QStackedWidget *pages{};
     QWidget *installPage{}, *loginPage{}, *playPage{};
@@ -135,6 +202,7 @@ class Launcher final : public QWidget {
         qint64 bytes = 0, limit = 0;
         QUrl origin;
         bool github = false;
+        std::function<void(const QString&)> fail; // set: report failures here instead of error()
         bool allows(const QUrl& url) const {
             if (github) return url.port(443) == 443 && (url.host() == "api.github.com" || url.host() == "github.com" || url.host().endsWith(".githubusercontent.com"));
             return url.scheme() == origin.scheme() && url.host() == origin.host() && url.port(443) == origin.port(443);
@@ -185,15 +253,17 @@ class Launcher final : public QWidget {
         const QString line = QDateTime::currentDateTimeUtc().toString(Qt::ISODate) + " " + message;
         logs->appendPlainText(line);
         if (skinLog) skinLog->appendPlainText(line);
+        if (automation) fprintf(stderr, "%s\n", line.toUtf8().constData()); // --update-once: the log is the diagnostic
     }
     void setBusy(bool value) {
         busy = value; pages->setEnabled(!value); settingsDialog->setEnabled(!value);
+        if (updateBanner) updateBanner->setEnabled(!value);
         progress->setRange(0, value ? 0 : 1); progress->setVisible(value || !skinFrame.isNull());
         syncSkin();
     }
     void error(const QString& message) {
         setBusy(false); status->setText(message); log(message);
-        if (automation) { fprintf(stderr, "%s\n", message.toUtf8().constData()); QCoreApplication::exit(1); }
+        if (automation) QCoreApplication::exit(1);
         else { auto* owner = QApplication::activeModalWidget(); QMessageBox::warning(owner ? owner : this, "İKV", message); }
     }
     auto attachProcessLog(QProcess* process, const QByteArray& secret = {}, std::function<void(const QString&)> sink = {}) {
@@ -245,14 +315,17 @@ class Launcher final : public QWidget {
         settings.setValue("installation/root", root->text()); settings.setValue("assets/source", assetSource->text());
         settings.setValue("assets/extractor", extractor->text()); settings.setValue("updates/repo", repo->text());
         settings.setValue("updates/trust", trust->text()); settings.setValue("updates/ca", updateCa->text());
-        settings.setValue("updates/api", releaseApi->text()); settings.setValue("updates/channel", channel->currentText());
+        // release_channel replaces 0.3's updates/channel, which saved an unchosen "stable" default.
+        settings.setValue("updates/api", releaseApi->text()); settings.setValue("updates/release_channel", channel->currentText()); settings.remove("updates/channel");
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/renderer", renderer->currentText());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/render_scale", renderScale->value());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/fsr", upscaler->currentData().toString());
         settings.setValue("graphics/fsr_sharpness", fsrSharpness->value());
         settings.setValue("graphics/frame_generation", frameGeneration->isChecked());
         settings.setValue("graphics/appearance", appearance->currentText());
-        settings.setValue("graphics/rt", rayTracing->currentText()); settings.setValue("graphics/width", width->value());
+        settings.setValue("graphics/rt", rayTracing->currentText()); settings.setValue("graphics/rt_style", rtStyle->currentText());
+        settings.setValue("graphics/texture_detail", textureDetail->currentIndex()); settings.setValue("graphics/lightmap_detail", lightmapDetail->currentIndex());
+        settings.setValue("graphics/width", width->value());
         settings.setValue("graphics/height", height->value()); settings.setValue("graphics/fullscreen", fullscreen->isChecked());
         settings.setValue("graphics/volume", volume->value());
         for (const auto* key : {"graphics/sceneMember", "graphics/zone", "graphics/characterModel"}) settings.remove(key);
@@ -351,6 +424,7 @@ class Launcher final : public QWidget {
         place(pages, {286, 105, 289, 244});
         place(status, {230, 378, 344, 38}); status->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         place(progress, {226, 420, 352, 18}); progress->setVisible(true);
+        place(updateBanner, {226, 442, 352, 30}); updateBanner->setVisible(!offeredVersion.isEmpty());
 
         auto* left = box({44, 355, 127, 118}, "Sunucu");
         skinLeft = left->parentWidget();
@@ -430,7 +504,9 @@ class Launcher final : public QWidget {
         reply->setReadBufferSize(65536);
         struct Download { QByteArray bytes; std::unique_ptr<QSaveFile> file; qint64 size = 0; QString issue; QUrl redirect; QDeadlineTimer deadline; };
         auto state = std::make_shared<Download>();
-        state->deadline = QDeadlineTimer(networkTimeoutMs);
+        // Staged downloads (the ~60 MB update package) also get 1 s per 128 KiB of their signed bound.
+        const qint64 wall = networkTimeoutMs + (destination.isEmpty() ? 0 : maximum / 128);
+        state->deadline = QDeadlineTimer(wall);
         if (!destination.isEmpty()) {
             state->file = std::make_unique<QSaveFile>(destination);
             if (!state->file->open(QIODevice::WriteOnly)) { reply->abort(); reply->deleteLater(); replies.removeOne(reply); throw std::runtime_error("Cannot stage HTTPS download"); }
@@ -457,7 +533,7 @@ class Launcher final : public QWidget {
             state->issue = budget->deadline.hasExpired() ? "HTTPS operation wall deadline exceeded" : "HTTPS request wall deadline exceeded";
             reply->abort();
         });
-        timer->start(static_cast<int>(std::min<qint64>(networkTimeoutMs, std::max<qint64>(1, budget->deadline.remainingTime()))));
+        timer->start(static_cast<int>(std::min<qint64>(wall, std::max<qint64>(1, budget->deadline.remainingTime()))));
         connect(reply, &QNetworkReply::readyRead, this, drain);
         connect(reply, &QNetworkReply::metaDataChanged, this, [this, reply, state, budget, maximum, method, bearer, redirects, drain] {
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -485,7 +561,7 @@ class Launcher final : public QWidget {
             if (!state->redirect.isEmpty() && state->issue.isEmpty()) {
                 reply->deleteLater(); state->file.reset();
                 try { fetch(state->redirect, certificate, method, body, false, maximum, destination, done, redirects + 1, budget); }
-                catch (const std::exception& e) { error(failure(e)); }
+                catch (const std::exception& e) { budget->fail ? budget->fail(failure(e)) : error(failure(e)); }
                 return;
             }
             QString issue = state->issue;
@@ -496,8 +572,8 @@ class Launcher final : public QWidget {
             }
             if (issue.isEmpty() && state->file && !state->file->commit()) issue = "Cannot commit staged HTTPS file";
             reply->deleteLater();
-            if (!issue.isEmpty()) { error(issue); return; }
-            try { done(state->bytes); } catch (const std::exception& e) { error(failure(e)); }
+            if (!issue.isEmpty()) { budget->fail ? budget->fail(issue) : error(issue); return; }
+            try { done(state->bytes); } catch (const std::exception& e) { budget->fail ? budget->fail(failure(e)) : error(failure(e)); }
         });
     }
     void api(const QString& route, const QByteArray& method, const QJsonObject& body, bool bearer, Callback done) {
@@ -518,54 +594,116 @@ class Launcher final : public QWidget {
         connect(p, &QProcess::errorOccurred, this, [this, p](QProcess::ProcessError e) { if (e == QProcess::FailedToStart) { busy = false; error(p->errorString()); p->deleteLater(); } });
         connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, p, output, done = std::move(done)](int code, QProcess::ExitStatus exit) {
             setBusy(false); p->deleteLater(); if (output->failed) return;
-            if (code || exit != QProcess::NormalExit) { error("Signed updater failed; previous release preserved"); return; }
-            status->setText("Kurulum tamamlandı; çalışan başlatıcı değiştirilmedi"); done();
+            if (code || exit != QProcess::NormalExit) { error("İmzalı güncelleyici başarısız oldu; önceki sürüm korundu (ayrıntılar tanılama kaydında)"); return; }
+            status->setText("Kurulum tamamlandı");
+            try { done(); } catch (const std::exception& e) { error(failure(e)); }
         });
         p->start();
     }
     void installBundle() {
         persist();
-        if (trust->text().isEmpty()) throw std::runtime_error("Select your trusted Ed25519 public PEM first");
+        const QString key = trustPem(trust->text());
         const QString manifest = QFileDialog::getOpenFileName(this, "Signed manifest", {}, "JSON (*.json)"); if (manifest.isEmpty()) return;
         const QString signature = QFileDialog::getOpenFileName(this, "Detached signature", QFileInfo(manifest).absolutePath()); if (signature.isEmpty()) return;
-        const auto m = ikv::updates::verify_manifest(fs(manifest), fs(signature), fs(trust->text()));
+        const auto m = ikv::updates::verify_manifest(fs(manifest), fs(signature), fs(key));
         const QString package = QFileDialog::getOpenFileName(this, "Package: " + QString::fromStdString(m.package), QFileInfo(manifest).absolutePath()); if (package.isEmpty()) return;
-        runHelper({"install", "--manifest", manifest, "--signature", signature, "--package", package, "--trust", trust->text(), "--root", root->text()}, [] {});
+        runHelper({"install", "--manifest", manifest, "--signature", signature, "--package", package, "--trust", key, "--root", root->text()},
+                  [this] { status->setText("Kurulum tamamlandı; yeni sürüm başlatıcının bir sonraki açılışında kullanılır"); });
     }
-    void update() {
-        persist(); if (busy || !replies.isEmpty()) throw std::runtime_error("Another installation/update or HTTPS request is active");
-        if (repo->text().isEmpty() || trust->text().isEmpty()) throw std::runtime_error("Configure release repository and trusted public key first; no implicit update trust");
-        const auto parts = repo->text().split('/');
-        if (parts.size() != 2 || parts[0].isEmpty() || parts[1].isEmpty()) throw std::runtime_error("Repository must be OWNER/REPOSITORY");
-        for (const auto& part : parts) for (const QChar c : part) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) throw std::runtime_error("Invalid repository name");
-        const QUrl endpoint = releaseApi->text().isEmpty() ? QUrl("https://api.github.com/repos/" + repo->text() + "/releases") : validatedUrl(releaseApi->text());
-        auto temp = std::make_shared<QTemporaryDir>(); if (!temp->isValid()) throw std::runtime_error("Cannot create update staging");
-        auto budget = std::make_shared<TransferBudget>(); budget->deadline = QDeadlineTimer(3 * networkTimeoutMs); budget->limit = 7 * 1024 * 1024; budget->origin = endpoint; budget->github = releaseApi->text().isEmpty();
-        setBusy(true); status->setText("İmzalı güncelleme aranıyor…");
-        fetch(endpoint, updateCa->text(), "GET", {}, false, 4 * 1024 * 1024, {}, [this, temp, budget](const QByteArray& bytes) {
+    QString updateChannel() const { return channel->currentText(); }
+    // Release API: explicit HTTPS override, else GitHub Releases of the configured (default compiled-in) repository.
+    QUrl releaseEndpoint() {
+        if (!releaseApi->text().isEmpty()) return validatedUrl(releaseApi->text());
+        const QString repository = repo->text().isEmpty() ? QString(ikv::release::repository) : repo->text();
+        const auto parts = repository.split('/');
+        if (parts.size() != 2 || parts[0].isEmpty() || parts[1].isEmpty()) throw std::runtime_error("Depo OWNER/REPOSITORY biçiminde olmalı");
+        for (const auto& part : parts) for (const QChar c : part) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) throw std::runtime_error("Geçersiz depo adı");
+        return QUrl("https://api.github.com/repos/" + repository + "/releases");
+    }
+    std::shared_ptr<TransferBudget> releaseBudget(const QUrl& endpoint) {
+        auto budget = std::make_shared<TransferBudget>();
+        budget->deadline = QDeadlineTimer(3 * networkTimeoutMs); budget->limit = 7 * 1024 * 1024;
+        budget->origin = endpoint; budget->github = releaseApi->text().isEmpty();
+        return budget;
+    }
+    // Ask the release API for the newest channel release (highest vX.Y.Z tag; drafts and other tags
+    // ignored) and offer it when SemVer-newer than this build. Background (startup) failures go to the
+    // status line and log instead of a dialog; the launcher stays usable either way.
+    void checkUpdates(bool background) {
+        if (busy || !replies.isEmpty()) throw std::runtime_error("Başka bir kurulum, güncelleme veya HTTPS isteği sürüyor");
+        const QUrl endpoint = releaseEndpoint();
+        auto budget = releaseBudget(endpoint);
+        if (background) budget->fail = [this](const QString& issue) { status->setText("Güncellemeler denetlenemedi: " + issue); log(status->text()); };
+        status->setText("Güncellemeler denetleniyor…");
+        fetch(endpoint, updateCa->text(), "GET", {}, false, 4 * 1024 * 1024, {}, [this](const QByteArray& bytes) {
             QJsonParseError parse; const auto doc = QJsonDocument::fromJson(bytes, &parse);
-            if (parse.error != QJsonParseError::NoError || !doc.isArray()) throw std::runtime_error("Release API must return GitHub release array");
-            QJsonObject release;
-            for (const auto& value : doc.array()) { const auto r = value.toObject(); if (!r.value("draft").toBool() && r.value("prerelease").toBool() == (channel->currentText() == "experimental")) { release = r; break; } }
-            if (release.isEmpty()) throw std::runtime_error("No release available in selected channel");
-            auto urls = std::make_shared<QMap<QString, QUrl>>();
-            for (const auto& value : release.value("assets").toArray()) { const auto a = value.toObject(); urls->insert(a.value("name").toString(), validatedUrl(a.value("browser_download_url").toString())); }
-            if (!urls->contains("manifest.json") || !urls->contains("manifest.sig")) throw std::runtime_error("Release has no signed manifest assets");
-            const QString manifest = temp->filePath("manifest.json"), sig = temp->filePath("manifest.sig");
-            fetch(urls->value("manifest.json"), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, manifest, [this, temp, urls, manifest, sig, budget](const QByteArray&) {
-                fetch(urls->value("manifest.sig"), updateCa->text(), "GET", {}, false, 64, sig, [this, temp, urls, manifest, sig, budget](const QByteArray&) {
-                    const auto m = ikv::updates::verify_manifest(fs(manifest), fs(sig), fs(trust->text()));
-                    if (QString::fromStdString(m.channel) != channel->currentText()) throw std::runtime_error("Signed manifest channel mismatch");
-                    budget->limit = static_cast<qint64>(m.package_size) + 7 * 1024 * 1024;
-                    const QString name = QString::fromStdString(m.package); if (!urls->contains(name)) throw std::runtime_error("Signed package missing from release assets");
-                    const QString package = temp->filePath(name);
-                    fetch(urls->value(name), updateCa->text(), "GET", {}, false, static_cast<qint64>(m.package_size), package, [this, temp, manifest, sig, package](const QByteArray&) {
-                        setBusy(false);
-                        runHelper({"install", "--manifest", manifest, "--signature", sig, "--package", package, "--trust", trust->text(), "--root", root->text()}, [this, temp] { if (automation) QCoreApplication::exit(0); });
-                    }, 0, budget);
+            if (parse.error != QJsonParseError::NoError || !doc.isArray()) throw std::runtime_error("Sürüm API'si GitHub sürüm dizisi döndürmedi");
+            QJsonObject newest; QString newestVersion;
+            for (const auto& value : doc.array()) {
+                const auto release = value.toObject();
+                const QString tag = release.value("tag_name").toString();
+                if (release.value("draft").toBool() || release.value("prerelease").toBool() != (updateChannel() == "experimental") || !tag.startsWith('v')) continue;
+                const auto version = tag.mid(1).toStdString(); // other tags than vX.Y.Z[-PRE] are not releases
+                const auto newer = [&] { return newestVersion.isEmpty() ? ikv::updates::compare_versions(version, version) == 0
+                                                                        : ikv::updates::compare_versions(version, newestVersion.toStdString()) > 0; };
+                try { if (!newer()) continue; } catch (const std::exception&) { continue; }
+                newest = release; newestVersion = QString::fromStdString(version);
+            }
+            if (newestVersion.isEmpty()) throw std::runtime_error("Seçili kanalda (" + updateChannel().toStdString() + ") sürüm bulunamadı");
+            if (ikv::updates::compare_versions(newestVersion.toStdString(), ikv::release::version) <= 0) {
+                status->setText(QString("Başlatıcı güncel (v%1)").arg(ikv::release::version)); log(status->text());
+                if (automation) { std::printf("ikv-launcher %s: güncel (en yeni v%s)\n", ikv::release::version, qPrintable(newestVersion)); QCoreApplication::exit(0); }
+                return;
+            }
+            offeredRelease = newest; offeredVersion = newestVersion; updateInstalled = false;
+            updateLabel->setText("Güncelleme mevcut: v" + newestVersion); updateNow->setText("Güncelle"); updateBanner->show();
+            status->setText(updateLabel->text()); log(updateLabel->text() + QString(" (çalışan v%1)").arg(ikv::release::version));
+            if (automation) updateNow->click(); // --update-once drives the same button
+        }, 0, budget);
+    }
+    // Güncelle: download the offered release's signed manifest, signature and package, verify, install
+    // through ikv-updater into the install root (assets/settings untouched), then restart into it.
+    void installUpdate() {
+        persist(); if (busy || !replies.isEmpty()) throw std::runtime_error("Başka bir kurulum, güncelleme veya HTTPS isteği sürüyor");
+        if (offeredVersion.isEmpty()) throw std::runtime_error("Önce güncellemeleri denetleyin");
+        const QString version = offeredVersion, key = trustPem(trust->text());
+        auto temp = std::make_shared<QTemporaryDir>(); if (!temp->isValid()) throw std::runtime_error("Güncelleme hazırlama klasörü oluşturulamadı");
+        auto budget = releaseBudget(releaseEndpoint());
+        budget->fail = [this](const QString& issue) { error("Güncelleme başarısız: " + issue); };
+        auto urls = std::make_shared<QMap<QString, QUrl>>();
+        for (const auto& value : offeredRelease.value("assets").toArray()) { const auto a = value.toObject(); urls->insert(a.value("name").toString(), validatedUrl(a.value("browser_download_url").toString())); }
+        if (!urls->contains("manifest.json") || !urls->contains("manifest.sig")) throw std::runtime_error("Sürümde imzalı manifest (manifest.json/manifest.sig) yok");
+        const QString manifest = temp->filePath("manifest.json"), sig = temp->filePath("manifest.sig");
+        setBusy(true); status->setText("v" + version + " indiriliyor…");
+        fetch(urls->value("manifest.json"), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, manifest, [this, temp, urls, manifest, sig, budget, version, key](const QByteArray&) {
+            fetch(urls->value("manifest.sig"), updateCa->text(), "GET", {}, false, 64, sig, [this, temp, urls, manifest, sig, budget, version, key](const QByteArray&) {
+                const auto m = ikv::updates::verify_manifest(fs(manifest), fs(sig), fs(key));
+                if (QString::fromStdString(m.channel) != updateChannel()) throw std::runtime_error("İmzalı manifest kanalı uyuşmuyor");
+                if (QString::fromStdString(m.version) != version) throw std::runtime_error("İmzalı manifest sürümü (" + m.version + ") sürüm etiketiyle uyuşmuyor");
+                budget->limit = static_cast<qint64>(m.package_size) + 7 * 1024 * 1024;
+                budget->deadline = QDeadlineTimer(3 * networkTimeoutMs + static_cast<qint64>(m.package_size / 128));
+                const QString name = QString::fromStdString(m.package); if (!urls->contains(name)) throw std::runtime_error("İmzalı paket sürüm dosyaları arasında yok");
+                const QString package = temp->filePath(name);
+                fetch(urls->value(name), updateCa->text(), "GET", {}, false, static_cast<qint64>(m.package_size), package, [this, temp, manifest, sig, package, version, key](const QByteArray&) {
+                    setBusy(false);
+                    runHelper({"install", "--manifest", manifest, "--signature", sig, "--package", package, "--trust", key, "--root", root->text()}, [this, temp, version] {
+                        updateInstalled = true;
+                        updateLabel->setText("v" + version + " kuruldu"); updateNow->setText("Yeniden başlat");
+                        log(updateLabel->text() + "; yeni sürüm başlatılıyor");
+                        if (automation) std::printf("ikv-launcher %s: v%s kuruldu, yeniden başlatılıyor\n", ikv::release::version, qPrintable(version));
+                        restartIntoInstalled();
+                    });
                 }, 0, budget);
             }, 0, budget);
         }, 0, budget);
+    }
+    // Exec the verified AppImage of <install-root>/current (after Güncelle or Önceki sürüme dön).
+    void restartIntoInstalled() {
+        if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Yeniden başlatmak için önce oyunu kapatın");
+        const QString target = installedAppImage(root->text(), trust->text(), false);
+        if (target.isEmpty()) throw std::runtime_error("Kurulu sürüm bulunamadı: " + root->text().toStdString() + "/current");
+        settings.sync();
+        execInto(target);
     }
     void play() {
 #if !IKV_HAS_VULKAN
@@ -581,18 +719,9 @@ class Launcher final : public QWidget {
         const QString host = origin.host();
         const QString assets = root->text() + "/assets";
         if (!QFileInfo(assets).isDir()) throw std::runtime_error("Import legitimate original assets first");
-        QString executable;
-        if (QFileInfo::exists(root->text() + "/current")) { // A signed release installed by the updater.
-            const auto current = std::filesystem::canonical(fs(root->text()) / "current");
-            if (trust->text().isEmpty()) throw std::runtime_error("Select trusted release key before launching native binaries");
-            (void)ikv::updates::verify_release(fs(root->text()), current.filename().string(), fs(trust->text()));
-            if (current != std::filesystem::canonical(fs(root->text()) / "releases" / current.filename())) throw std::runtime_error("Current pointer escapes the verified native release directory");
-            executable = QString::fromStdString((current / "bin/ikv-client").string());
-            if (!QFileInfo(executable).isExecutable()) throw std::runtime_error("Install signed native client release first");
-        } else { // Source build or installed prefix: the client beside this launcher is as trusted as the launcher.
-            executable = QCoreApplication::applicationDirPath() + "/ikv-client";
-            if (!QFileInfo(executable).isExecutable()) throw std::runtime_error("ikv-client not found beside the launcher; install a signed release in Ayarlar → Gelişmiş");
-        }
+        // OYNA runs this launcher's own client: after a startup handoff that is the newest installed release.
+        const QString executable = QCoreApplication::applicationDirPath() + "/ikv-client";
+        if (!QFileInfo(executable).isExecutable()) throw std::runtime_error("ikv-client başlatıcının yanında bulunamadı: " + executable.toStdString());
         QString certificate = serverCertificate();
         if (certificate.isEmpty()) {
             certificate = qEnvironmentVariable(X509_get_default_cert_file_env(), QString::fromLocal8Bit(X509_get_default_cert_file()));
@@ -608,12 +737,12 @@ class Launcher final : public QWidget {
             savedGraphics = document.object();
         }
         for (const auto* key : {"scene", "scene_member", "zone", "character_model", "model_mapping"}) savedGraphics.remove(key);
-        const QJsonObject chosenGraphics{{"width", width->value()}, {"height", height->value()}, {"fullscreen", fullscreen->isChecked()}, {"volume", volume->value() / 100.0}, {"renderer", renderer->currentText()}, {"appearance", appearance->currentText()}, {"rt", rayTracing->currentText()}, {"render_scale", renderScale->value()}, {"upscaler", fsrMode() == "off" ? "bilinear" : "fsr3"}, {"fsr_sharpness", fsrSharpness->value()}, {"frame_generation", frameGeneration->isChecked()}};
+        const QJsonObject chosenGraphics{{"width", width->value()}, {"height", height->value()}, {"fullscreen", fullscreen->isChecked()}, {"volume", volume->value() / 100.0}, {"renderer", renderer->currentText()}, {"appearance", appearance->currentText()}, {"rt", rayTracing->currentText()}, {"rt_style", rtStyle->currentText()}, {"render_scale", renderScale->value()}, {"upscaler", fsrMode() == "off" ? "bilinear" : "fsr3"}, {"fsr_sharpness", fsrSharpness->value()}, {"frame_generation", frameGeneration->isChecked()}, {"texture_detail", textureDetail->currentIndex()}, {"lightmap_detail", lightmapDetail->currentIndex()}};
         for (auto it = chosenGraphics.begin(); it != chosenGraphics.end(); ++it) savedGraphics.insert(it.key(), it.value());
         if (fsrMode() != "off") savedGraphics.insert("fsr_mode", fsrMode());
         saveJson(graphics, savedGraphics);
         // The client selects/creates the character itself over the same HTTPS account API (docs/LAUNCHER_UPDATES.md).
-        QStringList args{"--ca", certificate, "--session-stdin", "--auth", origin.toString(QUrl::StripTrailingSlash), "--asset-root", assets, "--settings", graphics, "--renderer", renderer->currentText(), "--appearance", appearance->currentText(), "--rt", rayTracing->currentText()};
+        QStringList args{"--ca", certificate, "--session-stdin", "--auth", origin.toString(QUrl::StripTrailingSlash), "--asset-root", assets, "--settings", graphics, "--renderer", renderer->currentText(), "--appearance", appearance->currentText(), "--rt", rayTracing->currentText(), "--rt-style", rtStyle->currentText()};
         args << "--render-scale" << QString::number(renderScale->value(), 'g', 17);
         args << "--upscaler" << (fsrMode() == "off" ? "bilinear" : "fsr3") << "--fsr-sharpness" << QString::number(fsrSharpness->value(), 'g', 17);
         args << "--frame-generation" << (frameGeneration->isChecked() ? "on" : "off");
@@ -789,6 +918,24 @@ class Launcher final : public QWidget {
         connect(upscaler, &QComboBox::currentIndexChanged, this, syncUpscaler);
         appearance = new QComboBox; appearance->setObjectName("appearance"); appearance->addItems({"original", "enhanced"}); appearance->setCurrentText(settings.value("graphics/appearance", "original").toString()); gf->addRow("Görünüm", appearance);
         rayTracing = new QComboBox; rayTracing->setObjectName("rayTracing"); rayTracing->addItems({"off", "auto", "required"}); rayTracing->setCurrentText(settings.value("graphics/rt", "off").toString()); gf->addRow("Işın izleme (donanıma bağlı)", rayTracing);
+        // faithful: the original lighting with RT actor shadows (any appearance); physical: enhanced GGX/GI/reflections.
+        const QString savedRtStyle = settings.value("graphics/rt_style", "faithful").toString();
+        if (savedRtStyle != "faithful" && savedRtStyle != "physical")
+            throw std::runtime_error("Invalid saved rt_style: faithful or physical required");
+        rtStyle = new QComboBox; rtStyle->setObjectName("rtStyle"); rtStyle->addItems({"faithful", "physical"}); rtStyle->setCurrentText(savedRtStyle); gf->addRow("Işın izleme ışığı", rtStyle);
+        // Original launcher "Doku Detay" / "Gölge Detay" (00483d50 writes TextureDetail/LightmapDetail; 004619d0 opens
+        // *_4/_2/_1.dat). Defaults are its >=1700 MB RAM tier (0x483330): texture 2, lightmap 1.
+        const auto detailCombo = [&](const char* name, const char* key, int fallback, const char* label) {
+            bool ok = false;
+            const int saved = settings.value(key, fallback).toInt(&ok);
+            if (!ok || saved < 0 || saved > 2) throw std::runtime_error(std::string("Invalid saved ") + key + ": 0..2 required");
+            auto* combo = new QComboBox; combo->setObjectName(name);
+            combo->addItems({"Düşük (_4.DAT)", "Orta (_2.DAT)", "Yüksek (_1.DAT)"}); combo->setCurrentIndex(saved);
+            gf->addRow(label, combo);
+            return combo;
+        };
+        textureDetail = detailCombo("textureDetail", "graphics/texture_detail", 2, "Doku detay");
+        lightmapDetail = detailCombo("lightmapDetail", "graphics/lightmap_detail", 1, "Gölge detay");
         auto* resolution = new QHBoxLayout;
         width = new QSpinBox; width->setObjectName("width"); width->setRange(640, 3840); width->setValue(settings.value("graphics/width", 1280).toInt());
         height = new QSpinBox; height->setObjectName("height"); height->setRange(480, 2160); height->setValue(settings.value("graphics/height", 720).toInt());
@@ -811,14 +958,19 @@ class Launcher final : public QWidget {
         button(ir, "İmzalı paket kur", "installButton", [this] { installBundle(); });
         auto* updates = new QGroupBox("Güncellemeler"); auto* uv = new QVBoxLayout(updates); auto* uf = new QFormLayout; uv->addLayout(uf); av->addWidget(updates);
         repo = text(uf, "GitHub OWNER/REPOSITORY", "updateRepo", settings.value("updates/repo").toString());
-        channel = new QComboBox; channel->setObjectName("channel"); channel->addItems({"stable", "experimental"}); channel->setCurrentText(settings.value("updates/channel", "stable").toString()); uf->addRow("Kanal", channel);
+        repo->setPlaceholderText(QString("boş = ") + ikv::release::repository);
+        channel = new QComboBox; channel->setObjectName("channel"); channel->addItems({"stable", "experimental"}); channel->setCurrentText(settings.value("updates/release_channel", ikv::release::channel).toString()); uf->addRow("Kanal", channel);
         trust = text(uf, "Güvenilen Ed25519 public PEM", "updateTrust", settings.value("updates/trust").toString());
+        trust->setPlaceholderText("boş = yerleşik IKV sürüm anahtarı");
         updateCa = text(uf, "HTTPS CA PEM", "updateCa", settings.value("updates/ca").toString());
         updateCa->setPlaceholderText("boş = sistem güveni");
         releaseApi = text(uf, "Kendi HTTPS release API (isteğe bağlı)", "releaseApi", settings.value("updates/api").toString());
         auto* ur = new QHBoxLayout; uv->addLayout(ur);
-        button(ur, "İmzalı güncelleme", "updateButton", [this] { update(); });
-        button(ur, "Önceki sürüme dön", "rollbackButton", [this] { persist(); runHelper({"rollback", "--trust", trust->text(), "--root", root->text()}, [] {}); });
+        button(ur, "Güncellemeleri denetle", "updateButton", [this] { persist(); checkUpdates(false); });
+        button(ur, "Önceki sürüme dön", "rollbackButton", [this] {
+            persist();
+            runHelper({"rollback", "--trust", trustPem(trust->text()), "--root", root->text()}, [this] { restartIntoInstalled(); });
+        });
         auto* content = new QGroupBox("Özgün içerik eşlemeleri (isteğe bağlı)"); auto* cf = new QFormLayout(content); av->addWidget(content);
         modelMap = text(cf, "Model eşlemesi (id:N → JSON)", "modelMap", settings.value("graphics/modelMap").toString());
         audioPath = text(cf, "Ses klasörü (göreli)", "audioPath", settings.value("graphics/audioPath").toString());
@@ -918,6 +1070,11 @@ public:
         cv->addStretch();
         pages->addWidget(playPage);
 
+        updateBanner = new QWidget; updateBanner->setObjectName("updateBanner"); updateBanner->hide();
+        auto* ub = new QHBoxLayout(updateBanner); ub->setContentsMargins(0, 0, 0, 0);
+        updateLabel = new QLabel; updateLabel->setObjectName("updateLabel"); ub->addWidget(updateLabel, 1);
+        updateNow = button(ub, "Güncelle", "updateNow", [this] { updateInstalled ? restartIntoInstalled() : installUpdate(); });
+        main->addWidget(updateBanner);
         status = new QLabel("Hazır"); status->setObjectName("status"); status->setWordWrap(true); main->addWidget(status);
         progress = new QProgressBar; progress->setObjectName("progress"); progress->setTextVisible(false); progress->setVisible(false); main->addWidget(progress);
 
@@ -930,23 +1087,37 @@ public:
         showPage();
         log("Native Qt " QT_VERSION_STR " platform=" + QApplication::platformName());
     }
+    // Normal start: report an unusable installed release, then check for updates without blocking.
+    void startup(const QString& handoffIssue) {
+        QTimer::singleShot(0, this, [this, handoffIssue] {
+            if (!handoffIssue.isEmpty()) error(handoffIssue);
+            try { checkUpdates(true); } catch (const std::exception& e) { status->setText("Güncellemeler denetlenemedi: " + failure(e)); log(status->text()); }
+        });
+    }
+    // --update-once: the startup check with explicit configuration; a newer release is installed through
+    // the real Güncelle button and the launcher restarts into it (which then reports itself current).
     void updateOnce(const QCommandLineParser& parser) {
         automation = true;
         networkTimeoutMs = parser.value("network-timeout-ms").toInt();
         root->setText(parser.value("install-root")); repo->setText(parser.value("repo")); trust->setText(parser.value("trust")); updateCa->setText(parser.value("update-ca")); releaseApi->setText(parser.value("release-api")); channel->setCurrentText(parser.value("channel"));
-        QTimer::singleShot(0, this, [this] { try { update(); } catch (const std::exception& e) { error(failure(e)); } });
+        QTimer::singleShot(0, this, [this] { try { persist(); checkUpdates(false); } catch (const std::exception& e) { error(failure(e)); } });
     }
     ~Launcher() override { for (auto* worker : workers) worker->wait(); session.fill('\0'); }
 };
 } // namespace
 int main(int argc, char** argv) {
     if (ikv::launcher_server::isSupervisorInvocation(argc, argv)) return ikv::launcher_server::supervisorMain(argc, argv);
-    QApplication app(argc, argv); QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
-    QCommandLineParser parser; parser.setApplicationDescription("Native own-server İKV launcher; no official credentials or endpoints"); parser.addHelpOption();
-    parser.addOption({"update-once", "Exercise actual HTTPS signed update path and exit (no dialogs)"});
+    QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
+    QCoreApplication::setApplicationVersion(ikv::release::version);
+    for (int i = 0; i < argc; ++i) startArguments.emplace_back(argv[i]);
+    const QString handoffIssue = handoff(); // returns only when this build stays in charge
+    if (!handoffIssue.isEmpty()) fprintf(stderr, "ikv-launcher: %s\n", handoffIssue.toUtf8().constData());
+    QApplication app(argc, argv);
+    QCommandLineParser parser; parser.setApplicationDescription("Native own-server İKV launcher; no official credentials or endpoints"); parser.addHelpOption(); parser.addVersionOption();
+    parser.addOption({"update-once", "Check the release API, install a newer release through Güncelle and restart into it; exit when current (no dialogs)"});
     for (const char* option : {"install-root", "repo", "trust", "update-ca", "release-api"}) parser.addOption({option, "Explicit update configuration", "value"});
     parser.addOption({"network-timeout-ms", "Reduce HTTPS wall deadlines (1..60000); operation deadline is three times this value", "milliseconds", "60000"});
-    parser.addOption({"channel", "Release channel stable|experimental", "channel", "stable"}); parser.process(app);
+    parser.addOption({"channel", "Release channel stable|experimental", "channel", ikv::release::channel}); parser.process(app);
     try {
     Launcher launcher;
     if (parser.isSet("update-once")) {
@@ -955,7 +1126,7 @@ int main(int argc, char** argv) {
         bool timeoutOk = false; const int timeout = parser.value("network-timeout-ms").toInt(&timeoutOk);
         if (!timeoutOk || timeout < 1 || timeout > 60000) return 2;
         launcher.updateOnce(parser);
-    } else launcher.show();
+    } else { launcher.show(); launcher.startup(handoffIssue); }
     return app.exec();
     } catch (const std::exception& e) {
         fprintf(stderr, "ikv-launcher: %s\n", e.what()); return 1;

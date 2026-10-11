@@ -6,8 +6,8 @@
 // guided creation (base_port deliberately occupied), auto-login, the native Sunucu Yönetimi panel (status,
 // live bots, broadcast, backup, restore), keep-alive reattach, stop, auto-start and Sunucuyu sil (see
 // hostServerSmoke). Needs ikv-launcher (supervisor), ikv-auth and ikv-server beside it.
-// Required: install_root, source, auth_url, world_host, world_port, ca, trust,
-// username, password. world_host/world_port are the expected
+// Required: install_root, source, auth_url, world_host, world_port, ca,
+// username, password (optional trust: update-key override). world_host/world_port are the expected
 // Play arguments: the launcher derives them from the server profile and /v1/status.
 // Optional: timeout_seconds (default 300), screenshot_path (play page),
 // graphics_screenshot_path (settings dialog), install_screenshot_path (first-run
@@ -19,7 +19,7 @@
 // smoke requires the real child's HTTPS character screen for the fresh account (characters=0).
 // Optional graphics: renderer (opengl|vulkan), render_scale (.25..1),
 // appearance (original|enhanced), rt (off|auto|required); defaults opengl/1/original/off.
-// The signed native release and legitimate original source must already exist.
+// The ikv-client built beside this binary and a legitimate original source must already exist.
 // No assets, accounts, certificates, or client executables are fabricated here.
 // The temporary settings profile is removed; the real child is terminated and
 // reaped on success or failure. Fixture cleanup is external.
@@ -554,7 +554,7 @@ int main(int argc, char** argv) {
         const QString auth = requiredString(fixture, "auth_url");
         const QString host = requiredString(fixture, "world_host");
         const QString certificate = requiredString(fixture, "ca");
-        const QString trustKey = requiredString(fixture, "trust");
+        const QString trustKey = fixture.value("trust").toString(); // optional update-trust override; Play no longer uses it
         const double portNumber = fixture.value("world_port").toDouble(-1);
         const int port = fixture.value("world_port").toInt(-1);
         if (port < 1 || port > 65535 || portNumber != port)
@@ -567,10 +567,12 @@ int main(int argc, char** argv) {
         const QString requestedRenderer = fixture.value("renderer").toString("opengl");
         const QString requestedAppearance = fixture.value("appearance").toString("original");
         const QString requestedRt = fixture.value("rt").toString("off");
+        const QString requestedRtStyle = fixture.value("rt_style").toString("faithful");
         const double requestedScale = fixture.value("render_scale").toDouble(1);
         if ((requestedRenderer != "opengl" && requestedRenderer != "vulkan") ||
             (requestedAppearance != "original" && requestedAppearance != "enhanced") ||
             (requestedRt != "off" && requestedRt != "auto" && requestedRt != "required") ||
+            (requestedRtStyle != "faithful" && requestedRtStyle != "physical") ||
             (fixture.contains("render_scale") && !fixture.value("render_scale").isDouble()) ||
             !std::isfinite(requestedScale) || requestedScale < .25 || requestedScale > 1 ||
             (requestedRenderer == "opengl" && requestedScale != 1))
@@ -599,8 +601,8 @@ int main(int argc, char** argv) {
             if (requested.removeDuplicates())
                 throw std::runtime_error("Requested launcher PNG destinations must be distinct");
         }
-        if (!QFileInfo(source).isDir() || !QFileInfo(installRoot + "/current/bin/ikv-client").isExecutable())
-            throw std::runtime_error("Existing original source and signed native client installation required");
+        if (!QFileInfo(source).isDir())
+            throw std::runtime_error("Existing original source required");
         const QString canonicalSource = QFileInfo(source).canonicalFilePath();
         const QString sourceParent = QFileInfo(canonicalSource).absolutePath();
         const QString sourceName = QFileInfo(canonicalSource).fileName();
@@ -617,6 +619,10 @@ int main(int argc, char** argv) {
         QCoreApplication::setOrganizationName("IKVCommunity");
         QCoreApplication::setApplicationName("IKVLauncher");
         QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, profile.path() + "/config");
+        // OYNA runs the client bundled beside the launcher (here: beside this smoke binary).
+        const QString bundledClient = QCoreApplication::applicationDirPath() + "/ikv-client";
+        if (!QFileInfo(bundledClient).isExecutable())
+            throw std::runtime_error("ikv-client must be built beside launcher-gui-smoke");
         {
             QSettings saved;
             for (const auto* key : {"graphics/sceneMember", "graphics/zone", "graphics/characterModel"})
@@ -654,6 +660,7 @@ int main(int argc, char** argv) {
 #endif
         control<QComboBox>(launcher, "appearance")->setCurrentText(requestedAppearance);
         control<QComboBox>(launcher, "rayTracing")->setCurrentText(requestedRt);
+        control<QComboBox>(launcher, "rtStyle")->setCurrentText(requestedRtStyle);
         auto* statusLabel = control<QLabel>(launcher, "status");
         auto* logs = control<QPlainTextEdit>(launcher, "diagnosticLogs");
         launcher.show();
@@ -726,7 +733,7 @@ int main(int argc, char** argv) {
         QTimer poll;
         poll.setInterval(25);
         const auto nativeChild = [&]() -> QProcess* {
-            const QString expected = QFileInfo(installRoot + "/current/bin/ikv-client").canonicalFilePath();
+            const QString expected = QFileInfo(bundledClient).canonicalFilePath();
             for (auto* process : launcher.findChildren<QProcess*>())
                 if (!expected.isEmpty() && QFileInfo(process->program()).canonicalFilePath() == expected)
                     return process;
@@ -1057,7 +1064,8 @@ int main(int argc, char** argv) {
                                  std::pair{QString("--host"), host}, std::pair{QString("--port"), QString::number(port)},
                                  std::pair{QString("--ca"), certificate}, std::pair{QString("--asset-root"), installRoot + "/assets"},
                                  std::pair{QString("--renderer"), requestedRenderer}, std::pair{QString("--appearance"), requestedAppearance},
-                                 std::pair{QString("--rt"), requestedRt}, std::pair{QString("--auth"), QUrl(auth).toString(QUrl::StripTrailingSlash)}}) {
+                                 std::pair{QString("--rt"), requestedRt}, std::pair{QString("--rt-style"), requestedRtStyle},
+                                 std::pair{QString("--auth"), QUrl(auth).toString(QUrl::StripTrailingSlash)}}) {
                             const auto position = arguments.indexOf(field.first);
                             if (position < 0 || position + 1 >= arguments.size() || arguments[position + 1] != field.second)
                                 throw std::runtime_error("Native child lost pinned service, imported source or requested graphics arguments");
@@ -1085,12 +1093,16 @@ int main(int argc, char** argv) {
                             if (static_cast<float>(provider.captured(1).toDouble()) != static_cast<float>(requestedScale) ||
                                 !provider.captured(0).contains("appearance=" + requestedAppearance + " "))
                                 throw std::runtime_error("Actual Vulkan provider did not render with selected appearance/scale");
-                            if (requestedRt == "required" && requestedAppearance == "enhanced") {
+                            if (requestedRt == "required" &&
+                                (requestedAppearance == "enhanced" || requestedRtStyle == "faithful")) {
                                 if (!QRegularExpression("Vulkan device=[^\\n]* hardwareRT=1(?:\\s|$)").match(text).hasMatch())
                                     throw std::runtime_error("Required RT frame has no actual hardware RT device");
-                                for (const auto* flag : {"hardwareRayQueries=1", "accelerationStructure=1",
-                                                        "reflections=1", "shadows=1", "diffuseGI=1"})
-                                    if (!provider.captured(0).contains(QString::fromLatin1(flag)))
+                                // Faithful RT traces only Sun-ray actor shadows; physical adds reflections and diffuse GI.
+                                const QString effects = requestedRtStyle == "physical" ? "1" : "0";
+                                for (const QString& flag : {QString("rtStyle=") + requestedRtStyle, QString("hardwareRayQueries=1"),
+                                                            QString("accelerationStructure=1"), QString("shadows=1"),
+                                                            "reflections=" + effects, "diffuseGI=" + effects})
+                                    if (!provider.captured(0).contains(flag))
                                         throw std::runtime_error("Required RT frame lacks actual acceleration/effect evidence");
                             }
                         }

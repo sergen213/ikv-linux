@@ -415,7 +415,9 @@ struct VulkanRtScene::Impl {
         input.info.scratchData.deviceAddress = aligned(acceleration.scratch.address, properties.minAccelerationStructureScratchOffsetAlignment);
         input.range.primitiveCount = static_cast<std::uint32_t>(mesh.indices.size() / 3);
     }
-    std::array<float, 4> validate_mesh(const Scene& scene, std::size_t m) const {
+    // topology=false: a skin refresh. Its immutable indices were range-checked against the same vertex count when the
+    // BLAS was built; the caller checks the vertices its triangle records read.
+    std::array<float, 4> validate_mesh(const Scene& scene, std::size_t m, bool topology = true) const {
         const auto& mesh = scene.meshes[m];
         const auto primitives = mesh.indices.size() / 3;
         if (mesh.indices.size() % 3 || (!mesh.indices.empty() && mesh.vertices.empty())
@@ -424,13 +426,16 @@ struct VulkanRtScene::Impl {
             || primitives > std::numeric_limits<std::uint32_t>::max()
             || primitives > max_triangle_bytes / sizeof(Triangle))
             throw std::runtime_error("Invalid or oversized RT triangle mesh");
-        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+        if (!topology && (m >= state->vertex_counts.size() || mesh.vertices.size() != state->vertex_counts[m]
+                          || mesh.indices.size() != state->index_counts[m]))
+            throw std::runtime_error("RT skin topology changed without rebuild");
+        for (std::size_t i = 0; topology && i < mesh.vertices.size(); ++i) {
             checkpoint(i);
             const auto& vertex = mesh.vertices[i];
             if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z))
                 throw std::runtime_error("Non-finite RT mesh vertex");
         }
-        for (std::size_t i = 0; i < mesh.indices.size(); ++i) {
+        for (std::size_t i = 0; topology && i < mesh.indices.size(); ++i) {
             checkpoint(i);
             if (mesh.indices[i] >= mesh.vertices.size())
                 throw std::runtime_error("RT triangle index outside vertex buffer");
@@ -483,7 +488,9 @@ struct VulkanRtScene::Impl {
                 for (std::size_t column = 0; column < 4; ++column)
                     instance.transform.matrix[row][column] = placed->matrix[column*4 + row];
             instance.instanceCustomIndex = state->mesh_offset[mesh] & 0xffffffu;
-            instance.mask = 0xff;
+            // Mask 2: actors (entity-attached); 1: static scenery. Faithful RT sun rays from lightmapped (static)
+            // receivers test only actors, since the baked lightmap already holds the scenery's shadows.
+            instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02 : 0x01;
             // Source clockwise-front triangles are ray back faces by default; rt_lighting.glsl culls back faces.
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
             instance.accelerationStructureReference = state->bottom[state->mesh_blas[mesh]]->address;
@@ -541,7 +548,8 @@ struct VulkanRtScene::Impl {
             checkpoint(m);
             if (!dirty(m)) continue;
             const auto& mesh = scene.meshes[m];
-            const auto color = validate_mesh(scene, m);
+            const bool skin = !mesh.influences.empty();
+            const auto color = validate_mesh(scene, m, !skin);
             auto& acceleration = *state->bottom[state->mesh_blas[m]];
             const VkDeviceSize triangle_bytes = mesh.indices.size() / 3 * sizeof(Triangle);
             void* mapped = nullptr;
@@ -563,6 +571,8 @@ struct VulkanRtScene::Impl {
                 const auto& a = mesh.vertices[mesh.indices[i]];
                 const auto& b = mesh.vertices[mesh.indices[i+1]];
                 const auto& c = mesh.vertices[mesh.indices[i+2]];
+                if (skin && !std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z + c.x + c.y + c.z))
+                    throw std::runtime_error("Non-finite RT mesh vertex");
                 triangles[i/3] = {{a.x,a.y,a.z,1}, {b.x,b.y,b.z,1}, {c.x,c.y,c.z,1}, color};
             }
             updates.emplace_back();
@@ -1108,7 +1118,7 @@ struct VulkanRtScene::Impl {
                 for (std::size_t column = 0; column < 4; ++column)
                     instance.transform.matrix[row][column] = placed->matrix[column*4 + row];
             instance.instanceCustomIndex = mesh_offset[mesh] & 0xffffffu;
-            instance.mask = 0xff;
+            instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02 : 0x01; // see the refresh path
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
             instance.accelerationStructureReference = next->bottom[mesh_blas[mesh]]->address;
             instances.push_back(instance);

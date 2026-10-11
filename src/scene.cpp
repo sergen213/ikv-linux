@@ -1,6 +1,7 @@
 #include "ikv/scene.hpp"
 #include "scene_source_sort.hpp"
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <bit>
 #include <cmath>
@@ -45,7 +46,7 @@ void normalize_loaded_bindings(Scene& scene,const std::vector<std::uint8_t>& usa
  for(std::size_t i=0;i<scene.meshes.size();++i)if(active_meshes[i])bound(scene.meshes[i].texture);
 }
 Texture decoded_texture(std::string name,const std::string& archive_name,const assets::Entry& entry,assets::DdsImage image) {
- return {std::move(name),image.width,image.height,std::move(image.rgba),std::move(image.mips),archive_name+":"+entry.path};
+ return {std::move(name),image.width,image.height,std::move(image.rgba),std::move(image.mips),archive_name+":"+entry.path,image.format};
 }
 std::filesystem::path base_path(const std::filesystem::path& root) {
  for(const auto& p:std::array<std::filesystem::path,3>{root,root/"base",root/"app"/"base"})if(std::filesystem::is_regular_file(p/"objects.dat"))return p;
@@ -58,7 +59,7 @@ struct Pack {
  std::ifstream stream;assets::Archive archive;std::unordered_map<std::string,std::size_t> entries;std::string source_name;
  explicit Pack(const std::filesystem::path& p):stream(p,std::ios::binary),source_name(p.filename().string()) { need(bool(stream),"cannot open SKYF read-only");archive=assets::read_archive(stream,std::filesystem::file_size(p));entries.reserve(archive.entries.size());for(std::size_t i=0;i<archive.entries.size();++i)need(entries.emplace(lower(archive.entries[i].path),i).second,"case-insensitive SKYF ambiguity"); }
  std::vector<std::uint8_t> read(const std::string& name) {auto i=entries.find(lower(name));if(i==entries.end())throw std::runtime_error("referenced original resource missing: "+source_name+":"+name);return assets::read_entry(stream,archive.entries[i->second]);}
- Texture read_texture(const std::string& name) {auto i=entries.find(name);if(i==entries.end())throw std::runtime_error("referenced original resource missing: "+source_name+":"+name);const auto& entry=archive.entries[i->second];auto bytes=assets::read_entry(stream,entry);return decoded_texture(name,source_name,entry,assets::decode_dds(bytes));}
+ Texture read_texture(const std::string& name) {auto i=entries.find(name);if(i==entries.end())throw std::runtime_error("referenced original resource missing: "+source_name+":"+name);const auto& entry=archive.entries[i->second];auto bytes=assets::read_entry(stream,entry);return decoded_texture(name,source_name,entry,assets::decode_dds(bytes,true));}
 };
 void normalize(float& x,float& y,float& z) { const auto length=std::sqrt(x*x+y*y+z*z);if(length>0){x/=length;y/=length;z/=length;} }
 struct Object { std::uint32_t id,parent,type,reference,owner;std::string name,reuse;bool bone=false,occlusion_proxy=false,root_bone=false;std::array<float,3> half_extents{}; };
@@ -346,6 +347,22 @@ const SourceSceneDescriptor& source_scene_descriptor(unsigned registry_id) {
  need(registry_id<rows.size(),"original scene registry ID outside supplied corpus");return rows[registry_id];
 }
 namespace {
+std::atomic<unsigned> texture_detail_{2},lightmap_detail_{1}; // original >=1700 MB launcher defaults (0x483330)
+// Resident (GPU-native BC or RGBA8) bytes of one scene's textures and lightmaps.
+constexpr std::uint64_t scene_texture_budget=assets::max_entry_bytes;
+}
+void set_texture_detail(unsigned textures,unsigned lightmaps) {
+ need(textures<=2&&lightmaps<=2,"texture/lightmap detail requires 0..2");texture_detail_=textures;lightmap_detail_=lightmaps;
+}
+std::filesystem::path texture_archive(const std::filesystem::path& base,const char* kind) {
+ // 004619d0 opens exactly <kind>_4/_2/_1.dat for detail 0/1/2. A missing pack (partial install) falls back to the nearest
+ // detail, sharper first; the original had no fallback.
+ static constexpr const char* order[3][3]={{"_4","_2","_1"},{"_2","_1","_4"},{"_1","_2","_4"}};
+ const unsigned detail=std::string_view(kind)=="lightmaps"?lightmap_detail_.load():texture_detail_.load();
+ for(const auto* suffix:order[detail])for(const auto* extension:{".DAT",".dat"}){auto path=base/(std::string(kind)+suffix+extension);if(std::filesystem::is_regular_file(path))return path;}
+ return {};
+}
+namespace {
 std::array<std::size_t,8> scene_sizes(const Scene& scene) {return {scene.meshes.size(),scene.materials.size(),scene.instances.size(),scene.nodes.size(),scene.animation.size(),scene.source_surfaces.size(),scene.source_resources.size(),scene.source_scalar_words.size()};}
 void append_model(Scene& scene,Scene model,std::uint32_t entity_id=0,std::uint32_t controller=UINT32_MAX) {
  const auto node_offset=std::uint32_t(scene.nodes.size()),mesh_offset=std::uint32_t(scene.meshes.size()),material_offset=std::uint32_t(scene.materials.size()),resource_offset=std::uint32_t(scene.source_resources.size());
@@ -361,20 +378,17 @@ void append_model(Scene& scene,Scene model,std::uint32_t entity_id=0,std::uint32
  for(auto word:model.source_scalar_words){word.resource+=resource_offset;scene.source_scalar_words.push_back(word);}
  for(auto& surface:model.source_surfaces){for(auto& corner:surface.corners)corner.mesh+=mesh_offset;scene.source_surfaces.push_back(std::move(surface));}
 }
-std::filesystem::path texture_archive(const std::filesystem::path& base,const char* kind) {
- for(const auto* suffix:{"_4.DAT","_4.dat","_2.DAT","_1.DAT"}){auto path=base/(std::string(kind)+suffix);if(std::filesystem::is_regular_file(path))return path;}return {};
-}
 void load_model_resources(Scene& scene,const std::filesystem::path& base,const Scene* resident=nullptr) {
  const auto usage=scene_material_usage(scene);const auto wanted=material_resources(scene,usage);std::uint64_t total=0;
- for(const auto& texture:scene.textures)total+=texture.rgba.size();
- if(resident)for(const auto& texture:resident->textures)total+=texture.rgba.size();
+ for(const auto& texture:scene.textures)total+=texture.data.size();
+ if(resident)for(const auto& texture:resident->textures)total+=texture.data.size();
  const auto loaded=[&](const std::string& name){const auto contains=[&](const Scene& value){return std::any_of(value.textures.begin(),value.textures.end(),[&](const Texture& texture){return texture.name==name;});};return contains(scene)||(resident&&contains(*resident));};
  if(std::any_of(wanted.textures.begin(),wanted.textures.end(),[&](const auto& name){return !loaded(name);})){
   auto path=texture_archive(base,"textures");need(!path.empty(),"original texture SKYF archive missing");Pack textures(path);
   // A texture the shipped archive lacks (Migrat's textures/tap_sonradan_silinecek_bayrak.dds) leaves that channel unbound, like an
   // absent lightmap below. [INFERENCE] the original's failed texture create left the stage empty instead of refusing the zone.
   std::set<std::string> absent;
-  for(const auto& name:wanted.textures){if(loaded(name))continue;if(!textures.entries.contains(name)){absent.insert(name);scene.diagnostics.push_back("Original texture absent in shipped archive, channel unbound: "+name);continue;}auto texture=textures.read_texture(name);total+=texture.rgba.size();need(total<=assets::max_entry_bytes,"scene decoded texture budget");scene.textures.push_back(std::move(texture));}
+  for(const auto& name:wanted.textures){if(loaded(name))continue;if(!textures.entries.contains(name)){absent.insert(name);scene.diagnostics.push_back("Original texture absent in shipped archive, channel unbound: "+name);continue;}auto texture=textures.read_texture(name);total+=texture.data.size();need(total<=scene_texture_budget,"scene resident texture budget");scene.textures.push_back(std::move(texture));}
   const auto unbind=[&](std::string& name){if(!name.empty()&&absent.contains(lower(name)))name.clear();};
   if(!absent.empty()){for(std::size_t i=0;i<scene.materials.size();++i)if(usage[i])for(auto* name:{&scene.materials[i].diffuse,&scene.materials[i].normal,&scene.materials[i].environment,&scene.materials[i].luminance})unbind(*name);for(auto& mesh:scene.meshes)unbind(mesh.texture);}
  }
@@ -384,7 +398,7 @@ void load_model_resources(Scene& scene,const std::filesystem::path& base,const S
    auto& material=scene.materials[i];auto name=lower(material.lightmap);
    if(!lightmaps.entries.contains(name)){scene.diagnostics.push_back("Original lightmap absent in selected source variant: "+material.lightmap);material.lightmap.clear();continue;}
    material.lightmap=name;if(loaded(name))continue;
-   auto texture=lightmaps.read_texture(name);total+=texture.rgba.size();need(total<=assets::max_entry_bytes,"scene decoded texture/lightmap budget");scene.textures.push_back(std::move(texture));
+   auto texture=lightmaps.read_texture(name);total+=texture.data.size();need(total<=scene_texture_budget,"scene resident texture/lightmap budget");scene.textures.push_back(std::move(texture));
   }
  }
  normalize_loaded_bindings(scene,usage,resident);
@@ -633,11 +647,17 @@ void install_assembly(Scene& scene,Scene model,ActorAnimation actor,SceneActorAs
 const SourceActorRecord& source_actor_record(const Scene& scene,unsigned source_uid) {
  const auto& record=source_record(scene,source_uid,true);if(!record.error.empty())throw std::runtime_error("invalid selected source item metadata: "+record.error);return record;
 }
+void install_actor(Scene& scene,PreparedActor prepared) {
+ install_assembly(scene,std::move(prepared.model),prepared.animation,std::move(prepared.descriptor),prepared.entry);
+}
 void attach_source_actor(Scene& scene,const std::filesystem::path& installation,const SourceAppearance& appearance,std::uint32_t entity_id) {
+ for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&!assembly.npc_uid&&assembly.member.empty()&&assembly.appearance==appearance)return;
+ install_actor(scene,prepare_source_actor(scene,installation,appearance,entity_id,&scene));
+}
+PreparedActor prepare_source_actor(Scene& scene,const std::filesystem::path& installation,const SourceAppearance& appearance,std::uint32_t entity_id,const Scene* resident) {
  need(appearance.source_class>=2&&appearance.source_class<=7,"original PC class outside 2..7");
  const unsigned sex=appearance.source_class&1,career=appearance.source_class/2-1;
  need(appearance.face<10&&appearance.hair<(sex?18U:21U)&&appearance.hair_color<(sex?5U:10U)&&appearance.beard<(sex?15U:25U)&&appearance.beard_color<(sex?5U:2U)&&appearance.equipment.size()<=12,"original creator appearance selection outside source tables");
- for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&!assembly.npc_uid&&assembly.member.empty()&&assembly.appearance==appearance)return;
  // All425 original B/C words were selected; these constexpr runs encode their exact
  // consecutive UID rows and -1 sentinels, not an inferred archive filename sequence.
  static constexpr auto hair=[]{
@@ -679,7 +699,8 @@ void attach_source_actor(Scene& scene,const std::filesystem::path& installation,
   descriptor.source_parts.push_back({slot,piece.uid});const auto first=model.instances.size();dress_part(model,cached_model(scene,objects,base,piece.path),root,piece,projection,base);
   if(slot==11)descriptor.weapon={first,model.instances.size()};
  }
- rebuild_node_order(model);source_actor_color_participation(model,projection);load_model_resources(model,base,&scene);install_assembly(scene,std::move(model),actor,std::move(descriptor),true);
+ rebuild_node_order(model);source_actor_color_participation(model,projection);load_model_resources(model,base,resident);
+ return {std::move(model),actor,std::move(descriptor),true};
 }
 const Instance* source_actor_weapon(const Scene& scene,std::uint32_t entity_id) {
  for(const auto& a:scene.actor_assemblies)if(a.entity_id==entity_id){
@@ -692,11 +713,17 @@ const Instance* source_actor_weapon(const Scene& scene,std::uint32_t entity_id) 
 }
 void attach_entity_model(Scene& scene,const std::filesystem::path& installation,const std::string& member,std::uint32_t entity_id) {
  for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&assembly.member==lower(member))return;
+ install_actor(scene,prepare_entity_model(scene,installation,member,entity_id,&scene));
+}
+PreparedActor prepare_entity_model(Scene& scene,const std::filesystem::path& installation,const std::string& member,std::uint32_t entity_id,const Scene* resident) {
  const auto base=base_path(installation);auto actor=load_actor_animation(scene,base,member);std::optional<Pack> objects;Scene model=cached_model(scene,objects,base,member);need(!model.instances.empty(),"operator model member lacks original renderable owning context");
- load_model_resources(model,base,&scene);SceneActorAssembly descriptor;descriptor.entity_id=entity_id;descriptor.member=lower(member);install_assembly(scene,std::move(model),actor,std::move(descriptor),false);
+ load_model_resources(model,base,resident);SceneActorAssembly descriptor;descriptor.entity_id=entity_id;descriptor.member=lower(member);return {std::move(model),actor,std::move(descriptor),false};
 }
 void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment) {
  for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&assembly.npc_uid==source_uid&&assembly.appearance.equipment==equipment)return;
+ install_actor(scene,prepare_source_npc(scene,installation,source_uid,entity_id,equipment,&scene));
+}
+PreparedActor prepare_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment,const Scene* resident) {
  const auto base=base_path(installation);(void)load_actor_animation(scene,base,"objects/pc/e_efe/E_BODY_EFE.ADF");
  const auto& record=source_record(scene,source_uid,false);const auto defaults=bodypiece_list(record.bodypieces);
  const auto& root_record=record.path.empty()?source_piece(scene,defaults.empty()?record.model:defaults.front()):record;
@@ -722,8 +749,8 @@ void attach_source_npc(Scene& scene,const std::filesystem::path& installation,un
  // zıçan mesh, Örümcek/Akrep tints) and Tangriss/Salon Tuzak's textures\none.dds, absent from the archives, so that channel stays
  // unbound like any absent texture (load_model_resources).
  if(!record.diffuse.empty()){for(auto& material:model.materials)material.diffuse=record.diffuse;for(auto& mesh:model.meshes)mesh.texture=record.diffuse;}
- rebuild_node_order(model);source_actor_color_participation(model,projection);load_model_resources(model,base,&scene);
- install_assembly(scene,std::move(model),actor,std::move(descriptor),false);
+ rebuild_node_order(model);source_actor_color_participation(model,projection);load_model_resources(model,base,resident);
+ return {std::move(model),actor,std::move(descriptor),false};
 }
 void detach_source_actor(Scene& scene,std::uint32_t entity_id) {
  const auto found=std::find_if(scene.actor_assemblies.begin(),scene.actor_assemblies.end(),[entity_id](const auto& assembly){return assembly.entity_id==entity_id;});
@@ -1040,5 +1067,16 @@ void scene_decoder_self_test() {
  auto inactive_skin=shared_skin;store(inactive_skin[inactive_skin.size()-2].data,20,0x7fc12345);auto skin_words=decode_scene(inactive_skin);need(skin_words.source_scalar_words.size()==1&&skin_words.source_scalar_words[0].use==SourceScalarUse::InactiveSkinNormal&&skin_words.meshes[0].vertices[0].x==1,"ADF original skin path never consumes stored normal fields");
  auto inactive_zero=zero_weights;store(inactive_zero[inactive_zero.size()-2].data,8,0x7fc12345);auto zero_words=decode_scene(inactive_zero);need(zero_words.source_scalar_words.size()==1&&zero_words.source_scalar_words[0].use==SourceScalarUse::ZeroWeightPosition&&zero_words.meshes[0].vertices[0].x==0,"ADF zero weight skips serialized local-position read");
  std::vector<assets::AdfChunk> standalone{consumer_fixture[1],consumer_fixture[4]};auto data_only=decode_scene(standalone);need(data_only.instances.empty()&&data_only.nodes.size()==1&&data_only.animation.size()==1&&!data_only.diagnostics.empty(),"ADF data-only resource parses explicitly without becoming a blank renderable model");
+ { // Texture/lightmap pack selection (004619d0 detail 0/1/2 = _4/_2/_1) with nearest-present fallback.
+  const int marker=0;const auto root=std::filesystem::temp_directory_path()/("ikv-pack-selftest-"+std::to_string(reinterpret_cast<std::uintptr_t>(&marker)));
+  std::filesystem::create_directories(root);
+  for(const auto* name:{"textures_2.DAT","textures_1.DAT","lightmaps_4.dat"})std::ofstream(root/name).put('\0');
+  const auto pick=[&](const char* kind){return texture_archive(root,kind).filename().string();};
+  bool invalid_detail=false;try{set_texture_detail(3,0);}catch(const std::runtime_error&){invalid_detail=true;}
+  need(invalid_detail&&pick("textures")=="textures_1.DAT"&&pick("lightmaps")=="lightmaps_4.dat","default detail 2/1 selects _1, missing lightmap packs fall back to the present one");
+  set_texture_detail(0,1);need(pick("textures")=="textures_2.DAT","detail 0 falls back to the nearest present pack (_2)");
+  set_texture_detail(1,2);need(pick("textures")=="textures_2.DAT"&&pick("lightmaps")=="lightmaps_4.dat"&&texture_archive(root,"objects").empty(),"detail 1 selects _2; absent kinds select nothing");
+  set_texture_detail(2,1);std::filesystem::remove_all(root);
+ }
 }
 } // namespace ikv

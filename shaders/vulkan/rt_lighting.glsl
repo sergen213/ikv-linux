@@ -85,25 +85,29 @@ vec3 rtAboveSurface(vec3 direction, vec3 smoothNormal) {
 // normal on the lit side). Such a ray starts just under the facet and skips back faces: inside a closed mesh only back
 // faces are visible, so it leaves its own hull and only front faces beyond it occlude it, as for the smooth surface.
 // Instances flip ray facing (vulkan_rt.cpp) so the source's raster front faces are ray front faces.
-#define rtTrace(query, position, facet, direction, flags) { \
+#define rtTrace(query, position, facet, direction, flags, mask) { \
     float bias = rtBias(position); \
     bool below = dot(direction, facet) < 0.0; \
     rayQueryInitializeEXT(query, sceneAS, \
         gl_RayFlagsOpaqueEXT | (flags) | (below ? gl_RayFlagsCullBackFacingTrianglesEXT : 0u), \
-        0xff, position + facet * (below ? -bias : bias), bias, direction, IKV_RT_MAX_DISTANCE); \
+        (mask), position + facet * (below ? -bias : bias), bias, direction, IKV_RT_MAX_DISTANCE); \
     while (rayQueryProceedEXT(query)) {} }
+// mask: TLAS instance mask (vulkan_rt.cpp: 1 static scenery, 2 actors).
+float rtSunVisibilityMasked(vec3 position, vec3 facet, vec3 sunDir, uint mask) {
+    rayQueryEXT query;
+    rtTrace(query, position, facet, sunDir, gl_RayFlagsTerminateOnFirstHitEXT, mask);
+    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+}
 float rtSunVisibility(vec3 position, vec3 facet, vec3 sunDir) {
 #if IKV_RT_SHADOWS
-    rayQueryEXT query;
-    rtTrace(query, position, facet, sunDir, gl_RayFlagsTerminateOnFirstHitEXT);
-    return rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+    return rtSunVisibilityMasked(position, facet, sunDir, 0xffu);
 #else
     return 1.0;
 #endif
 }
 vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir) {
     rayQueryEXT query;
-    rtTrace(query, position, facet, direction, 0u);
+    rtTrace(query, position, facet, direction, 0u, 0xffu);
     if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT)
         return rtSky(direction);
     uint index = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)

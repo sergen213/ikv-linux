@@ -426,7 +426,8 @@ void door_rules(ikv::Json config) {
     ikv::World hub(config,[](std::span<const ikv::CharacterSave>){});hub.add(1,1,1,record(1,150));hub.add(3,3,3,record(3,150));
     for(uint32_t id:{1u,3u})hub.action(id,{{"action","quest_accept"},{"target",2147493649u},{"quest","first_hunt"}});
     hub.action(3,{{"action","guild_create"},{"name","Kervan"}});
-    for(uint32_t id:{1u,3u})hub.action(id,{{"action","interact"},{"target",2147493652u}});ticks(hub,25);
+    for(uint32_t id:{1u,3u})hub.action(id,{{"action","interact"},{"target",2147493652u}});
+    ticks(hub,25);
     check(event(hub.state(1),"error","guild") && hub.state(1).at("zone")=="eminonu","the Lonca Merkezi refuses players outside a lonca");
     check(hub.state(3).at("zone")=="old_town","a lonca member enters the Lonca Merkezi");
 }
@@ -817,7 +818,8 @@ void quest_objectives(ikv::Json config) {
     check(!stage(s,"u1","progress").is_null() && !stage(s,"u1","ready").is_null(),"use objective: Kullan on the prop progresses the quest");
     world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","u1"}});check(!stage(world.state(1),"u1","completed").is_null(),"use quest handed in");
     // count>1 use: each trapped Cin (same classes.dat uid) frees once and leaves; one prop repeats only after the cooldown
-    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_accept"},{"target",giver},{"quest",q}});world.state(1);
+    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_accept"},{"target",giver},{"quest",q}});
+    world.state(1);
     const auto progress=[&](const char* q){return own().at("quests").at(q).at("progress").get<int>();};
     const auto seen=[&](uint32_t id){const auto f=world.state(1);for(const auto& e:f.at("entities"))if(e.at("id")==id)return true;return false;};
     world.action(1,{{"action","interact"},{"target",cin1}});check(progress("u2")==1 && !seen(cin1),"rescue: Kullan frees the trapped Cin, which leaves");
@@ -828,7 +830,8 @@ void quest_objectives(ikv::Json config) {
     check(progress("u3")==1,"spamming one prop inside its cooldown counts once");
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));
     world.action(1,{{"action","interact"},{"target",prop}});check(progress("u3")==2,"the prop counts again after its cooldown");
-    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_complete"},{"target",giver},{"quest",q}});world.state(1);
+    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_complete"},{"target",giver},{"quest",q}});
+    world.state(1);
     // visit: reaching the spot completes the objective within a second; class/sex reward variants
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","v1"}});world.state(1);
     walk(600);check(own().at("quests").at("v1").at("progress")==0,"visit: outside the radius nothing happens");

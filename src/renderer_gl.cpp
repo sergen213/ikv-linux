@@ -275,7 +275,8 @@ void main(){
     vec3 c=texture(first,texcoord).rgb;
     if(mode==0)c=c*0.45+texture(second,texcoord).rgb*0.55;
     else if(mode==1)c=(0.25+step_gain.z)*(texture(first,texcoord-step_gain.xy).rgb+texture(first,texcoord+step_gain.xy).rgb)+0.5*c;
-    else c*=0.8;
+    else if(mode==2)c*=0.8;
+    else c=min(pow(c,vec3(1.0/1.2))*1.005,vec3(1.0)); // mode 3: fullscreen gamma ramp 0x467030(1,1,1.2), final pass
     output_color=vec4(clamp(c,0.0,1.0),1.0);
 }
 )GLSL";
@@ -382,6 +383,7 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLDELETERENDERBUFFERSPROC, glDeleteRenderbuffers);
     GL_ENTRY(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer);
     GL_ENTRY(PFNGLBLENDEQUATIONPROC, glBlendEquation);
+    GL_ENTRY(PFNGLCOMPRESSEDTEXIMAGE2DPROC, glCompressedTexImage2D);
 #undef GL_ENTRY
     struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; };
     struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0; bool referenced=false; };
@@ -392,6 +394,8 @@ class GlRenderer final : public Renderer {
     RendererOptions options_;
     int width_=0,height_=0;
     GLint max_texture_size_=0;
+    bool s3tc_=false; // GL_EXT_texture_compression_s3tc: original DXT blocks stay compressed; otherwise decoded to RGBA8
+    GLfloat anisotropy_=1; // min(16, GL_MAX_TEXTURE_MAX_ANISOTROPY); 1 = unsupported
     GLuint program_=0,overlay_program_=0,overlay_vao_=0,overlay_texture_=0;
     GLuint particle_program_=0,particle_vao_=0,particle_buffer_=0;
     GLint particle_vp_location_=-1,particle_bias_location_=-1,particle_reference_location_=-1;
@@ -414,6 +418,7 @@ class GlRenderer final : public Renderer {
     GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1;
     SourceScrollState source_scroll_;
     bool overlay_present_=false,rendered_=false,grayscale_=false;
+    int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
     bool source_presented_=false;
     const Scene* scene_=nullptr;
     std::uint64_t geometry_revision_=0;
@@ -451,10 +456,17 @@ public:
             LOAD_GL(glBufferSubData);
             LOAD_GL(glGenFramebuffers); LOAD_GL(glBindFramebuffer); LOAD_GL(glFramebufferTexture2D); LOAD_GL(glCheckFramebufferStatus); LOAD_GL(glDeleteFramebuffers);
             LOAD_GL(glGenRenderbuffers); LOAD_GL(glBindRenderbuffer); LOAD_GL(glRenderbufferStorage); LOAD_GL(glFramebufferRenderbuffer); LOAD_GL(glDeleteRenderbuffers); LOAD_GL(glBlitFramebuffer);
-            LOAD_GL(glBlendEquation);
+            LOAD_GL(glBlendEquation); LOAD_GL(glCompressedTexImage2D);
 #undef LOAD_GL
             glGetIntegerv(GL_MAX_TEXTURE_SIZE,&max_texture_size_);
             if(max_texture_size_<1) throw std::runtime_error("OpenGL texture limits unavailable");
+            s3tc_=SDL_GL_ExtensionSupported("GL_EXT_texture_compression_s3tc");
+            // GL 4.6 core, ARB and EXT texture_filter_anisotropic share these enums. Original 0046b040 sets
+            // D3DSAMP_MAXANISOTROPY (default pref 4x); 16 measured no worse in motion (wave-12 Textures report §2).
+            if(SDL_GL_ExtensionSupported("GL_EXT_texture_filter_anisotropic")||SDL_GL_ExtensionSupported("GL_ARB_texture_filter_anisotropic")) {
+                GLfloat limit=1;glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT,&limit);anisotropy_=std::clamp(limit,1.f,16.f);
+            }
+            std::fprintf(stderr,"OpenGL textures s3tc=%d anisotropy=%.0f\n",s3tc_?1:0,anisotropy_);
             // Vsync is best-effort on headless/compositing drivers; rendering does not depend on it.
             SDL_GL_SetSwapInterval(options_.vsync?1:0);
             progress();
@@ -541,14 +553,26 @@ public:
         progress();
     }
     void set_grayscale(bool on) override { grayscale_=on; }
-    void set_overlay(const Overlay& overlay) override {
+    void set_overlay(const Overlay& overlay,std::span<const std::array<int,4>> changed) override {
         current();
         if(overlay.width==0 && overlay.height==0 && overlay.rgba.empty()){overlay_present_=false;return;}
         validate_texture(overlay.width,overlay.height,overlay.rgba.size());
         progress();
         glActiveTexture_(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D,overlay_texture_);
         glPixelStorei(GL_UNPACK_ALIGNMENT,1);
-        glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,overlay.width,overlay.height,0,GL_RGBA,GL_UNSIGNED_BYTE,overlay.rgba.data());
+        if(changed.empty() || overlay.width!=overlay_width_ || overlay.height!=overlay_height_) {
+            glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,overlay.width,overlay.height,0,GL_RGBA,GL_UNSIGNED_BYTE,overlay.rgba.data());
+            overlay_width_=overlay.width; overlay_height_=overlay.height;
+        } else {
+            // Only the changed rectangles; the texture keeps every other texel.
+            glPixelStorei(GL_UNPACK_ROW_LENGTH,overlay.width);
+            for(const auto& r:changed) {
+                const int x0=std::clamp(r[0],0,overlay.width),y0=std::clamp(r[1],0,overlay.height);
+                const int x1=std::clamp(r[0]+std::max(r[2],0),x0,overlay.width),y1=std::clamp(r[1]+std::max(r[3],0),y0,overlay.height);
+                if(x0<x1 && y0<y1) glTexSubImage2D(GL_TEXTURE_2D,0,x0,y0,x1-x0,y1-y0,GL_RGBA,GL_UNSIGNED_BYTE,overlay.rgba.data()+(static_cast<std::size_t>(y0)*overlay.width+x0)*4);
+            }
+            glPixelStorei(GL_UNPACK_ROW_LENGTH,0);
+        }
         progress();
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
@@ -768,8 +792,17 @@ public:
         glDisable(GL_BLEND);glBindVertexArray_(0);
         check("drawing original asset scene");
         progress();
-        glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,0);
-        glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        if(SDL_GetWindowFlags(window_)&SDL_WINDOW_FULLSCREEN) {
+            // Original SetGammaRamp (0x467030(1,1,1.2) @0x46711f) is fullscreen-only and covers scene + HUD, like this
+            // final pass. GL screenshots read the scene framebuffer (pre-ramp); Vulkan's read output_ (post-ramp).
+            glBindFramebuffer_(GL_FRAMEBUFFER,0);glViewport(0,0,width_,height_);glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);
+            glUseProgram_(glow_program_);glBindVertexArray_(overlay_vao_);glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,color_);
+            glUniform1i_(glow_mode_location_,3);glDrawArrays(GL_TRIANGLES,0,3);glBindVertexArray_(0);
+            check("drawing fullscreen gamma ramp");
+        } else {
+            glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,0);
+            glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT,GL_NEAREST);
+        }
         progress();
         if(!SDL_GL_SwapWindow(window_)) fail("OpenGL presentation");
         rendered_=true;
@@ -957,31 +990,48 @@ private:
             progress();
         }catch(...){release_scene();throw;}
     }
-    void upload_texture(const Texture& texture,GLuint& name) {
-        if(texture.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || texture.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
-        if(texture.mips.empty() || texture.mips.size()>32)throw std::invalid_argument("scene texture lacks a bounded original DDS mip chain");
+    void upload_texture(const Texture& source,GLuint& name) {
+        if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
+        if(source.mips.empty() || source.mips.size()>32)throw std::invalid_argument("scene texture lacks a bounded original DDS mip chain");
+        Texture expanded; // only without S3TC: the BC blocks decoded exactly like the CPU decoder
+        if(source.format!=assets::DdsFormat::rgba8&&!s3tc_) {
+            auto image=assets::decompress_dds({source.width,source.height,source.data,source.mips,source.format});
+            expanded.width=source.width;expanded.height=source.height;expanded.data=std::move(image.rgba);expanded.mips=std::move(image.mips);
+        }
+        const auto& texture=expanded.data.empty()?source:expanded;
+        const auto compressed=texture.format==assets::DdsFormat::bc1?GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+            texture.format==assets::DdsFormat::bc2?GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
         glGenTextures(1,&name);glBindTexture(GL_TEXTURE_2D,name);glPixelStorei(GL_UNPACK_ALIGNMENT,1);
         std::uint32_t mip_width=texture.width,mip_height=texture.height;
         std::size_t next_offset=0;
         for(std::size_t level=0;level<texture.mips.size();++level) {
             const auto& mip=texture.mips[level];
             if(mip.width!=mip_width || mip.height!=mip_height || mip.offset!=next_offset ||
-               mip.offset>texture.rgba.size() || mip.size>texture.rgba.size()-mip.offset)
+               mip.offset>texture.data.size() || mip.size>texture.data.size()-mip.offset)
                 throw std::invalid_argument("invalid original DDS mip layout");
-            validate_texture(static_cast<int>(mip.width),static_cast<int>(mip.height),mip.size);
             progress();
-            glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_RGBA8,static_cast<GLsizei>(mip.width),
-                         static_cast<GLsizei>(mip.height),0,GL_RGBA,GL_UNSIGNED_BYTE,texture.rgba.data()+mip.offset);
+            if(texture.format==assets::DdsFormat::rgba8) {
+                validate_texture(static_cast<int>(mip.width),static_cast<int>(mip.height),mip.size);
+                glTexImage2D(GL_TEXTURE_2D,static_cast<GLint>(level),GL_RGBA8,static_cast<GLsizei>(mip.width),
+                             static_cast<GLsizei>(mip.height),0,GL_RGBA,GL_UNSIGNED_BYTE,texture.data.data()+mip.offset);
+            } else {
+                if(mip.width>static_cast<unsigned>(max_texture_size_)||mip.height>static_cast<unsigned>(max_texture_size_)||
+                   mip.size!=assets::dds_mip_bytes(texture.format,mip.width,mip.height)||mip.size>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()))
+                    throw std::invalid_argument("invalid original DXT texture dimensions/payload");
+                glCompressedTexImage2D_(GL_TEXTURE_2D,static_cast<GLint>(level),compressed,static_cast<GLsizei>(mip.width),
+                                        static_cast<GLsizei>(mip.height),0,static_cast<GLsizei>(mip.size),texture.data.data()+mip.offset);
+            }
             progress();
             next_offset+=mip.size;
             if(mip_width==1 && mip_height==1 && level+1<texture.mips.size())throw std::invalid_argument("DDS mip chain exceeds its final level");
             mip_width=std::max(1U,mip_width/2);mip_height=std::max(1U,mip_height/2);
         }
-        if(next_offset!=texture.rgba.size())throw std::invalid_argument("trailing decoded DDS mip bytes");
+        if(next_offset!=texture.data.size())throw std::invalid_argument("trailing decoded DDS mip bytes");
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,static_cast<GLint>(texture.mips.size()-1));
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,options_.original_appearance?GL_LINEAR_MIPMAP_NEAREST:GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+        if(anisotropy_>1)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAX_ANISOTROPY_EXT,anisotropy_);
     }
     void draw_instance(const Scene& scene,const Draw& draw){
         const auto& gpu=meshes_[draw.instance->mesh];const auto& material=scene.materials[draw.material];const auto& maps=materials_[draw.material];

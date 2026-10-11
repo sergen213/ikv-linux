@@ -10,6 +10,10 @@ layout(location=8) in vec3 localNormal;
 layout(location=9) in float fadeWeight;
 layout(location=10) in vec3 sourceOceanEye;
 layout(location=11) in vec2 sourceOceanUV;
+// v_dif_lit oD0 terms before the vs_1_1 saturate: lighting_multipliers_1 x ambd colour, saturate(N.Sun) x multipliers_2.
+// RT shadows the directional term only (RTLIGHTING faithful RT); raster keeps vertexAmbient, the per-vertex saturate.
+layout(location=14) in vec3 sourceAmbientTerm;
+layout(location=15) in vec3 sourceSunTerm;
 layout(location=0) out vec4 outputColor;
 // Unjittered clip positions this/last frame (scene.vert); location 2 = previousUV-UV, 5 = FSR 3.1.4 reactive coverage.
 // Unbound locations are dropped: the pipelines without motion/FSR attachments write only colour.
@@ -48,7 +52,8 @@ vec3 mappedNormal(){
     return normalize(mat3(t,cross(n,t),n)*(texture(normalMap,texcoord).xyz*2-1));
 }
 // Independently expressed recovered original shader equations, not copied proprietary shader source.
-vec4 originalSurface(vec4 diffuse) {
+// sunVisibility: 1 in raster; RT sun-ray visibility. Occlusion removes only the source directional terms.
+vec4 originalSurface(vec4 diffuse,float sunVisibility) {
     bool hasNormal=draw.flags.x>.5,hasEnvironment=draw.flags.y>.5,hasLightmap=draw.extra.x>.5;
     vec3 eye=normalize(frame.eye.xyz-worldPosition);
     vec3 localN=hasNormal?normalize(localNormal):localNormal;
@@ -65,7 +70,8 @@ vec4 originalSurface(vec4 diffuse) {
         vec3 b=cross(n,t);
         vec3 tangentSun=vec3(dot(-frame.sun.xyz,t),dot(-frame.sun.xyz,b),dot(-frame.sun.xyz,n));
         vec3 tangentEye=normalize(vec3(dot(eye,t),dot(eye,b),dot(eye,n)));
-        float factor=.5*dot(mapped,tangentSun)+.5;
+        // Fully occluded = facing away from the Sun (factor 1: the dark I_b end of the source sky curve).
+        float factor=mix(1.,.5*dot(mapped,tangentSun)+.5,sunVisibility);
         float exponent=hasEnvironment?64:48;
         vec3 halfway=mapped+tangentEye;
         float specular=factor>0&&dot(halfway,halfway)>1e-12?pow(max(dot(mapped,normalize(halfway)),0),exponent):0;
@@ -76,13 +82,14 @@ vec4 originalSurface(vec4 diffuse) {
         return vec4(result,1);
     }
     vec3 lightmap=hasLightmap?texture(originalLightmap,lightmapUV).rgb:vec3(0);
+    vec3 vertexLight=sunVisibility<1&&frame.sun.w>.5?clamp(sourceAmbientTerm+sourceSunTerm*sunVisibility,0,1):vertexAmbient.rgb;
     if(hasEnvironment) {
         vec3 result=hasLightmap?
             mix(diffuse.rgb,environmentColor,diffuse.a)-lightmap*(1-clamp(diffuse.a,0,1))*frame.fog.z:
             diffuse.rgb+diffuse.a*environmentColor;
-        return vec4(result*vertexAmbient.rgb,1);
+        return vec4(result*vertexLight,1);
     }
-    return vec4((diffuse.rgb-lightmap*frame.fog.z)*vertexAmbient.rgb,diffuse.a);
+    return vec4((diffuse.rgb-lightmap*frame.fog.z)*vertexLight,diffuse.a);
 }
 vec4 sourceOceanSurface() {
     vec3 normal0=texture(normalMap,sourceOceanUV*.80000001).rgb*2-1;
@@ -111,7 +118,9 @@ outputReactive=draw.flags.w>0?0:min(texture(diffuseMap,texcoord).a*draw.color.a,
 vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
 #endif
 #ifdef IKV_RT_GUIDED
-vec3 guideNormal=normalize(worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
+// rtUnit: zero/NaN source normals (degenerate meshes) would put NaN in the guide, which history and the a-trous
+// passes then spread over the screen as a growing black block.
+vec3 guideNormal=rtUnit(worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
 float rtArtwork=0;
 #endif
 if(draw.extra.w>=2) {
@@ -143,7 +152,18 @@ if(draw.extra.y>.5) {
 if(draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5)
     texel=mix(texture(fadeMap,texcoord)*draw.color,texel,fadeWeight);
 float sourceAlpha=draw.flags.x>.5||draw.flags.y>.5?1:texel.a;
-vec4 original=frame.params.x<.5?originalSurface(texel):vec4(texel.rgb,sourceAlpha);
+float sunVisibility=1.;
+#ifdef IKV_RT
+// Faithful RT (original appearance): actors (TLAS mask 2) cast deterministic Sun-ray shadows on static surfaces by
+// removing the source directional term. Scenery never occludes: the baked lightmaps hold its shadows, from a light that
+// is not the dynamic SunDir (with mask 0xff most of the lightmap-lit courtyard and every actor in it went dark).
+if(frame.params.x<.5&&frame.sun.w>.5&&fract(draw.extra.w)<.25&&dot(worldNormal,frame.sun.xyz)>0) {
+    vec3 facet=rtUnit(rtFacet);
+    if(dot(facet,frame.eye.xyz-worldPosition)<0)facet=-facet;
+    sunVisibility=rtSunVisibilityMasked(worldPosition,facet,rtUnit(frame.sun.xyz),2u);
+}
+#endif
+vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.rgb,sourceAlpha);
 if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb,vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;

@@ -268,9 +268,54 @@ struct ChannelMask {
                                           maximum / 2) / maximum);
     }
 };
+// One mip's DXT1/3/5 blocks (tightly packed, source order) to RGBA8 rows of mip.width*4 bytes.
+void decode_blocks(const std::uint8_t* block, std::uint32_t width, std::uint32_t height, DdsFormat format,
+                   std::uint8_t* output_base) {
+    const bool is_dxt1 = format == DdsFormat::bc1, is_dxt3 = format == DdsFormat::bc2, is_dxt5 = format == DdsFormat::bc3;
+    const unsigned block_bytes = is_dxt1 ? 8 : 16;
+    const auto blocks_x = (static_cast<std::uint64_t>(width) + 3) / 4;
+    const auto blocks_y = (static_cast<std::uint64_t>(height) + 3) / 4;
+    for (std::uint64_t by = 0; by < blocks_y; ++by) {
+        for (std::uint64_t bx = 0; bx < blocks_x; ++bx, block += block_bytes) {
+            const auto* color_block = block + (is_dxt1 ? 0 : 8);
+            const auto colors = dxt_colors(color_block, is_dxt1);
+            const auto selectors = le32(color_block + 4);
+            std::array<std::uint8_t, 8> alphas{};
+            std::uint64_t alpha_selectors = 0;
+            if (is_dxt5) {
+                alphas[0] = block[0];
+                alphas[1] = block[1];
+                if (alphas[0] > alphas[1]) {
+                    for (unsigned i = 2; i < 8; ++i)
+                        alphas[i] = static_cast<std::uint8_t>(((8 - i) * alphas[0] + (i - 1) * alphas[1]) / 7);
+                } else {
+                    for (unsigned i = 2; i < 6; ++i)
+                        alphas[i] = static_cast<std::uint8_t>(((6 - i) * alphas[0] + (i - 1) * alphas[1]) / 5);
+                    alphas[6] = 0;
+                    alphas[7] = 255;
+                }
+                for (unsigned i = 0; i < 6; ++i) alpha_selectors |= static_cast<std::uint64_t>(block[2 + i]) << (8 * i);
+            }
+            for (unsigned i = 0; i < 16; ++i) {
+                const auto x = bx * 4 + i % 4, y = by * 4 + i / 4;
+                if (x >= width || y >= height) continue;
+                auto color = colors[(selectors >> (2 * i)) & 3U];
+                if (is_dxt3) color[3] = static_cast<std::uint8_t>(((block[i / 2] >> (4 * (i % 2))) & 15U) * 17);
+                else if (is_dxt5) color[3] = alphas[(alpha_selectors >> (3 * i)) & 7U];
+                std::copy(color.begin(), color.end(), output_base + static_cast<std::size_t>((y * width + x) * 4));
+            }
+        }
+    }
+}
 } // namespace
 
-DdsImage decode_dds(std::span<const std::uint8_t> bytes) {
+std::uint64_t dds_mip_bytes(DdsFormat format, std::uint32_t width, std::uint32_t height) {
+    if (format == DdsFormat::rgba8) return static_cast<std::uint64_t>(width) * height * 4;
+    return ((static_cast<std::uint64_t>(width) + 3) / 4) * ((static_cast<std::uint64_t>(height) + 3) / 4) *
+           (format == DdsFormat::bc1 ? 8 : 16);
+}
+
+DdsImage decode_dds(std::span<const std::uint8_t> bytes, bool keep_blocks) {
     if (bytes.size() > max_entry_bytes) invalid("DDS input exceeds 512 MiB budget");
     if (bytes.size() < 128) invalid("truncated DDS header");
     const auto field = [bytes](std::size_t offset) { return le32(bytes.data() + offset); };
@@ -321,6 +366,18 @@ DdsImage decode_dds(std::span<const std::uint8_t> bytes) {
         sources[level] = {static_cast<std::size_t>(source_offset), static_cast<std::size_t>(row_bytes)};
         source_offset += row_bytes * rows;
     }
+    const auto format = !compressed ? DdsFormat::rgba8 : is_dxt1 ? DdsFormat::bc1 : is_dxt3 ? DdsFormat::bc2 : DdsFormat::bc3;
+    if (keep_blocks && compressed) { // Mips are consecutive in the source: copy the validated payload once.
+        DdsImage image{header.width, header.height, {}, {}, format};
+        image.mips.assign(mips.begin(), mips.begin() + header.mip_levels);
+        for (std::uint32_t level = 0; level < header.mip_levels; ++level) {
+            auto& mip = image.mips[level];
+            mip.offset = sources[level].offset - 128;
+            mip.size = static_cast<std::size_t>(dds_mip_bytes(format, mip.width, mip.height));
+        }
+        image.rgba.assign(bytes.begin() + 128, bytes.begin() + static_cast<std::ptrdiff_t>(source_offset));
+        return image;
+    }
     const ChannelMask red(field(92)), green(field(96)), blue(field(100)), alpha(field(104));
     DdsImage image{header.width, header.height, {}, {}};
     image.mips.assign(mips.begin(), mips.begin() + header.mip_levels);
@@ -344,42 +401,31 @@ DdsImage decode_dds(std::span<const std::uint8_t> bytes) {
             }
             continue;
         }
-        const auto blocks_x = (static_cast<std::uint64_t>(mip.width) + 3) / 4;
-        const auto blocks_y = (static_cast<std::uint64_t>(mip.height) + 3) / 4;
-        const auto* block = bytes.data() + source.offset;
-        for (std::uint64_t by = 0; by < blocks_y; ++by) {
-            for (std::uint64_t bx = 0; bx < blocks_x; ++bx, block += block_bytes) {
-                const auto* color_block = block + (is_dxt1 ? 0 : 8);
-                const auto colors = dxt_colors(color_block, is_dxt1);
-                const auto selectors = le32(color_block + 4);
-                std::array<std::uint8_t, 8> alphas{};
-                std::uint64_t alpha_selectors = 0;
-                if (is_dxt5) {
-                    alphas[0] = block[0];
-                    alphas[1] = block[1];
-                    if (alphas[0] > alphas[1]) {
-                        for (unsigned i = 2; i < 8; ++i)
-                            alphas[i] = static_cast<std::uint8_t>(((8 - i) * alphas[0] + (i - 1) * alphas[1]) / 7);
-                    } else {
-                        for (unsigned i = 2; i < 6; ++i)
-                            alphas[i] = static_cast<std::uint8_t>(((6 - i) * alphas[0] + (i - 1) * alphas[1]) / 5);
-                        alphas[6] = 0;
-                        alphas[7] = 255;
-                    }
-                    for (unsigned i = 0; i < 6; ++i) alpha_selectors |= static_cast<std::uint64_t>(block[2 + i]) << (8 * i);
-                }
-                for (unsigned i = 0; i < 16; ++i) {
-                    const auto x = bx * 4 + i % 4, y = by * 4 + i / 4;
-                    if (x >= mip.width || y >= mip.height) continue;
-                    auto color = colors[(selectors >> (2 * i)) & 3U];
-                    if (is_dxt3) color[3] = static_cast<std::uint8_t>(((block[i / 2] >> (4 * (i % 2))) & 15U) * 17);
-                    else if (is_dxt5) color[3] = alphas[(alpha_selectors >> (3 * i)) & 7U];
-                    std::copy(color.begin(), color.end(), output_base + static_cast<std::size_t>((y * mip.width + x) * 4));
-                }
-            }
-        }
+        decode_blocks(bytes.data() + source.offset, mip.width, mip.height, format, output_base);
     }
     return image;
+}
+
+DdsImage decompress_dds(const DdsImage& image) {
+    if (image.format == DdsFormat::rgba8) return image;
+    if (image.mips.empty() || image.mips.size() > 32) invalid("BC image lacks a bounded mip chain");
+    DdsImage output{image.width, image.height, {}, {}};
+    std::uint64_t source = 0, decoded = 0;
+    for (const auto& mip : image.mips) {
+        if (mip.offset != source || mip.size != dds_mip_bytes(image.format, mip.width, mip.height) ||
+            mip.size > image.rgba.size() - std::min<std::size_t>(mip.offset, image.rgba.size()))
+            invalid("invalid BC mip layout");
+        const auto size = dds_mip_bytes(DdsFormat::rgba8, mip.width, mip.height);
+        if (size > max_entry_bytes - decoded) invalid("BC image decoded RGBA exceeds 512 MiB budget");
+        output.mips.push_back({mip.width, mip.height, static_cast<std::size_t>(decoded), static_cast<std::size_t>(size)});
+        source += mip.size; decoded += size;
+    }
+    if (source != image.rgba.size()) invalid("trailing BC mip bytes");
+    output.rgba.resize(static_cast<std::size_t>(decoded));
+    for (std::size_t level = 0; level < image.mips.size(); ++level)
+        decode_blocks(image.rgba.data() + image.mips[level].offset, image.mips[level].width, image.mips[level].height,
+                      image.format, output.rgba.data() + output.mips[level].offset);
+    return output;
 }
 
 void decoder_self_test() {
@@ -492,6 +538,28 @@ void decoder_self_test() {
     require_mip(decoded_chain, 1, 2, 2, 64, 16);
     require_mip(decoded_chain, 2, 1, 1, 80, 4);
     require(std::equal(decoded_mip.rgba.begin(), decoded_mip.rgba.end(), decoded_chain.rgba.begin()));
+    // keep_blocks keeps the authored payload byte-for-byte; decompress_dds reproduces decode_dds exactly.
+    const auto require_blocks = [&](const std::vector<std::uint8_t>& bytes, DdsFormat format) {
+        const auto decoded = decode_dds(bytes), blocks = decode_dds(bytes, true);
+        require(blocks.format == format && blocks.mips.size() == decoded.mips.size());
+        require(std::equal(blocks.rgba.begin(), blocks.rgba.end(), bytes.begin() + 128) && blocks.rgba.size() == bytes.size() - 128);
+        std::size_t offset = 0;
+        for (const auto& level : blocks.mips) {
+            require(level.offset == offset && level.size == dds_mip_bytes(format, level.width, level.height));
+            offset += level.size;
+        }
+        const auto expanded = decompress_dds(blocks);
+        require(expanded.format == DdsFormat::rgba8 && expanded.rgba == decoded.rgba && expanded.mips.size() == decoded.mips.size());
+        for (std::size_t level = 0; level < decoded.mips.size(); ++level)
+            require(expanded.mips[level].offset == decoded.mips[level].offset && expanded.mips[level].size == decoded.mips[level].size);
+        auto broken = blocks; broken.rgba.pop_back();
+        bool rejected = false;
+        try { (void)decompress_dds(broken); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected);
+    };
+    require_blocks(mip, DdsFormat::bc1);
+    require_blocks(transparent, DdsFormat::bc1);
+    require(decode_dds(rgb16, true).format == DdsFormat::rgba8 && decode_dds(rgb16, true).rgba == decoded16.rgba);
     const std::array<std::uint8_t, 4> last_pixel{255, 255, 0, 255};
     require(std::equal(last_pixel.begin(), last_pixel.end(), decoded_chain.rgba.begin() + 80));
     for (const auto* base : {&dxt3, &dxt5}) {
@@ -511,6 +579,7 @@ void decoder_self_test() {
             require(image.rgba[offset] == 255 && image.rgba[offset + 1] == 0 &&
                     image.rgba[offset + 2] == 0 && image.rgba[offset + 3] == expected_alpha);
         }
+        require_blocks(mip, base == &dxt3 ? DdsFormat::bc2 : DdsFormat::bc3);
         truncated_mip = mip; truncated_mip.pop_back(); rejects(truncated_mip);
     }
     mip = rgb16; mip.resize(138);

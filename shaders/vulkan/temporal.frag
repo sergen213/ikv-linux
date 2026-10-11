@@ -37,8 +37,9 @@ void main() {
     diffuseHistory=vec4(0);
     reflectionHistory=vec4(0);
     vec4 guide=texelFetch(currentGuide,p,0);
-    // Sky, ocean and untextured translucent surfaces have no decomposition: raw colour, no history.
-    if(guide.w<=0 || guide.z<=0)return;
+    // Sky, ocean and untextured translucent surfaces have no decomposition: raw colour, no history. Rejects are written
+    // !(x>0) so a non-finite guide is rejected too (NaN fails every comparison and would otherwise spread).
+    if(!(guide.w>0) || !(guide.z>0))return;
     vec3 normal=rtGuideDecodeNormal(guide.xy);
     float depth=guide.w;
     vec3 diffuse0=texelFetch(currentDiffuse,p,0).rgb;
@@ -60,7 +61,7 @@ void main() {
             ivec2 q=p+ivec2(x,y)*int(stride);
             if(!inside(q,size))continue;
             vec4 neighbor=texelFetch(currentGuide,q,0);
-            if(neighbor.w<=0 || neighbor.z<=0)continue;
+            if(!(neighbor.w>0) || !(neighbor.z>0))continue;
             vec4 d=texelFetch(previousDiffuse,q,0);
             float w=taps[abs(x)]*taps[abs(y)];
             if(x!=0 || y!=0) {
@@ -108,9 +109,9 @@ void main() {
             ivec2 q=base+o;
             if(!inside(q,size))continue;
             vec4 old=texelFetch(previousGuide,q,0);
-            if(old.w<=0 || old.z<=0 || abs(old.w-expected)>tolerance || dot(normal,rtGuideDecodeNormal(old.xy))<.8)continue;
+            if(!(old.w>0) || !(old.z>0) || !(abs(old.w-expected)<=tolerance) || !(dot(normal,rtGuideDecodeNormal(old.xy))>=.8))continue;
             vec4 sampleDiffuse=texelFetch(previousDiffuse,q,0);
-            if(sampleDiffuse.a<1)continue;
+            if(!(sampleDiffuse.a>=1))continue;
             float w=(o.x==1?f.x:1-f.x)*(o.y==1?f.y:1-f.y);
             history+=sampleDiffuse*w;
             historyReflection+=texelFetch(previousReflection,q,0)*w;
@@ -131,10 +132,10 @@ void main() {
         ivec2 q=p+ivec2(x,y);
         if(!inside(q,size))continue;
         vec4 neighbor=texelFetch(currentGuide,q,0);
-        if(neighbor.w<=0 || neighbor.z<=0)continue;
+        if(!(neighbor.w>0) || !(neighbor.z>0))continue;
         float plane=abs(dot(normal,neighbor.w*viewRay((vec2(q)+.5)/vec2(size))-depth*ray))*planeScale;
         float g=exp(-plane)*pow(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1),16.);
-        if(g<1e-3)continue;
+        if(!(g>=1e-3))continue;
         float w=g*exp(-.5*float(x*x+y*y)/1.5);
         vec3 d=texelFetch(currentDiffuse,q,0).rgb,r=texelFetch(currentReflection,q,0).rgb;
         sumDiffuse+=d*w;

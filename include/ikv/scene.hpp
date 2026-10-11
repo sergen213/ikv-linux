@@ -13,7 +13,7 @@ namespace ikv {
 struct Vertex { float x,y,z,nx,ny,nz,u,v; std::array<float,4> ambient{1,1,1,1}; std::array<float,3> tangent{}; std::array<float,2> uv1{}; std::array<float,4> color{1,1,1,1}; };
 struct SkinInfluence { std::uint32_t vertex=0,node=0; float weight=0; std::array<float,3> position{},normal{}; };
 struct Mesh { std::vector<Vertex> vertices; std::vector<std::uint32_t> indices; std::string texture; std::uint32_t material=0; std::vector<SkinInfluence> influences; std::uint64_t revision=0; std::uint32_t source_material_id=0; std::uint64_t key=0; }; // key: nonzero identity of an actor-assembly mesh, so renderers keep GPU resources across actor attach/detach
-struct Texture { std::string name; std::uint32_t width=0,height=0; std::vector<std::uint8_t> rgba; std::vector<assets::DdsMip> mips; std::string source_path{}; }; // Original RGBA8 mip chain; source_path is archive basename:authored member path.
+struct Texture { std::string name; std::uint32_t width=0,height=0; std::vector<std::uint8_t> data; std::vector<assets::DdsMip> mips; std::string source_path{}; assets::DdsFormat format=assets::DdsFormat::rgba8; }; // Original mip chain in `format` (authored BC blocks or RGBA8); source_path is archive basename:authored member path.
 struct Material { std::string name,diffuse,normal,environment,luminance,lightmap; std::array<float,4> color{1,1,1,1}; bool alpha=false; float alpha_cutoff=0; std::uint32_t flags=0; bool double_sided=false; bool source_color_draw=true; bool source_ocean=false; };
 struct Transform { std::array<float,16> matrix{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}; }; // column-major
 struct Instance { std::uint32_t mesh=0; Transform transform; std::string name; std::uint32_t entity_id=0; std::uint32_t node=0; std::uint32_t material=UINT32_MAX; bool occlusion_proxy=false,sky=false,ocean=false; std::array<float,3> source_half_extents{}; bool source_support=false,source_nocamera=false; bool source_ordinary_color_participates=true; }; // Source collider classes and cached ordinary color reachability remain separate from material flags.
@@ -46,7 +46,10 @@ struct SourceScalarWord { std::uint32_t resource=0,chunk=0,offset=0,bits=0; Sour
 struct SourceSceneDescriptor { unsigned registry_id=0,support_id=0; std::string key,label,environment_key; float minute=749; std::string lightmap; std::vector<std::string> members; };
 struct SourceEquipment { unsigned slot=0,uid=0; bool operator==(const SourceEquipment&) const = default; };
 struct SourceAppearance { unsigned source_class=3,face=0,hair=0,hair_color=0,beard=0,beard_color=0; std::vector<SourceEquipment> equipment; bool operator==(const SourceAppearance&) const = default; };
-struct SceneActorAssembly { std::uint32_t entity_id=0,controller=UINT32_MAX; SourceAppearance appearance; unsigned npc_uid=0; std::string member; std::array<std::size_t,8> begin{},end{}; std::vector<SourceEquipment> source_parts; std::array<std::size_t,2> weapon{}; }; // meshes/materials/instances/nodes/tracks/surfaces/resources/scalars; weapon: slot-11 item instances, relative to begin[2]
+// skin_held (set by the caller before update_scene): skip CPU skinning of this actor's meshes this frame, like original
+// 00476eb0, which skins a root only while its +0xf4 frustum flag is set. The clip clock and bones keep advancing;
+// skin_stale (update_scene bookkeeping) re-skins the actor on the first frame it is released.
+struct SceneActorAssembly { std::uint32_t entity_id=0,controller=UINT32_MAX; SourceAppearance appearance; unsigned npc_uid=0; std::string member; std::array<std::size_t,8> begin{},end{}; std::vector<SourceEquipment> source_parts; std::array<std::size_t,2> weapon{}; bool skin_held=false,skin_stale=false; }; // meshes/materials/instances/nodes/tracks/surfaces/resources/scalars; weapon: slot-11 item instances, relative to begin[2]
 struct Scene;
 struct SceneModelResource { std::string member; std::shared_ptr<const Scene> decoded; };
 struct Scene { std::vector<Mesh> meshes; std::vector<Texture> textures; std::vector<Material> materials; std::vector<Instance> instances; std::vector<AnimationTrack> animation; std::vector<SceneNode> nodes; std::vector<std::uint32_t> node_order; std::vector<HelpPage> help; Zone zone; SceneLighting lighting; std::vector<std::string> diagnostics; std::filesystem::path font; std::uint64_t geometry_revision=0,mesh_key=0; std::vector<SourceSurface> source_surfaces; std::vector<std::string> source_resources; std::vector<SourceScalarWord> source_scalar_words; ActorTables actor_tables; std::vector<ActorAnimation> actors; std::optional<unsigned> source_registry_id; unsigned source_support=UINT32_MAX; std::string source_environment_key,source_lightmap; std::vector<SceneActorAssembly> actor_assemblies; std::vector<SceneModelResource> model_resources; float animation_seconds=0; bool force_pose_update=false; };
@@ -71,6 +74,15 @@ Scene load_charsel_scene(const std::filesystem::path& installation); // Original
 void attach_source_actor(Scene& scene,const std::filesystem::path& installation,const SourceAppearance& appearance,std::uint32_t entity_id);
 void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment={});
 void detach_source_actor(Scene& scene,std::uint32_t entity_id);
+// The attach_* functions above are install_actor(scene, prepare_*(scene, ..., &scene)). Split, the prepare step reads and
+// fills only `context` (actor tables, decoded model cache, diagnostics; a Scene owned by one thread at a time) and decodes
+// the textures neither the model nor `resident` (names only) holds, so it can run off the frame thread. install_actor
+// needs scene.actor_tables equal to the context's and the model's textures already in or moved into scene.textures.
+struct PreparedActor { Scene model; ActorAnimation animation; SceneActorAssembly descriptor; bool entry=false; };
+PreparedActor prepare_source_actor(Scene& context,const std::filesystem::path& installation,const SourceAppearance& appearance,std::uint32_t entity_id,const Scene* resident);
+PreparedActor prepare_source_npc(Scene& context,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment,const Scene* resident);
+PreparedActor prepare_entity_model(Scene& context,const std::filesystem::path& installation,const std::string& member,std::uint32_t entity_id,const Scene* resident);
+void install_actor(Scene& scene,PreparedActor actor);
 void set_actor_action(Scene& scene,std::uint32_t entity_id,std::uint32_t source_clip_id,float blend_seconds=.25f,bool restart=false,bool terminal=false); // Explicit restart/terminal seek are independent delivery policies; default retains source same-ID suppression.
 Transform entity_instance_transform(const Scene& scene,const Instance& instance,float authority_x,float supported_ground,float authority_z,float orientation);
 std::array<float,3> entity_source_bounds_center(const Scene& scene,const Instance& instance,float authority_x,float supported_ground,float authority_z,float orientation);
@@ -97,4 +109,9 @@ void set_scene_clock(Scene& scene,float hour,const std::array<std::uint8_t,11>& 
 // 0046b630/0046b660 with the Görüş Mesafesi scale view: D3D linear fog start = record start·view (0x77c30c), end =
 // record end·view + 110 (0x77c314); far = record end·view (0x77c31c, squared 0x77c320) bounds particle/model visibility.
 void set_scene_fog(SceneLighting& light,float view);
+// Original TextureDetail/LightmapDetail prefs (004619d0, globals 0x5eabb8/0x5eabbc): 0 = <kind>_4.DAT, 1 = _2, 2 = _1.
+// Process-wide like the source prefs; applies to resources loaded afterwards. Default 2/1 (launcher >=1700 MB, 0x483330).
+void set_texture_detail(unsigned textures,unsigned lightmaps);
+// base/<kind>_N.DAT ("textures" or "lightmaps") for the selected detail, or the nearest present detail; empty when none.
+std::filesystem::path texture_archive(const std::filesystem::path& base,const char* kind);
 } // namespace ikv

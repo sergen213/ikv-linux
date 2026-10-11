@@ -30,8 +30,24 @@
 #endif
 namespace ikv { namespace {
 void checked(VkResult r,const char* operation){if(r!=VK_SUCCESS)throw std::runtime_error(std::string(operation)+": Vulkan result "+std::to_string(r));}
-struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr; };
-struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;};
+// A scene-load memory block shared by many buffers/images; freed with the last resource holding it (retained-reload
+// releases keep their range until then). vkFreeMemory also unmaps.
+struct MemoryBlock {
+    VkDevice device=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize size=0;std::byte* mapped=nullptr;
+    MemoryBlock()=default;MemoryBlock(const MemoryBlock&)=delete;MemoryBlock& operator=(const MemoryBlock&)=delete;
+    ~MemoryBlock(){if(memory)vkFreeMemory(device,memory,nullptr);}
+};
+// One full scene load binds its ~20k buffers and images into a few blocks per memory type instead of one vkAllocateMemory
+// each (65 % of the 2.2-2.4 s Eminönü load, wave-12 Perf §4). Buffers and images never share a block, so
+// bufferImageGranularity never applies; blocks grow 16 MiB..256 MiB.
+struct MemoryPool {
+    std::array<std::shared_ptr<MemoryBlock>,2*VK_MAX_MEMORY_TYPES> blocks; // [type*2 + image]
+    std::array<VkDeviceSize,2*VK_MAX_MEMORY_TYPES> used{},next{};
+    std::size_t allocations=0;
+};
+// memory: a dedicated allocation; block: pooled (memory stays null, the block owns it).
+struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
+struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
 struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;};
 static_assert(sizeof(Frame)==464 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448);
@@ -39,7 +55,8 @@ static_assert(sizeof(Frame)==464 && offsetof(Frame,previous_vp)==288 && offsetof
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
 // Skinned meshes write staging[frame slot] on the host; the copy into vertices is recorded into that frame (upload).
-// previous: the pose the last frame drew (motion vectors); previous_stale: vertices changed since it was copied.
+// previous: the pose the last frame drew (motion vectors; swapped with vertices on upload); previous_stale: previous
+// still differs from vertices.
 struct Geometry {Buffer vertices,indices,staging[2],previous;std::uint32_t count=0;std::uint64_t revision=0;std::array<float,4> bounds{};bool upload=false,previous_stale=false;};
 // Two frames in flight: frame serial s records/submits slot s&1 and the CPU waits only for the frame two serials back.
 struct FrameSlot {VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquire=VK_NULL_HANDLE;bool pending=false;std::uint64_t serial=0;};
@@ -90,6 +107,10 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  std::vector<DrawItem> draws_;
  SourceScrollState source_scroll_;
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
+ bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
+ // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance,
+ // or any appearance with faithful RT (RtStyle). Enhanced appearance keeps its sampling/FSR either way.
+ bool original_lighting_=true;
  Frame previous_frame_{};
  std::uint64_t history_eligible_frames_=0,history_reset_events_=0,history_retained_dirty_frames_=0;
  std::uint32_t frame_=0;
@@ -100,7 +121,8 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  std::filesystem::path cache_path_;
  // Host-written per-frame resources are indexed by the frame slot (total_frames_&1), so HUD/particle/skin uploads wait only
  // for that slot's previous frame. Overlay staging copies are recorded into the next frame's command buffer.
- Buffer overlay_staging_[2];bool overlay_upload_=false,overlay_undefined_=false;
+ Buffer overlay_staging_[2];bool overlay_upload_=false,overlay_undefined_=false,overlay_whole_=false;
+ std::vector<VkBufferImageCopy> overlay_regions_; // pending changed rectangles of the next upload (unused while overlay_whole_)
  bool source_presented_=false;
  // FSR 3.1.4 frame generation (generating_ = fsr_->generates()): per frame slot, generated_ is the frame interpolated
  // between the previous and this frame's HUD-less output_, real_ this frame; hud_pass_ composites the current HUD onto
@@ -296,7 +318,10 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
              const auto ready=clock::now();
              const double period=last_ready==clock::time_point{}?0:ms(ready-last_ready);
              last_ready=ready;
-             if(period>0&&period<250)interval_ms=interval_ms>0?interval_ms*.9+period*.1:period;
+             // One swapchain/compositor stall must not inflate the pacing interval (and with it the half-interval sleep that
+             // throttles the render thread through drain_presents) for the next ~40 frames: samples are clamped to 1.5x the
+             // running interval, so a genuine slowdown still converges (+5% per frame). analysis/porting-wave12/Perf/report.md
+             if(period>0&&period<250)interval_ms=interval_ms>0?interval_ms*.9+std::min(period,interval_ms*1.5)*.1:period;
              collect();
              const auto present=[&](unsigned index,const Image& source,bool is_real) {
                  const auto id=present_image(index,source);
@@ -395,32 +420,73 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      }
  }
  std::uint32_t memory_type(std::uint32_t mask,VkMemoryPropertyFlags flags){VkPhysicalDeviceMemoryProperties p;vkGetPhysicalDeviceMemoryProperties(physical_,&p);for(std::uint32_t i=0;i<p.memoryTypeCount;++i)if((mask&(1u<<i))&&(p.memoryTypes[i].propertyFlags&flags)==flags)return i;throw std::runtime_error("Vulkan compatible memory type unavailable");}
- Buffer buffer(VkDeviceSize size,VkBufferUsageFlags usage,VkMemoryPropertyFlags properties){Buffer b;b.bytes=size;VkBufferCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;c.size=size;c.usage=usage;c.sharingMode=VK_SHARING_MODE_EXCLUSIVE;checked(vkCreateBuffer(device_,&c,nullptr,&b.handle),"create buffer");try{VkMemoryRequirements r;vkGetBufferMemoryRequirements(device_,b.handle,&r);VkMemoryAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;a.allocationSize=r.size;a.memoryTypeIndex=memory_type(r.memoryTypeBits,properties);checked(vkAllocateMemory(device_,&a,nullptr,&b.memory),"allocate buffer");checked(vkBindBufferMemory(device_,b.handle,b.memory,0),"bind buffer");if(properties&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)checked(vkMapMemory(device_,b.memory,0,size,0,&b.mapped),"map buffer");}catch(...){destroy(b);throw;}return b;}
- void destroy(Buffer& b){if(b.mapped)vkUnmapMemory(device_,b.memory);if(b.handle)vkDestroyBuffer(device_,b.handle,nullptr);if(b.memory)vkFreeMemory(device_,b.memory,nullptr);b={};}
- Image image(std::uint32_t w,std::uint32_t h,VkFormat format,VkImageUsageFlags usage,
-             VkImageAspectFlags aspect=VK_IMAGE_ASPECT_COLOR_BIT,std::uint32_t levels=1) {
-     if(!w||!h||!levels||levels>static_cast<std::uint32_t>(std::bit_width(std::max(w,h))))throw std::runtime_error("invalid Vulkan image mip extent");
-     progress();
-     Image i;i.width=w;i.height=h;i.format=format;i.levels=levels;
-     VkImageCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-     c.imageType=VK_IMAGE_TYPE_2D;c.format=format;c.extent={w,h,1};c.mipLevels=levels;c.arrayLayers=1;
-     c.samples=VK_SAMPLE_COUNT_1_BIT;c.tiling=VK_IMAGE_TILING_OPTIMAL;c.usage=usage;c.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
-     check_image_format(w,h,format,usage);
-     checked(vkCreateImage(device_,&c,nullptr,&i.handle),"create image");
-     try {
-         VkMemoryRequirements r;vkGetImageMemoryRequirements(device_,i.handle,&r);
-         VkMemoryAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-         a.allocationSize=r.size;a.memoryTypeIndex=memory_type(r.memoryTypeBits,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-         checked(vkAllocateMemory(device_,&a,nullptr,&i.memory),"allocate image");
-         checked(vkBindImageMemory(device_,i.handle,i.memory,0),"bind image");
-         VkImageViewCreateInfo v{};v.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-         v.image=i.handle;v.viewType=VK_IMAGE_VIEW_TYPE_2D;v.format=format;v.subresourceRange={aspect,0,levels,0,1};
-         checked(vkCreateImageView(device_,&v,nullptr,&i.view),"create image view");
-         progress();
-     } catch(...) {destroy(i);throw;}
-     return i;
- }
- void destroy(Image& i){if(i.view)vkDestroyImageView(device_,i.view,nullptr);if(i.handle)vkDestroyImage(device_,i.handle,nullptr);if(i.memory)vkFreeMemory(device_,i.memory,nullptr);i={};}
+// Binds a dedicated allocation (pool null) or a range of the pool's current block for this memory type.
+template<class Bind>void bind_memory(const VkMemoryRequirements& r,VkMemoryPropertyFlags properties,MemoryPool* pool,bool image,
+                                     VkDeviceMemory& memory,std::shared_ptr<MemoryBlock>& owner,void** mapped,Bind bind) {
+    const auto type=memory_type(r.memoryTypeBits,properties);
+    const bool host=(properties&VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)!=0;
+    if(!pool) {
+        VkMemoryAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;a.allocationSize=r.size;a.memoryTypeIndex=type;
+        checked(vkAllocateMemory(device_,&a,nullptr,&memory),"allocate memory");
+        checked(bind(memory,VkDeviceSize(0)),"bind memory");
+        if(host)checked(vkMapMemory(device_,memory,0,VK_WHOLE_SIZE,0,mapped),"map memory");
+        return;
+    }
+    const auto slot=type*2+(image?1:0);auto& block=pool->blocks[slot];
+    const auto alignment=std::max<VkDeviceSize>(1,r.alignment);
+    VkDeviceSize offset=(pool->used[slot]+alignment-1)/alignment*alignment;
+    if(!block||offset>block->size||r.size>block->size-offset) {
+        constexpr VkDeviceSize first=16ull<<20,largest=256ull<<20;
+        auto& next=pool->next[slot];next=next?std::min(next*2,largest):first;
+        auto fresh=std::make_shared<MemoryBlock>();fresh->device=device_;
+        VkMemoryAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;a.memoryTypeIndex=type;
+        a.allocationSize=std::max(next,r.size);
+        // Nearly full VRAM: a large block can fail where the resource alone still fits.
+        if(vkAllocateMemory(device_,&a,nullptr,&fresh->memory)!=VK_SUCCESS) {
+            a.allocationSize=r.size;checked(vkAllocateMemory(device_,&a,nullptr,&fresh->memory),"allocate memory block");
+        }
+        fresh->size=a.allocationSize;++pool->allocations;
+        if(host){void* base=nullptr;checked(vkMapMemory(device_,fresh->memory,0,VK_WHOLE_SIZE,0,&base),"map memory block");fresh->mapped=static_cast<std::byte*>(base);}
+        block=std::move(fresh);offset=0;
+    }
+    checked(bind(block->memory,offset),"bind pooled memory");
+    if(host)*mapped=block->mapped+offset;
+    pool->used[slot]=offset+r.size;owner=block;
+}
+Buffer buffer(VkDeviceSize size,VkBufferUsageFlags usage,VkMemoryPropertyFlags properties,MemoryPool* pool=nullptr) {
+    Buffer b;b.bytes=size;
+    VkBufferCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;c.size=size;c.usage=usage;c.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+    checked(vkCreateBuffer(device_,&c,nullptr,&b.handle),"create buffer");
+    try {
+        VkMemoryRequirements r;vkGetBufferMemoryRequirements(device_,b.handle,&r);
+        bind_memory(r,properties,pool,false,b.memory,b.block,&b.mapped,
+            [&](VkDeviceMemory memory,VkDeviceSize offset){return vkBindBufferMemory(device_,b.handle,memory,offset);});
+    } catch(...) {destroy(b);throw;}
+    return b;
+}
+void destroy(Buffer& b){if(b.mapped&&b.memory)vkUnmapMemory(device_,b.memory);if(b.handle)vkDestroyBuffer(device_,b.handle,nullptr);if(b.memory)vkFreeMemory(device_,b.memory,nullptr);b={};}
+Image image(std::uint32_t w,std::uint32_t h,VkFormat format,VkImageUsageFlags usage,
+            VkImageAspectFlags aspect=VK_IMAGE_ASPECT_COLOR_BIT,std::uint32_t levels=1,MemoryPool* pool=nullptr) {
+    if(!w||!h||!levels||levels>static_cast<std::uint32_t>(std::bit_width(std::max(w,h))))throw std::runtime_error("invalid Vulkan image mip extent");
+    progress();
+    Image i;i.width=w;i.height=h;i.format=format;i.levels=levels;
+    VkImageCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    c.imageType=VK_IMAGE_TYPE_2D;c.format=format;c.extent={w,h,1};c.mipLevels=levels;c.arrayLayers=1;
+    c.samples=VK_SAMPLE_COUNT_1_BIT;c.tiling=VK_IMAGE_TILING_OPTIMAL;c.usage=usage;c.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
+    check_image_format(w,h,format,usage);
+    checked(vkCreateImage(device_,&c,nullptr,&i.handle),"create image");
+    try {
+        VkMemoryRequirements r;vkGetImageMemoryRequirements(device_,i.handle,&r);
+        bind_memory(r,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,pool,true,i.memory,i.block,nullptr,
+            [&](VkDeviceMemory memory,VkDeviceSize offset){return vkBindImageMemory(device_,i.handle,memory,offset);});
+        VkImageViewCreateInfo v{};v.sType=VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        v.image=i.handle;v.viewType=VK_IMAGE_VIEW_TYPE_2D;v.format=format;v.subresourceRange={aspect,0,levels,0,1};
+        checked(vkCreateImageView(device_,&v,nullptr,&i.view),"create image view");
+        progress();
+    } catch(...) {destroy(i);throw;}
+    return i;
+}
+void destroy(Image& i){if(i.view)vkDestroyImageView(device_,i.view,nullptr);if(i.handle)vkDestroyImage(device_,i.handle,nullptr);if(i.memory)vkFreeMemory(device_,i.memory,nullptr);i={};}
  void barrier(VkCommandBuffer c,VkImage image,VkImageLayout old,VkImageLayout next,VkAccessFlags src,VkAccessFlags dst,
               VkPipelineStageFlags before,VkPipelineStageFlags after,VkImageAspectFlags aspect=VK_IMAGE_ASPECT_COLOR_BIT,
               std::uint32_t levels=1) {
@@ -454,132 +520,168 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      }
      vkDestroyFence(device_,f,nullptr);vkFreeCommandBuffers(device_,pool_,1,&c);
  }
- // frame: record into the caller's frame command buffer (retained reloads, no submit or wait); staging is retired until
- // that frame completed. Otherwise own submissions, each waited.
- struct UploadBatch {
-     VulkanRenderer& renderer;
-     VkCommandBuffer command=VK_NULL_HANDLE;
-     VkFence fence=VK_NULL_HANDLE;
-     std::vector<Buffer> staging;
-     VkDeviceSize bytes=0,total_bytes=0;
-     std::size_t submissions=0;
-     bool recording=false,pending=false,frame=false;
-     explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE)
-         :renderer(r),command(into),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
-     ~UploadBatch() {
-         if(frame){for(auto& stage:staging)renderer.retire(stage);return;}
-         if(pending)renderer.drain_fence(fence);
-         if(command)vkFreeCommandBuffers(renderer.device_,renderer.pool_,1,&command);
-         if(fence)vkDestroyFence(renderer.device_,fence,nullptr);
-         for(auto& stage:staging)renderer.destroy(stage);
-     }
-     void flush() {
-         if(frame) {
-             if(!staging.empty())++submissions;
-             for(auto& stage:staging)renderer.retire(stage);
-             staging.clear();bytes=0;return;
-         }
-         if(!recording)return;
-         checked(vkEndCommandBuffer(command),"end scene upload batch");
-         recording=false;
-         checked(vkResetFences(renderer.device_,1,&fence),"reset scene upload fence");
-         VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;
-         submit.commandBufferCount=1;submit.pCommandBuffers=&command;
-         checked(renderer.queue_submit(submit,fence),"submit scene upload batch");
-         pending=true;
-         renderer.wait_fence(fence,"wait scene upload batch");
-         pending=false;++submissions;
-         checked(vkResetCommandBuffer(command,0),"reset scene upload batch");
-         for(auto& stage:staging)renderer.destroy(stage);
-         staging.clear();bytes=0;
-     }
-     Buffer& stage(const void* data,VkDeviceSize size) {
-         // Bound aggregate staging to one eighth of the asset cap; a larger single asset runs alone.
-         renderer.progress();
-         constexpr VkDeviceSize chunk_bytes=assets::max_entry_bytes/8;
-         if(bytes&&(size>chunk_bytes||bytes>chunk_bytes-size))flush();
-         if(!command) {
-             VkCommandBufferAllocateInfo allocate{};allocate.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-             allocate.commandPool=renderer.pool_;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
-             checked(vkAllocateCommandBuffers(renderer.device_,&allocate,&command),"allocate scene upload batch");
-             VkFenceCreateInfo create{};create.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-             checked(vkCreateFence(renderer.device_,&create,nullptr,&fence),"create scene upload fence");
-         }
-         if(!recording) {
-             VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-             begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-             checked(vkBeginCommandBuffer(command,&begin),"begin scene upload batch");recording=true;
-         }
-         renderer.progress();
-         auto next=renderer.buffer(size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-         try {staging.push_back(next);}catch(...) {renderer.destroy(next);throw;}
-         renderer.copy_staging(next.mapped,data,static_cast<std::size_t>(size));
-         bytes+=size;total_bytes+=size;
-         return staging.back();
-     }
- };
- Image upload(std::uint32_t w,std::uint32_t h,const std::uint8_t* rgba,
-              std::span<const assets::DdsMip> mips={},std::size_t bytes=0,UploadBatch* batch=nullptr) {
-     if(!w||!h||std::uint64_t(w)*h>134217728)throw std::runtime_error("invalid Vulkan texture dimensions");
-     const auto levels=mips.empty()?1u:static_cast<std::uint32_t>(mips.size());
-     if(levels>32)throw std::runtime_error("invalid original mip count");
-     if(!bytes)bytes=static_cast<std::size_t>(w)*h*4;
-     if(bytes>assets::max_entry_bytes)throw std::runtime_error("decoded original mip chain exceeds upload limit");
-     std::array<VkBufferImageCopy,32> copies{};
-     std::size_t expected_offset=0;
-     for(std::uint32_t level=0;level<levels;++level) {
-         progress();
-         const auto width=std::max(1u,w>>level),height=std::max(1u,h>>level);
-         std::size_t size=static_cast<std::size_t>(width)*height*4;
-         if(!mips.empty()&&(mips[level].width!=width||mips[level].height!=height||
-            mips[level].offset!=expected_offset||mips[level].size!=size))
-             throw std::runtime_error("invalid decoded original mip descriptor");
-         if(size>bytes||expected_offset>bytes-size)throw std::runtime_error("truncated original mip chain");
-         copies[level].bufferOffset=expected_offset;
-         copies[level].imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,1};
-         copies[level].imageExtent={width,height,1};expected_offset+=size;
-     }
-     if(expected_offset!=bytes)throw std::runtime_error("unexpected original mip chain trailing bytes");
-     Buffer staging;
-     Image i;
-     try {
-         i=image(w,h,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-             VK_IMAGE_ASPECT_COLOR_BIT,levels);
-         if(batch)staging=batch->stage(rgba,bytes);
-         else {
-             staging=buffer(bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-             copy_staging(staging.mapped,rgba,bytes);
-         }
-         auto record=[&](VkCommandBuffer c) {
-             barrier(c,i.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 0,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
-                 VK_IMAGE_ASPECT_COLOR_BIT,levels);
-             vkCmdCopyBufferToImage(c,staging.handle,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,levels,copies.data());
-             barrier(c,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                 VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
-                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_COLOR_BIT,levels);
-         };
-         if(batch)record(batch->command);else immediate(record);
-     } catch(...) {if(!batch)destroy(staging);destroy(i);throw;}
-     if(!batch)destroy(staging);
-     return i;
- }
- Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usage,UploadBatch& batch) {
-     auto result=buffer(bytes,usage|VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-     Buffer stage;
-     try {stage=batch.stage(data,bytes);}catch(...) {destroy(result);throw;}
-     VkBufferCopy copy{0,0,bytes};vkCmdCopyBuffer(batch.command,stage.handle,result.handle,1,&copy);
-     VkBufferMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-     barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
-     barrier.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_INDEX_READ_BIT;
-     barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-     barrier.buffer=result.handle;barrier.size=VK_WHOLE_SIZE;
-     vkCmdPipelineBarrier(batch.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-         0,0,nullptr,1,&barrier,0,nullptr);
-     return result;
- }
+// frame: record into the caller's frame command buffer (retained reloads, no submit or wait); staging is retired until
+// that frame completed. Otherwise own submissions, each waited, staged through one reusable buffer (`ring`); `pool`
+// (full scene loads) sub-allocates the destinations.
+struct Staged {VkBuffer handle=VK_NULL_HANDLE;VkDeviceSize offset=0;};
+struct UploadBatch {
+    VulkanRenderer& renderer;
+    MemoryPool* pool=nullptr;
+    VkCommandBuffer command=VK_NULL_HANDLE;
+    VkFence fence=VK_NULL_HANDLE;
+    std::vector<Buffer> staging;
+    Buffer ring;
+    VkDeviceSize bytes=0,total_bytes=0;
+    std::size_t submissions=0;
+    bool recording=false,pending=false,frame=false;
+    explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE,MemoryPool* destinations=nullptr)
+        :renderer(r),pool(destinations),command(into),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
+    ~UploadBatch() {
+        if(frame){for(auto& stage:staging)renderer.retire(stage);return;}
+        if(pending)renderer.drain_fence(fence);
+        if(command)vkFreeCommandBuffers(renderer.device_,renderer.pool_,1,&command);
+        if(fence)vkDestroyFence(renderer.device_,fence,nullptr);
+        for(auto& stage:staging)renderer.destroy(stage);
+        renderer.destroy(ring);
+    }
+    void flush() {
+        if(frame) {
+            if(!staging.empty())++submissions;
+            for(auto& stage:staging)renderer.retire(stage);
+            staging.clear();bytes=0;return;
+        }
+        if(!recording)return;
+        checked(vkEndCommandBuffer(command),"end scene upload batch");
+        recording=false;
+        checked(vkResetFences(renderer.device_,1,&fence),"reset scene upload fence");
+        VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submit.commandBufferCount=1;submit.pCommandBuffers=&command;
+        checked(renderer.queue_submit(submit,fence),"submit scene upload batch");
+        pending=true;
+        renderer.wait_fence(fence,"wait scene upload batch");
+        pending=false;++submissions;
+        checked(vkResetCommandBuffer(command,0),"reset scene upload batch");
+        for(auto& stage:staging)renderer.destroy(stage);
+        staging.clear();bytes=0;
+    }
+    Staged stage(const void* data,VkDeviceSize size) {
+        // Bound aggregate staging to one eighth of the asset cap; a larger single asset runs alone. Offsets stay 16-byte
+        // aligned (BC block and texel copy offsets).
+        renderer.progress();
+        constexpr VkDeviceSize chunk_bytes=assets::max_entry_bytes/8;
+        if(bytes&&(size>chunk_bytes||((bytes+15)&~VkDeviceSize(15))>chunk_bytes-size))flush();
+        if(!command) {
+            VkCommandBufferAllocateInfo allocate{};allocate.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocate.commandPool=renderer.pool_;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
+            checked(vkAllocateCommandBuffers(renderer.device_,&allocate,&command),"allocate scene upload batch");
+            VkFenceCreateInfo create{};create.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            checked(vkCreateFence(renderer.device_,&create,nullptr,&fence),"create scene upload fence");
+        }
+        if(!recording) {
+            VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            checked(vkBeginCommandBuffer(command,&begin),"begin scene upload batch");recording=true;
+        }
+        renderer.progress();
+        total_bytes+=size;
+        if(!frame&&size<=chunk_bytes) { // flush() waits for the copies before the ring is rewritten
+            if(!ring.handle)ring=renderer.buffer(chunk_bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            const VkDeviceSize offset=(bytes+15)&~VkDeviceSize(15);
+            renderer.copy_staging(static_cast<std::byte*>(ring.mapped)+offset,data,static_cast<std::size_t>(size));
+            bytes=offset+size;
+            return {ring.handle,offset};
+        }
+        auto next=renderer.buffer(size,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        try {staging.push_back(next);}catch(...) {renderer.destroy(next);throw;}
+        renderer.copy_staging(next.mapped,data,static_cast<std::size_t>(size));
+        bytes+=size;
+        return {next.handle,0};
+    }
+};
+static VkFormat texture_format(assets::DdsFormat format) {
+    switch(format) {
+    case assets::DdsFormat::bc1: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK; // DXT1 1-bit alpha: the RGBA variant
+    case assets::DdsFormat::bc2: return VK_FORMAT_BC2_UNORM_BLOCK;
+    case assets::DdsFormat::bc3: return VK_FORMAT_BC3_UNORM_BLOCK;
+    default: return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+}
+// pixels: the mip chain in `format` (RGBA8 texels or authored BC blocks), tightly packed per level.
+Image upload(std::uint32_t w,std::uint32_t h,const std::uint8_t* pixels,
+             std::span<const assets::DdsMip> mips={},std::size_t bytes=0,UploadBatch* batch=nullptr,
+             assets::DdsFormat format=assets::DdsFormat::rgba8) {
+    if(!w||!h||std::uint64_t(w)*h>134217728)throw std::runtime_error("invalid Vulkan texture dimensions");
+    const auto levels=mips.empty()?1u:static_cast<std::uint32_t>(mips.size());
+    if(levels>32)throw std::runtime_error("invalid original mip count");
+    if(!bytes)bytes=static_cast<std::size_t>(assets::dds_mip_bytes(format,w,h));
+    if(bytes>assets::max_entry_bytes)throw std::runtime_error("decoded original mip chain exceeds upload limit");
+    std::array<VkBufferImageCopy,32> copies{};
+    std::size_t expected_offset=0;
+    for(std::uint32_t level=0;level<levels;++level) {
+        progress();
+        const auto width=std::max(1u,w>>level),height=std::max(1u,h>>level);
+        const auto size=static_cast<std::size_t>(assets::dds_mip_bytes(format,width,height));
+        if(!mips.empty()&&(mips[level].width!=width||mips[level].height!=height||
+           mips[level].offset!=expected_offset||mips[level].size!=size))
+            throw std::runtime_error("invalid decoded original mip descriptor");
+        if(size>bytes||expected_offset>bytes-size)throw std::runtime_error("truncated original mip chain");
+        copies[level].bufferOffset=expected_offset;
+        copies[level].imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,level,0,1};
+        copies[level].imageExtent={width,height,1};expected_offset+=size;
+    }
+    if(expected_offset!=bytes)throw std::runtime_error("unexpected original mip chain trailing bytes");
+    Buffer staging;
+    Staged source;
+    Image i;
+    try {
+        i=image(w,h,texture_format(format),VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT,levels,batch?batch->pool:nullptr);
+        if(batch)source=batch->stage(pixels,bytes);
+        else {
+            staging=buffer(bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            copy_staging(staging.mapped,pixels,bytes);
+            source={staging.handle,0};
+        }
+        for(std::uint32_t level=0;level<levels;++level)copies[level].bufferOffset+=source.offset;
+        auto record=[&](VkCommandBuffer c) {
+            barrier(c,i.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                0,VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,levels);
+            vkCmdCopyBufferToImage(c,source.handle,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,levels,copies.data());
+            barrier(c,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_COLOR_BIT,levels);
+        };
+        if(batch)record(batch->command);else immediate(record);
+    } catch(...) {if(!batch)destroy(staging);destroy(i);throw;}
+    if(!batch)destroy(staging);
+    return i;
+}
+// Scene/particle textures: authored BC blocks stay compressed when the device samples BC (bc_supported_); otherwise they
+// decode to RGBA8 exactly like the CPU decoder.
+Image upload_texture(const Texture& t,UploadBatch* batch=nullptr) {
+    if(t.data.empty())throw std::runtime_error("invalid decoded original texture size");
+    if(t.format==assets::DdsFormat::rgba8||bc_supported_)return upload(t.width,t.height,t.data.data(),t.mips,t.data.size(),batch,t.format);
+    const auto rgba=assets::decompress_dds({t.width,t.height,t.data,t.mips,t.format});
+    return upload(rgba.width,rgba.height,rgba.rgba.data(),rgba.mips,rgba.rgba.size(),batch);
+}
+Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usage,UploadBatch& batch) {
+    auto result=buffer(bytes,usage|VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,batch.pool);
+    Staged stage;
+    try {stage=batch.stage(data,bytes);}catch(...) {destroy(result);throw;}
+    VkBufferCopy copy{stage.offset,0,bytes};vkCmdCopyBuffer(batch.command,stage.handle,result.handle,1,&copy);
+    VkBufferMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT|VK_ACCESS_INDEX_READ_BIT;
+    barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    barrier.buffer=result.handle;barrier.size=VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(batch.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+        0,0,nullptr,1,&barrier,0,nullptr);
+    return result;
+}
  std::vector<std::uint32_t> shader_bytes(const char* name){std::vector<std::filesystem::path> roots{IKV_SHADER_DIR};if(const char* base=SDL_GetBasePath()){roots.emplace_back(std::filesystem::path(base)/"shaders/vulkan");roots.emplace_back(std::filesystem::path(base)/"../share/ikv/shaders/vulkan");}for(const auto& root:roots){std::ifstream f(root/(std::string(name)+".spv"),std::ios::binary|std::ios::ate);if(!f)continue;auto length=static_cast<std::streamoff>(f.tellg());if(length<20||length>16*1024*1024||length%4!=0)throw std::runtime_error("invalid SPIR-V file");std::vector<std::uint32_t> words(static_cast<std::size_t>(length)/4);f.seekg(0);f.read(reinterpret_cast<char*>(words.data()),length);if(!f||words[0]!=0x07230203)throw std::runtime_error("invalid SPIR-V magic/read");return words;}throw std::runtime_error(std::string("compiled Vulkan shader missing: ")+name+".spv");}
  VkShaderModule shader(const char* name){auto words=shader_bytes(name);VkShaderModuleCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;c.codeSize=words.size()*4;c.pCode=words.data();VkShaderModule module;checked(vkCreateShaderModule(device_,&c,nullptr,&module),"create shader module");return module;}
 VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mesh,bool alpha,
@@ -778,9 +880,12 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      }
      if(!physical_)throw std::runtime_error("no Vulkan1.2 graphics/present device satisfies requested capabilities");
      const auto features=query_rt_features(physical_);
-     rt_enabled_=options_.ray_tracing!=RayTracing::off&&features.supported()&&compute_queue();
+     // Physical RT only traces in enhanced lighting: with original appearance it would build/refresh AS for nothing.
+     rt_enabled_=options_.ray_tracing!=RayTracing::off&&features.supported()&&compute_queue()&&
+         (options_.rt_style==RtStyle::faithful||!options_.original_appearance);
+     original_lighting_=options_.original_appearance||(rt_enabled_&&options_.rt_style==RtStyle::faithful);
      const char* denoise=SDL_getenv("IKV_RT_DENOISE");
-     denoise_enabled_=rt_enabled_&&!options_.original_appearance&&(!denoise||std::strcmp(denoise,"0"));
+     denoise_enabled_=rt_enabled_&&!original_lighting_&&(!denoise||std::strcmp(denoise,"0"));
      VkPhysicalDeviceFeatures available{};vkGetPhysicalDeviceFeatures(physical_,&available);
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
@@ -844,6 +949,18 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      timing_features.pNext=rt_enabled_?&bda:nullptr;
      dc.pNext=present_timing_?static_cast<void*>(&id_features):rt_enabled_?static_cast<void*>(&bda):nullptr;
      VkPhysicalDeviceFeatures enabled{};enabled.independentBlend=denoise_enabled_||fsr_supported_;
+     // Authored DXT1/3/5 stay compressed on the GPU when BC1/2/3 sample with linear filtering (upload_texture).
+     bc_supported_=available.textureCompressionBC;
+     for(const auto format:{VK_FORMAT_BC1_RGBA_UNORM_BLOCK,VK_FORMAT_BC2_UNORM_BLOCK,VK_FORMAT_BC3_UNORM_BLOCK}) {
+         VkFormatProperties bc{};vkGetPhysicalDeviceFormatProperties(physical_,format,&bc);
+         constexpr VkFormatFeatureFlags needed=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT|VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+         bc_supported_=bc_supported_&&(bc.optimalTilingFeatures&needed)==needed;
+     }
+     enabled.textureCompressionBC=bc_supported_;
+     // Original 0046b040 sets D3DSAMP_MAXANISOTROPY (launcher default 4x) on the texture stages; 16 measured no worse in
+     // motion (wave-12 Textures report §2).
+     enabled.samplerAnisotropy=available.samplerAnisotropy;
+     const float anisotropy=available.samplerAnisotropy?std::min(16.f,props.limits.maxSamplerAnisotropy):1.f;
      if(fsr_supported_)Fsr3Upscaler::enable_features(physical_,enabled);
      dc.pEnabledFeatures=&enabled;
      checked(vkCreateDevice(physical_,&dc,nullptr,&device_),"create Vulkan device");
@@ -885,7 +1002,9 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
      sampler.mipmapMode=options_.original_appearance?VK_SAMPLER_MIPMAP_MODE_NEAREST:VK_SAMPLER_MIPMAP_MODE_LINEAR;
      sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_REPEAT;sampler.maxLod=VK_LOD_CLAMP_NONE;
+     sampler.anisotropyEnable=anisotropy>1?VK_TRUE:VK_FALSE;sampler.maxAnisotropy=anisotropy;
      checked(vkCreateSampler(device_,&sampler,nullptr,&sampler_),"texture sampler");
+     sampler.anisotropyEnable=VK_FALSE;sampler.maxAnisotropy=1; // clamp/shadow samplers read render targets
      sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
      checked(vkCreateSampler(device_,&sampler,nullptr,&linear_clamp_),"linear clamp sampler");
      sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -994,7 +1113,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          const bool generation=options_.frame_generation&&Fsr3Upscaler::frame_generation_supported(physical_,swap_format_,&generation_missing);
          if(options_.frame_generation&&!generation)std::cerr<<"Vulkan FSR 3.1.4 frame generation unsupported ("<<generation_missing<<"); off\n";
          try {
-             fsr_=std::make_unique<Fsr3Upscaler>(physical_,device_,fsr_extent,extent_,!options_.original_appearance,
+             fsr_=std::make_unique<Fsr3Upscaler>(physical_,device_,fsr_extent,extent_,!original_lighting_,
                  generation?swap_format_:VK_FORMAT_UNDEFINED);
              render_extent_=fsr_extent;fsr_reset_=true;
          } catch(const std::exception& e) {std::cerr<<"Vulkan "<<e.what()<<"; bilinear render scale\n";}
@@ -1057,7 +1176,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      for(auto& s:present_semaphores_)checked(vkCreateSemaphore(device_,&sem,nullptr,&s),"present semaphore");
      const auto hdr_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      for(auto& i:hdr_)i=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,hdr_usage);
-     if(options_.original_appearance) {
+     if(original_lighting_) {
          for(auto& i:glow_chain_)i=image(128,128,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
          const VkFormat glow_colors[]{VK_FORMAT_R8G8B8A8_UNORM};
          glow_pass_=render_pass(glow_colors,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,false);
@@ -1329,7 +1448,7 @@ void clear_material_sets() {
      const auto retained_meshes=std::count_if(geometry_.begin(),geometry_.end(),
          [](const Geometry& g){return g.vertices.handle!=VK_NULL_HANDLE;});
      const auto retained_textures=textures_.size();
-     std::size_t new_meshes=0,submissions=0;
+     std::size_t new_meshes=0,submissions=0,memory_blocks=0,texture_bytes=0;
      VkDeviceSize upload_bytes=0;
      try {
          std::vector<std::uint8_t> used(s.meshes.size(),0);
@@ -1347,7 +1466,8 @@ void clear_material_sets() {
          }
          geometry_.resize(s.meshes.size());
          textures_.resize(s.textures.size());
-         UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE);
+         MemoryPool pool; // full loads only: retained reloads (actor churn) allocate and retire per resource
+         UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
          for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
              if(mesh_index%1024==0)progress(); // uploads pump on their own
              if(!used[mesh_index])continue;
@@ -1374,20 +1494,20 @@ void clear_material_sets() {
              if(skinned) {
                  for(auto& stage:g.staging)
                      stage=buffer(g.vertices.bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-                 // Motion vectors' previous pose starts equal to the bind pose (record_geometry_uploads keeps it one frame behind).
-                 g.previous=upload_buffer(mesh.vertices.data(),g.vertices.bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,batch);
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,batch.pool);
+                 // Motion vectors' previous pose starts equal to the bind pose; record_geometry_uploads swaps it with
+                 // vertices, so both carry the same usage.
+                 g.previous=upload_buffer(mesh.vertices.data(),g.vertices.bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,batch);
              }
              g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);++new_meshes;
          }
          for(std::size_t i=retained_textures;i<s.textures.size();++i) {
              progress();
              const auto& t=s.textures[i];
-             if(t.rgba.empty())throw std::runtime_error("invalid decoded original texture size");
              if(!texture_lookup_.emplace(t.name,i).second)throw std::runtime_error("duplicate original texture name");
-             textures_[i]=upload(t.width,t.height,t.rgba.data(),t.mips,t.rgba.size(),&batch);
+             textures_[i]=upload_texture(t,&batch);texture_bytes+=t.data.size();
          }
-         batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;
+         batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;memory_blocks=pool.allocations;
          // Appending must not conceal pending revisions of already-retained animated meshes.
          update_geometry(s);geometry_revision_=s.geometry_revision;
          mesh_keys_.resize(s.meshes.size());for(std::size_t i=0;i<s.meshes.size();++i)mesh_keys_[i]=s.meshes[i].key;mesh_key_=s.mesh_key;
@@ -1400,7 +1520,8 @@ void clear_material_sets() {
      std::cerr<<"Vulkan scene resources mode="<<(retain?"retain":"full")
          <<" meshesNew="<<new_meshes<<" meshesRetained="<<retained_meshes<<" meshesReleased="<<released_meshes
          <<" texturesNew="<<s.textures.size()-retained_textures<<" texturesRetained="<<retained_textures
-         <<" uploadBatches="<<submissions<<" uploadBytes="<<upload_bytes<<" elapsedMs="<<elapsed<<'\n';
+         <<" uploadBatches="<<submissions<<" uploadBytes="<<upload_bytes<<" textureBytes="<<texture_bytes
+         <<" textureBC="<<(bc_supported_?1:0)<<" memoryBlocks="<<memory_blocks<<" elapsedMs="<<elapsed<<'\n';
  }
 // Stages changed skins in the current slot; record_geometry_uploads copies them in this frame's command buffer.
 void update_geometry(const Scene& scene) {
@@ -1426,30 +1547,24 @@ void record_geometry_uploads() {
             0,1,&b,0,nullptr,0,nullptr);
         any=true;
     };
-    if(motion_vectors_) { // previous = the pose the last frame drew, copied before this frame's skin replaces it
-        bool copied=false;
-        for(std::size_t i=0;i<geometry_.size();++i) {
-            if(i%4096==0)progress();
-            auto& g=geometry_[i];
-            if(!g.previous.handle||!(g.upload||g.previous_stale))continue;
-            begin();
-            VkBufferCopy copy{0,0,g.vertices.bytes};
-            vkCmdCopyBuffer(command_,g.vertices.handle,g.previous.handle,1,&copy);
-            g.previous_stale=g.upload;copied=true; // an unchanged skin next frame still needs previous == current
-        }
-        if(copied) { // the reads above finish before the skin copies below overwrite vertices
-            VkMemoryBarrier b{};b.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&b,0,nullptr,0,nullptr);
-        }
-    }
+    // Motion vectors' previous pose: an uploaded skin swaps vertices/previous (the buffer the last frame drew becomes
+    // previous) and writes the new pose into the other one, instead of copying vertices->previous first. A skin that
+    // stops changing copies once, so previous == current from the next frame on.
     for(std::size_t i=0;i<geometry_.size();++i) {
         if(i%4096==0)progress();
         auto& g=geometry_[i];
-        if(!g.upload)continue;
-        begin();
-        VkBufferCopy copy{0,0,g.vertices.bytes};
-        vkCmdCopyBuffer(command_,g.staging[total_frames_&1u].handle,g.vertices.handle,1,&copy);
-        g.upload=false;
+        if(g.upload) {
+            begin();
+            if(motion_vectors_&&g.previous.handle)std::swap(g.vertices,g.previous);
+            VkBufferCopy copy{0,0,g.vertices.bytes};
+            vkCmdCopyBuffer(command_,g.staging[total_frames_&1u].handle,g.vertices.handle,1,&copy);
+            g.upload=false;g.previous_stale=g.previous.handle!=VK_NULL_HANDLE;
+        } else if(g.previous_stale&&motion_vectors_) {
+            begin();
+            VkBufferCopy copy{0,0,g.vertices.bytes};
+            vkCmdCopyBuffer(command_,g.vertices.handle,g.previous.handle,1,&copy);
+            g.previous_stale=false;
+        }
     }
     if(!any)return;
     VkMemoryBarrier b{};b.sType=VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -1478,7 +1593,7 @@ void record_geometry_uploads() {
  }
  void draw_scene(VkCommandBuffer c,bool shadow) {
      if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&rt_set_,0,nullptr);
-     // draws_ is sorted by pass/material: skip rebinding unchanged pipeline, material set and mesh buffers.
+     // draws_ is sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
      for(const auto& item:draws_) {
          if(shadow?item.sky:!item.visible)continue;
@@ -1591,14 +1706,16 @@ public:
  const Camera& camera()const override{return options_.camera;}
  void set_camera(const Camera& camera)override{validate_camera(camera);options_.camera=camera;}
  void resize(int,int)override{dirty_=true;}
- void set_overlay(const Overlay& o)override {
+ void set_overlay(const Overlay& o,std::span<const std::array<int,4>> changed)override {
      if(o.width<0||o.height<0||o.rgba.size()!=std::uint64_t(o.width)*std::uint64_t(o.height)*4||
         std::uint64_t(o.width)*std::uint64_t(o.height)>268435456)
          throw std::invalid_argument("invalid overlay RGBA size");
      overlay_visible_=o.width>0&&o.height>0;
      if(!overlay_visible_)return;
      const auto width=static_cast<std::uint32_t>(o.width),height=static_cast<std::uint32_t>(o.height);
+     bool whole=changed.empty()||overlay_undefined_;
      if(overlay_.width!=width||overlay_.height!=height) {
+         whole=true;
          wait_frame("overlay frame wait"); // in-flight frames sample the old image through these descriptors
          auto next=image(width,height,VK_FORMAT_R8G8B8A8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
          destroy(overlay_);overlay_=next;overlay_undefined_=true;
@@ -1611,8 +1728,21 @@ public:
          stage=buffer(VkDeviceSize(width)*height*4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
      }
-     copy_staging(stage.mapped,o.rgba.data(),o.rgba.size());
-     overlay_upload_=true;
+     if(whole){
+         copy_staging(stage.mapped,o.rgba.data(),o.rgba.size());
+         overlay_regions_.clear();overlay_whole_=true;
+     }else for(const auto& r:changed) {
+         // Only the changed rectangles: the image keeps every other texel from earlier uploads.
+         const auto x0=std::clamp(r[0],0,o.width),y0=std::clamp(r[1],0,o.height);
+         const auto x1=std::clamp(r[0]+std::max(r[2],0),x0,o.width),y1=std::clamp(r[1]+std::max(r[3],0),y0,o.height);
+         if(x0==x1||y0==y1)continue;
+         const auto offset=(std::size_t(y0)*width+std::size_t(x0))*4,row=std::size_t(x1-x0)*4;
+         for(auto y=y0;y<y1;++y)std::memcpy(static_cast<std::byte*>(stage.mapped)+offset+std::size_t(y-y0)*width*4,o.rgba.data()+offset+std::size_t(y-y0)*width*4,row);
+         if(overlay_whole_)continue; // a whole upload already pending this frame copies the updated staging
+         VkBufferImageCopy copy{};copy.bufferOffset=offset;copy.bufferRowLength=width;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+         copy.imageOffset={x0,y0,0};copy.imageExtent={std::uint32_t(x1-x0),std::uint32_t(y1-y0),1};overlay_regions_.push_back(copy);
+     }
+     overlay_upload_=overlay_whole_||!overlay_regions_.empty();
  }
  void record_overlay_upload(VkCommandBuffer c) {
      const auto& stage=overlay_staging_[total_frames_&1u];
@@ -1620,10 +1750,11 @@ public:
          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,overlay_undefined_?0:VK_ACCESS_SHADER_READ_BIT,VK_ACCESS_TRANSFER_WRITE_BIT,
          overlay_undefined_?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT);
      VkBufferImageCopy copy{};copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={overlay_.width,overlay_.height,1};
-     vkCmdCopyBufferToImage(c,stage.handle,overlay_.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+     if(overlay_whole_)vkCmdCopyBufferToImage(c,stage.handle,overlay_.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+     else vkCmdCopyBufferToImage(c,stage.handle,overlay_.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,std::uint32_t(overlay_regions_.size()),overlay_regions_.data());
      barrier(c,overlay_.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
          VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-     overlay_upload_=overlay_undefined_=false;
+     overlay_upload_=overlay_undefined_=overlay_whole_=false;overlay_regions_.clear();
  }
  void update_overlay_descriptors() {
      if(!descriptor_pool_)return;
@@ -1668,7 +1799,7 @@ void set_particles(const ParticleFrame& frame)override {
     while(particle_images_.size()<frame.textures.size()) {
         if(particle_images_.size()>=capacity)throw std::runtime_error("particle texture descriptor capacity exceeded");
         const auto& t=frame.textures[particle_images_.size()];
-        particle_images_.push_back(upload(t.width,t.height,t.rgba.data(),t.mips,t.rgba.size()));
+        particle_images_.push_back(upload_texture(t));
         particle_sets_.push_back(allocate_set(set_layout_,particle_pool_));
         if(!dirty_)write_set(particle_sets_.back(),nullptr,0,false,false,&particle_images_.back()); // else create_targets writes it
     }
@@ -1805,7 +1936,12 @@ void set_particles(const ParticleFrame& frame)override {
      std::sort(draws_.begin(),draws_.end(),[](const auto& a,const auto& b) {
          if(a.sky!=b.sky)return a.sky;
          if(a.alpha!=b.alpha)return !a.alpha;
-         return a.alpha?a.distance>b.distance:a.material<b.material;
+         // Opaque nearest-first: early Z rejects hidden fragments before their ray queries (-13% scene pass,
+         // analysis/porting-wave12/Perf/report.md). Equal distances (meshes of one placement) fall back to material/mesh,
+         // so coplanar opaque parts never swap draw order between frames.
+         if(a.alpha)return a.distance>b.distance;
+         if(a.distance!=b.distance)return a.distance<b.distance;
+         return a.material!=b.material?a.material<b.material:a.mesh<b.mesh;
      });
      Frame f{};
      f.vp=camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true);
@@ -1840,7 +1976,7 @@ void set_particles(const ParticleFrame& frame)override {
        jumped(f.diffuse,previous_frame_.diffuse)||jumped(f.fog_color,previous_frame_.fog_color)||
        jumped(f.fog,previous_frame_.fog)||jumped(f.sky_b,previous_frame_.sky_b)||jumped(f.sky_c,previous_frame_.sky_c)))
         frame_=0;
-     f.params={options_.original_appearance?0.f:1.f,options_.exposure,
+     f.params={original_lighting_?0.f:1.f,options_.exposure,
          denoise_enabled_&&frame_>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
      f.viewport={float(render_extent_.width),float(render_extent_.height),float(total_frames_%16777216u),denoise_enabled_?1.f:0.f};
      const float tangent=std::tan(options_.camera.fov*.008726646259971648f);
@@ -1849,7 +1985,9 @@ void set_particles(const ParticleFrame& frame)override {
      f.camera_forward={basis.forward[0],basis.forward[1],basis.forward[2],0};
      f.previous_vp=previous_frame_.vp;f.previous_eye=previous_frame_.eye;
      f.previous_forward=previous_frame_.camera_forward;
-     f.source_time={float(source_ticks),float(source_ticks)*.001f,grayscale_?1.f:0.f,0};
+     // w: original fullscreen gamma ramp 0x467030(1,1,1.2) (post.frag/overlay.frag); D3D9 SetGammaRamp is fullscreen-only.
+     f.source_time={float(source_ticks),float(source_ticks)*.001f,grayscale_?1.f:0.f,
+         (SDL_GetWindowFlags(window_)&SDL_WINDOW_FULLSCREEN)?1.f:0.f};
      uniform_offset_=slot*uniform_stride_;
      std::memcpy(static_cast<std::byte*>(uniform_.mapped)+uniform_offset_,&f,sizeof(f));
      unsigned current=frame_&1u;
@@ -2022,15 +2160,16 @@ void set_particles(const ParticleFrame& frame)override {
      previous_frame_=f;rendered_=true;++frame_;
      ++total_frames_;
      if(total_frames_<=2||total_frames_%300==0) {
-         const bool active=rt_enabled_&&!options_.original_appearance;
+         const bool active=rt_enabled_&&!original_lighting_;
          // Rendered (submitted) frame period since the previous line: the FIFO-paced frame rate without frame generation.
          const auto now=std::chrono::steady_clock::now();
          const double frame_ms_avg=log_frame_?std::chrono::duration<double,std::milli>(now-log_time_).count()/double(total_frames_-log_frame_):0;
          log_time_=now;log_frame_=total_frames_;
          std::cerr<<"Vulkan submitted frame="<<total_frames_<<" provider=vulkan appearance="
-             <<(options_.original_appearance?"original":"enhanced")<<" hardwareRayQueries="<<active
-             <<" accelerationStructure="<<(rt_enabled_&&rt_->acceleration_structure()!=VK_NULL_HANDLE)
-             <<" reflections="<<active<<" shadows="<<active<<" diffuseGI="<<active<<" renderedFrameMs="<<frame_ms_avg
+            <<(options_.original_appearance?"original":"enhanced")<<" rtStyle="<<(options_.rt_style==RtStyle::faithful?"faithful":"physical")
+            <<" lighting="<<(original_lighting_?"original":"physical")<<" hardwareRayQueries="<<rt_enabled_
+            <<" accelerationStructure="<<(rt_enabled_&&rt_->acceleration_structure()!=VK_NULL_HANDLE)
+            <<" reflections="<<active<<" shadows="<<rt_enabled_<<" diffuseGI="<<active<<" renderedFrameMs="<<frame_ms_avg
              <<" historyEligible="<<int(f.params[2])<<" historyEligibleFrames="<<history_eligible_frames_
              <<" historyResetEvents="<<history_reset_events_<<" historyRetainedDirtyFrames="<<history_retained_dirty_frames_
              <<" historySampleCap=32 geometryMotionVectors="<<motion_vectors_<<" denoise="<<denoise_enabled_<<" renderScale="<<options_.render_scale
@@ -2068,7 +2207,7 @@ void set_particles(const ParticleFrame& frame)override {
  void screenshot(const std::filesystem::path& path)override {
      if(!rendered_)throw std::runtime_error("Vulkan screenshot requires a rendered frame");
      wait_frame("screenshot frame wait");
-     std::cerr<<"Vulkan completed frames="<<total_frames_<<" provider=vulkan hardwareRayQueries="<<(rt_enabled_&&!options_.original_appearance)<<'\n';
+     std::cerr<<"Vulkan completed frames="<<total_frames_<<" provider=vulkan hardwareRayQueries="<<rt_enabled_<<'\n';
      write_display(output_,path);
      if(!generating_||generation_frame_<2)return;
      const auto sibling=[&](const char* suffix){return path.parent_path()/(path.stem().string()+suffix+path.extension().string());};

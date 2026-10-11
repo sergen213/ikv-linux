@@ -38,6 +38,13 @@ public:
     // Draw following text with the original bold face (sibling verdanab.ttf) where it covers the glyph.
     void set_bold(bool bold);
     const Overlay& overlay() const;
+    // World-anchored layer beneath the HUD (name labels, floaters). Draws between begin_world() and end_world() go to it
+    // instead of the HUD; each begin_world() starts it empty. compose() puts the HUD over it in overlay() and returns the
+    // non-overlapping x,y,w,h rectangles changed since the previous compose (the whole overlay after begin()), so a frame
+    // where only world text moved repaints and uploads just its old and new boxes.
+    void begin_world();
+    void end_world();
+    std::span<const std::array<int, 4>> compose();
 
 private:
     struct Impl;

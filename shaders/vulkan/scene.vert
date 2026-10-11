@@ -26,6 +26,9 @@ layout(location=11) out vec2 sourceOceanUV;
 // Unjittered clip positions this and last frame: per-pixel motion vectors (FSR 3.1.4, RT history reprojection).
 layout(location=12) out vec4 motionCurrent;
 layout(location=13) out vec4 motionPrevious;
+// v_dif_lit oD0 before the saturate, split for faithful RT (lighting.glsl shadows only the directional term).
+layout(location=14) out vec3 sourceAmbientTerm;
+layout(location=15) out vec3 sourceSunTerm;
 void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
@@ -41,8 +44,9 @@ void main(){
     fadeWeight=sourceColor.a;
     vertexAmbient=ambient;
     // D3D vs_1_1 saturates oD0 before the pixel shader consumes it.
-    if(frame.sun.w>.5)vertexAmbient=vec4(clamp(ambient.rgb*frame.ambient.rgb+
-        clamp(dot(mat3(draw.model)*normal,frame.sun.xyz),0,1)*frame.diffuse.rgb,0,1),1);
+    sourceAmbientTerm=ambient.rgb*frame.ambient.rgb;
+    sourceSunTerm=clamp(dot(mat3(draw.model)*normal,frame.sun.xyz),0,1)*frame.diffuse.rgb;
+    if(frame.sun.w>.5)vertexAmbient=vec4(clamp(sourceAmbientTerm+sourceSunTerm,0,1),1);
     if(draw.extra.y>.5)vertexAmbient=vec4(.80000001*sqrt(max(frame.ambient.rgb,vec3(0))),1);
     if(ocean)vertexAmbient=vec4(frame.ambient.rgb,1);
     shadowPosition=frame.lightVP*world;

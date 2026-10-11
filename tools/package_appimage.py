@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build the portable, asset-free IKV Type-2 AppImage.
 
-Host:  python3 tools/package_appimage.py   (needs docker or podman and network on first run)
+Host:  python3 tools/package_appimage.py [--version X.Y.Z] [--work DIR] [--dist DIR]   (docker or podman; network on first run)
        Builds tools/appimage/Dockerfile.ubuntu24 (pinned Ubuntu 24.04, OpenSSL 3.5.9, SDL 3.4.18),
        then compiles and assembles inside it with the source tree mounted read-only.
 Output: dist/IKV-Linux-<version>-x86_64.AppImage, .sha256 and a .json inventory/licence report.
@@ -21,9 +21,8 @@ import sys
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.3.0"
-NAME = f"IKV-Linux-{VERSION}-x86_64.AppImage"
-IMAGE = f"ikv-appimage-toolchain:{VERSION}"
+VERSION = re.search(r"^project\(\w+ VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(), re.MULTILINE).group(1)
+IMAGE = "ikv-appimage-toolchain:ubuntu24"
 # Same pinned static Type-2 runtime as the sibling Kabus 22 AppImage; sources/licences in packaging/runtime-uruntime.
 RUNTIME_NAME = "uruntime-appimage-squashfs-lite-x86_64"
 RUNTIME_URL = "https://github.com/VHSgunzo/uruntime/releases/download/v0.8.1/" + RUNTIME_NAME
@@ -60,7 +59,7 @@ ikv-launcher|ikv-client|ikv-auth|ikv-server|ikv-updater|ikv-assets|ikv-original-
 esac
 exec "$HERE/usr/bin/ikv-launcher" "$@"
 '''
-DESKTOP = f'''[Desktop Entry]
+DESKTOP = '''[Desktop Entry]
 Type=Application
 Name=İstanbul Kıyamet Vakti
 GenericName=IKV native launcher
@@ -69,7 +68,7 @@ Exec=ikv-launcher
 Icon=ikv-launcher
 Terminal=false
 Categories=Game;RolePlaying;
-X-AppImage-Version={VERSION}
+X-AppImage-Version={version}
 '''
 # Generic packaging artwork (crescent over a dome), not original game art.
 ICON = '''<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256"><rect x="16" y="16" width="224" height="224" rx="40" fill="#1b2230"/><path d="M56 196h144v-12H56zM72 184c0-42 25-72 56-72s56 30 56 72z" fill="#c9b27c"/><rect x="122" y="88" width="12" height="26" fill="#c9b27c"/><circle cx="150" cy="66" r="26" fill="#e8e1cf"/><circle cx="162" cy="58" r="22" fill="#1b2230"/></svg>'''
@@ -166,9 +165,11 @@ def copy_tree(source: Path, target: Path, skip=lambda p: False) -> None:
 def inside(args) -> None:
     src, out, dist = Path("/src"), Path("/out"), Path("/dist")
     build, appdir = out / "build", out / "AppDir"
+    name = f"IKV-Linux-{args.version}-x86_64.AppImage"
+    desktop = DESKTOP.format(version=args.version)
     flags = "-march=x86-64 -mtune=generic"
     run("cmake", "-S", src, "-B", build, "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=OFF",
-        "-DCMAKE_CXX_COMPILER=g++-14", f"-DCMAKE_CXX_FLAGS={flags}",
+        "-DCMAKE_CXX_COMPILER=g++-14", f"-DCMAKE_CXX_FLAGS={flags}", f"-DIKV_VERSION={args.version}",
         "-DCMAKE_PREFIX_PATH=/opt/ikv-sdl3", "-DOPENSSL_ROOT_DIR=/opt/ikv-openssl", "-DOPENSSL_USE_STATIC_LIBS=OFF",
         "-DIKV_BUILD_CLIENT=ON", "-DIKV_BUILD_VULKAN=ON", "-DIKV_BUILD_LAUNCHER=ON",
         "-DIKV_BUILD_ASSET_TOOLS=ON", "-DIKV_BUILD_ORIGINAL_TOOLS=ON")
@@ -225,18 +226,18 @@ def inside(args) -> None:
 
     (appdir / "AppRun").write_text(APPRUN)
     (appdir / "AppRun").chmod(0o755)
-    (appdir / "ikv-launcher.desktop").write_text(DESKTOP)
+    (appdir / "ikv-launcher.desktop").write_text(desktop)
     (appdir / "ikv-launcher.svg").write_text(ICON)
     (appdir / ".DirIcon").write_text(ICON)
     (usr / "share/applications").mkdir(parents=True, exist_ok=True)
-    (usr / "share/applications/ikv-launcher.desktop").write_text(DESKTOP)
+    (usr / "share/applications/ikv-launcher.desktop").write_text(desktop)
     (usr / "share/icons/hicolor/scalable/apps").mkdir(parents=True, exist_ok=True)
     (usr / "share/icons/hicolor/scalable/apps/ikv-launcher.svg").write_text(ICON)
 
     glibc = sorted({v for p in appdir.rglob("*") if p.is_file() and is_elf(p)
                     for v in re.findall(r"GLIBC_([0-9.]+)", run("readelf", "-V", "-W", p))},
                    key=lambda v: tuple(map(int, v.split("."))))
-    report = {"version": VERSION, "asset_free": True, "compiler_warnings": warnings,
+    report = {"version": args.version, "asset_free": True, "compiler_warnings": warnings,
               "bundled_libraries": bundled, "host_libraries": host, "ubuntu_packages": versions,
               "minimum_glibc": glibc[-1] if glibc else None,
               "components": {"openssl": "3.5.9 (source-built, /opt/ikv-openssl)", "sdl3": "3.4.18 (source-built, static)",
@@ -255,16 +256,16 @@ def inside(args) -> None:
     squash.unlink(missing_ok=True)
     run("mksquashfs", appdir, squash, "-noappend", "-all-root", "-no-xattrs", "-no-exports", "-comp", "zstd",
         "-Xcompression-level", "19", "-mkfs-time", "0", "-all-time", "0", "-no-progress", "-quiet")
-    image = dist / NAME
+    image = dist / name
     with image.open("wb") as output, squash.open("rb") as payload:
         output.write(runtime)
         shutil.copyfileobj(payload, output, 1 << 20)
     image.chmod(0o755)
     squash.unlink()
     digest = sha256(image)
-    (dist / (NAME + ".sha256")).write_text(f"{digest}  {NAME}\n")
-    report["appimage"] = {"file": NAME, "size": image.stat().st_size, "sha256": digest, "squashfs_offset": len(runtime)}
-    (dist / (NAME + ".json")).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    (dist / (name + ".sha256")).write_text(f"{digest}  {name}\n")
+    report["appimage"] = {"file": name, "size": image.stat().st_size, "sha256": digest, "squashfs_offset": len(runtime)}
+    (dist / (name + ".json")).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(f"{image}: {image.stat().st_size} bytes sha256 {digest}; glibc >= {report['minimum_glibc']}")
 
 
@@ -272,9 +273,9 @@ def host(args) -> None:
     engine = shutil.which("podman") or shutil.which("docker")
     if not engine:
         raise SystemExit("docker or podman is required")
-    work, dist = ROOT / "build-appimage", ROOT / "dist"
+    work, dist = args.work.absolute(), args.dist.absolute()
     (work / "cache").mkdir(parents=True, exist_ok=True)
-    dist.mkdir(exist_ok=True)
+    dist.mkdir(parents=True, exist_ok=True)
     runtime = work / "cache" / RUNTIME_NAME
     if not runtime.exists():
         data = urllib.request.urlopen(RUNTIME_URL, timeout=90).read()
@@ -285,7 +286,7 @@ def host(args) -> None:
         subprocess.run([engine, "build", "-t", IMAGE, "-"], stdin=dockerfile, check=True)
     subprocess.run([engine, "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}", "-e", "HOME=/tmp",
                     "-v", f"{ROOT}:/src:ro", "-v", f"{work}:/out", "-v", f"{dist}:/dist", IMAGE,
-                    "python3", "/src/tools/package_appimage.py", "--inside",
+                    "python3", "/src/tools/package_appimage.py", "--inside", "--version", args.version,
                     "--runtime", f"/out/cache/{RUNTIME_NAME}"], check=True)
 
 
@@ -300,6 +301,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--runtime", help=argparse.SUPPRESS)
+    parser.add_argument("--version", default=VERSION, type=lambda v: re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v)[0],
+                        help=f"X.Y.Z compiled in as IKV_VERSION and used in the image name (default: CMake project, {VERSION})")
+    parser.add_argument("--work", type=Path, default=ROOT / "build-appimage", help="build tree/AppDir/cache directory")
+    parser.add_argument("--dist", type=Path, default=ROOT / "dist", help="output directory")
     parser.add_argument("--self-check", action="store_true", help="run the library-policy self-check")
     arguments = parser.parse_args()
     self_check() if arguments.self_check else inside(arguments) if arguments.inside else host(arguments)

@@ -268,15 +268,12 @@ std::uint32_t EffectSystem::texture(std::string_view name) {
         const auto directory = slash == std::string::npos ? std::string("fx") : key.substr(0, slash);
         const auto file = slash == std::string::npos ? key : key.substr(slash + 1);
         std::string source;
-        if (directory == "textures") { // same archive preference as scene.cpp: _4, _2, _1
-            for (const auto* suffix : {"_4.DAT", "_4.dat", "_2.DAT", "_1.DAT"}) {
-                const auto path = base_ / (std::string("textures") + suffix);
-                if (!std::filesystem::is_regular_file(path)) continue;
+        if (directory == "textures") {
+            if (const auto path = texture_archive(base_, "textures"); !path.empty()) {
                 std::ifstream in(path, std::ios::binary);
                 const auto archive = assets::read_archive(in, std::filesystem::file_size(path));
                 for (const auto& entry : archive.entries)
                     if (lower(entry.path) == key) { bytes = assets::read_entry(in, entry, 64u << 20); source = path.filename().string() + ':' + entry.path; break; }
-                break;
             }
         } else if (directory == "fx") {
             for (const auto& entry : std::filesystem::directory_iterator(base_ / "fx"))
@@ -288,9 +285,9 @@ std::uint32_t EffectSystem::texture(std::string_view name) {
                 }
         }
         if (bytes.empty()) throw std::runtime_error("not found");
-        auto image = assets::decode_dds(bytes);
-        Texture t; t.name = key; t.width = image.width; t.height = image.height;
-        t.rgba = std::move(image.rgba); t.mips = std::move(image.mips); t.source_path = source;
+        auto image = assets::decode_dds(bytes, true);
+        Texture t; t.name = key; t.width = image.width; t.height = image.height; t.format = image.format;
+        t.data = std::move(image.rgba); t.mips = std::move(image.mips); t.source_path = source;
         textures_.push_back(std::move(t));
         index = static_cast<std::uint32_t>(textures_.size() - 1);
     } catch (const std::exception& e) { report(std::string("particle texture unavailable (") + e.what() + ")", name); }

@@ -18,13 +18,19 @@ struct SDL_Window;
 
 namespace ikv {
 // Metres, Y up; yaw/pitch in radians, vertical field of view in degrees.
-// Defaults frame a ~7.5-unit source actor at ~1/3 screen height from behind/above, like original gameplay footage.
+// Defaults frame a ~7.5-unit source actor from behind/above. Original LookAtRH/PerspectiveFovRH camera (004773e0/
+// 00476640): look-at = player+6 up, up (0,1,0), fovy 50; pitch .27 (15.5 deg) is the median view pitch measured from
+// the original gameplay video (10-25 deg); steeper pitches lean screen-edge verticals far more than the original did.
 struct Camera {
     std::array<float, 3> target{0, 0, 0};
-    float yaw = 0, pitch = 0.55f, distance = 22, fov = 50;
+    float yaw = 0, pitch = 0.27f, distance = 22, fov = 50;
     float near_plane = 0.1f, far_plane = 10000;
 };
 enum class RayTracing { off, automatic, required };
+// Vulkan RT lighting. faithful: the original lighting equation in every appearance (no denoiser); RT only adds actor
+// cast shadows (deterministic Sun rays against TLAS mask 2). physical: enhanced-appearance GGX/GI/reflections + denoiser;
+// with original appearance nothing traces, so no acceleration structure is built.
+enum class RtStyle { faithful, physical };
 // Vulkan only. fsr3: AMD FidelityFX Super Resolution 3.1.4 temporal upscaling (render_scale ignored); OpenGL renders natively.
 enum class Upscaler { bilinear, fsr3 };
 // FSR 3.1.4 presets: render resolution = output / {1, 1.5, 1.7, 2, 3}.
@@ -33,6 +39,7 @@ struct RendererOptions {
     Camera camera;
     bool original_appearance = true;
     RayTracing ray_tracing = RayTracing::off;
+    RtStyle rt_style = RtStyle::faithful;
     float render_scale = 1;
     Upscaler upscaler = Upscaler::bilinear;
     FsrQuality fsr_quality = FsrQuality::quality;
@@ -229,8 +236,9 @@ public:
     virtual void screenshot(const std::filesystem::path&) = 0;
     virtual void set_camera(const Camera&) = 0;
     virtual const Camera& camera() const = 0;
-    // Uploads pixels synchronously; caller may release or mutate Overlay immediately afterwards.
-    virtual void set_overlay(const Overlay&) = 0;
+    // Uploads pixels synchronously; caller may release or mutate Overlay immediately afterwards. `changed` lists the x,y,w,h
+    // rectangles that differ from the previous call (non-overlapping); empty = the whole overlay.
+    virtual void set_overlay(const Overlay&, std::span<const std::array<int, 4>> changed = {}) = 0;
     // Uploads billboards for the next render(): non-AfterHDR batches after scene alpha (glow input), AfterHDR batches after
     // the glow composite, both before HUD; alpha is fogged like v_particles.vsh. Caller may mutate the frame afterwards.
     virtual void set_particles(const ParticleFrame&) = 0;

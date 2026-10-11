@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ikv::updates {
@@ -42,5 +43,9 @@ Manifest verify_release(const std::filesystem::path& install_root,
 // Verify previous signed release, then atomically switch current; repeated rollback toggles.
 Manifest rollback(const std::filesystem::path& install_root,
                   const std::filesystem::path& trusted_pem);
+// Strict SemVer 2.0 precedence of MAJOR.MINOR.PATCH[-PRERELEASE] (a prerelease sorts before its
+// release; no "v" prefix, build metadata, leading zeroes or empty identifiers). Returns <0, 0 or >0;
+// malformed input throws.
+int compare_versions(std::string_view left, std::string_view right);
 
 } // namespace ikv::updates
