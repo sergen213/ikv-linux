@@ -1579,26 +1579,6 @@ void record_geometry_uploads() {
     b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
- Matrix4 light_matrix()const {
-     auto sun=scene_&&scene_->lighting.source_values?scene_->lighting.sun_direction:std::array<float,3>{.48f,.78f,.4f};
-     Camera light=options_.camera;
-     light.yaw=std::atan2(sun[0],sun[2]);light.pitch=std::atan2(sun[1],std::sqrt(sun[0]*sun[0]+sun[2]*sun[2]));
-     light.pitch=std::clamp(light.pitch,-1.54f,1.54f);
-     light.distance=std::max(50.f,options_.camera.distance*3);light.near_plane=.1f;light.far_plane=light.distance*4;
-     const auto basis=camera_basis(light);
-     auto dot=[](const auto& a,const auto& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];};
-     Matrix4 view{basis.right[0],basis.up[0],-basis.forward[0],0,basis.right[1],basis.up[1],-basis.forward[1],0,
-         basis.right[2],basis.up[2],-basis.forward[2],0,-dot(basis.right,basis.eye),-dot(basis.up,basis.eye),dot(basis.forward,basis.eye),1};
-     float radius=std::max(30.f,options_.camera.distance*2);
-     // Whole shadow-map texels only: a window following the player by fractions of a texel re-rasterised every leaf
-     // shadow at a new sub-texel phase each frame (crawling shadows while walking).
-     const float texel=2*radius/2048;
-     for(std::size_t i:{12u,13u})view[i]=std::round(view[i]/texel)*texel;
-     Matrix4 projection{};projection[0]=1/radius;projection[5]=-1/radius;
-     projection[10]=1/(light.near_plane-light.far_plane);
-     projection[14]=light.near_plane/(light.near_plane-light.far_plane);projection[15]=1;
-     return multiply_matrix(projection,view);
- }
  void draw_scene(VkCommandBuffer c,bool shadow) {
      if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&rt_set_,0,nullptr);
      // draws_ is sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
@@ -1963,9 +1943,9 @@ void set_particles(const ParticleFrame& frame)override {
          // flicker in motion (analysis/porting-wave11/Foliage/report.md).
      }
      f.jitter[2]=previous_frame_.jitter[0];f.jitter[3]=previous_frame_.jitter[1];
-     f.light=light_matrix();f.eye={eye[0],eye[1],eye[2],1};
+     f.light=shadow_light_matrix(options_.camera,enhanced_sun(scene.lighting));f.eye={eye[0],eye[1],eye[2],1};
      const auto& lighting=scene.lighting;
-     auto sun=lighting.source_values?lighting.sun_direction:std::array<float,3>{.48f,.78f,.4f};
+     const auto sun=enhanced_sun(lighting);
      f.sun={sun[0],sun[1],sun[2],lighting.source_values?1.f:0.f};
      f.ambient={lighting.ambient_multiplier[0],lighting.ambient_multiplier[1],lighting.ambient_multiplier[2],0};
      f.diffuse={lighting.diffuse_multiplier[0],lighting.diffuse_multiplier[1],lighting.diffuse_multiplier[2],0};

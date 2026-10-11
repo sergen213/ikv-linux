@@ -39,10 +39,12 @@ uniform bool has_environment_map;
 uniform bool source_ocean;
 uniform vec4 source_time;
 uniform vec4 source_scroll;
+uniform mat4 light_view_projection;
+out vec3 fragment_position;
+out vec4 shadow_position;
 out vec2 texcoord;
 out vec3 world_normal;
 out vec3 world_tangent;
-out vec3 vertex_ambient;
 out vec3 source_vertex_light;
 out float fog_blend;
 out vec2 environment_uv;
@@ -71,7 +73,7 @@ void main() {
         lightmap_uv=uv+source_scroll.zw;
         source_tangent_eye=normalize(camera_position-world_position.xyz);
         source_vertex_light=ambient_multiplier;
-        world_normal=normal;world_tangent=tangent;vertex_ambient=ambient.rgb;
+        world_normal=normal;world_tangent=tangent;
         source_tangent_sun=vec3(0.0);environment_uv=vec2(0.0);
         sky_scatter=0.0;fade_blend=1.0;
         float source_clip_z=(gl_Position.z+gl_Position.w)*0.5;
@@ -80,13 +82,13 @@ void main() {
     }
     vec4 world_position=object_matrix*vec4(position,1.0);
     gl_Position=view_projection*world_position;
+    fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;
     texcoord=uv;
     world_normal=normal;world_tangent=tangent;
     if(!original_appearance&&!sky) {
         world_normal=transpose(inverse(mat3(object_matrix)))*normal;
         world_tangent=mat3(object_matrix)*tangent;
     }
-    vertex_ambient=ambient.rgb;
     lightmap_uv=uv_lightmap;
     fade_blend=diffuse_color.a;
     vec3 eye_direction=vec3(0.0);environment_uv=vec2(0.0);
@@ -131,7 +133,6 @@ constexpr const char* scene_fragment = R"GLSL(#version 330 core
 in vec2 texcoord;
 in vec3 world_normal;
 in vec3 world_tangent;
-in vec3 vertex_ambient;
 uniform sampler2D diffuse_map;
 uniform sampler2D normal_map;
 uniform bool has_normal_map;
@@ -163,7 +164,25 @@ uniform bool source_ocean;
 uniform vec3 sun_direction;
 uniform float sky_blend;
 uniform bool grayscale; // original death view: 3D scene desaturated, HUD untouched
+uniform sampler2D shadow_map;
+uniform vec3 camera_position;
+in vec3 fragment_position;
+in vec4 shadow_position;
 in float sky_scatter;
+// Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
+const float PI=3.14159265359;
+vec3 enhanced_environment(vec3 direction) {
+    if(!has_environment_map)return mix(vec3(0.055,0.07,0.09),vec3(0.32,0.44,0.62),clamp(direction.y*0.5+0.5,0.0,1.0));
+    return textureLod(environment_map,vec2(atan(direction.z,direction.x)/(2.0*PI)+0.5,acos(clamp(direction.y,-1.0,1.0))/PI),0.0).rgb;
+}
+// shadow_position is in Vulkan light clip space; the GL shadow pass maps z to window depth 0..1 unchanged.
+float shadow_visibility(vec3 n,vec3 l) {
+    vec3 p=shadow_position.xyz/shadow_position.w;vec2 uv=p.xy*0.5+0.5;
+    if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||p.z<0.0||p.z>1.0)return 1.0;
+    float bias=max(0.0003,0.002*(1.0-dot(n,l)));vec2 texel=1.0/vec2(textureSize(shadow_map,0));float visible=0.0;
+    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=p.z-bias<=texture(shadow_map,uv+vec2(x,y)*texel).r?1.0:0.0;
+    return visible/9.0;
+}
 out vec4 output_color;
 void main() {
     vec4 surface=material_color;
@@ -214,28 +233,65 @@ void main() {
             surface.rgb*=source_vertex_light;
         }
     } else {
-        vec3 n=world_normal;
-        if(has_normal_map && length(n)>0.00001 && length(world_tangent)>0.00001) {
-            n=normalize(n);
-            vec3 cross_tangent=cross(n,world_tangent);
-            if(length(cross_tangent)>0.00001) {
-                vec3 b=normalize(cross_tangent);
-                vec3 t=cross(b,n);
-                vec2 xy=texture(normal_map,texcoord).xy*2.0-1.0;
-                // Original t_dif_norm_lit reconstructs Z as 1-X^2-Y^2, then normalizes.
-                vec3 mapped=normalize(vec3(xy,1.0-dot(xy,xy)));
-                n=mat3(t,b,n)*mapped;
-            }
+        // Source MAT+14 secondary fade applies only without higher-priority normal/environment maps.
+        if(has_fade_map&&!has_normal_map&&!has_environment_map)surface=mix(texture(fade_map,texcoord)*material_color,surface,fade_blend);
+        if(has_normal_map||has_environment_map)surface.a=1.0;
+        float nlength=length(world_normal);
+        vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
+        if(has_normal_map) {
+            vec3 t=world_tangent-n*dot(n,world_tangent);
+            if(dot(t,t)>1e-12){t=normalize(t);n=normalize(mat3(t,cross(n,t),n)*(texture(normal_map,texcoord).xyz*2.0-1.0));}
         }
-        float nlength=length(n);
-        float diffuse=nlength>0.00001 ? max(dot(n/nlength,normalize(vec3(0.4,0.8,0.3))),0.0) : 0.0;
-        surface.rgb*=0.35*vertex_ambient+vec3(0.65*diffuse);
-        surface.rgb=vec3(1.0)-exp(-surface.rgb*exposure);
+        vec3 v=normalize(camera_position-fragment_position),l=normalize(sun_direction),h=normalize(v+l);
+        const float roughness=0.65;
+        vec3 albedo=pow(max(surface.rgb,vec3(0.0)),vec3(2.2));
+        float ndl=max(dot(n,l),0.0),ndv=max(dot(n,v),0.001),ndh=max(dot(n,h),0.0),vdh=max(dot(v,h),0.0);
+        float a2=roughness*roughness*roughness*roughness,dd=ndh*ndh*(a2-1.0)+1.0,d=a2/(PI*dd*dd);
+        float k=(roughness+1.0)*(roughness+1.0)/8.0,g=(ndv/(ndv*(1.0-k)+k))*(ndl/(ndl*(1.0-k)+k));
+        vec3 f=vec3(0.04)+0.96*pow(1.0-vdh,5.0);
+        vec3 direct=((1.0-f)*albedo/PI+d*g*f/max(4.0*ndv*ndl,0.001))*ndl*3.2;
+        vec3 c=direct*shadow_visibility(n,l)+albedo*enhanced_environment(n)*0.35+enhanced_environment(reflect(-v,n))*f*(1.0-roughness)*0.4;
+        c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
+        surface.rgb=pow(c,vec3(1.0/2.2));
     }
     if((original_appearance||source_ocean)&&!sky)surface.rgb=mix(fog_color,surface.rgb,clamp(fog_blend,0.0,1.0));
     if(surface.a<=alpha_cutoff&&alpha_cutoff>0.0)discard;
     if(grayscale)surface.rgb=vec3(dot(surface.rgb,vec3(0.299,0.587,0.114)));
     output_color=surface;
+}
+)GLSL";
+// Enhanced sun shadow map (Vulkan shadow.vert/.frag): light clip z 0..1 is mapped to GL's -1..1, so the stored window
+// depth equals the Vulkan depth the scene shader compares against.
+constexpr const char* shadow_vertex = R"GLSL(#version 330 core
+layout(location=0) in vec3 position;
+layout(location=2) in vec2 uv;
+layout(location=6) in vec4 diffuse_color;
+uniform mat4 light_view_projection;
+uniform mat4 object_matrix;
+out vec2 texcoord;
+out float fade_blend;
+void main(){
+    texcoord=uv;fade_blend=diffuse_color.a;
+    vec4 p=light_view_projection*(object_matrix*vec4(position,1.0));
+    gl_Position=vec4(p.xy,p.z*2.0-p.w,p.w);
+}
+)GLSL";
+constexpr const char* shadow_fragment = R"GLSL(#version 330 core
+in vec2 texcoord;
+in float fade_blend;
+uniform sampler2D diffuse_map;
+uniform sampler2D fade_map;
+uniform bool has_texture;
+uniform bool has_fade_map;
+uniform bool opaque_alpha;
+uniform vec4 material_color;
+uniform float alpha_cutoff;
+void main(){
+    if(alpha_cutoff<=0.0)return;
+    float alpha=has_texture?texture(diffuse_map,texcoord).a:1.0;
+    if(opaque_alpha)alpha=1.0;
+    else if(has_fade_map)alpha=mix(texture(fade_map,texcoord).a,alpha,fade_blend);
+    if(alpha*material_color.a<=alpha_cutoff)discard;
 }
 )GLSL";
 constexpr const char* overlay_vertex = R"GLSL(#version 330 core
@@ -406,6 +462,10 @@ class GlRenderer final : public Renderer {
     std::vector<ContourDraw> contours_;
     GLuint framebuffer_=0,color_=0,depth_=0;
     GLuint glow_program_=0,glow_textures_[2]{},glow_framebuffers_[2]{}; // [0]=bb38, [1]=bb3c
+    // Enhanced appearance only: 2048^2 sun depth map (Vulkan shadow pass parity).
+    GLuint shadow_program_=0,shadow_texture_=0,shadow_framebuffer_=0;
+    GLint light_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
+    GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
     GLint glow_mode_location_=-1,glow_step_location_=-1;
     GLint vp_location_=-1,object_location_=-1,color_location_=-1,texture_location_=-1,original_location_=-1,exposure_location_=-1;
     GLint normal_location_=-1,cutoff_location_=-1;
@@ -490,7 +550,8 @@ public:
             glUseProgram_(program_); glUniform1i_(uniform(program_,"diffuse_map"),0);
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
-            glUniform1i_(uniform(program_,"fade_map"),4);
+            glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
+            light_location_=uniform(program_,"light_view_projection");
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
             glGenTextures(1,&overlay_texture_);
@@ -522,6 +583,23 @@ public:
             contour_program_=link(contour_vertex,contour_fragment);
             contour_vp_location_=uniform(contour_program_,"view_projection");contour_object_location_=uniform(contour_program_,"object_matrix");
             contour_offset_location_=uniform(contour_program_,"offset");contour_color_location_=uniform(contour_program_,"contour");
+            if(!options_.original_appearance) {
+                shadow_program_=link(shadow_vertex,shadow_fragment);
+                shadow_light_location_=uniform(shadow_program_,"light_view_projection");shadow_object_location_=uniform(shadow_program_,"object_matrix");
+                shadow_color_location_=uniform(shadow_program_,"material_color");shadow_cutoff_location_=uniform(shadow_program_,"alpha_cutoff");
+                shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
+                shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
+                glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
+                glGenTextures(1,&shadow_texture_);glBindTexture(GL_TEXTURE_2D,shadow_texture_);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                glGenFramebuffers_(1,&shadow_framebuffer_);glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffer_);
+                glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadow_texture_,0);
+                glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+                if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL shadow framebuffer incomplete");
+                glBindFramebuffer_(GL_FRAMEBUFFER,0);check("allocating shadow map");
+            }
             glGenFramebuffers_(1,&framebuffer_); glGenTextures(1,&color_); glGenRenderbuffers_(1,&depth_);
             int w=0,h=0;
             if(!SDL_GetWindowSizeInPixels(window_,&w,&h)) fail("SDL window extent");
@@ -635,7 +713,9 @@ public:
             throw std::invalid_argument("invalid source fog interval");
         if(!std::isfinite(light.lightmap_strength))throw std::invalid_argument("non-finite source lightmap multiplier");
         if(!std::isfinite(light.sky_blend)||!std::isfinite(light.sky_rotation))throw std::invalid_argument("non-finite source sky parameters");
-        glUniform1i_(source_light_location_,light.source_values?1:0);glUniform3fv_(sun_location_,1,light.sun_direction.data());
+        // Enhanced lighting needs a sun even without source constants; original paths only read it with them.
+        const auto sun=enhanced_sun(light);
+        glUniform1i_(source_light_location_,light.source_values?1:0);glUniform3fv_(sun_location_,1,sun.data());
         glUniform3fv_(ambient_location_,1,light.ambient_multiplier.data());glUniform3fv_(diffuse_location_,1,light.diffuse_multiplier.data());
         glUniform3fv_(fog_color_location_,1,light.fog_color.data());
         glUniform1f_(fog_start_location_,light.fog_start);glUniform1f_(fog_end_location_,light.fog_end);
@@ -681,7 +761,8 @@ public:
             // Culled alpha draws stay in alpha_ so its distance sort sees the unculled list.
             const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
                 sphere_visible(planes,matrix,meshes_[instance.mesh].bounds);
-            if(!visible&&!scene.materials[material].alpha)continue;
+            // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
+            if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
             bool fog=false;
             if(visible&&(options_.original_appearance||scene.materials[material].source_ocean)&&light.fog_enabled&&!instance.sky) {
                 if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog requires original model bounds");
@@ -699,6 +780,21 @@ public:
                 contours_.push_back({instance.mesh,matrix,entity->contour});
             }
         }
+        if(shadow_program_) {
+            const auto light_vp=shadow_light_matrix(options_.camera,sun);
+            glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffer_);glViewport(0,0,2048,2048);
+            // Vulkan shadow pipeline: back faces culled, depth bias 1.25 constant / 1.75 slope. The light matrix keeps
+            // Vulkan's Y flip, which reverses GL winding, so source CW front faces rasterise CCW here.
+            glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glFrontFace(GL_CCW);
+            glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1.75f,1.25f);
+            glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
+            for(const auto* list:{&opaque_,&alpha_})for(const auto& draw:*list)draw_shadow(scene,draw);
+            glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
+            glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
+            glUseProgram_(program_);glUniformMatrix4fv_(light_location_,1,GL_FALSE,light_vp.data());
+            glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_texture_);
+            check("drawing shadow map");
+        }
         glDepthMask(GL_FALSE);
         for(const auto& draw:sky_) {
             if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
@@ -706,7 +802,7 @@ public:
             draw_instance(scene,draw);
         }
         glDisable(GL_BLEND);glDepthMask(GL_TRUE);
-        for(const auto& draw:opaque_) draw_instance(scene,draw);
+        for(const auto& draw:opaque_) if(draw.visible) draw_instance(scene,draw);
         std::sort(alpha_.begin(),alpha_.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
         for(const auto& draw:alpha_) if(draw.visible) draw_instance(scene,draw);
@@ -1033,6 +1129,20 @@ private:
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
         if(anisotropy_>1)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAX_ANISOTROPY_EXT,anisotropy_);
     }
+    void draw_shadow(const Scene& scene,const Draw& draw){
+        const auto& material=scene.materials[draw.material];
+        // ponytail: no wave displacement here, so source ocean casts no shadow; port sourceOceanPosition if water must.
+        if(material.source_ocean)return;
+        if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
+        const auto& gpu=meshes_[draw.instance->mesh];const auto& maps=materials_[draw.material];
+        const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
+        glUniformMatrix4fv_(shadow_object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(shadow_color_location_,1,material.color.data());
+        glUniform1f_(shadow_cutoff_location_,material.alpha_cutoff);glUniform1i_(shadow_texture_location_,diffuse?1:0);
+        glUniform1i_(shadow_fade_location_,maps.fade?1:0);glUniform1i_(shadow_opaque_location_,maps.normal||maps.environment?1:0);
+        glActiveTexture_(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,maps.fade);
+        glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);
+        glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+    }
     void draw_instance(const Scene& scene,const Draw& draw){
         const auto& gpu=meshes_[draw.instance->mesh];const auto& material=scene.materials[draw.material];const auto& maps=materials_[draw.material];
         if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
@@ -1073,6 +1183,9 @@ private:
             if(glow_program_ && glDeleteProgram_)glDeleteProgram_(glow_program_);
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
+            if(shadow_program_ && glDeleteProgram_)glDeleteProgram_(shadow_program_);
+            if(shadow_texture_)glDeleteTextures(1,&shadow_texture_);
+            if(shadow_framebuffer_ && glDeleteFramebuffers_)glDeleteFramebuffers_(1,&shadow_framebuffer_);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;
     }

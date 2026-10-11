@@ -81,6 +81,12 @@ Verification: `build-full` **18/18** (205.5 s), `build-gl-only` **18/18** (205.8
 
 Verification: `build-full` **18/18** (178.2 s), `build-gl-only` **18/18** (178.3 s), concurrent; `build-full-sanitized` **18/18** (340.4 s) alone; all `--output-on-failure --parallel 1`, warning-free; the sanitizer shutdown timeout did not appear (still open). `build-release` rebuilt (dev services not restarted). RT smoke on the real display (`rt_display.py build-full`: faithful/physical × scale 1/.5 + original RT off) all ok, 0.13–0.18 % near-black; signed Qt launcher Vulkan .5 enhanced required-RT PASSED (`analysis/porting-wave13/PhysicalDecal/verify/`).
 
+## 2026-10-11 wave 14 (OpenGL enhanced lighting)
+
+- User report: OpenGL + Görünüm enhanced had no lighting and no shadows. Cause: GL's enhanced branch was a stub (fixed light `(0.4,0.8,0.3)`, ignored SunDir, no shadow pass). It now ports Vulkan's enhanced raster path: GGX sun from the scene SunDir, 3×3 PCF from a 2048² sun shadow map (light matrix moved to the shared `shadow_light_matrix()`/`enhanced_sun()` in `renderer.hpp`, Vulkan uses the same), sky/environment ambient and the ACES/exposure tonemap. Off-screen opaque draws are kept for the shadow pass, as in Vulkan. Same-scene GL vs Vulkan enhanced screenshots (960×640, real display) show the same sun shading and column/actor shadows; GL original appearance is unchanged.
+
+Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **18/18** each; GL/Vulkan enhanced and GL original same-scene captures via `tests/render_integration.py` on the real display; RT smoke (`rt_display.py build-full`, faithful/physical × scale 1/.5 + original RT off) 5/5 ok; signed Qt launcher OpenGL enhanced PASSED (`analysis/porting-wave14/GlEnhanced/verify/`). `build-release` rebuilt (dev services not restarted).
+
 ## Status and evidence vocabulary
 
 [Goal](../Goal) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.

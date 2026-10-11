@@ -110,6 +110,30 @@ inline Matrix4 camera_view_projection(const Camera& c, int width, int height, bo
     projection[14] = vulkan ? c.far_plane*c.near_plane/(c.near_plane-c.far_plane) : 2*c.far_plane*c.near_plane/(c.near_plane-c.far_plane);
     return multiply_matrix(projection, view);
 }
+// Enhanced raster sun: the source SunDir when known, otherwise a fixed fallback direction (towards the light).
+inline std::array<float, 3> enhanced_sun(const SceneLighting& l) {
+    return l.source_values ? l.sun_direction : std::array<float, 3>{.48f, .78f, .4f};
+}
+// Enhanced raster shadow map (2048^2): orthographic sun view around the camera, Vulkan clip space (y down, z 0..1).
+inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun) {
+    Camera light = camera;
+    light.yaw = std::atan2(sun[0], sun[2]); light.pitch = std::atan2(sun[1], std::sqrt(sun[0]*sun[0]+sun[2]*sun[2]));
+    light.pitch = std::clamp(light.pitch, -1.54f, 1.54f);
+    light.distance = std::max(50.f, camera.distance*3); light.near_plane = .1f; light.far_plane = light.distance*4;
+    const auto basis = camera_basis(light);
+    auto dot = [](const auto& a, const auto& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    Matrix4 view{basis.right[0], basis.up[0], -basis.forward[0], 0, basis.right[1], basis.up[1], -basis.forward[1], 0,
+        basis.right[2], basis.up[2], -basis.forward[2], 0, -dot(basis.right,basis.eye), -dot(basis.up,basis.eye), dot(basis.forward,basis.eye), 1};
+    const float radius = std::max(30.f, camera.distance*2);
+    // Whole shadow-map texels only: a window following the player by fractions of a texel re-rasterised every leaf
+    // shadow at a new sub-texel phase each frame (crawling shadows while walking).
+    const float texel = 2*radius/2048;
+    for (std::size_t i : {12u, 13u}) view[i] = std::round(view[i]/texel)*texel;
+    Matrix4 projection{}; projection[0] = 1/radius; projection[5] = -1/radius;
+    projection[10] = 1/(light.near_plane-light.far_plane);
+    projection[14] = light.near_plane/(light.near_plane-light.far_plane); projection[15] = 1;
+    return multiply_matrix(projection, view);
+}
 // Conservative culling sphere {centre xyz, radius} in mesh space: AABB centre and half-diagonal.
 // Non-finite vertices give an infinite radius, which is never culled.
 inline std::array<float, 4> mesh_bounds(const Mesh& mesh) {
