@@ -10,7 +10,7 @@
 
 namespace ikv {
 using Json = nlohmann::json;
-struct Identity { std::int64_t account_id; bool admin; bool plus = false; }; // plus: Plus Paket entitlement (accounts.plus)
+struct Identity { std::int64_t account_id; bool admin; bool plus = false, kasa = false; }; // Plus Paket (accounts.plus), Kasa Erişimi (accounts.kasa)
 struct CharacterSave { std::int64_t account_id; std::int64_t character_id; Json state; Json bank = nullptr; }; // bank null: unchanged
 struct ApiError : std::runtime_error {
     int status;

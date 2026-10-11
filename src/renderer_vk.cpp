@@ -635,13 +635,17 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
         std::array<VkPipelineColorBlendAttachmentState,8> blends{};blends[0]=blend;
         for(std::size_t i=1;i<blends.size();++i)blends[i].colorWriteMask=particle||contour?0:0xf;
         if(pass==scene_pass_||pass==after_pass_) {
-            // [2] motion: translucent/particle/contour draws keep the motion of what they cover.
-            blends[2].colorWriteMask=particle||contour||alpha?0:VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT;
+            // Blended scene meshes (depth_write: not sky layers) are drawn back to front without depth writes, so the last
+            // fragment is the one shown: like opaque draws they overwrite motion, the RT guide (lighting.glsl) and reactive.
+            const bool surface=!alpha||(mesh&&!particle&&!contour&&depth_write);
+            // [2] motion: sky layers/particle/contour draws keep the motion of what they cover.
+            blends[2].colorWriteMask=surface?VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT:0;
             // [5] FSR reactive: opaque geometry writes 0 (ZERO*src+ZERO*dst, also over earlier translucent sky layers),
-            // translucent draws keep the maximum coverage (MAX ignores the factors).
+            // blended surfaces write their own value, other translucent draws keep the maximum coverage (MAX ignores
+            // the factors).
             const VkBlendFactor reactive=alpha?VK_BLEND_FACTOR_ONE:VK_BLEND_FACTOR_ZERO;
             const VkBlendOp reactive_op=alpha?VK_BLEND_OP_MAX:VK_BLEND_OP_ADD;
-            blends[5]={VK_TRUE,reactive,reactive,reactive_op,reactive,reactive,reactive_op,
+            blends[5]={!(alpha&&surface),reactive,reactive,reactive_op,reactive,reactive,reactive_op,
                 mesh?VkColorComponentFlags{VK_COLOR_COMPONENT_R_BIT}:0u};
         }
         // Without independentBlend (enabled only for denoise/FSR) every location past 0 is VK_ATTACHMENT_UNUSED.
@@ -876,7 +880,10 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          if(std::isfinite(value)&&value>=0&&value<=20)pacing_lead_ms_=value;
      }
      VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-     sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
+     // GL parity: original appearance keeps the source's nearest mip (LINEAR_MIPMAP_NEAREST), enhanced blends mips
+     // (LINEAR_MIPMAP_LINEAR); hard mip switches popped alpha-tested foliage coverage with distance.
+     sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
+     sampler.mipmapMode=options_.original_appearance?VK_SAMPLER_MIPMAP_MODE_NEAREST:VK_SAMPLER_MIPMAP_MODE_LINEAR;
      sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_REPEAT;sampler.maxLod=VK_LOD_CLAMP_NONE;
      checked(vkCreateSampler(device_,&sampler,nullptr,&sampler_),"texture sampler");
      sampler.addressModeU=sampler.addressModeV=sampler.addressModeW=VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -1460,6 +1467,10 @@ void record_geometry_uploads() {
      Matrix4 view{basis.right[0],basis.up[0],-basis.forward[0],0,basis.right[1],basis.up[1],-basis.forward[1],0,
          basis.right[2],basis.up[2],-basis.forward[2],0,-dot(basis.right,basis.eye),-dot(basis.up,basis.eye),dot(basis.forward,basis.eye),1};
      float radius=std::max(30.f,options_.camera.distance*2);
+     // Whole shadow-map texels only: a window following the player by fractions of a texel re-rasterised every leaf
+     // shadow at a new sub-texel phase each frame (crawling shadows while walking).
+     const float texel=2*radius/2048;
+     for(std::size_t i:{12u,13u})view[i]=std::round(view[i]/texel)*texel;
      Matrix4 projection{};projection[0]=1/radius;projection[5]=-1/radius;
      projection[10]=1/(light.near_plane-light.far_plane);
      projection[14]=light.near_plane/(light.near_plane-light.far_plane);projection[15]=1;
@@ -1804,6 +1815,8 @@ void set_particles(const ParticleFrame& frame)override {
          const float jx=2*fsr_jitter[0]/float(render_extent_.width),jy=2*fsr_jitter[1]/float(render_extent_.height);
          for(std::size_t column=0;column<4;++column){f.vp[column*4]+=jx*f.vp[column*4+3];f.vp[column*4+1]+=jy*f.vp[column*4+3];}
          f.jitter={jx,jy,0,0};
+         // No negative texture mip bias (AMD suggests log2(render/display)-1): measured, it raised FSR leaf and ground
+         // flicker in motion (analysis/porting-wave11/Foliage/report.md).
      }
      f.jitter[2]=previous_frame_.jitter[0];f.jitter[3]=previous_frame_.jitter[1];
      f.light=light_matrix();f.eye={eye[0],eye[1],eye[2],1};

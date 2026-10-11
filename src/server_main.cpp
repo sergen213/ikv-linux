@@ -9,6 +9,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
@@ -69,7 +70,7 @@ long resident_kib() {
 ikv::Json validate_config(const std::string& path) {
     try {
         std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file || file.tellg() <= 0 || file.tellg() > 1048576) throw std::runtime_error("gameplay file missing or larger than 1 MiB");
+        if (!file || file.tellg() <= 0 || file.tellg() > 4194304) throw std::runtime_error("gameplay file missing or larger than 4 MiB");
         file.seekg(0);
         ikv::World probe(ikv::Json::parse(file), [](std::span<const ikv::CharacterSave>) {});
         const auto status = probe.status();
@@ -312,7 +313,7 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     const auto id = next_id++;
                     peer.identity = identity; peer.character_id = character_id; peer.held_lease = true;
                     peer.session = message.session;
-                    world.add(id, identity.account_id, character_id, record, identity.admin); world.entitlement(id, identity.plus);
+                    world.add(id, identity.account_id, character_id, record, identity.admin); world.entitlement(id, identity.plus, identity.kasa);
                     peer.id = id;
                     ikv::Message welcome{ikv::Type::welcome}; welcome.id = id; welcome.tick = world.tick();
                     if (!queue(peer, welcome)) return;
@@ -403,7 +404,7 @@ int run(const Options& opts) {
     SSL_CTX_set_options(context.get(), SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
     ikv::Store store(secret_file(opts.dsn_file));
     std::ifstream config_file(opts.gameplay, std::ios::binary | std::ios::ate);
-    if (!config_file || config_file.tellg() <= 0 || config_file.tellg() > 1048576)
+    if (!config_file || config_file.tellg() <= 0 || config_file.tellg() > 4194304) // wave 11: spawn groups/props took gameplay.json past 1 MiB
         throw std::runtime_error("invalid gameplay configuration file");
     config_file.seekg(0);
     auto config = ikv::Json::parse(config_file);
@@ -450,6 +451,7 @@ int run(const Options& opts) {
     const auto started = Clock::now();
     auto next_tick = started + tick_period, next_heartbeat = started, next_save = started + std::chrono::seconds(5);
     double last_tick_ms = 0;
+    std::vector<double> recent_ticks; // tick durations since the previous heartbeat (status.tick_ms_recent), at most 64
     int exit_code = 0;
     // Administrator restart/shutdown countdown (POST /v1/admin/control delay_seconds); announced in game before exit.
     std::optional<Clock::time_point> exit_at;
@@ -539,6 +541,7 @@ int run(const Options& opts) {
                 catch (const std::exception&) { disconnect(peer, "snapshot"); }
             }
             last_tick_ms = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+            if (recent_ticks.size() < 64) recent_ticks.push_back(std::round(last_tick_ms * 100) / 100);
             if ((opts.ticks && world.tick() >= *opts.ticks) || world.tick() == std::numeric_limits<std::uint32_t>::max()) break;
         }
         try { bots.pump(); } catch (const std::exception&) { std::cerr << "bot_release_failed\n"; exit_code = 1; break; }
@@ -558,7 +561,7 @@ int run(const Options& opts) {
                         } else {
                             const auto record = store.character(identity.account_id, peer.character_id);
                             world.moderation(peer.id, record.value("moderation", ikv::Json::object()).value("muted", false));
-                            world.entitlement(peer.id, identity.plus); // an administrator's Plus grant/revoke applies within a second
+                            world.entitlement(peer.id, identity.plus, identity.kasa); // an administrator's Plus/Kasa Erişimi grant/revoke applies within a second
                         }
                     } catch (const std::exception&) { disconnect(peer, "session_revoked"); }
                 }
@@ -593,7 +596,7 @@ int run(const Options& opts) {
                 }
                 auto status = world.status();
                 status["instance"] = instance; status["players"] = joined(peers); status["connections"] = peers.size();
-                status["tick"] = world.tick(); status["tick_ms"] = last_tick_ms;
+                status["tick"] = world.tick(); status["tick_ms"] = last_tick_ms; status["tick_ms_recent"] = std::exchange(recent_ticks, {});
                 status["uptime_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - started).count();
                 status["world_port"] = ntohs(address.sin_port);
                 status["memory_kib"] = resident_kib();

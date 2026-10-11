@@ -5,9 +5,12 @@
 #include <cstddef>
 #include <functional>
 #include <map>
+#include <optional>
 #include <memory>
 #include <set>
 #include <tuple>
+#include <queue>
+#include <unordered_map>
 #include <utility>
 
 namespace ikv {
@@ -21,7 +24,7 @@ public:
     void destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence);
     void action(uint32_t id, const Json& request);
     void moderation(uint32_t id, bool muted);
-    void entitlement(uint32_t id, bool plus); // Plus Paket (accounts.plus), refreshed by the server's session heartbeat
+    void entitlement(uint32_t id, bool plus, bool kasa = false); // Plus Paket (accounts.plus), Kasa Erişimi (accounts.kasa); refreshed by the server's session heartbeat
     void set_source_zones(std::map<std::string, std::shared_ptr<const Zone>> zones);
     void advance();
     uint32_t tick() const;
@@ -34,9 +37,10 @@ public:
     void save_all();
     // Server-side bots (NONCANONICAL, src/world_bots.cpp): peerless actors whose behaviour issues the same handle()/destination()
     // requests a client would, so every range, cooldown, resource and ownership rule applies. They never use the 32 player slots.
-    uint32_t add_bot(int64_t account_id, int64_t character_id, const Json& record, const Json& spec); // spec {behaviour, zone?}; returns id
+    uint32_t add_bot(int64_t account_id, int64_t character_id, const Json& record, const Json& spec); // spec {behaviour, zone?|"auto", levels?}; returns id
     Json bots() const; // admin status rows
     std::vector<std::pair<int64_t,int64_t>> released_bots(); // (account, character) of bots removed since the last call
+    Json bot_returns(); // spawn specs of churned-out bots whose offline time is over (bots.offline_minutes)
     Json bot_character(int level) const; // a fresh bot {name, class_id, appearance, state} with original class/sex/cosmetics
     Json bot_plan(int total) const; // spawn specs from gameplay.json bots.spawn; total < 0: the configured counts, else round-robin
 private:
@@ -45,7 +49,7 @@ private:
         Json character, events = Json::array();
         std::array<size_t,32> event_sizes{};
         size_t event_bytes = 0;
-        bool admin = false, muted = false, externally_muted = false, kicked = false, bot = false, plus = false;
+        bool admin = false, muted = false, externally_muted = false, kicked = false, bot = false, plus = false, kasa = false;
         int complaints = 0; // Şikayet Et uses this session (guide: Plus 10, others 3)
         int8_t dx = 0, dy = 0;
         uint32_t sequence = 0, attack_ready = 0, chat_ready = 0, skill_ready = 0;
@@ -55,7 +59,8 @@ private:
         size_t waypoint = 0;
         std::map<std::string, uint32_t> cooldowns;
         Json bank; // Banka: persisted beside (not inside) state, written only by bank actions
-        uint32_t banker = 0, gathering = 0, gather_ready = 0; // open bank NPC; Toplama node and completion tick
+        uint32_t banker = 0, gathering = 0, gather_ready = 0; // open bank NPC (own id: Kasa Erişimi); Toplama node and completion tick
+        int bank_tab = 0; // shown Banka tab (original page 0x611454)
         uint8_t posture = 0; // held RP clip (social.postures: sit/lay) shown to late joiners; cleared by moving, fighting, dying
     };
     struct Npc {
@@ -89,6 +94,9 @@ private:
     Json config_;
     std::function<void(std::span<const CharacterSave>)> persist_;
     std::map<std::string, std::shared_ptr<const Zone>> source_zones_;
+    // route(): per source zone, per support cell, clear_path() to each of the 8 neighbour cells memoised (bit d: known, bit 8+d:
+    // clear). calloc'ed 2048x2048 so only the pages searches touch become resident; reset by set_source_zones().
+    mutable std::map<std::string, std::unique_ptr<uint16_t[], void (*)(void*)>> route_steps_;
     bool initializing_ = true;
     uint32_t tick_ = 0;
     uint64_t trade_revision_ = 0;
@@ -129,7 +137,19 @@ private:
     std::vector<uint32_t> nearby(uint32_t id, int range) const;
     bool passable(const std::string& zone, int32_t x, int32_t y) const;
     bool clear_path(const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny) const;
-    std::vector<std::pair<int32_t,int32_t>> route(const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny, int limit = 1000) const;
+    std::vector<std::pair<int32_t,int32_t>> route(const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny, int limit = 1000, bool partial = false) const;
+    // route() in resumable parts: begin (trivial answers: unreachable end, straight line, independent fixture zone), step (pop at
+    // most `nodes` more cells), finish (cell path, smoothed; partial = toward the explored cell nearest the goal when not found).
+    struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
+    struct RouteSearch {
+        std::string zone; int32_t x = 0, y = 0, nx = 0, ny = 0;
+        int sx = 0, sy = 0, gx = 0, gy = 0, start = 0, goal = 0, best = 0, best_h = 0, popped = 0; bool found = false, over = false;
+        std::unordered_map<int, std::pair<int,int>> visited; // cell -> (cost, parent)
+        std::priority_queue<RoutePending> open;
+    };
+    std::optional<std::vector<std::pair<int32_t,int32_t>>> route_begin(RouteSearch& r, const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny) const;
+    void route_step(RouteSearch& r, int nodes) const;
+    std::vector<std::pair<int32_t,int32_t>> route_finish(RouteSearch& r, bool partial, size_t cells = SIZE_MAX) const;
     std::string instance(uint32_t id, const std::string& zone) const; // zone, or the player's group copy of an instanced zone
     void transfer(uint32_t id, const std::string& zone, int32_t x, int32_t y);
     Json visible_equipment(const Json& state) const;
@@ -137,6 +157,7 @@ private:
     void persisted_visual(Json& state) const { state["visual"]=visible_equipment(state); }
     void project_event(uint32_t entity, Json event);
     bool close(uint32_t a, uint32_t b, int range) const;
+    bool bank_reach(uint32_t id, const Actor& a) const; // open banker in range, or own Kasa Erişimi
     Npc& npc(uint32_t player, uint32_t target, const char* kind = "");
     void commit(const std::map<uint32_t, Json>& proposed, const Json* bank = nullptr); // bank: single-entry commit's new bank
     void gather_tick(uint32_t id, Actor& a);
@@ -165,7 +186,7 @@ private:
     Json& owned(Json& state, const std::string& uid);
     const Json& owned(const Json& state, const std::string& uid) const;
     void currency(Json& state, int64_t change) const;
-    void xp(Json& state, int amount) const;
+    void xp(Json& state, int amount, Json& events) const; // events: the free-reset notice when a free_resets level is reached
     void die(uint32_t id, Json& state) const;
     void engage(uint32_t id, Actor& a);
     // A skill's crit/multiplier land with its damage (true when it crit); auto-attack and DoT pass already-landed damage.
@@ -193,41 +214,66 @@ private:
     // Quests (world.cpp quest block). Character state keeps active quests in "quests" {id:{progress[,deadline]}} and
     // completed ids in the sorted array "quests_done"; events are queued by the helpers and emitted after the commit.
     bool quest_done(const Json& state, int source_quest_id) const; // <loc> requiredquestid gate
-    Json quests_at(const Npc& npc, const Json& state) const; // offered at this NPC (GB-Anı: re-takeable auto quests)
+    Json quests_at(const Npc& npc, const Json& state) const; // taken + open quests at this NPC (GB-Anı: re-takeable auto quests)
+    bool quest_open(const Json& quest, const Json& state) const; // every prerequisite (requires, requires_also) done
     Json quest_event(const std::string& quest, const char* stage, int progress = 0) const;
+    void quest_step(Json& state, const std::string& quest, int progress, Json& events) const; // progress + (n/m)/ready events
     void quest_kill(Json& state, const Json& enemy, Json& events);
-    void quest_finish(Json& state, const std::string& quest, Json& events);
-    void quest_expiry(uint32_t id, Actor& a);
+    void quest_carry(Json& state, Json& events) const; // collect progress = items in the bag (commit())
+    void quest_use(uint32_t id, uint32_t target); // Kullan/Konuş on a use-objective prop/NPC; may commit state
+    void quest_finish(Json& state, const Json& character, const std::string& quest, Json& events);
+    void quest_tick(uint32_t id, Actor& a); // once a second: timed quest expiry and visit spots; may commit state
     // Bots (src/world_bots.cpp). `errand` is an NPC to reach and `request` the action to send once in interaction range.
+    struct Reaction { uint32_t due = 0; Json request; uint32_t leader = 0; }; // a delayed reply/accept; leader: set on success
     struct Bot {
-        std::string behaviour, home; // home: the zone the bot was spawned for (town wander / hunting ground)
+        Json spec; // the spawn spec, queued again when a session-length logout ends (login/logout churn)
+        std::string behaviour, home, mode = "town", ground; // mode: mod-playerbots "new rpg" status town/grind/quest/travel
         int32_t anchor_x = 0, anchor_y = 0;
-        uint32_t next_think = 0, idle_until = 0, chat_ready = 0, quest_ready = 0; // quest_ready: next chore/quest look
-        uint32_t leader = 0, errand = 0, stuck = 0, unblock = 0;
-        Json request, inbox = Json::array(); // inbox: group/private chat from players (/dismiss)
+        uint32_t next_think = 0, idle_until = 0, chat_ready = 0, quest_ready = 0, mode_until = 0, logout_at = 0, revive_at = 0;
+        uint32_t leader = 0, ally = 0, errand = 0, stuck = 0, unblock = 0, flee_until = 0, dry = 0; // ally: last leader (its kills are no steal)
+        Json request, inbox = Json::array(); // inbox: chat, invitations and trade offers addressed to the bot by players
+        std::vector<Reaction> pending;
         std::set<uint32_t> blocked; // doors that refused this bot (quest/GM/death gates) and quarries it could not reach
-        uint32_t quarry = 0, misses = 0; // hunt target and how often the engine dropped the approach to it
+        std::set<std::string> refused, zones; // quests a giver refused (until the next level); zones visited (metric)
+        std::map<std::string, std::pair<int,uint32_t>> quest_seen; // active quest: progress, tick it last changed
+        uint32_t quarry = 0, misses = 0, target = 0; // hunt target, dropped approaches, last attacked NPC (kill accounting)
+        uint32_t invite_from = 0, trade_since = 0; uint64_t trade_seen = 0; int level_seen = 0;
         int32_t goal_x = 0, goal_y = 0; int64_t goal_best = INT64_MAX; uint32_t stalls = 0; // bot_walk progress toward its goal
-        bool resting = false, lost = false, attacked = false, routed = false;
+        bool resting = false, lost = false, attacked = false, routed = false, partial = false, stay = false; // partial: route stretch short of the goal
+        uint32_t kills = 0, steals = 0, quests = 0, vendor = 0, thinks = 0, idle = 0; const char* last = ""; // admin metrics
     };
     std::map<uint32_t, Bot> bots_;
     uint32_t next_bot_ = 0x70000000u; // bot actor ids: below INT32_MAX, far above connection ids
     std::vector<std::pair<int64_t,int64_t>> released_bots_;
-    uint32_t bot_search_tick_ = UINT32_MAX; // one long bot route search per tick bounds its cost
-    std::map<std::string, std::vector<uint32_t>> bot_index_; // "kind:zone" -> configured NPC ids (built on first bot use)
+    std::vector<std::pair<uint32_t,Json>> bot_returns_; // (tick due, spec) of churned-out bots
+    // The one bot route search in flight (bot_walk): bots_tick advances it by bots.route_nodes cells per tick up to 12 slices,
+    // so a long detour is planned completely without a long tick; its bot collects the route on a later think.
+    RouteSearch bot_search_; uint32_t bot_search_owner_ = 0, bot_search_tick_ = 0;
+    std::map<std::string, std::vector<uint32_t>> bot_index_; // "kind:zone"/"tmpl:template" -> configured NPC ids (built on first use)
+    // Players (non-bot actors) by zone, their active quest target templates and bots per hunting ground; rebuilt once per tick.
+    struct BotCensus { uint32_t tick = UINT32_MAX; std::map<std::string,std::vector<uint32_t>> players; std::map<std::string,std::set<std::string>> targets; std::map<std::string,int> grinders; };
+    BotCensus census_;
+    std::map<uint32_t, uint32_t> bot_replied_; // player -> tick a bot last answered their Söyle line (one voice, not a chorus)
+    const BotCensus& bot_census();
     const std::vector<uint32_t>& bot_npcs(const std::string& kind, const std::string& zone);
     std::vector<std::pair<std::string,uint32_t>> bot_zones(const Bot& b, const std::string& from); // BFS through doors, first door
     void admit(uint32_t id, int64_t account_id, int64_t character_id, const Json& record, bool admin, bool bot);
     void bots_tick();
     void bot_think(uint32_t id, Actor& a, Bot& b);
+    void bot_social(uint32_t id, Actor& a, Bot& b); // inbox, invitations and trades -> delayed reactions
+    void bot_say(Bot& b, const char* key, Json request, const std::string& speaker = ""); // queue a configured line
     bool bot_act(uint32_t id, const Json& request); // handle() as a client would send it; false when refused
+    // A real player outside this bot's group has the monster: tapped it (owner), hit it (threat) or targets it (engaged). World
+    // combat refuses and drops a bot's attack, swing or skill on it (attack, engage(), skill foes), whatever the brain decided.
+    bool player_claim(uint32_t bot, uint32_t npc);
     bool bot_walk(uint32_t id, Actor& a, Bot& b, int32_t x, int32_t y); // straight legs; one route() search after no progress
-    bool bot_reach(uint32_t id, Actor& a, Bot& b, uint32_t npc, Json request); // walk to an NPC, then send request
+    bool bot_reach(uint32_t id, Actor& a, Bot& b, uint32_t npc, Json request); // walk to an NPC (any zone), then send request
     bool bot_travel(uint32_t id, Actor& a, Bot& b, const std::string& zone); // next door toward a zone; false: no path
     bool bot_fight(uint32_t id, Actor& a, Bot& b); // skills, potions and heals while engaged or a groupmate is hurt
-    bool bot_upkeep(uint32_t id, Actor& a, Bot& b); // skill points, loot, gear, repair, selling, potions, quests
-    void bot_town(uint32_t id, Actor& a, Bot& b);
-    void bot_hunt(uint32_t id, Actor& a, Bot& b);
-    void bot_follow(uint32_t id, Actor& a, Bot& b);
+    bool bot_chores(uint32_t id, Actor& a, Bot& b); // repair, selling, potions (travelling to a zone that has them)
+    bool bot_quests(uint32_t id, Actor& a, Bot& b); // hand in, abandon, accept (quest mode: in other zones too)
+    bool bot_hunt(uint32_t id, Actor& a, Bot& b); // hunting ground by level band and spread, fair quarry, attack
+    bool bot_town(uint32_t id, Actor& a, Bot& b); // wander near a townsfolk NPC, emote, sit, Söyle chat
+    bool bot_follow(uint32_t id, Actor& a, Bot& b);
 };
 }

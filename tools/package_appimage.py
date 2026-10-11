@@ -21,7 +21,7 @@ import sys
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 NAME = f"IKV-Linux-{VERSION}-x86_64.AppImage"
 IMAGE = f"ikv-appimage-toolchain:{VERSION}"
 # Same pinned static Type-2 runtime as the sibling Kabus 22 AppImage; sources/licences in packaging/runtime-uruntime.

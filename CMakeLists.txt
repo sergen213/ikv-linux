@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.2.0 LANGUAGES CXX)
+project(ikv_native VERSION 0.3.0 LANGUAGES CXX)
 
 if(NOT UNIX)
     message(FATAL_ERROR "The native implementation targets Linux/POSIX.")
@@ -141,6 +141,8 @@ if(IKV_BUILD_ASSET_TOOLS)
     # Regenerates config/gameplay.json content from the original tables (see docs/SERVER_ARCHITECTURE.md).
     add_executable(ikv-content-generator tools/generate_content.cpp)
     target_link_libraries(ikv-content-generator PRIVATE ikv-world)
+    target_compile_definitions(ikv-content-generator PRIVATE IKV_PLACEMENTS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/placements.json"
+                                                             IKV_QUESTS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/quests_original.json")
     list(APPEND ikv_targets ikv-content-generator)
 endif()
 if(IKV_BUILD_LAUNCHER)
@@ -175,6 +177,7 @@ if(BUILD_TESTING)
     list(APPEND ikv_targets protocol-test)
     add_executable(audio-asset-test tools/audio_asset_check.cpp)
     target_link_libraries(audio-asset-test PRIVATE ikv-assets-lib)
+    target_compile_options(audio-asset-test PRIVATE -UNDEBUG) # its checks are assert()s: keep them in Release/RelWithDebInfo trees
     list(APPEND ikv_targets audio-asset-test)
     add_test(NAME original-audio-boundaries COMMAND audio-asset-test)
     add_test(NAME deployment-secret-provisioning

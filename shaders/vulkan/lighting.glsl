@@ -102,8 +102,10 @@ vec4 sourceOceanSurface() {
 }
 void main(){
 outputMotion=(motionPrevious.xy/motionPrevious.w-motionCurrent.xy/motionCurrent.w)*.5;
-// Only translucent pipelines write reactive (MAX blend); their texel alpha is how much the surface replaces history.
-outputReactive=min(texture(diffuseMap,texcoord).a*draw.color.a,.9);
+// Reactive (FSR): opaque pipelines write 0 whatever this is. Blended draws overwrite it: alpha-tested ones (source
+// cutoff: foliage, decals) write motion vectors and are accumulated like opaque surfaces (0); untextured translucent
+// draws keep their coverage, how much the surface replaces history.
+outputReactive=draw.flags.w>0?0:min(texture(diffuseMap,texcoord).a*draw.color.a,.9);
 #ifdef IKV_RT
 // Physical facet normal from screen derivatives, before any discard leaves helper lanes undefined.
 vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
@@ -158,11 +160,15 @@ result=direct*shadowVisibility(n)+albedo*environment(n)*.35+environment(reflect(
 if(frame.params.x<.5&&frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(frame.fogColor.rgb,result,clamp(sourceFog,0,1));
 outputColor=vec4(result,original.a);
 #ifdef IKV_RT_GUIDED
-// Alpha-blended draws (extra.w 1) keep their blended raw colour: no decomposition, never history.
+// Alpha-tested blended draws (source cutoff: foliage, decals) own the guide: no depth writes and source back-to-front
+// order make the last fragment drawn the one the raw colour shows. Their stochastic terms are scaled by coverage, the
+// share of the raw colour they produce, so the resolve replaces exactly that share. Untextured translucent draws keep
+// their blended raw colour: no decomposition, never history.
 float guideDepth=max(dot(worldPosition-frame.eye.xyz,frame.cameraForward.xyz),.0001);
-bool blended=draw.extra.w>.75;
-outputGuide=vec4(rtGuideEncodeNormal(guideNormal),blended?0:rtArtwork,blended?-guideDepth:guideDepth);
-outputDiffuse=vec4(rtDiffuse,1);
-outputReflection=vec4(rtReflection,fract(draw.extra.w)>.25?1:0);
+bool translucent=draw.extra.w>.75&&draw.flags.w<=0;
+float coverage=draw.extra.w>.75?original.a:1.;
+outputGuide=vec4(rtGuideEncodeNormal(guideNormal),translucent?0:rtArtwork,translucent?-guideDepth:guideDepth);
+outputDiffuse=vec4(rtDiffuse*coverage,1);
+outputReflection=vec4(rtReflection*coverage,fract(draw.extra.w)>.25?1:0);
 #endif
 }

@@ -69,7 +69,7 @@ const SourceSceneDescriptor& source_scene_descriptor(unsigned registry_id);
 Scene load_source_scene(const std::filesystem::path& installation,unsigned registry_id);
 Scene load_charsel_scene(const std::filesystem::path& installation); // Original character select/creation backdrop: slots c_character0..3, preview c_create_adamyarat.
 void attach_source_actor(Scene& scene,const std::filesystem::path& installation,const SourceAppearance& appearance,std::uint32_t entity_id);
-void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id);
+void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment={});
 void detach_source_actor(Scene& scene,std::uint32_t entity_id);
 void set_actor_action(Scene& scene,std::uint32_t entity_id,std::uint32_t source_clip_id,float blend_seconds=.25f,bool restart=false,bool terminal=false); // Explicit restart/terminal seek are independent delivery policies; default retains source same-ID suppression.
 Transform entity_instance_transform(const Scene& scene,const Instance& instance,float authority_x,float supported_ground,float authority_z,float orientation);

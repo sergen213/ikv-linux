@@ -695,8 +695,8 @@ void attach_entity_model(Scene& scene,const std::filesystem::path& installation,
  const auto base=base_path(installation);auto actor=load_actor_animation(scene,base,member);std::optional<Pack> objects;Scene model=cached_model(scene,objects,base,member);need(!model.instances.empty(),"operator model member lacks original renderable owning context");
  load_model_resources(model,base,&scene);SceneActorAssembly descriptor;descriptor.entity_id=entity_id;descriptor.member=lower(member);install_assembly(scene,std::move(model),actor,std::move(descriptor),false);
 }
-void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id) {
- for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&assembly.npc_uid==source_uid)return;
+void attach_source_npc(Scene& scene,const std::filesystem::path& installation,unsigned source_uid,std::uint32_t entity_id,const std::vector<SourceEquipment>& equipment) {
+ for(const auto& assembly:scene.actor_assemblies)if(assembly.entity_id==entity_id&&assembly.npc_uid==source_uid&&assembly.appearance.equipment==equipment)return;
  const auto base=base_path(installation);(void)load_actor_animation(scene,base,"objects/pc/e_efe/E_BODY_EFE.ADF");
  const auto& record=source_record(scene,source_uid,false);const auto defaults=bodypiece_list(record.bodypieces);
  const auto& root_record=record.path.empty()?source_piece(scene,defaults.empty()?record.model:defaults.front()):record;
@@ -704,11 +704,17 @@ void attach_source_npc(Scene& scene,const std::filesystem::path& installation,un
  std::optional<Pack> objects;Scene model=cached_model(scene,objects,base,root_record.path);const auto model_root=biped_root(model,root_record.model);
  initialize_source_actor_root(model,root_record);
  std::vector<std::size_t> projection;prepare_source_actor_geometry(model,model_root,projection,0,base,root_record.path);
- SceneActorAssembly descriptor;descriptor.entity_id=entity_id;descriptor.npc_uid=source_uid;descriptor.member=root_record.path;descriptor.source_parts.reserve(6);descriptor.source_parts.push_back({0,root_record.uid});
+ SceneActorAssembly descriptor;descriptor.entity_id=entity_id;descriptor.npc_uid=source_uid;descriptor.member=root_record.path;descriptor.appearance.equipment=equipment;descriptor.source_parts.reserve(6+equipment.size());descriptor.source_parts.push_back({0,root_record.uid});
  // 00473e50 clones/dresses only when 004a5120 found a BIP (first model-root child).
  if(const auto root=source_bip(model,model_root);root!=UINT32_MAX){
   for(unsigned slot=1;slot<=5&&slot<defaults.size();++slot)if(!defaults[slot].empty()&&defaults[slot][0]!='*'){
    const auto& piece=source_piece(scene,defaults[slot]);descriptor.source_parts.push_back({slot,piece.uid});dress_part(model,cached_model(scene,objects,base,piece.path),root,piece,projection,base);
+  }
+  // Server-sent visible equipment (classes.dat rhweaponid/lhweaponid) after the bodypieces, as the PC dressing 0043fe40 does.
+  for(const auto& item:equipment){
+   const auto& piece=source_record(scene,item.uid);need(!piece.path.empty(),"selected NPC visual equipment has no model member");
+   descriptor.source_parts.push_back({item.slot,piece.uid});const auto first=model.instances.size();dress_part(model,cached_model(scene,objects,base,piece.path),root,piece,projection,base);
+   if(item.slot==11)descriptor.weapon={first,model.instances.size()};
   }
  }
  // 00434cd0 (on entity construction 004a53a8 and every re-dress 004a9639/004a9661) looks the class record's diffuse_texture up

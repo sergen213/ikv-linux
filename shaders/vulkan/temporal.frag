@@ -37,7 +37,7 @@ void main() {
     diffuseHistory=vec4(0);
     reflectionHistory=vec4(0);
     vec4 guide=texelFetch(currentGuide,p,0);
-    // Sky, ocean and alpha-blended surfaces have no decomposition: raw colour, no history.
+    // Sky, ocean and untextured translucent surfaces have no decomposition: raw colour, no history.
     if(guide.w<=0 || guide.z<=0)return;
     vec3 normal=rtGuideDecodeNormal(guide.xy);
     float depth=guide.w;

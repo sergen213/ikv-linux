@@ -2,7 +2,7 @@
 #define IKV_RT_GUIDE_GLSL
 // Guided-RT surface guide (scene location 1, RGBA32F): xy octahedral interpolated vertex normal (normal-map detail
 // would stop the spatial filter on every bumpy texel), z packed 8-bit artwork colour + 1 (0: no RT decomposition,
-// e.g. sky/ocean/alpha), w signed view depth (<0: never history).
+// e.g. sky/ocean/untextured translucent), w signed view depth (<0: never history).
 vec2 rtGuideEncodeNormal(vec3 n) {
     n /= abs(n.x) + abs(n.y) + abs(n.z);
     vec2 e = n.xy;

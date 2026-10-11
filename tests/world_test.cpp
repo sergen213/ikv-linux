@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 
 namespace {
 void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
@@ -49,16 +50,18 @@ void economy_mechanics(ikv::Json config) {
     for(const auto& [id,name]:std::initializer_list<std::pair<const char*,const char*>>{{"test_ore","Test Cevheri"},{"test_rare","Saf Test Cevheri"},{"test_ingot","Test Külçe"},{"test_scroll","Test Reçetesi"}})
         config["items"][id]={{"name",name},{"stack",20},{"price",5},{"level",1}};
     config["recipes"]={{"test_scroll",{{"craft","madenci"},{"level",1},{"product","test_ingot"},{"quantity",1},{"components",{{{"item","test_ore"},{"quantity",2}}}}}}};
-    config["economy"]["gather_ticks"]=3;config["economy"]["gather_rare_percent"]=100;config["quests"]=ikv::Json::object(); // rare roll forced
+    config["economy"]["gather_ticks"]=3;config["economy"]["gather_rare_percent"]=100;config["economy"]["bank_slots"]=2;config["quests"]=ikv::Json::object(); // rare roll forced; 2 cells per Banka tab
     const uint32_t node=2147493700u,banker=2147493701u;
     config["npcs"]={{{"id",node},{"kind","node"},{"name","Test Cevheri"},{"zone","eminonu"},{"x",100},{"y",0},{"hp",100},{"dialogue","Maden"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()},
                      {"gather",{{"craft","madenci"},{"level",1},{"item","test_ore"},{"rare","test_rare"},{"respawn",40}}}},
-                    {{"id",banker},{"kind","questgiver"},{"banker",true},{"name","Bankacı"},{"zone","eminonu"},{"x",0},{"y",100},{"hp",100},{"dialogue","Kasa"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}}};
+                    {{"id",banker},{"kind","questgiver"},{"banker",true},{"name","Bankacı"},{"zone","eminonu"},{"x",0},{"y",100},{"hp",100},{"dialogue","Kasa"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()},
+                     {"equipment",{{{"slot",11},{"source_uid",13226}}}}}}; // classes.dat rhweaponid (Bab-ı Ali Muhafızı: Tüfek)
     std::vector<ikv::CharacterSave> saved;bool fail=false;
     ikv::World world(config,[&](std::span<const ikv::CharacterSave> states){if(fail)throw std::runtime_error("injected persistence failure");saved.assign(states.begin(),states.end());});
     auto player=record(1);player["state"]["level"]=2;player["state"]["crafts"]={{"madenci",1}};
     player["state"]["inventory"]={{{"uid",ore_uid},{"item","test_ore"},{"quantity",2}},{{"uid",scroll_uid},{"item","test_scroll"},{"quantity",1}}};
     world.add(1,1,1,player);world.add(2,2,2,record(2));
+    check(entity(world.state(1),banker).at("equipment")==ikv::Json::array({{{"slot",11},{"source_uid",13226}}}),"an NPC's held weapon reaches the client like a player's visible equipment");
     const auto own=[&](){return world.state(1).at("character").at("state");};
     const auto count=[&](const ikv::Json& items,const char* item){int n=0;for(const auto& e:items)if(e.at("item")==item)n+=e.at("quantity").get<int>();return n;};
     const auto phase=[&](const ikv::Json& frame,const char* name){for(const auto& e:frame.at("events"))if(e.at("type")=="gather" && e.at("phase")==name)return true;return false;};
@@ -122,6 +125,40 @@ void economy_mechanics(ikv::Json config) {
     check(!world.state(1).contains("bank"),"bank contents stay private until a banker session opens");
     world.action(1,{{"action","bank_open"},{"target",banker}});
     check(world.state(1).at("bank").at("items")==bank.at("items") && world.state(1).at("bank").at("currency")==60 && !bank.at("items").empty(),"bank persists across relog");
+    // Banka tabs ("Kasanız iki sekmeden oluşmaktadır"; 00440110/004401d0 page 0..1, 0043f330 cells page·64..): bank_slots cells per
+    // tab, the state carries only the shown tab, entries keep their tab across relog; Kasa Erişimi opens the own bank anywhere.
+    {const std::string a(32,'a'),b(32,'b'),c(32,'c'),d(32,'d');
+     auto tabbed=record(1);tabbed["state"]=saved.back().state;
+     tabbed["bank"]={{"items",{{{"uid",a},{"item","test_scroll"},{"quantity",1}},{{"uid",c},{"item","test_ore"},{"quantity",1}},{{"uid",b},{"item","test_scroll"},{"quantity",1},{"tab",1}}}},{"currency",60}};
+     world.remove(1);world.add(1,1,1,tabbed);world.action(1,{{"action","bank_open"},{"target",banker}});
+     frame=world.state(1);
+     check(frame.at("bank").at("tab")==0 && frame.at("bank").at("items").size()==2 && !frame.at("bank").at("items")[1].contains("tab"),"the first tab shows only its cells");
+     world.action(1,{{"action","bank_deposit"},{"uid",uid(frame,"test_ingot")},{"quantity",1}});
+     check(event(world.state(1),"error","bank"),"a full tab refuses a new cell (Banka dolu)");
+     world.action(1,{{"action","bank_deposit"},{"uid",uid(frame,"test_ingot")},{"quantity",1},{"tab",1}});world.action(1,{{"action","bank_tab"},{"tab",1}});
+     frame=world.state(1);
+     check(frame.at("bank").at("tab")==1 && frame.at("bank").at("items").size()==2 && count(frame.at("bank").at("items"),"test_ingot")==1 &&
+           std::all_of(frame.at("bank").at("items").begin(),frame.at("bank").at("items").end(),[](const ikv::Json& e){return e.value("tab",0)==1;}) &&
+           saved.back().bank.at("items").size()==4 && count(frame.at("character").at("state").at("inventory"),"test_ingot")==0,"a deposit lands on the requested second tab and persists");
+     world.action(1,{{"action","bank_deposit"},{"uid",uid(frame,"test_rare")},{"quantity",1},{"tab",1}});check(event(world.state(1),"error","bank"),"the second tab has its own limit");
+     world.action(1,{{"action","bank_tab"},{"tab",2}});check(event(world.state(1),"error","quantity"),"only two tabs exist");
+     const auto stored=saved.back().bank;world.remove(1);auto back=record(1);back["state"]=saved.back().state;back["bank"]=stored;world.add(1,1,1,back);
+     world.action(1,{{"action","bank_open"},{"target",banker}});world.action(1,{{"action","bank_tab"},{"tab",1}});
+     frame=world.state(1);
+     check(count(frame.at("bank").at("items"),"test_ingot")==1 && frame.at("bank").at("items").size()==2,"tabs persist across relog");
+     for(const auto& e:frame.at("bank").at("items"))if(e.at("item")=="test_ingot")world.action(1,{{"action","bank_withdraw"},{"uid",e.at("uid")},{"quantity",1}});
+     frame=world.state(1);
+     check(count(frame.at("character").at("state").at("inventory"),"test_ingot")==1 && frame.at("bank").at("items").size()==1,"a second-tab cell withdraws into the bag");
+     auto over=record(3);over["bank"]={{"items",{{{"uid",a},{"item","test_scroll"},{"quantity",1}},{{"uid",c},{"item","test_ore"},{"quantity",1}},{{"uid",d},{"item","test_rare"},{"quantity",1}}}},{"currency",0}};
+     bool refused=false;try{world.add(3,3,3,over);}catch(...){refused=true;}check(refused,"a stored tab over its cell limit is refused at load");
+     auto wrong=record(3);wrong["bank"]={{"items",{{{"uid",d},{"item","test_rare"},{"quantity",1},{"tab",2}}}},{"currency",0}};
+     refused=false;try{world.add(3,3,3,wrong);}catch(...){refused=true;}check(refused,"a stored third tab is refused at load");
+     // Kasa Erişimi (guide l.875-878): "Kasamı Göster" on the own panel; without the product it is refused, a revoke closes it.
+     world.action(1,{{"action","bank_close"}});world.action(1,{{"action","bank_open"},{"target",1}});
+     frame=world.state(1);check(event(frame,"error","kasa") && !frame.contains("bank"),"own Kasamı Göster needs Kasa Erişimi");
+     world.entitlement(1,false,true);world.action(1,{{"action","bank_open"},{"target",1}});
+     frame=world.state(1);check(frame.contains("bank") && frame.at("bank").at("banker")==1,"Kasa Erişimi opens the own bank without a banker");
+     world.entitlement(1,false,false);check(!world.state(1).contains("bank"),"revoking Kasa Erişimi closes the remote bank");}
     world.action(1,{{"action","recipe_forget"},{"recipe","test_scroll"}});check(own().at("recipes").empty(),"Seçili reçeteyi hafızamdan sil forgets the recipe");
 }
 // Eşyalar drag/split/destroy refusals (004344b0, 0042f690), vendor itemflag order, bound trade items and the Plus Paket entitlement.
@@ -384,6 +421,14 @@ void door_rules(ikv::Json config) {
     check(event(world.state(1),"error","permission") && world.state(1).at("zone")=="old_town","gmonly door refuses players");
     world.action(2,{{"action","zone"},{"zone","old_town"}});use(2,2147493653u);
     check(world.state(2).at("zone")=="eminonu","gmonly door admits administrators");
+    // social.guild_zones (TopkapiPage.aspx "Yalnızca loncaların girebildiği"): a lonca member enters, others are refused.
+    config["social"]["guild_zones"]={"old_town"};
+    ikv::World hub(config,[](std::span<const ikv::CharacterSave>){});hub.add(1,1,1,record(1,150));hub.add(3,3,3,record(3,150));
+    for(uint32_t id:{1u,3u})hub.action(id,{{"action","quest_accept"},{"target",2147493649u},{"quest","first_hunt"}});
+    hub.action(3,{{"action","guild_create"},{"name","Kervan"}});
+    for(uint32_t id:{1u,3u})hub.action(id,{{"action","interact"},{"target",2147493652u}});ticks(hub,25);
+    check(event(hub.state(1),"error","guild") && hub.state(1).at("zone")=="eminonu","the Lonca Merkezi refuses players outside a lonca");
+    check(hub.state(3).at("zone")=="old_town","a lonca member enters the Lonca Merkezi");
 }
 // Bağlantılar ignore list, Kabadayı / enemy-clan PvP consent, Klan recruiters and channel, emotes.
 void social_rules(ikv::Json config) {
@@ -569,9 +614,9 @@ void actionbar_rules(ikv::Json config) {
     bool imprisoned=false;const auto foe_state=own(4);for(const auto& b:foe_state.at("buffs"))imprisoned|=b.value("stun",false) && b.value("silence",false) && b.value("harmful",false);
     check(imprisoned,"Zihin Saldırısı rank-15 proc imprisons the player");
     world.action(4,{{"action","skill"},{"skill","depar"},{"target",4}});check(event(world.state(4),"error","state"),"imprisoned player cannot use skills");
-    // Yetenekler ✓: pending points for several skills in one request, all-or-nothing within rank 15 and the budget (level 40: 40).
+    // Yetenekler ✓: pending points for several skills in one request, all-or-nothing within rank 15 and the budget (level 40: 2×40 = 80).
     world.action(3,{{"action","skill_learn"},{"skills",{{"zihin_saldirisi",1}}}});check(event(world.state(3),"error","rank"),"rank 15 is the cap");
-    world.action(3,{{"action","skill_learn"},{"skills",{{"buz_oku",15},{"meteorit",14}}}});
+    world.action(3,{{"action","skill_learn"},{"skills",{{"buz_oku",15},{"meteorit",14},{"konsantrasyon",15},{"fiziksel_bilgi",15},{"ates_cemberi",15}}}});
     check(event(world.state(3),"error","points") && !own(3).at("skills").contains("buz_oku"),"over-budget confirm commits nothing");
     world.action(3,{{"action","skill_learn"},{"skills",{{"buz_oku",15},{"meteorit",4}}}});
     check(own(3).at("skills").at("buz_oku")==15 && own(3).at("skills").at("meteorit")==5,"confirm invests every pending point");
@@ -631,8 +676,9 @@ void glyph_riders(ikv::Json config) {
     ikv::World world(config,[](std::span<const ikv::CharacterSave>){});
     const auto add=[&](uint32_t id,int class_id,int x,ikv::Json skills,std::vector<const char*> glyphs,int hp=1000000){
         auto r=record(int(id),x);r["class_id"]=class_id;r["state"]["level"]=40;r["state"]["mana"]=1000000;r["state"]["hp"]=hp;r["state"]["skills"]=skills; // level 40: Kutup Rüzgarı
-        ikv::Json inventory={{{"uid",std::string(32,'e')},{"item","training_blade"},{"quantity",1},{"prefixes",{prefix}}}};
+        ikv::Json inventory=ikv::Json::array(); // glyphs first: only the four Tılsım-row cells work
         for(size_t i=0;i<glyphs.size();++i)inventory.push_back({{"uid",std::string(31,'d')+"0123456789abcdef"[i]},{"item",glyphs[i]},{"quantity",1}});
+        inventory.push_back({{"uid",std::string(32,'e')},{"item","training_blade"},{"quantity",1},{"prefixes",{prefix}}});
         r["state"]["inventory"]=inventory;world.add(id,id,id,r);};
     const auto own=[&](uint32_t id){return world.state(id).at("character").at("state");};
     const auto buffs=[&](uint32_t id){return own(id).at("buffs");}; // by value: range-for keeps the copy alive
@@ -656,6 +702,13 @@ void glyph_riders(ikv::Json config) {
     ticks(world,20);cast(12,"dikkat_dagitma",13);
     int slow=0;for(const auto& b:buffs(13))if(b.value("id","")=="dikkat_dagitma")slow=b.value("speed",0);
     check(slow==-80,"slow Tılsım scales Dikkat Dağıtma 50 % → 80 %");
+    // Only the Tılsım row works (the first 4 Eşyalar cells, 2 red + 2 blue in the UI2 art); slotting one drains Kudret (fandom SSS).
+    add(20,1,120,{{"dikkat_dagitma",1}},{"g_free","g_silence","g_silenced","g_cut","g_slow"});world.action(20,{{"action","kabadayi"}});
+    ticks(world,600);cast(20,"dikkat_dagitma",13);
+    slow=0;for(const auto& b:buffs(13))if(b.value("id","")=="dikkat_dagitma")slow=b.value("speed",0);
+    check(slow==-50,"a Tılsım in the fifth bag cell does nothing");
+    world.action(20,{{"action","item_move"},{"uid",std::string(31,'d')+"4"},{"to",0}});
+    check(own(20).at("mana")==0 && own(20).at("inventory")[0].at("item")=="g_slow","slotting a Tılsım into the row drains Kudret");
     // Asit Saldırısı heal_cut halves the victim's own heals; Gazap Tılsım allows healing at 50 %.
     add(15,3,100,{{"iyilestirme",1},{"gazap",1}},{},5000);add(16,3,100,{{"asit_saldirisi",1}},{"g_cut"});add(17,3,-600,{{"iyilestirme",1},{"gazap",1}},{"g_wrath"},5000);
     for(uint32_t id:{15u,16u})world.action(id,{{"action","kabadayi"}});
@@ -699,7 +752,7 @@ void quest_rules(ikv::Json config) {
     const auto stage=[](const ikv::Json& s,const char* quest,const char* name){for(const auto& e:s.at("events"))if(e.at("type")=="quest" && e.at("quest")==quest && e.at("stage")==name)return e;return ikv::Json();};
     auto s=world.state(1);
     check(s.at("character").at("state").at("quests_done")==ikv::Json::array({"first_hunt"}) && s.at("character").at("state").at("quests").empty(),"legacy completed quest migrates; retired ids drop");
-    check(s.at("catalogs").at("quests").contains("c1") && s.at("catalogs").at("quests").contains("c2"),"visible NPC offers join the quest catalog");
+    check(s.at("catalogs").at("quests").contains("c1") && !s.at("catalogs").at("quests").contains("c2"),"visible NPC offers join the quest catalog; an untaken auto quest is offered by nobody but GB-Anı");
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","first_hunt"}});check(event(world.state(1),"error","quest"),"completed quest cannot be taken again");
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","t1"}});check(!stage(world.state(1),"t1","accepted").is_null(),"accepted event");
     ticks(world,40);s=world.state(1);
@@ -724,6 +777,78 @@ void quest_rules(ikv::Json config) {
     world.destination(1,350,0,4);ticks(world,8);
     world.action(1,{{"action","quest_complete"},{"target",merchant},{"quest","c2"}});
     check(own().at("quests_done")==ikv::Json::array({"c1","c2","first_hunt"}),"talk quest completed at turn_in; quests_done stays sorted");
+}
+// Wave 11 objective kinds and rules: visit (a <loc> spot, once a second), use (Kullan on a prop), OFF-Q level requirement
+// (min_level), several prerequisites (requires_also), bag-collect progress with an extra item ("also"), a class-limited quest,
+// and rewards handed out as the class/sex variant of one name ("{sınıf}" names the class in the completion line).
+void quest_objectives(ikv::Json config) {
+    const uint32_t giver=2147493649u, merchant=2147493650u, prop=2147493671u;
+    const ikv::Json none={{"xp",10},{"currency",5},{"items",ikv::Json::array()}};
+    auto armour=config["items"]["training_blade"];armour["name"]="Test Zırhı";armour["class"]=0;armour["sex"]=1;config["items"]["armour_m"]=armour;
+    armour["sex"]=0;config["items"]["armour_f"]=armour;
+    auto blade=config["items"]["training_blade"];blade["name"]="Test Hançeri";blade["class"]=1;config["items"]["blade_b"]=blade;
+    auto prize=config["items"]["healing_tonic"];prize["name"]="Savaşçı Ödülü";config["items"]["prize_s"]=prize;prize["name"]="Büyücü Ödülü";config["items"]["prize_b"]=prize;
+    config["quests"]["v1"]={{"name","Keşif"},{"giver",giver},{"level",1},{"objective",{{"kind","visit"},{"zone","eminonu"},{"x",900},{"y",0},{"radius",150}}},
+                            {"complete_text","Al bakalım {sınıf} kardeşim."},{"reward",{{"xp",10},{"currency",0},{"items",{{{"item","armour_m"},{"quantity",1}},{{"item","blade_b"},{"quantity",1}},
+                            {{"item","prize_s"},{"quantity",1},{"classes",{1,3}}},{{"item","prize_b"},{"quantity",1},{"classes",{2}}}}}}}};
+    config["quests"]["u1"]={{"name","Stoklar"},{"giver",giver},{"level",1},{"objective",{{"kind","use"},{"targets",{prop}},{"count",1}}},{"reward",none}};
+    config["quests"]["m1"]={{"name","Seviye"},{"giver",giver},{"level",3},{"min_level",2},{"objective",{{"kind","talk"}}},{"reward",none}};
+    config["quests"]["r1"]={{"name","Çifte"},{"giver",giver},{"level",1},{"requires","v1"},{"requires_also",{"u1"}},{"objective",{{"kind","talk"}}},{"reward",none}};
+    config["quests"]["b1"]={{"name","Çanta"},{"giver",giver},{"level",1},{"objective",{{"kind","collect"},{"item","healing_tonic"},{"count",5},{"also",{{{"item","training_blade"},{"count",1}}}}}},{"reward",none}};
+    config["quests"]["w1"]={{"name","Takas"},{"giver",giver},{"level",1},{"class",2},{"objective",{{"kind","talk"}}},{"reward",none}};
+    const uint32_t cin1=2147493672u, cin2=2147493673u;
+    config["quests"]["u2"]={{"name","Kurtarıcımız"},{"giver",giver},{"level",1},{"objective",{{"kind","use"},{"targets",{cin1}},{"count",2}}},{"reward",none}};
+    config["quests"]["u3"]={{"name","Kadim İşçilik"},{"giver",giver},{"level",1},{"objective",{{"kind","use"},{"targets",{prop}},{"count",2},{"cooldown",1}}},{"reward",none}};
+    for(auto& n:config["npcs"])if(n.at("id")==giver)n["quests"]={"first_hunt","v1","u1","m1","r1","b1","w1","u2","u3"};
+    config["npcs"].push_back({{"id",prop},{"kind","prop"},{"interactable",true},{"name","Stok"},{"zone","eminonu"},{"x",300},{"y",100},{"hp",100},{"dialogue","Stok"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}});
+    for(const auto& [cin,y]:{std::pair{cin1,50},{cin2,-50}})
+        config["npcs"].push_back({{"id",cin},{"kind","prop"},{"interactable",true},{"rescue",true},{"respawn",40},{"source_uid",17096},{"source_class",394},{"name","Biçare Folklor Cini"},{"zone","eminonu"},{"x",300},{"y",y},{"hp",1},{"dialogue","Cin"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}});
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){});
+    auto player=record(1,300);player["appearance"]={{"sex",0}};player["state"]["currency"]=1000;world.add(1,1,1,player);
+    const auto own=[&]{return world.state(1).at("character").at("state");};
+    const auto stage=[](const ikv::Json& s,const char* quest,const char* name){for(const auto& e:s.at("events"))if(e.at("type")=="quest" && e.at("quest")==quest && e.at("stage")==name)return e;return ikv::Json();};
+    int seq=1; const auto walk=[&](int x){world.destination(1,x,0,uint32_t(seq++));ticks(world,30);};
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","m1"}});check(event(world.state(1),"error","level"),"OFF-Q level requirement (min_level) refuses a lower level");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","w1"}});check(event(world.state(1),"error","class"),"a class-limited quest refuses other classes");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","r1"}});check(event(world.state(1),"error","quest"),"a quest waits for every prerequisite");
+    // use: Kullan on the prop
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","u1"}});world.state(1);
+    world.action(1,{{"action","interact"},{"target",prop}});auto s=world.state(1);
+    check(!stage(s,"u1","progress").is_null() && !stage(s,"u1","ready").is_null(),"use objective: Kullan on the prop progresses the quest");
+    world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","u1"}});check(!stage(world.state(1),"u1","completed").is_null(),"use quest handed in");
+    // count>1 use: each trapped Cin (same classes.dat uid) frees once and leaves; one prop repeats only after the cooldown
+    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_accept"},{"target",giver},{"quest",q}});world.state(1);
+    const auto progress=[&](const char* q){return own().at("quests").at(q).at("progress").get<int>();};
+    const auto seen=[&](uint32_t id){const auto f=world.state(1);for(const auto& e:f.at("entities"))if(e.at("id")==id)return true;return false;};
+    world.action(1,{{"action","interact"},{"target",cin1}});check(progress("u2")==1 && !seen(cin1),"rescue: Kullan frees the trapped Cin, which leaves");
+    world.action(1,{{"action","interact"},{"target",cin1}});check(progress("u2")==1,"a freed Cin cannot be freed again");
+    world.action(1,{{"action","interact"},{"target",cin2}});s=world.state(1);check(progress("u2")==2 && !stage(s,"u2","ready").is_null(),"another Cin of the same family counts");
+    ticks(world,45);check(seen(cin1),"a freed Cin returns after its respawn");
+    world.action(1,{{"action","interact"},{"target",prop}});world.action(1,{{"action","interact"},{"target",prop}});
+    check(progress("u3")==1,"spamming one prop inside its cooldown counts once");
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    world.action(1,{{"action","interact"},{"target",prop}});check(progress("u3")==2,"the prop counts again after its cooldown");
+    for(const char* q:{"u2","u3"})world.action(1,{{"action","quest_complete"},{"target",giver},{"quest",q}});world.state(1);
+    // visit: reaching the spot completes the objective within a second; class/sex reward variants
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","v1"}});world.state(1);
+    walk(600);check(own().at("quests").at("v1").at("progress")==0,"visit: outside the radius nothing happens");
+    walk(850);s=world.state(1);check(!stage(s,"v1","ready").is_null() && own().at("quests").at("v1").at("progress")==1,"visit: inside the radius the objective is done");
+    walk(300);world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","v1"}});s=world.state(1);
+    check(stage(s,"v1","completed").at("text")=="Al bakalım savaşçı kardeşim.","{sınıf} names the character's class");
+    check(holds(s,"armour_f") && !holds(s,"armour_m") && !holds(s,"blade_b"),"rewards: the own class/sex variant, never another class's weapon");
+    check(holds(s,"prize_s") && !holds(s,"prize_b"),"rewards: a line tagged for other classes (W-REW class page) is skipped");
+    // requires_also: both prerequisites done
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","r1"}});check(!stage(world.state(1),"r1","accepted").is_null(),"every prerequisite done: accepted");
+    // bag collect with an extra item: progress follows the bag, the hand-in takes everything
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","b1"}});s=world.state(1); // defaults: 3 tonics, 1 blade
+    check(own().at("quests").at("b1").at("progress")==3,"collect: items already carried count at once");
+    walk(400);world.action(1,{{"action","buy"},{"target",merchant},{"item","healing_tonic"},{"quantity",2}});s=world.state(1);
+    check(own().at("quests").at("b1").at("progress")==4,"collect: the bag counts, capped while an 'also' item is missing");
+    world.action(1,{{"action","buy"},{"target",merchant},{"item","training_blade"},{"quantity",1}});s=world.state(1);
+    check(!stage(s,"b1","ready").is_null() && own().at("quests").at("b1").at("progress")==5,"collect: ready once every item is carried");
+    walk(300);world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","b1"}});s=world.state(1);
+    int blades=0;for(const auto& e:s.at("character").at("state").at("inventory"))blades+=e.at("item")=="training_blade";
+    check(!stage(s,"b1","completed").is_null() && !holds(s,"healing_tonic") && blades==1,"collect: bag items handed over, the worn blade stays (\"çantanızdayken\")");
 }
 // Server-side bots (NONCANONICAL): no player slot, only validated client actions (range, cooldowns, quest givers), deferred
 // persistence of bot-only progress, companion invitation/heal/door follow/assist/dismiss/leader logout, and a tick budget.
@@ -774,10 +899,13 @@ void bot_rules(ikv::Json config) {
     // Companion: accepts a player's invitation, heals the hurt leader, follows through a door, assists, leaves on /dismiss and logout.
     world.remove(1);auto hurt=record(1,-700);hurt["state"]["hp"]=100;world.add(1,1,1,hurt);
     const auto mate=bot(901,3,-600,"companion");
-    world.action(1,{{"action","group_invite"},{"target",mate}});ticks(world,12);
+    world.action(1,{{"action","group_invite"},{"target",mate}});ticks(world,120); // accepted after a human reaction delay
     check(row(mate).at("leader")==1,"companion accepts a player's group invitation");
     bool healed=false;for(int t=0;t<40 && !healed;++t){world.advance();const auto seen=world.state(1);for(const auto& e:seen.at("events"))healed=healed||(e.at("type")=="skill" && e.at("source")==mate && e.at("target")==1);}
     check(healed,"Şifacı companion heals its hurt leader");
+    world.action(1,{{"action","chat"},{"channel","private"},{"to",mate},{"text","naber, nasılsın?"}});
+    bool answered=false;for(int t=0;t<200 && !answered;++t){world.advance();const auto seen=world.state(1);for(const auto& e:seen.at("events"))answered=answered||(e.at("type")=="chat" && e.at("from")==mate && e.at("channel")=="private");}
+    check(answered,"a bot answers a player's whisper after a reaction delay");
     world.action(1,{{"action","interact"},{"target",door}});ticks(world,25);
     check(world.state(1).at("zone")=="old_town","leader uses the door");
     ticks(world,200);
@@ -785,11 +913,11 @@ void bot_rules(ikv::Json config) {
     world.action(1,{{"action","attack"},{"target",yard_rat}});
     bool assisted=false;for(int t=0;t<200 && !assisted;++t){world.advance();const auto seen=world.state(1);for(const auto& e:seen.at("events"))assisted=assisted||(e.value("source",0u)==mate && e.value("target",0u)==yard_rat);}
     check(assisted,"companion assists the leader's target");
-    world.action(1,{{"action","chat"},{"channel","group"},{"text","/dismiss"}});ticks(world,12);
+    world.action(1,{{"action","chat"},{"channel","group"},{"text","/dismiss"}});ticks(world,40);
     check(row(mate).at("leader")==0,"/dismiss releases the companion");
-    ticks(world,20);world.action(1,{{"action","group_invite"},{"target",mate}});ticks(world,12);
+    ticks(world,20);world.action(1,{{"action","group_invite"},{"target",mate}});ticks(world,120);
     check(row(mate).at("leader")==1,"a released companion can be invited again");
-    world.remove(1);ticks(world,12);
+    world.remove(1);ticks(world,40);
     check(row(mate).at("leader")==0,"leader logout releases the companion");
     // Budget: 200 bots at 20 Hz (fixture zones; ikv-server status tick_ms measures original support grids).
     for(int n=0;n<200;++n)bot(1000+n,1+n%3,-400+n*4,n%3==0?"hunt":n%3==1?"town":"companion");
@@ -802,6 +930,45 @@ void bot_rules(ikv::Json config) {
     for(const auto& e:crowd.at("entities"))if(e.at("kind")=="player")listed.insert(e.at("id").get<uint32_t>());
     for(const auto& p:shown)sent.insert(p.id);
     check(shown.size()==32 && listed==sent,"a bot crowd keeps the snapshot at 32 players, equal to the state's player entities");
+}
+// Bot quarry fairness (mod-playerbots GrindTargetValue): a hunting bot never takes a monster a player is attacking or has hit,
+// even when it is the only monster in reach; it hunts the same monster once the player is gone.
+void bot_fairness(ikv::Json config) {
+    const uint32_t rat=2147493651u;
+    for(auto& n:config["npcs"])if(n.at("id")==rat){n["hp"]=100000;n["patrol"]=ikv::Json::array();} // outlasts the test: no respawn gap
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){});
+    auto player=record(1,300);player["state"]["level"]=1;world.add(1,1,1,player);
+    auto fresh=world.bot_character(1);fresh["state"]["x"]=350;
+    const auto hunter=world.add_bot(902,902,fresh,{{"behaviour","hunt"}});
+    world.action(1,{{"action","attack"},{"target",rat}});
+    bool took=false;
+    for(int t=0;t<600;++t){
+        world.advance();
+        const auto seen=world.state(1);for(const auto& e:seen.at("events"))took=took||(e.value("source",0u)==hunter && e.value("target",0u)==rat);
+    }
+    check(!took,"a bot never strikes a monster a player is attacking");
+    world.remove(1);
+    for(int t=0;t<1200 && !took;++t){world.advance();for(const auto& r:world.bots())took=took||r.at("state")=="fighting";}
+    check(took,"the bot hunts that monster once no player is on it");
+}
+// World-level tap guarantee (not the brain): a bot that clicked a monster first never lands a hit once a player clicks it before
+// the bot's first swing, and a bot's later click on it is refused (bot_rules covers a companion assisting its leader's target).
+void bot_claim(ikv::Json config) {
+    const uint32_t rat=2147493651u;int rx=0,ry=0;
+    for(auto& n:config["npcs"])if(n.at("id")==rat){n["hp"]=100000;n["patrol"]=ikv::Json::array();rx=n.at("x");ry=n.at("y");}
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){});
+    auto player=record(1,300);player["state"]["level"]=1;world.add(1,1,1,player);
+    auto fresh=world.bot_character(1);fresh["state"]["x"]=rx-1200;fresh["state"]["y"]=ry;
+    const auto bot=world.add_bot(904,904,fresh,{{"behaviour","town"}});
+    const auto state=[&]{for(const auto& r:world.bots())if(r.at("id")==bot)return r.at("state").get<std::string>();return std::string();};
+    world.action(bot,{{"action","attack"},{"target",rat}});world.advance();
+    check(state()=="fighting","the bot engages the unclaimed monster first");
+    world.action(1,{{"action","attack"},{"target",rat}}); // the player clicks before the bot's first hit
+    bool hit=false;
+    for(int t=0;t<400;++t){world.advance();const auto view=world.state(1);for(const auto& e:view.at("events"))hit=hit||(e.value("source",0u)==bot && e.value("target",0u)==rat);}
+    check(!hit && state()!="fighting","a bot that clicked first never hits a monster a player claimed before its first hit");
+    world.action(bot,{{"action","attack"},{"target",rat}});world.advance();
+    check(state()!="fighting","a bot's click on a player-claimed monster is refused");
 }
 // Bots spawned together enter at distinct supported spots a straight walk from the zone spawn reaches, never stacked on the spawn.
 void bot_spawn_spread(const ikv::Json& mechanics) {
@@ -961,6 +1128,65 @@ void idle_walk_rules(ikv::Json config) {
     check(!stroll(100,true),"an idle walker stands for the player it served");
     check(!stroll(0,false),"idlewalktend 0 stands");
 }
+// Gaps #3b/#8/#9/#10/#14 (analysis/porting-wave11/Rules): classes.dat monster combat numbers meet the Karakter Bilgisi at
+// formulas.monster_unit, 2 skill points per level, the free yetenek/direnç reset at level 5, ×10 regeneration while sitting,
+// the level-based death fee (Plus pays a third) and resurrection at the nearest Ruh Taşı arrival.
+void progression_rules(ikv::Json config) {
+    const uint32_t rat=2147493651u;
+    {   // A bare-handed level-1 Savaşçı (Saldırı/Savunma 22) against the original Fare (classes.dat 16001: attack 60, defense 50,
+        // dmgmin-dmgmax 2-4, criticalchance 3 x2, attackrate 1200 ms) for two minutes.
+        auto c=config;auto& r=c["npcs"][2];r["x"]=100;r["patrol"]=ikv::Json::array();r["hp"]=100000;r["attack"]=60.0;r["defense"]=50.0;
+        r["damage_range"]={2.0,4.0};r["crit"]={3.0,2.0};r["attack_cooldown"]=24;
+        ikv::World world(c,[](std::span<const ikv::CharacterSave>){});world.add(1,1,1,record(1));
+        world.action(1,{{"action","attack"},{"target",rat}});
+        int swings=0,hits=0,bites=0,landed=0,worst=0;
+        for(int t=0;t<20*120;++t){world.advance();const auto f=world.state(1);for(const auto& e:f.at("events"))if(e.at("type")=="combat"){
+            if(e.at("source")==1){++swings;hits+=!e.value("miss",false);}
+            else if(e.at("source")==rat){++bites;if(!e.value("miss",false)){++landed;worst=std::max(worst,e.at("damage").get<int>());}}}}
+        const auto s=world.state(1).at("character").at("state");
+        check(swings>=90 && hits*100>=swings*42 && hits*100<=swings*72,"an L1 hits a Fare about Saldırı/(Saldırı+defense/3) = 57% of swings");
+        check(bites>=80 && landed*100>=bites*30 && landed*100<=bites*65 && worst>=1 && worst<=3,"a Fare bites at attack/3 vs Savunma (48%) for dmgmin-dmgmax/3 (1, crit 2-3)");
+        check(s.at("hp").get<int>()>s.at("max_hp").get<int>()/2,"an L1 outlasts two minutes of Fare bites (VOD: never died farming rats)");
+    }
+    {   // 2 points per level; reaching level 5 refunds Yetenekler and Dirençler with the VOD 49:45 line.
+        auto c=config;auto& r=c["npcs"][2];r["x"]=100;r["patrol"]=ikv::Json::array();r["hp"]=1;r["xp"]=2200;
+        ikv::World world(c,[](std::span<const ikv::CharacterSave>){});
+        auto player=record(1);player["state"]["level"]=4;player["state"]["skills"]={{"depar",2}};player["state"]["resistances"]={{"ates",3}};world.add(1,1,1,player);
+        check(world.state(1).at("skill_points")==6,"2 skill points per level: 8 at level 4, 2 spent");
+        world.action(1,{{"action","attack"},{"target",rat}});
+        std::string line;ikv::Json s;
+        for(int t=0;t<100 && line.empty();++t){world.advance();const auto f=world.state(1);s=f;for(const auto& e:f.at("events"))if(e.at("type")=="notice")line=e.at("text");}
+        const auto& own=s.at("character").at("state");
+        check(own.at("level")==5 && own.at("skills").empty() && own.at("resistances").empty(),"level 5 frees the invested yetenek and direnç points");
+        check(line=="5 seviye olduğunuz için yeteneklerinizi/dirençlerinizi ÜCRETSİZ sıfırlandı. Tekrar dağıtabilirsiniz!","VOD 49:45 free reset line");
+        check(s.at("skill_points")==10 && s.at("stats").at("resistance_points")==20,"VOD level 5: Kalan 10, Dirençler Puan 20");
+    }
+    {   // Guide l.1123-1125: sitting refills Enerji and Kudret ten times faster; walking ends the posture.
+        auto c=config;c["regeneration"]={{"interval",10},{"hp",3},{"mana",2},{"posture_multiplier",10}};
+        ikv::World world(c,[](std::span<const ikv::CharacterSave>){});
+        auto player=record(1,-500);player["state"]["hp"]=50;player["state"]["mana"]=0;world.add(1,1,1,player);
+        const auto own=[&]{return world.state(1).at("character").at("state");};
+        while(own().at("hp")==50)world.advance(); // align with the regeneration interval
+        world.action(1,{{"action","chat"},{"channel","local"},{"text","/otur"}});
+        const int hp=own().at("hp"),mana=own().at("mana");ticks(world,10);
+        check(own().at("hp")==hp+30 && own().at("mana")==mana+20,"a sitting character regenerates x10");
+        world.destination(1,-900,0,1);ticks(world,10);
+        check(own().at("hp")==hp+33,"standing up returns to the normal rate");
+    }
+    {   // Death fee 5-3.5L+1.5L² (VOD 8/15/25 at 3/4/5), Plus a third; rise at the nearest Ruh Taşı arrival instead of the spawn.
+        auto c=config;auto& r=c["npcs"][2];r["x"]=2900;r["patrol"]=ikv::Json::array();r["damage_range"]={3000.0,3000.0};
+        c["npcs"].push_back({{"id",2147493660u},{"source_uid",30002},{"source_class",1},{"kind","door"},{"name","Ruh Taşı"},{"zone","old_town"},{"x",500},{"y",0},{"hp",100},
+                             {"dialogue","Ruh Taşı"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()},{"door",{{"to","eminonu"},{"arrive",{3000,0}}}}});
+        ikv::World world(c,[](std::span<const ikv::CharacterSave>){});
+        for(int id:{1,2}){auto p=record(id,2800);p["state"]["level"]=id==1?5:3;p["state"]["currency"]=100;world.add(id,id,id,p);}
+        world.entitlement(2,true);
+        const auto own=[&](int id){return world.state(id).at("character").at("state");};
+        for(int t=0;t<200 && (own(1).at("hp")!=0 || own(2).at("hp")!=0);++t)world.advance();
+        check(own(1).at("currency")==75 && own(2).at("currency")==98,"level 5 loses 25 Para; a level-3 Plus holder 8/3");
+        ticks(world,c.at("death_resurrect_delay").get<int>());world.action(1,{{"action","resurrect"}});
+        check(own(1).at("x")==3000 && own(1).at("y")==0,"resurrection at the nearest safe point (a Ruh Taşı arrival)");
+    }
+}
 int main(int argc, char** argv) {
     try {
         if (argc != 3) throw std::runtime_error("usage: world-test config/gameplay.json tests/independent_content.json");
@@ -985,12 +1211,14 @@ int main(int argc, char** argv) {
         boss_rules(config,false);boss_rules(config,true);
         idle_walk_rules(config);
         regeneration_rules(config);
+        progression_rules(config);
         actionbar_rules(config);
         glyph_riders(config);
         item_rules(config);
         point_reset_rules(config);
         quest_rules(config);
-        bot_rules(config);bot_spawn_spread(config);
+        quest_objectives(config);
+        bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
         world.action(1, {{"action", "buy"}, {"target", 2147493650u}, {"item", "healing_tonic"}, {"quantity", 1}});
         check(event(world.state(1), "error", "range"), "merchant range");
@@ -1180,7 +1408,7 @@ int main(int argc, char** argv) {
             ikv::World skills(tough,[](std::span<const ikv::CharacterSave>){});
             auto warrior=record(20,700);warrior["state"]["level"]=3;skills.add(20,20,20,warrior);
             skills.action(20,{{"action","skill_learn"},{"skills",{{"ofansif_dovus",1},{"sert_vurus",1},{"depar",1}}}});
-            skills.action(20,{{"action","skill_learn"},{"skills",{{"depar",1}}}});
+            skills.action(20,{{"action","skill_learn"},{"skills",{{"depar",4}}}}); // level 3: 2×3 = 6 points, 3 spent
             check(event(skills.state(20),"error","points"),"skill points limited by level");
             skills.action(20,{{"action","skill"},{"target",2147493651u},{"skill","sert_vurus"}});
             check(event(skills.state(20),"error","requires"),"Sert Vuruş requires Ofansif Dövüş");
@@ -1231,7 +1459,7 @@ int main(int argc, char** argv) {
         mechanics.action(12,{{"action","resurrect"}});
         auto resurrection=mechanics.state(12);auto revived=resurrection.at("character").at("state");
         check(authority_event(resurrection,"resurrect",12,12,12),"resurrection projects authoritative life transition");
-        check(revived.at("hp")==revived.at("max_hp") && revived.at("x")==0 && revived.at("currency")==95,"safe resurrection and money penalty");
+        check(revived.at("hp")==revived.at("max_hp") && revived.at("x")==0 && revived.at("currency")==97,"safe resurrection and the level-1 death fee (3 Para)");
         mechanics.destination(12,1000,500,1);
         check(event(mechanics.state(12),"correction"),"configured collision destination");
         mechanics.action(10,{{"action","moderate"},{"target",11},{"operation","kick"}});

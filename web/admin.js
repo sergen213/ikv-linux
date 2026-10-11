@@ -199,7 +199,7 @@
     const zones = Array.isArray(status.zones) ? status.zones : [];
     const live = Boolean(world && world.online);
     element('m-online').textContent = live ? count(status.players) : 'Çevrimdışı';
-    element('m-bots').textContent = live ? count(bots.length) : '—';
+    element('m-bots').textContent = live ? count(status.bots_total ?? bots.length) : '—';
     element('m-tick').textContent = live && typeof status.tick_ms === 'number' ? `${status.tick_ms.toFixed(2)} ms` : '—';
     element('m-uptime').textContent = live ? duration(status.uptime_seconds) : '—';
     element('m-memory').textContent = live && typeof status.memory_kib === 'number' ? `${(status.memory_kib / 1024).toFixed(1)} MiB` : '—';
@@ -397,7 +397,7 @@
       const row = node('tr');
       row.dataset.id = id;
       row.setAttribute('aria-selected', String(id !== '' && id === selected));
-      const label = kind === 'account' ? `${text(record.username)}${record.admin ? ' · yönetici' : ''}${record.plus ? ' · Plus' : ''}${record.banned ? ' · YASAKLI' : ''}`
+      const label = kind === 'account' ? `${text(record.username)}${record.admin ? ' · yönetici' : ''}${record.plus ? ' · Plus' : ''}${record.kasa ? ' · Kasa Erişimi' : ''}${record.banned ? ' · YASAKLI' : ''}`
         : `${text(record.name)} · hesap ${text(record.account_id)} · sv. ${text(record.state?.level)}${record.moderation?.muted ? ' · susturulmuş' : ''}`;
       row.append(node('td', record.id), node('td', label));
       const details = node('td');
@@ -581,7 +581,7 @@
     event.preventDefault();
     const action = event.submitter?.value;
     const id = selectedAccount;
-    if (!id || !['ban', 'unban', 'reset', 'plus', 'unplus'].includes(action)) return;
+    if (!id || !['ban', 'unban', 'reset', 'plus', 'unplus', 'kasa', 'unkasa'].includes(action)) return;
     void perform(async () => {
       positiveId(id, 'Hesap ID');
       const reason = element('ban-reason').value.trim();
@@ -589,13 +589,14 @@
       if (action === 'ban' && (!reason || new TextEncoder().encode(reason).length > 512)) throw new Error('Yasaklama gerekçesi 1–512 UTF-8 bayt olmalıdır; Türkçe karakterler birden fazla bayt kullanabilir.');
       if (action === 'ban' && (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > 31536000)) throw new Error('Yasak süresi 0–31536000 saniye arasında bir tamsayı olmalıdır; 0 süresiz yasaktır.');
       const prompt = action === 'ban' ? `Hesap ${id} yasaklansın mı?\nGerekçe: ${reason}\nSüre: ${seconds === 0 ? 'Süresiz' : `${seconds} saniye`}` : action === 'reset' ? `Hesap ${id} için parola sıfırlama tokenı üretilecek. Tokenı hesap sahibine güvenli bir kanaldan elle teslim etmelisiniz. Onaylıyor musunuz?`
-        : action === 'plus' ? `Hesap ${id} Plus Paket sahibi yapılsın mı? (satıcıya 1/3 fiyat, 3 kat Şan, %10 Karizma kaybı)` : action === 'unplus' ? `Hesap ${id} Plus Paket yetkisi kaldırılsın mı?` : `Hesap ${id} yasağı kaldırılsın mı?`;
+        : action === 'plus' ? `Hesap ${id} Plus Paket sahibi yapılsın mı? (satıcıya 1/3 fiyat, 3 kat Şan, %10 Karizma kaybı)` : action === 'unplus' ? `Hesap ${id} Plus Paket yetkisi kaldırılsın mı?`
+        : action === 'kasa' ? `Hesap ${id} Kasa Erişimi sahibi yapılsın mı? (Kasamı Göster ile her yerden banka)` : action === 'unkasa' ? `Hesap ${id} Kasa Erişimi kaldırılsın mı?` : `Hesap ${id} yasağı kaldırılsın mı?`;
       if (!window.confirm(prompt)) { notice('İşlem iptal edildi.'); return; }
       const result = await request(`/v1/admin/accounts/${encodeURIComponent(id)}/${action}`, 'POST', action === 'ban' ? { reason, duration_seconds: seconds } : {});
       if (action === 'reset') {
         if (typeof result.token !== 'string' || !result.token) throw new Error('Sunucu sıfırlama tokenı döndürmedi; yeniden üretmeden önce durumu kontrol edin.');
         await afterMutation(`Hesap ${id} için sıfırlama tokenı üretildi. Güvenli bir kanaldan elle teslim edin.\nTOKEN: ${result.token}\nSon kullanım: ${date(result.expires_at)}\nSonraki işlemde bu token ekrandan silinir.`, true);
-      } else await afterMutation(`Hesap ${id}: ${{ ban: 'yasak uygulandı', unban: 'yasak kaldırıldı', plus: 'Plus Paket verildi', unplus: 'Plus Paket kaldırıldı' }[action]}.`);
+      } else await afterMutation(`Hesap ${id}: ${{ ban: 'yasak uygulandı', unban: 'yasak kaldırıldı', plus: 'Plus Paket verildi', unplus: 'Plus Paket kaldırıldı', kasa: 'Kasa Erişimi verildi', unkasa: 'Kasa Erişimi kaldırıldı' }[action]}.`);
     });
   });
 

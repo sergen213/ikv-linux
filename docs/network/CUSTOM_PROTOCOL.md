@@ -136,7 +136,7 @@ Common NPC check `npc()`: exists (`target`), within `interaction_range` (`range`
 | `skill` | `skill`, `target` (enemy/ally skills; optional for summons) | Rank ≥ 1 (`rank`), slot holds this variant (`variant`), not passive (`passive`), not immune or `silence`d (`state`), required stance (`requires`), Gazap heal block (`wrath`), cooldown + 20-tick global (`cooldown`), mana (`resource`), range (`range`), target validity (`target`/`dead`), buff cap 8 (`buff`). `enemy`/`enemies` reach living enemy NPCs and players hostile under `attack`'s rule (damage via `strike`, timed effects as harmful buffs). `summon` spawns the configured classes.dat template at the caster (one per skill); a Boz Ayı recast while it lives costs no mana or cooldown and sends it at `target` (enemy NPC) or beside the caster. Detail-text `procs` roll: `free` (no mana), `stun`/`silence`, `multiply` (vs `vulnerable` NPCs), passive `dot`. | ack + `skill`/`hit`/`resurrect` |
 | `skill_variant` | `skill` (a skill with `replaces`) | Own class (`class`), level (`level`); toggles the `boz_ayi`-style flag. NONCANONICAL (official grant rule unrecovered). | ack |
 | `quickbar` | `slots` (10 × `null`\|`{skill}`\|`{item: 32-hex uid}`) | Exactly ten valid slots (`quickbar`); stored in `character.state.quickbar`. | ack |
-| `resurrect` | — | Dead (`state`), `death_resurrect_delay` elapsed (`cooldown`), zone spawn walkable (`collision`); full HP/mana at zone spawn. | ack + `resurrect` |
+| `resurrect` | — | Dead (`state`), `death_resurrect_delay` elapsed (`cooldown`), resurrection point walkable (`collision`); full HP/mana at the nearest of the zone spawn and the zone's Ruh Taşı arrivals, or for a clan member its clan's nearest standing banner (the death itself took the `death_fee`). | ack + `resurrect` |
 | `loot` | `target` | Dead, unlooted, owned by sender (`ownership`); beyond `interaction_range` but in `aoi` → walk then open. Opening (original `btlr`→`sdbt`) grants the box currency (NONCANONICAL timing) and lists the Ganimet slots (loot table, rolled drop). | ack + `loot_open` |
 | `loot_take` | `target`, `slot` | As `loot` but within `interaction_range` (`range`); slot holds an item (`slot`); bag space (`inventory`). The last taken slot marks the corpse looted. Original `fatl`. | ack + `loot` |
 | `repair` | `target` | Anvil NPC; no active trade (`trade`); something worn down (`repair`); cost NONCANONICAL (`item_rules.repair_denominator`). | ack + `repair` |
@@ -222,6 +222,7 @@ Delivery: **self** = sender only; **AOI** = every player in the same zone within
 | `repair` | `cost`, `items` | self | `:1238` |
 | `reset_offer` | `target`, `reset` (`skills`\|`crafts`), `price` | self | `interact` on a reset machine; the client confirms in a Dikkat box and sends `point_reset` |
 | `point_reset` | `reset`, `price` | self | `point_reset` action |
+| `notice` | `text` | self | server line shown centred and in chat; the `free_resets` level-up refund ("N seviye olduğunuz için yeteneklerinizi/dirençlerinizi ÜCRETSİZ sıfırlandı. Tekrar dağıtabilirsiniz!") |
 | `equip` / `unequip` | `entity`, `source`, `target`, `equipment` (visible array) | AOI | `:1262` |
 | `craft` | `entity`, `recipe`, `item`, `quantity` | self | `:1702` |
 | `gather` | `phase` (`start`\|`cancel`\|`done`), `entity`, `source`, `target`, `items` (done) | AOI | `:1711,1749,1762` |

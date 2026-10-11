@@ -71,11 +71,10 @@ constexpr std::pair<unsigned, const char*> loc_zone_overrides[] = {{132058, "emi
 // (47-65) reuse the zone's scene; their support grids 8/9/10 are cell-for-cell identical to 14/15/16. Er Meydanı 2-20 are the
 // savas registry rows 7-25 (zone name table 0x58ffc4..: "savas2".."savas20" share support grid 6 with "savas", Er Meydanı 1).
 constexpr std::tuple<const char*, unsigned, unsigned> zone_instances[] = {{"migrat", 27, 9}, {"siginak", 37, 9}, {"cemberli", 47, 19}, {"savas", 7, 19}};
-// NONCANONICAL monster level bands per zone (spawn tables were server data).
-constexpr std::tuple<const char*, int, int> monster_bands[] = {
-    {"eminonu", 1, 5}, {"antrepo", 2, 8}, {"labirent", 6, 14}, {"meteor", 10, 20}, {"ada", 15, 25},
-    {"yeralti", 20, 30}, {"migrat", 25, 35}, {"siginak", 30, 40}, {"cemberli", 35, 45}, {"buyukhol", 40, 50},
-    {"karakoy", 45, 55}, {"karakoyic", 50, 60}};
+// Enemy entity ids 2147493667-2147493774 stay enemies of these zones, 9 each in this order (the former NONCANONICAL 3x3 level
+// bands); they take the first 9 members of the zone's tools/data/placements.json spawn groups, every other member is appended.
+constexpr const char* legacy_enemy_zones[] = {"eminonu", "antrepo", "labirent", "meteor", "ada", "yeralti", "migrat", "siginak", "cemberli", "buyukhol", "karakoy", "karakoyic"};
+constexpr size_t legacy_enemies_per_zone = 9;
 
 std::string lower(std::string s) { for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c))); return s; }
 const std::string& get(const Attributes& a, const char* key) { static const std::string empty; auto f = a.find(key); return f == a.end() ? empty : f->second; }
@@ -123,6 +122,14 @@ int main(int argc, char** argv) try {
     const auto classes = ikv::load_source_records(base, "classes.dat");
     const auto animation = ikv::load_source_records(base, "animation.dat");
     const auto prefixes = ikv::load_source_records(base, "prefixes.dat");
+    // Hand-curated NPC spots, spawn groups and extra node spots, each row with its provenance (tools/data/placements.json).
+    const Ordered placements = [] { std::ifstream in(IKV_PLACEMENTS); if (!in) throw std::runtime_error("cannot read " IKV_PLACEMENTS); return Ordered::parse(in); }();
+    // "map": original minimap readout/texel (u, v) = 1024 - 2/3 position (client 00477775); "at": wire units.
+    const auto spot = [](const Ordered& row) {
+        if (row.contains("map")) return std::pair{(1024 - row.at("map")[0].get<double>()) * 1.5, (1024 - row.at("map")[1].get<double>()) * 1.5};
+        return std::pair{row.at("at")[0].get<double>() / 1000, row.at("at")[1].get<double>() / 1000};
+    };
+    const auto placement = [&](unsigned uid) -> const Ordered* { const auto key = std::to_string(uid); return placements.at("npcs").contains(key) ? &placements.at("npcs").at(key) : nullptr; };
 
     std::map<std::string, Grid> grids;
     for (const auto& [name, registry] : zone_registry) {
@@ -233,6 +240,11 @@ int main(int argc, char** argv) try {
         const auto& g = grids.at(name);
         std::cout << "spawn " << name << " [" << wire(s.first) << ',' << wire(s.second) << "] component cells " << g.reach(s) << '\n';
     }
+    // Components players arrive on (the zone spawn and every door arrival): placed NPCs and spawn groups must stand on one.
+    std::map<std::string, std::set<int32_t>> entries;
+    for (const auto& [name, s] : spawns) entries[name].insert(grids.at(name).component(s.first, s.second));
+    for (const auto* list : {&doors, &late_doors, &final_doors})
+        for (const auto& [uid, door] : *list) { const auto& g = grids.at(door.at("to").get<std::string>()); entries[g.name].insert(g.component(door.at("arrive")[0].get<int>() / 1500 + 1024, door.at("arrive")[1].get<int>() / 1500 + 1024)); }
 
     // ---- prefixes (prefixes.dat, loader 0043aac0): server-side Efsun table; the client reads prefixes.dat itself ----
     // attreffects ids are character attribute ids (names: original 004338f0; Karakter Bilgisi getters 00402f60).
@@ -374,7 +386,7 @@ int main(int argc, char** argv) try {
     std::map<int, const Attributes*> objects; for (const auto& r : classes) if (r.tag == "object") objects[integer(r.attributes, "uid")] = &r.attributes;
     const auto numbers = [](const std::string& s) { std::vector<int> v; std::istringstream in(s); std::string part; while (std::getline(in, part, ';')) if (!part.empty()) v.push_back(std::stoi(part)); return v; };
     for (const auto& [uid, a] : objects) if (get(*a, "objecttype") == "component" && !get(*a, "name").empty()) {
-        Ordered item = {{"name", get(*a, "name")}, {"stack", 20}, {"price", std::clamp(integer(*a, "price"), 1, 1000000)}, {"level", std::clamp(integer(*a, "itemlevel", 1), 1, 100)}, {"source_uid", uid}};
+        Ordered item = {{"name", get(*a, "name")}, {"stack", 20}, {"price", std::clamp(integer(*a, "price"), 1, 999000000)}, {"level", std::clamp(integer(*a, "itemlevel", 1), 1, 100)}, {"source_uid", uid}}; // Teşkilat Bonosu 10m: 10000000
         if (const auto id = "o" + std::to_string(uid); fits(id, item)) items[id] = std::move(item);
     }
     Ordered recipes = Ordered::object(); std::map<int, std::vector<std::string>> recipe_scrolls; // crafttype -> scroll ids
@@ -428,7 +440,7 @@ int main(int argc, char** argv) try {
         const double low = std::clamp(number(a, "dmgmin"), 0.0, 100000.0), high = std::clamp(number(a, "dmgmax"), low, 100000.0);
         const auto fraction = [&](const char* key) { return std::clamp(number(a, key), 0.0, 1.0); };
         Ordered resist = Ordered::array(); for (const char* key : {"fireresist", "coldresist", "electricresist", "acidresist", "poisonresist"}) resist.push_back(std::clamp(number(a, key), 0.0, 1000.0));
-        return Ordered{{"source_uid", integer(a, "uid")}, {"source_class", std::max(1, integer(a, "classid"))}, {"kind", "enemy"},
+        Ordered n{{"source_uid", integer(a, "uid")}, {"source_class", std::max(1, integer(a, "classid"))}, {"kind", "enemy"},
             {"template", "m" + get(a, "uid")}, {"name", get(a, "name")}, {"level", integer(a, "level", 1)},
             {"hp", clamp(number(a, "hp", 100), 1, 100000)}, {"damage", clamp((low + high) / 2, 1, 100000)}, {"damage_range", Ordered::array({low, high})},
             {"attack", std::clamp(number(a, "attack"), 0.0, 100000.0)}, {"defense", std::clamp(number(a, "defense"), 0.0, 100000.0)},
@@ -438,6 +450,14 @@ int main(int argc, char** argv) try {
             {"aggro", aggro}, {"leash", std::min(100000, aggro * 3)},
             {"speed", clip_speed.contains(get(a, "classid")) ? clip_speed.at(get(a, "classid")) : 110},
             {"respawn", 600}, {"xp", clamp(number(a, "experience", 1), 1, 100000)}, {"currency", clamp(number(a, "dropmoney", 1), 1, 100000)}};
+        // Original behaviour fields no client code reads (server semantics NONCANONICAL): attackrangeremote (ranged strike reach,
+        // World bites from max(attack_range, ranged_range)), canmove/canattack 0 (the banners), infinitefollower 1 (group-zone
+        // mobs that never give up a chase: the maximum leash).
+        if (number(a, "attackrangeremote") > 0) n["ranged_range"] = clamp(number(a, "attackrangeremote") * 1000, 1000, 200000);
+        if (get(a, "canmove") == "0") n["immobile"] = true;
+        if (get(a, "canattack") == "0") n["passive"] = true;
+        if (get(a, "infinitefollower") == "1") { n["infinite_follow"] = true; n["leash"] = 100000; }
+        return n;
     };
     for (const auto& r : classes) {
         if (r.tag != "npc" && r.tag != "monster") continue;
@@ -459,6 +479,8 @@ int main(int argc, char** argv) try {
         if (found) placed[zone].push_back({units(found->first), units(found->second)});
         return found;
     };
+    // Models the client cannot assemble (original biped/binding mismatches) are left out of the population.
+    ikv::Scene probe; std::map<unsigned, bool> assembles, dresses; // dresses: actor uid -> its rhweaponid/lhweaponid dress
     // classes.dat idlewalktend (server field, see World::idle_walk) replaces the NONCANONICAL patrol wherever the record has
     // one (0 = stands); walkers move at their animation.dat walk speed.
     const auto add_npc = [&](Ordered n, const std::string& zone, std::pair<int, int> at) {
@@ -471,10 +493,25 @@ int main(int argc, char** argv) try {
             if (walk != walk_speed.end() && tend) n["walk_speed"] = walk->second;
             if (n.contains("patrol")) n["patrol"] = Ordered::array();
         }
-        Ordered ordered = {{"id", n.at("id")}}; ordered.update(n); npcs.push_back(std::move(ordered));
+        Ordered ordered = {{"id", n.at("id")}}; ordered.update(n);
+        // classes.dat rhweaponid/lhweaponid (the exe never reads them; server-sent equipment): the client's visible-equipment
+        // shape, slot = the weapon object's suitableslot (11 right hand, 12 left hand).
+        if (const auto a = actors.find(ordered.value("source_uid", 0u)); a != actors.end() && !ordered.contains("equipment")) {
+            Ordered equipment = Ordered::array();
+            for (const char* key : {"rhweaponid", "lhweaponid"})
+                if (const auto o = objects.find(integer(a->second, key, -1)); o != objects.end()) equipment.push_back({{"slot", integer(*o->second, "suitableslot")}, {"source_uid", o->first}});
+            // Equipment the client cannot dress on this skeleton (no original rigid anchor path) is left out, logged.
+            std::vector<ikv::SourceEquipment> visual;
+            for (const auto& item : equipment) visual.push_back({item.at("slot").get<unsigned>(), item.at("source_uid").get<unsigned>()});
+            if (!visual.empty()) {
+                auto [known, fresh] = dresses.try_emplace(a->first, true);
+                if (fresh) try { ikv::attach_source_npc(probe, base, a->first, 2, visual); } catch (const std::exception& error) { known->second = false; std::cout << "excluded equipment of actor " << a->first << ": " << error.what() << '\n'; }
+                if (fresh) ikv::detach_source_actor(probe, 2);
+                if (known->second) ordered["equipment"] = std::move(equipment);
+            }
+        }
+        npcs.push_back(std::move(ordered));
     };
-    // Models the client cannot assemble (original biped/binding mismatches) are left out of the population.
-    ikv::Scene probe; std::map<unsigned, bool> assembles;
     const auto renders = [&](unsigned uid) {
         if (const auto found = assembles.find(uid); found != assembles.end()) return found->second;
         bool ok = true;
@@ -482,27 +519,45 @@ int main(int argc, char** argv) try {
         ikv::detach_source_actor(probe, 1);
         return assembles[uid] = ok;
     };
-    // map_x/map_y: the NPC's shop mark in the original ui/zoneNN.dds map art (0 = none). A map pixel is 2048 minus the
-    // support cell (the client minimap convention): zone00 "Bankacı" (938,718); zone01 "Aktar" (1098,1007),
-    // "Demirci" (1119,1044), "Terzi" (993,1109). The VOD 18:30 Bankacı stands at that bank's colonnade.
-    struct Town { const char* zone; unsigned uid; const char* role; const char* kind; int lo, hi, map_x, map_y; };
-    // NONCANONICAL town population: roles follow the original merchant/banker/questGiver flags and the NPC trades
-    // (aktar/demirci/terzi models at the matching Mısır Çarşısı marks); unmarked positions and all stock are server data.
-    // Agah Efendi stands in the Yeni Cami courtyard (VOD).
+    // A tools/data/placements.json spot: the free cell nearest it (3x3 support, on an arrival component, `margin` off every door
+    // footprint, `spacing` from the zone's earlier NPCs) within `reach` units.
+    const auto place_at = [&](const std::string& zone, std::pair<double, double> c, double reach, double spacing, double margin) {
+        const Grid& g = grids.at(zone);
+        const auto found = ring_search(c.first, c.second, 0, reach, 0, [&](int x, int y) {
+            return g.block(x, y, 1) && entries[zone].contains(g.component(x, y)) && !in_triggers(triggers, g, units(x), units(y), margin) &&
+                   std::none_of(placed[zone].begin(), placed[zone].end(), [&](const Placed& p) { return dist(p.x, p.y, units(x), units(y)) < spacing; }); });
+        if (found) placed[zone].push_back({units(found->first), units(found->second)});
+        return found;
+    };
+    // An NPC's placements.json row (zone + spot) or, logged, the NONCANONICAL ring round the zone spawn in `zone`.
+    std::set<unsigned> placed_uids; // placements.json rows used by the town/questgiver tables; the rest are appended at the end
+    const auto place_npc = [&](unsigned uid, std::string zone) -> std::pair<std::string, std::optional<std::pair<int, int>>> {
+        if (const auto* p = placement(uid)) {
+            zone = p->at("zone").get<std::string>(); placed_uids.insert(uid);
+            if (const auto at = place_at(zone, spot(*p), 30, 4, 3)) return {zone, at};
+            std::cerr << "placement fallback " << uid << ": no free cell near its spot in " << zone << '\n';
+        } else std::cerr << "placement fallback " << uid << ": no placements.json row\n";
+        return {zone, place(zone, 14, 150, 1, 10, 10, 40.0 * double(placed[zone].size()))};
+    };
+    struct Town { const char* zone; unsigned uid; const char* role; const char* kind; int lo, hi; };
+    // Roles follow the original merchant/banker/questGiver flags, the NPC trades and the guide/news (#11): İşportacı Genç is the
+    // starting street vendor (guide l.1713), Kuyumcu Agop sells the Teşkilat Bonosu (NEWS-450), the Mısır Çarşısı tradesmen
+    // (aktar Şevket, demirci Rüstem, terzi Fahri) stand at their marks, Demirci Dilek, Elif and Ayşe Teyze in Yeni Bab-ı Ali
+    // (W-AGL lv30). NONCANONICAL: every stock list; the zone here is the fallback, placements.json places each NPC.
     constexpr Town town[] = {
-        {"eminonu", 1001, "quest", "", 0, 0, 0, 0}, {"eminonu", 1002, "merchant", "weapon", 1, 5, 0, 0},
-        {"eminonu", 1012, "banker", "", 0, 0, 938, 718}, {"eminonu", 1017, "merchant", "potion", 1, 5, 0, 0},
-        {"eminonu", 1057, "merchant", "potion", 1, 10, 0, 0}, {"eminonu", 1041, "merchant", "armour", 1, 4, 0, 0},
-        {"eminonu", 1000, "talker", "", 0, 0, 0, 0},
-        {"misir", 1003, "merchant", "potion", 1, 25, 1098, 1007}, {"misir", 1025, "merchant", "weapon", 6, 15, 1119, 1044},
-        {"misir", 1006, "merchant", "armour", 5, 12, 993, 1109}, {"misir", 1024, "merchant", "potion", 26, 55, 0, 0},
-        {"topkapi", 131527, "merchant", "armour", 13, 20, 0, 0}, {"topkapi", 131561, "merchant", "weapon", 16, 30, 0, 0},
-        {"karakoy", 131810, "merchant", "armour", 21, 30, 0, 0},
+        {"eminonu", 1001, "quest", "", 0, 0}, {"misir", 1002, "merchant", "jeweller", 0, 0},
+        {"eminonu", 1012, "banker", "", 0, 0}, {"eminonu", 1017, "merchant", "weapon", 1, 5},
+        {"meteor", 1057, "merchant", "potion", 26, 40}, {"eminonu", 1041, "merchant", "armour", 1, 4},
+        {"eminonu", 1000, "talker", "", 0, 0},
+        {"misir", 1003, "merchant", "potion", 1, 25}, {"meteor", 1025, "merchant", "weapon", 26, 35},
+        {"misir", 1006, "merchant", "armour", 5, 12}, {"meteor", 1024, "merchant", "potion", 26, 55},
+        {"topkapi", 131527, "merchant", "armour", 13, 20}, {"topkapi", 131561, "merchant", "weapon", 16, 30},
+        {"karakoy", 131810, "merchant", "armour", 21, 30},
         // Klan: Arz/Lodos Muhafızı (claninviter) guard their clan's Büyük Hol gate signs in Meteor Bölgesi (<loc> 131839
         // ID_ARZ_TABELA, 131840 ID_LODOS_TABELA); Tüccar (Arz/Lodos) stand at the Maden Ocağı hub of their half of Büyük Hol
         // (zone12.dds: Arz exit 131842 in the north-west half, Lodos exit 131841 in the south-east one). NONCANONICAL spots.
-        {"meteor", 1033, "recruiter", "", 1, 0, 1345, 700}, {"meteor", 1034, "recruiter", "", 2, 0, 1334, 700},
-        {"buyukhol", 1058, "clanshop", "Arzın Çocukları", 1, 0, 755, 1035}, {"buyukhol", 1046, "clanshop", "Lodos", 2, 0, 987, 1280}};
+        {"meteor", 1033, "recruiter", "", 1, 0}, {"meteor", 1034, "recruiter", "", 2, 0},
+        {"buyukhol", 1058, "clanshop", "Arzın Çocukları", 1, 0}, {"buyukhol", 1046, "clanshop", "Lodos", 2, 0}};
     // Guide "Klan OOK'leri": clan NPCs attack the other clan's players and serve no one while dead. They keep their classes.dat
     // combat stats (enemy()) beside their talk/trade kind; claninviter (entity flag 0x20000) marks the Klana Katıl recruiters.
     // NONCANONICAL: `reach` caps the classes.dat triggerrange (the shared Meteor gate puts both recruiters 40 units apart).
@@ -519,12 +574,14 @@ int main(int argc, char** argv) try {
         const std::string role = t.role;
         if (role == "merchant") {
             n["kind"] = "merchant"; n["dialogue"] = "Buyurun, mallarıma bir göz atın."; n["shop"] = stock(t.kind, t.lo, t.hi);
-            // NONCANONICAL: the Eminönü terzi also sells the Akçe (İKV Dükkan) goods, the Topkapı terzi the lonca goods, the Topkapı
-            // silahçı the first-tier Tılsım (all of each, by id).
+            // NONCANONICAL: the Eminönü vendor also sells the first potions, Halime Teyze the Akçe (İKV Dükkan) goods, the Topkapı
+            // terzi the lonca goods, the Topkapı silahçı the first-tier Tılsım (all of each, by id); the Kuyumcu the two bonds.
+            if (t.uid == 1017) for (const auto& id : stock("potion", 1, 5)) n["shop"].push_back(id);
+            if (t.uid == 1002) { n["dialogue"] = "Kuyumcu Agop'a hoş geldiniz. Teşkilat Bonosu da bende bulunur."; for (const char* id : {"o13616", "o13615"}) if (items.contains(id)) n["shop"].push_back(id); }
             if (const char* extra = t.uid == 1041 ? "akce" : t.uid == 131527 ? "lonca" : t.uid == 131561 ? "glyph" : nullptr)
                 for (const auto& [id, k] : item_kind) if (std::get<0>(k) == extra) n["shop"].push_back(id);
         }
-        else if (role == "quest") { n["kind"] = "questgiver"; n["dialogue"] = "Hoş geldin evladım. Avludaki fareler hastalık saçıyor; yardımına ihtiyacım var."; } // quests: see the quest section
+        else if (role == "quest") { n["kind"] = "questgiver"; n["dialogue"] = "Hoş geldin evladım. Teşkilat'ın senin gibi gençlere ihtiyacı var."; } // NONCANONICAL greeting; quests: tools/data/quests_original.json
         else if (role == "banker") { n["kind"] = "questgiver"; n["banker"] = true; n["dialogue"] = "Eşyalarınızı ve paranızı kasanızda saklayabilirim. (İşlemler → Kasamı göster)"; }
         else if (role == "recruiter") { n["kind"] = "questgiver"; n["dialogue"] = "Klanımıza katılmak istersen İşlemler menüsünden Klana Katıl'ı seç."; clan_guard(n, a, t.lo, 15000); }
         else if (role == "clanshop") {
@@ -536,43 +593,58 @@ int main(int argc, char** argv) try {
             n["kind"] = "merchant"; n["dialogue"] = "Klan mallarım Klan Parası ile satılır."; n["shop"] = std::move(shop); clan_guard(n, a, t.lo, 100000);
         }
         else { n["kind"] = "questgiver"; n["dialogue"] = "Hoş geldin yolcu."; }
-        const auto anchor = t.map_x ? std::optional{std::pair{units(2048 - t.map_x), units(2048 - t.map_y)}} : std::nullopt;
-        const bool first = placed[t.zone].empty();
-        const auto at = anchor ? place(t.zone, 0, 30, 1, 10, 10, 0, anchor) : place(t.zone, first ? 8 : 14, 150, 1, 10, 10, first ? 200 : 40.0 * double(placed[t.zone].size()));
-        if (!at) throw std::runtime_error(std::string("no free walkable placement for NPC in ") + t.zone);
-        add_npc(std::move(n), t.zone, *at);
+        const auto [zone, at] = place_npc(t.uid, t.zone);
+        if (!at) throw std::runtime_error("no free walkable placement for NPC " + std::to_string(t.uid) + " in " + zone);
+        add_npc(std::move(n), zone, *at);
     }
-    for (const auto& [zone, lo, hi] : monster_bands) {
-        // Up to three monster families per zone (distinct models), one group of three each, on the zone's main walkable component.
-        std::vector<const Attributes*> chosen; std::set<std::string> models;
-        std::vector<std::pair<int, const Attributes*>> pool;
-        for (const auto& [uid, a] : actors) {
-            const auto path = lower(get(a, "path")); const auto name = get(a, "name");
-            if (get(a, "allignment") != "monster" || integer(a, "level") < lo || integer(a, "level") > hi || name.empty() || name == "Boş" ||
-                name.find("Reserved") != std::string::npos || name.find('[') != std::string::npos || number(a, "hp") > 100000 ||
-                number(a, "dmgmax") <= 0 || number(a, "attackrange") <= 1 || path.find("tuzak") != std::string::npos || path.find("dummy") != std::string::npos) continue;
-            pool.push_back({uid == 16001 ? -1 : integer(a, "level"), &a}); // Fare first: the Eminönü quest target
+    // Short straight patrol (every sample keeps 3x3 support, so the world's segment trace stays on support).
+    const auto patrol_from = [](const Grid& g, std::pair<int, int> at, int member) {
+        Ordered patrol = Ordered::array();
+        for (int direction = 0; direction < 8 && patrol.empty(); ++direction) {
+            const double d = (45.0 * direction + 90 * member) * M_PI / 180; bool clear = true;
+            for (double s = 0; s <= 6 && clear; s += 0.5) clear = g.block(cell(units(at.first) + s * std::cos(d)), cell(units(at.second) + s * std::sin(d)), 1);
+            if (clear) patrol = {{wire(at.first), wire(at.second)}, {wire(cell(units(at.first) + 6 * std::cos(d))), wire(cell(units(at.second) + 6 * std::sin(d)))}};
         }
-        std::sort(pool.begin(), pool.end(), [](const auto& l, const auto& r) { return l.first != r.first ? l.first < r.first : integer(*l.second, "uid") < integer(*r.second, "uid"); });
-        for (const auto& [level, a] : pool) if (chosen.size() < 3 && !models.contains(lower(get(*a, "path"))) && renders(unsigned(integer(*a, "uid")))) { models.insert(lower(get(*a, "path"))); chosen.push_back(a); }
-        for (size_t group = 0; group < chosen.size(); ++group) {
-            const auto found = place(zone, 70 + 50 * double(group), 450, 2, 40, 25, 120 * double(group));
-            if (!found) { std::cerr << "skipped monster group " << get(*chosen[group], "name") << " in " << zone << ": spawn area too small\n"; continue; }
-            const auto anchor = *found; const Grid& g = grids.at(zone);
-            for (int member = 0; member < 3; ++member) {
-                const double t = (120.0 * member + 30) * M_PI / 180, ax = units(anchor.first), ay = units(anchor.second);
-                auto at = std::pair{cell(ax + 3 * std::cos(t)), cell(ay + 3 * std::sin(t))};
-                if (!g.block(at.first, at.second, 1) || g.component(at.first, at.second) != g.component(anchor.first, anchor.second)) at = anchor;
-                Ordered n = enemy(*chosen[group]); n["loot"] = Ordered::array(); n["drops"] = drops(n.at("level").get<int>());
-                // Short straight patrol (every sample keeps 3x3 support, so the world's segment trace stays on support).
-                Ordered patrol = Ordered::array();
-                for (int direction = 0; direction < 8 && patrol.empty(); ++direction) {
-                    const double d = (45.0 * direction + 90 * member) * M_PI / 180; bool clear = true;
-                    for (double s = 0; s <= 6 && clear; s += 0.5) clear = g.block(cell(units(at.first) + s * std::cos(d)), cell(units(at.second) + s * std::sin(d)), 1);
-                    if (clear) patrol = {{wire(at.first), wire(at.second)}, {wire(cell(units(at.first) + 6 * std::cos(d))), wire(cell(units(at.second) + 6 * std::sin(d)))}};
-                }
-                n["patrol"] = std::move(patrol); add_npc(std::move(n), zone, at);
-            }
+        return patrol;
+    };
+    // ---- monster spawn groups (placements.json "spawns", replacing the former 3x3 level bands): family uid, zone, centre, radius
+    // (units), count, respawn (seconds) and provenance. Members spread over the disc on a Vogel spiral, each on the free cell
+    // nearest its spiral point (5 units apart, 10 units off door footprints).
+    std::map<std::string, std::vector<std::pair<Ordered, std::pair<int, int>>>> members; // zone -> members in group order
+    std::vector<std::tuple<std::string, Ordered, std::pair<int, int>>> appended; // "append" groups: after every other NPC (stable ids)
+    for (const auto& group : placements.at("spawns")) {
+        const unsigned uid = group.at("family"); const std::string zone = group.at("zone");
+        if (!actors.contains(uid) || !renders(uid)) throw std::runtime_error("spawn group family does not assemble: " + std::to_string(uid));
+        const auto [cx, cy] = spot(group); const double radius = group.at("radius"); const int count = group.at("count"); int done = 0;
+        for (int i = 0; i < count; ++i) {
+            const double r = radius * std::sqrt((i + 0.5) / count), angle = i * 2.399963229728653; // golden angle
+            const auto at = place_at(zone, {cx + r * std::cos(angle), cy + r * std::sin(angle)}, radius + 10, 5, 10);
+            if (!at) continue;
+            Ordered n = enemy(actors.at(uid)); n["loot"] = Ordered::array(); n["drops"] = drops(n.at("level").get<int>());
+            n["respawn"] = std::clamp(group.at("respawn").get<int>() * 20, 20, 72000); n["patrol"] = patrol_from(grids.at(zone), *at, i);
+            // "rescue": trapped quest NPCs (Kurtarıcımız: Biçare Folklor Cini, classes.dat interactable, attack 0) are freed by Kullan
+            // (World::quest_use), never fought; a freed one leaves until its respawn. NONCANONICAL dialogue.
+            if (group.contains("rescue")) n = {{"source_uid", uid}, {"source_class", n.at("source_class")}, {"name", n.at("name")}, {"hp", 1}, {"kind", "prop"},
+                {"interactable", true}, {"rescue", true}, {"respawn", n.at("respawn")}, {"dialogue", "Tuzağa yakalanmış bir " + n.at("name").get<std::string>() + "."}};
+            if (group.value("append", false)) appended.push_back({zone, std::move(n), *at}); else members[zone].push_back({std::move(n), *at});
+            ++done;
+        }
+        if (done < count) std::cerr << "spawn group " << uid << " in " << zone << ": placed " << done << " of " << count << '\n';
+    }
+    // A legacy slot takes the zone's first member of the family that id had in the input config, when the zone still spawns that
+    // family, so the id keeps its source_uid across regenerations; otherwise the zone's next member in group order.
+    std::map<uint32_t, unsigned> previous_uid;
+    for (const auto& n : config.at("npcs")) if (n.contains("source_uid")) previous_uid[n.at("id").get<uint32_t>()] = n.at("source_uid").get<unsigned>();
+    for (const char* zone : legacy_enemy_zones) {
+        auto& list = members[zone];
+        if (list.size() < legacy_enemies_per_zone) throw std::runtime_error(std::string("fewer than 9 spawn group members in ") + zone);
+        for (size_t k = 0; k < legacy_enemies_per_zone; ++k) {
+            const auto old = previous_uid.find(first_npc_id + uint32_t(npcs.size()));
+            auto pick = list.begin() + k;
+            if (old != previous_uid.end())
+                if (const auto same = std::find_if(pick, list.end(), [&](const auto& m) { return m.first.at("source_uid").template get<unsigned>() == old->second; }); same != list.end()) pick = same;
+            std::rotate(list.begin() + k, pick, pick + 1); // move the pick to slot k, keeping the others in group order
+            add_npc(list[k].first, zone, list[k].second);
         }
     }
     // ---- Toplama nodes: classes.dat <loc> locationtypename maden* (ID_MADEN_TAS ore, ID_MADEN_ELMAS gem, ID_CICEK herb) ----
@@ -590,24 +662,34 @@ int main(int argc, char** argv) try {
         }
         return out;
     };
+    // The raw component a maden*/gather_* type yields: rarity 500 named after the type, else (Çamur, Yeraltı Mantarı and the Büyük
+    // Hol gather_* minerals have no rarity-500 entry) the component whose folded name starts with the type's.
+    const auto raw_component = [&](const std::string& type, bool exact) -> std::pair<int, const Attributes*> {
+        const auto key = fold(type.substr(type.starts_with("gather_") ? 7 : 5)); const Attributes* raw = nullptr; int raw_uid = 0;
+        for (const auto& [cuid, c] : objects)
+            if (get(*c, "objecttype") == "component" && (exact ? fold(get(*c, "name")).starts_with(key) : integer(*c, "rarity") == 500 && fold(get(*c, "name")).find(key) != std::string::npos) &&
+                (!raw || get(*c, "name").size() < get(*raw, "name").size())) { raw = c; raw_uid = cuid; }
+        return {raw_uid, raw};
+    };
+    const auto gather_node = [&](unsigned uid, const Attributes& a, int raw_uid, const Attributes& raw) {
+        Ordered gather = {{"craft", professions[integer(raw, "crafttype")]}, {"level", integer(raw, "itemlevel")}, {"item", "o" + std::to_string(raw_uid)}, {"respawn", 600}};
+        if (const auto pair = objects.find(raw_uid + 1); pair != objects.end() && get(*pair->second, "objecttype") == "component" && integer(*pair->second, "rarity") == 0 &&
+            get(*pair->second, "crafttype") == get(raw, "crafttype") && get(*pair->second, "itemlevel") == get(raw, "itemlevel") && get(*pair->second, "components").empty() &&
+            items.contains("o" + std::to_string(raw_uid + 1))) gather["rare"] = "o" + std::to_string(raw_uid + 1);
+        return Ordered{{"source_uid", uid}, {"source_class", std::max(1, integer(a, "classid"))}, {"name", get(raw, "name")}, {"hp", 100}, {"kind", "node"},
+                       {"dialogue", get(a, "detail").empty() ? get(raw, "name") : get(a, "detail")}, {"gather", std::move(gather)}};
+    };
+    std::vector<unsigned> late_nodes; // skipped here, retried after every other NPC so earlier NPC ids stay stable
     for (const auto& [uid, a] : locs) {
         const auto type = get(a, "locationtypename");
         if (!type.starts_with("maden") || !triggers_by_uid.contains(uid)) continue;
-        const auto key = fold(type.substr(5)); const Attributes* raw = nullptr; int raw_uid = 0;
-        for (const auto& [cuid, c] : objects)
-            if (get(*c, "objecttype") == "component" && integer(*c, "rarity") == 500 && fold(get(*c, "name")).find(key) != std::string::npos &&
-                (!raw || get(*c, "name").size() < get(*raw, "name").size())) { raw = c; raw_uid = cuid; }
+        const auto [raw_uid, raw] = raw_component(type, false);
         const auto& t = triggers_by_uid.at(uid); const Grid& g = *t.grid;
         const auto at = ring_search(t.x, t.y, 0, 6, 0, [&](int x, int y) { return g.walk(x, y); });
         if (!raw || integer(*raw, "crafttype") < 3 || integer(*raw, "crafttype") > 5 || (t.x == 0 && t.y == 0) || !at || !items.contains("o" + std::to_string(raw_uid)) || !renders(uid)) {
-            std::cerr << "skipped gather node " << uid << ' ' << type << '\n'; continue;
+            late_nodes.push_back(uid); continue;
         }
-        Ordered gather = {{"craft", professions[integer(*raw, "crafttype")]}, {"level", integer(*raw, "itemlevel")}, {"item", "o" + std::to_string(raw_uid)}, {"respawn", 600}};
-        if (const auto pair = objects.find(raw_uid + 1); pair != objects.end() && get(*pair->second, "objecttype") == "component" && integer(*pair->second, "rarity") == 0 &&
-            get(*pair->second, "crafttype") == get(*raw, "crafttype") && get(*pair->second, "itemlevel") == get(*raw, "itemlevel") && get(*pair->second, "components").empty() &&
-            items.contains("o" + std::to_string(raw_uid + 1))) gather["rare"] = "o" + std::to_string(raw_uid + 1);
-        add_npc({{"source_uid", uid}, {"source_class", std::max(1, integer(a, "classid"))}, {"name", get(*raw, "name")}, {"hp", 100}, {"kind", "node"},
-                 {"dialogue", get(a, "detail")}, {"gather", std::move(gather)}}, g.name, *at);
+        add_npc(gather_node(uid, a, raw_uid, *raw), g.name, *at);
     }
     // ---- örs: classes.dat <loc> locationtypename orseminonu (loc\id_ors.ADF, detail "Örs"). helps.xml Para: right-clicking one
     // repairs the worn-down equipment. Position: the loc areacenter's nearest walkable cell (the model stands at the centre).
@@ -631,191 +713,49 @@ int main(int argc, char** argv) try {
                  {"dialogue", get(a, "detail").empty() ? get(a, "name") : get(a, "detail")}, {"door", std::move(door)}}, g.name, *at);
     };
     for (auto& [uid, door] : doors) place_door(uid, door);
-    // NONCANONICAL recipe sellers (scroll sources were server data): Eminönü merchants stock the scrolls by profession.
-    for (auto& n : npcs) {
-        const unsigned source = n.at("source_uid");
-        for (const auto& [craft, scrolls] : recipe_scrolls)
-            if ((source == 1017 && craft >= 3) || (source == 1002 && (craft == 0 || craft == 2)) || (source == 1041 && craft == 1))
-                for (const auto& id : scrolls) n["shop"].push_back(id);
-    }
 
-    // ---- quests (rows 7, 18) ----
-    // Every interactable classes.dat questGiver NPC gets a NONCANONICAL chain (objectives were server data). VOD names and
-    // completion texts where the VOD shows them (chat 09:25-50:25); reward scale from the VOD tecrübe/para floaters: a level-L
-    // 10-kill quest gives 77·(10+L) tecrübe and 100·L para (847/+100 at [1] ... 1078/+400 at [4]), a talk quest half that
-    // tecrübe (424 at [1], 462 at [2]). Home zones of questgivers the town table does not place are inferred from their
-    // names/models (spawns were server data); interactable=0 questGivers (fans, robots, the crystal, the clock) cannot be
-    // talked to in the original and get none. GB-ANI (exe 0x592f88 "Mısır Çarşısındaki GB-Anı") re-offers auto quests.
+    // ---- questgivers (rows 7, 18): every interactable classes.dat questGiver NPC the town table does not place, at its
+    // placements.json spot (the zones here are the fallback and match it); interactable=0 questGivers (fans, robots, the
+    // crystal, the clock) cannot be talked to in the original. GB-ANI (exe 0x592f88 "Mısır Çarşısındaki GB-Anı") re-offers
+    // auto quests. The quests themselves are read from tools/data/quests_original.json after every entity is placed.
     constexpr std::pair<unsigned, const char*> quest_homes[] = {
-        {1005, "eminonu"}, {1007, "eminonu"}, {1008, "eminonu"}, {1009, "eminonu"}, {1010, "eminonu"}, {1011, "eminonu"}, {1013, "eminonu"},
+        {1005, "misir"}, {1007, "eminonu"}, {1008, "eminonu"}, {1009, "eminonu"}, {1010, "eminonu"}, {1011, "eminonu"}, {1013, "eminonu"},
         {1018, "eminonu"}, {1019, "eminonu"}, {1020, "eminonu"}, {1021, "eminonu"}, {1022, "eminonu"}, {1023, "eminonu"}, {1035, "eminonu"},
-        {1038, "eminonu"}, {1039, "eminonu"}, {1040, "eminonu"}, {1042, "eminonu"}, {1043, "eminonu"}, {1048, "eminonu"}, {1054, "eminonu"},
-        {1056, "eminonu"}, {1004, "misir"}, {1026, "misir"}, {1027, "misir"}, {1028, "misir"}, {17112, "misir"},
-        {1016, "antrepo"}, {17068, "antrepo"}, {17069, "antrepo"}, {17110, "labirent"}, {17046, "labirent"}, {17047, "labirent"}, {17048, "labirent"},
-        {1029, "meteor"}, {1030, "meteor"}, {131366, "meteor"}, {131342, "ada"}, {131490, "ada"}, {131833, "yeralti"}, {131835, "yeralti"},
-        {131500, "migrat"}, {131108, "siginak"}, {131109, "siginak"}, {131112, "siginak"}, {131113, "siginak"}, {131114, "siginak"},
+        {1038, "eminonu"}, {1039, "eminonu"}, {1040, "eminonu"}, {1042, "eminonu"}, {1043, "eminonu"}, {1048, "eminonu"}, {1054, "meteor"},
+        {1056, "ada"}, {1004, "misir"}, {1026, "yeralti"}, {1027, "meteor"}, {1028, "yeralti"}, {17112, "misir"},
+        {1016, "yeralti"}, {17068, "ada"}, {17069, "yeralti"}, {17110, "yeralti"}, {17046, "eminonu"}, {17047, "eminonu"}, {17048, "meteor"},
+        {1029, "eminonu"}, {1030, "eminonu"}, {131366, "meteor"}, {131342, "ada"}, {131490, "ada"}, {131833, "yeralti"}, {131835, "yeralti"},
+        {131500, "migrat"}, {131108, "siginak"}, {131109, "migrat"}, {131112, "siginak"}, {131113, "siginak"}, {131114, "siginak"},
         {131115, "siginak"}, {131116, "siginak"}, {131117, "siginak"}, {131301, "cemberli"}, {131302, "cemberli"}, {131309, "cemberli"},
         {131310, "cemberli"}, {131311, "cemberli"}, {131312, "cemberli"}, {131313, "cemberli"}, {131314, "cemberli"}, {131315, "cemberli"},
-        {131316, "cemberli"}, {131317, "cemberli"}, {131318, "cemberli"}, {131323, "cemberli"}, {1036, "topkapi"}, {1045, "topkapi"},
-        {1053, "topkapi"}, {1055, "topkapi"}, {1069, "topkapi"}, {1070, "topkapi"}, {1031, "buyukhol"}, {1032, "buyukhol"},
+        {131316, "cemberli"}, {131317, "cemberli"}, {131318, "cemberli"}, {131323, "cemberli"}, {1036, "meteor"}, {1045, "meteor"},
+        {1053, "meteor"}, {1055, "ada"}, {1069, "yeralti"}, {1070, "topkapi"}, {1031, "buyukhol"}, {1032, "buyukhol"},
         {131811, "karakoy"}, {131812, "karakoy"}, {131813, "karakoy"}, {131814, "karakoy"}, {131830, "karakoy"}, {131877, "karakoy"},
         {131878, "karakoy"}, {131879, "karakoy"}, {131880, "karakoy"}, {131881, "karakoy"}, {131882, "karakoy"}, {131883, "karakoy"},
         {131884, "karakoy"}, {131885, "karakoy"}, {131886, "karakoy"}, {131888, "karakoy"}, {131889, "karakoy"}, {131890, "karakoy"},
         {131891, "karakoy"}, {131892, "karakoy"}, {131893, "karakoy"}, {131894, "karakoy"}, {131895, "karakoy"}, {132054, "karakoy"},
-        {132055, "karakoy"}, {132056, "karakoy"}, {131896, "karakoyic"}, {131897, "karakoyic"}, {131898, "karakoyic"}, {131899, "karakoyic"},
+        {132055, "karakoy"}, {132056, "karakoy"}, {131896, "karakoyic"}, {131897, "karakoyic"}, {131898, "karakoyic"}, {131899, "karakoy"},
         {131995, "karakoyic"}, {132041, "karakoyic"}, {132042, "karakoyic"}, {132048, "karakoyic"}, {132075, "karakoyic"}, {132076, "karakoyic"},
         {132078, "karakoyic"}, {132081, "karakoyic"}, {132082, "karakoyic"}, {132085, "karakoyic"}, {132191, "karakoyic"}};
-    const std::map<std::string, std::string> zone_titles{{"eminonu", "Eminönü"}, {"misir", "Mısır Çarşısı"}, {"antrepo", "Antrepo"}, {"labirent", "Labirent"},
-        {"meteor", "Meteor Bölgesi"}, {"ada", "Sivri Ada"}, {"savas", "Er Meydanı"}, {"yeralti", "Yeraltı"}, {"migrat", "Migrat"}, {"siginak", "Sığınaklar"},
-        {"cemberli", "Çemberlitaş"}, {"topkapi", "Topkapı"}, {"buyukhol", "Büyük Hol"}, {"karakoy", "Karaköy"}, {"karakoyic", "Karaköy İç"}}; // exe 0x58f310
     std::map<unsigned, size_t> giver_index; // classes.dat uid -> npcs index
     for (size_t i = 0; i < npcs.size(); ++i) if (npcs[i].at("kind") == "questgiver" || npcs[i].at("kind") == "merchant") giver_index.emplace(npcs[i].at("source_uid").get<unsigned>(), i);
-    for (const auto& [uid, zone] : quest_homes) {
+    for (const auto& [uid, home] : quest_homes) {
         if (giver_index.contains(uid)) continue;
         const auto& a = actors.at(uid);
         if (!renders(uid)) { std::cerr << "skipped questgiver " << uid << ": model does not assemble\n"; continue; }
-        const auto at = place(zone, 14, 150, 1, 10, 10, 40.0 * double(placed[zone].size()));
+        const auto [zone, at] = place_npc(uid, home);
         if (!at) { std::cerr << "skipped questgiver " << uid << ": no walkable placement in " << zone << '\n'; continue; }
         Ordered n = {{"source_uid", uid}, {"source_class", std::max(1, integer(a, "classid"))}, {"name", get(a, "name")}, {"hp", 100}, {"kind", "questgiver"},
                      {"dialogue", "Selam yolcu. Sana verecek bir işim var."}};
         if (uid == 17112) { n["auto_quests"] = true; n["dialogue"] = "Otomatik gelen görevlerini sildiysen onları yalnızca benden yeniden alabilirsin."; }
+        // Demirci Rüstem (classes.dat merchant, demrc model) trades at the Mısır Çarşısı Demirci mark. NONCANONICAL stock.
+        if (uid == 1004) { n["kind"] = "merchant"; n["shop"] = stock("weapon", 6, 15); n["dialogue"] = "Rüstem'in demircisine hoş geldin. Silahlarıma bir göz at."; }
         giver_index.emplace(uid, npcs.size()); add_npc(std::move(n), zone, *at);
     }
     for (const auto& [uid, a] : actors)
         if (integer(a, "questGiver") == 1 && integer(a, "interactable") == 1 && !giver_index.contains(uid) &&
             std::none_of(std::begin(quest_homes), std::end(quest_homes), [&](const auto& h) { return h.first == uid; }))
             throw std::runtime_error("questGiver without a home zone: " + std::to_string(uid));
-    struct Family { std::string tmpl, name, zone; int level = 1; Ordered drops; };
-    std::map<std::string, std::vector<Family>> families; // zone -> enemy families by level
-    for (const auto& n : npcs) if (n.at("kind") == "enemy") {
-        auto& f = families[n.at("zone").get<std::string>()];
-        if (std::none_of(f.begin(), f.end(), [&](const Family& x) { return n.at("template") == x.tmpl; }))
-            f.push_back({n.at("template").get<std::string>(), n.at("name").get<std::string>(), n.at("zone").get<std::string>(), n.at("level").get<int>(), n.at("drops")});
-    }
-    for (auto& [zone, f] : families) std::stable_sort(f.begin(), f.end(), [](const Family& l, const Family& r) { return l.level < r.level; });
-    const std::map<std::string, std::string> hunting{{"misir", "eminonu"}, {"topkapi", "meteor"}, {"savas", "eminonu"}}; // town zones without monsters
-    const auto potion = [&](int level) {
-        std::string best = "p253"; int found = 0;
-        for (const auto& [id, k] : item_kind) if (std::get<0>(k) == "potion" && items.at(id).contains("heal") && std::get<1>(k) <= level && std::get<1>(k) >= found) { best = id; found = std::get<1>(k); }
-        return best;
-    };
-    const auto words = [&](const std::string& s) { std::vector<std::string> v; std::istringstream in(s); std::string w; while (in >> w) v.push_back(fold(w)); return v; };
-    // Collect objective: the rarity-10000 hide/cloth component named after the monster (Yılan -> Yılan Derisi, Kurt -> Kurt
-    // Kürkü), else the highest such component at or below the monster level.
-    const auto quest_item = [&](const Family& f) {
-        std::string best = "o13564"; int found = -1; const auto monster = words(f.name);
-        for (const auto& [uid, o] : objects) {
-            if (get(*o, "objecttype") != "component" || integer(*o, "rarity") != 10000 || !items.contains("o" + std::to_string(uid))) continue;
-            if (const auto first = words(get(*o, "name")); !first.empty() && std::find(monster.begin(), monster.end(), first.front()) != monster.end()) return "o" + std::to_string(uid);
-            if (const int l = integer(*o, "itemlevel"); l <= f.level && l > found) { best = "o" + std::to_string(uid); found = l; }
-        }
-        return best;
-    };
-    const auto npc_id = [&](unsigned uid) { return npcs.at(giver_index.at(uid)).at("id").get<uint32_t>(); };
-    const auto name_of = [&](unsigned uid) { return npcs.at(giver_index.at(uid)).at("name").get<std::string>(); };
-    const auto kill_xp = [](int level) { return 77 * (10 + level); };
-    const auto reward = [](int xp, int currency, Ordered list = Ordered::array()) { return Ordered{{"xp", xp}, {"currency", currency}, {"items", std::move(list)}}; };
-    const auto stack = [](const std::string& item, int n) { return Ordered::array({Ordered{{"item", item}, {"quantity", n}}}); };
-    struct Step { std::string name; int level; std::string kind, target, item; int count; unsigned turn_in; int time_limit; std::string goal, description, complete; Ordered reward; };
-    Ordered quests = Ordered::object(); std::map<unsigned, std::string> chain_end;
-    // Quest "<npc uid>.<n>": the first is accepted at the giver (once `after` is done), later ones arrive automatically; each is
-    // handed in at turn_in (default the giver), whose catalog lists it.
-    const auto chain = [&](unsigned giver, const std::vector<Step>& steps, const std::string& after = "") {
-        std::string previous = after;
-        for (size_t i = 0; i < steps.size(); ++i) {
-            const auto& s = steps[i]; const auto id = std::to_string(giver) + "." + std::to_string(i + 1);
-            Ordered q = {{"name", s.name}, {"giver", npc_id(giver)}};
-            if (s.turn_in) q["turn_in"] = npc_id(s.turn_in);
-            q["level"] = s.level;
-            if (i) q["auto"] = true;
-            if (!previous.empty()) q["requires"] = previous;
-            if (s.time_limit) q["time_limit"] = s.time_limit;
-            Ordered objective = {{"kind", s.kind}};
-            if (s.kind != "talk") { objective["target"] = s.target; objective["count"] = s.count; }
-            if (s.kind == "collect") objective["item"] = s.item;
-            q.update({{"objective", std::move(objective)}, {"objective_text", s.goal}, {"description", s.description}, {"complete_text", s.complete}, {"reward", s.reward}});
-            if (i == 0 || !s.turn_in) npcs[giver_index.at(giver)]["quests"].push_back(id);
-            if (s.turn_in) npcs[giver_index.at(s.turn_in)]["quests"].push_back(id);
-            quests[id] = std::move(q); previous = id;
-        }
-        chain_end[giver] = previous;
-    };
-    const auto eminonu_family = [&](const char* tmpl) {
-        for (const auto& f : families["eminonu"]) if (f.tmpl == tmpl) return f;
-        throw std::runtime_error(std::string("VOD quest monster missing in Eminönü: ") + tmpl);
-    };
-    const auto fare = eminonu_family("m16001"), kertenkele = eminonu_family("m17015"), orumcek = eminonu_family("m17020");
-    // VOD quests (names, levels, completion texts and order as seen in chat; objectives of the talk steps follow those texts).
-    chain(1000, {{"Teşkilat'a Katıl", 1, "talk", "", "", 0, 1048, 0, "Teşkilat Hattı ile konuş.",
-                  "Teşkilat yeni gönüllüler arıyor. Meydandaki Teşkilat Hattı'ndan kaydını yaptır.",
-                  "Kaydın tamam. Al bakalım kardeşim. Bunlara ihtiyacın olabilir. Şimdi git Agah Bey'le konuş.", reward(424, 0, stack(potion(1), 3))}}); // VOD 08:56/09:25
-    chain(1001, {{"Salgın hastalık", 1, "kill", fare.tmpl, "", 10, 0, 0, "10 adet Fare öldür.",
-                  "Avludaki fareler hastalık taşıyor; salgın yayılmadan onları temizlemeliyiz.\nOn fare öldür, sonra bana gel.",
-                  "Tebrik ederim. İlk gerçek görevini başardın. [Eşyalarınız hasar gördüyse Mısır Çarşısı girişindeki örse tıklayarak tamir edebilirsiniz.]",
-                  reward(kill_xp(1), 100, stack(potion(1), 2))}, // VOD 16:12-16:30
-                 {"Bankacıya Ulak", 1, "talk", "", "", 0, 1012, 0, "Bankacı ile konuş.", "Bankacı birine bir emanet göndermek istiyor. Git ona uğra.",
-                  "Ali'nin cüzdanı işte burada. Bunu ona götürün lütfen. İyi günler dilerim.", reward(kill_xp(1) / 2, 0)}, // VOD 18:30
-                 {"Hesap Cüzdan", 1, "talk", "", "", 0, 1039, 0, "Cüzdanı Jandarma Ali'ye götür.", "Bankacının verdiği cüzdan Jandarma Ali'nin. Ona götür.",
-                  "Çok sağol. Burada anacımın topladığı ceviz yapraklarından var. Al kaynatıp içersin. Soğuk iyi gelir.", reward(360, 0, stack("o13545", 3))}}, // VOD 19:17-20:40
-          "1000.1");
-    chain(1039, {{"Anacının İlaçları", 3, "talk", "", "", 0, 1021, 300, "İlaçları beş dakika içinde Teyze'ye götür.",
-                  "Anacım hasta, ilaçlarını bekliyor. Acele et; geç kalırsan iş işten geçer.", "Allah razı olsun evladım, tam vaktinde geldin.",
-                  reward(kill_xp(3) / 2, 0, stack(potion(3), 2))}}, "1001.3"); // VOD 44:35 "görevinin süresi doldu!"
-    chain(1010, {{"Sahil Temizliği", 2, "kill", kertenkele.tmpl, "", 10, 0, 0, "10 adet " + kertenkele.name + " öldür.",
-                  "Kıyıya kertenkeleler doluştu, ağlarımı kemiriyorlar. On tanesini temizle.", "Sağ ol, kıyı biraz nefes aldı.", reward(kill_xp(2), 200, stack(potion(2), 2))}, // VOD 24:30-26:13
-                 {"Sahil Temizliği", 3, "kill", kertenkele.tmpl, "", 10, 0, 0, "10 adet " + kertenkele.name + " öldür.",
-                  "Kertenkeleler yine çoğaldı. Kıyıyı bir kez daha temizle.", "Kıyı tertemiz oldu. Eline sağlık.", reward(kill_xp(3), 300, stack(potion(3), 2))}}); // VOD 28:45-31:30
-    chain(1011, {{"Fiş Hesapları", 4, "collect", orumcek.tmpl, quest_item(orumcek), 5, 0, 0, "5 adet " + items.at(quest_item(orumcek)).at("name").get<std::string>() + " topla (" + orumcek.name + ").",
-                  "Dilekçelerimi yazacak malzemem kalmadı. Örümcek yuvalarının oradan bana malzeme getir.", "İşte şimdi hesapları kapatabilirim. Sağ ol.",
-                  reward(kill_xp(4), 400, orumcek.drops.empty() ? Ordered::array() : stack(orumcek.drops[0], 1))}}); // VOD 40:18 +1078/+400
-    chain(1043, {{"Pis Haşereler", 4, "kill", orumcek.tmpl, "", 10, 0, 0, "10 adet " + orumcek.name + " öldür.",
-                  "Pazarın arkasını örümcekler bastı. On tanesini temizle de nefes alalım.",
-                  "Hmmm fena değil. Sayıları azaldı baya. Lütfen ara sıra bana uğrayın. Yardımınıza ihtiyaç duyabilirim.", reward(kill_xp(4), 400, stack(potion(4), 2))}}); // VOD 41:00
-    chain(1042, {{"Savaş'ın Niyeti", 3, "kill", kertenkele.tmpl, "", 10, 0, 0, "10 adet " + kertenkele.name + " öldür.",
-                  "Ne yapmak istediğimi anlatmadan önce sana güvenebileceğimi görmeliyim. Kertenkelelerden on tanesini öldür.",
-                  "[Hayran bakışlarla Savaş sizi dinlemektedir.] [Savaş'la tekrar konuşun]", reward(164, 0)}, // VOD 49:44-50:25
-                 {"Savaş'la Konuş", 3, "talk", "", "", 0, 0, 0, "Savaş ile tekrar konuş.", "Savaş anlatacaklarını bitirmedi.",
-                  "Sana güvenebileceğimi biliyordum. Gerisini sonra konuşuruz.", reward(kill_xp(3) / 2, 0)}});
-    // Generated chains: kill 10 of one zone family, collect 5 quest drops of the next, then carry word to the zone's next questgiver.
-    std::map<std::string, std::vector<unsigned>> zone_givers;
-    for (const auto& [uid, index] : giver_index)
-        if (integer(actors.at(uid), "questGiver") == 1 && integer(actors.at(uid), "interactable") == 1 && !npcs[index].value("auto_quests", false))
-            zone_givers[npcs[index].at("zone").get<std::string>()].push_back(uid);
-    for (const auto& [zone, givers] : zone_givers)
-        for (size_t k = 0; k < givers.size(); ++k) {
-            const unsigned g = givers[k]; if (chain_end.contains(g)) continue;
-            const auto& fams = families[hunting.contains(zone) ? hunting.at(zone) : zone]; std::vector<Step> steps;
-            if (!fams.empty()) {
-                const size_t first = k % fams.size(); const auto& a = fams[first]; const auto& b = fams[std::min(first + 1, fams.size() - 1)]; // levels never fall
-                steps.push_back({a.name + " Avı", a.level, "kill", a.tmpl, "", 10, 0, 0, "10 adet " + a.name + " öldür.",
-                                 zone_titles.at(a.zone) + " çevresinde " + a.name + " sürüleri dolaşıyor, kimseye rahat vermiyorlar.\n10 tanesini öldür, sonra bana gel.",
-                                 "Aferin, sayıları epey azaldı.", reward(kill_xp(a.level), 100 * a.level, stack(potion(a.level), 2))});
-                const auto item = quest_item(b); const auto item_name = items.at(item).at("name").get<std::string>();
-                steps.push_back({item_name + " Toplama", b.level, "collect", b.tmpl, item, 5, 0, 0, "5 adet " + item_name + " topla (" + b.name + ").",
-                                 b.name + " avlarken üzerlerinden " + item_name + " düşer. Bana 5 tane getir; işime yarayacak.",
-                                 "Tam ihtiyacım olan şey. Eline sağlık.", reward(kill_xp(b.level), 100 * b.level, b.drops.empty() ? Ordered::array() : stack(b.drops[0], 1))});
-            }
-            if (givers.size() > 1) {
-                const unsigned h = givers[(k + 1) % givers.size()]; const int level = steps.empty() ? 1 : steps.back().level;
-                steps.push_back({name_of(h) + " ile Görüş", level, "talk", "", "", 0, h, 0, name_of(h) + " ile konuş.",
-                                 name_of(h) + " senin gibi birini arıyor. Git onunla konuş; selamımı da ilet.",
-                                 name_of(g) + " mi gönderdi seni? Hoş geldin, sana da bir işim olabilir.", reward(kill_xp(level) / 2, 0)});
-            }
-            if (!steps.empty()) chain(g, steps);
-        }
-    // <loc> requiredquestid gates (World checks them when a door is used): each id marks the last quest of a chain in the door's
-    // zone, round-robin over that zone's questgivers in uid order (the original chains were server data).
-    std::map<std::string, size_t> next_gate; std::set<int> gated;
-    for (const auto& [uid, t] : triggers_by_uid) {
-        if (t.quest < 0 || gated.contains(t.quest)) continue;
-        const auto found = zone_givers.find(t.grid->name);
-        for (size_t n = 0; found != zone_givers.end() && n < found->second.size(); ++n) {
-            auto& at = next_gate[t.grid->name]; const unsigned g = found->second[(at + n) % found->second.size()];
-            if (!chain_end.contains(g) || quests.at(chain_end.at(g)).contains("source_quest_id")) continue;
-            quests[chain_end.at(g)]["source_quest_id"] = t.quest; gated.insert(t.quest); at = (at + n + 1) % found->second.size(); break;
-        }
-        if (!gated.contains(t.quest)) std::cerr << "gate quest " << t.quest << " (loc " << uid << ") has no questgiver chain in " << t.grid->name << '\n';
-    }
     // ---- requiredentitydeathid guardians: the classid each gated door waits for (518 GBM X, 523 Semiha Hanım, 384 Gaffar Bey) stands
     // by the loc it guards. NONCANONICAL spots (spawns were server data): GBM X at the Yaşam Merkezi entrance 131358, Semiha Hanım at
     // the Şalter 131364 inside it, Gaffar Bey in Gaffar Oda 131491 (the Şalter's destination); no patrol.
@@ -931,8 +871,8 @@ int main(int argc, char** argv) try {
         {17077, "migrat", 0},         // Şah Kobra (level 36): the temple's snakes and scorpions (Sarı Akrep)
         {17078, "meteor", 30190},     // Toprak Şamanı (ID_KURT_SAMAN): Kara Kürk's wolves, at the crater trigger questtriggerkrater
         {17055, "buyukhol", 0},       // Dev Komodo (level 46): Büyük Hol's Evcil Komodo
-        {17066, "karakoy", 0},        // Yol Savaşçısı (ID_ZICAN_DIS, level 49)
-        {17071, "cemberli", 0},       // Junon (level 49): shares skill group 33 with the GBM 70/71 machines of the Çemberlitaş complex
+        {17066, "cemberli", 0},       // Yol Savaşçısı (ID_ZICAN_DIS, level 49): a Çemberlitaş boss (fandom Çemberlitaş loot list)
+        {17071, "migrat", 131147},    // Junon (level 49): Migrat boss in "Junon'un hapishanesi" (fandom Migrat loot; W-AGL lv47), at the Kafes
         {17090, "yeralti", 30246},    // İfliss (ID_MERAN_IRI, the great Meran): questtriggermeranmeydan
         {17087, "yeralti", 30258},    // Kadim Hidra: the hydra lair of Yeşil Hidra (questtriggeryesilhidra)
         {131107, "siginak", 0},       // Kenan: classes.dat uid beside the Sığınaklar quest givers 131108-131117
@@ -943,8 +883,7 @@ int main(int argc, char** argv) try {
         {131867, "karakoyic", 0},     // GBZ (ID_GZ42, level 58)
         {131874, "karakoy", 0},       // Yüce Komiser (level 58)
         {131870, "karakoy", 132063}}; // General Hakir (level 59): on the zeppelin (Zeplin Çıkışı) with Zeplin Bombası (level 59)
-    std::map<std::string, std::set<int32_t>> entries; // components players arrive on: the zone spawn and every door arrival
-    for (const auto& [name, s] : spawns) entries[name].insert(grids.at(name).component(s.first, s.second));
+    // `entries` (arrival components) is extended by every door arrival below.
     const auto arrival = [&](const Ordered& door) { // also kept clear of Şefs
         const auto& g = grids.at(door.at("to").get<std::string>()); const int x = door.at("arrive")[0].get<int>() / 1500 + 1024, y = door.at("arrive")[1].get<int>() / 1500 + 1024;
         entries[g.name].insert(g.component(x, y));
@@ -1039,6 +978,77 @@ int main(int argc, char** argv) try {
                  {"reset", skills ? "skills" : "crafts"},
                  {"dialogue", skills ? "Yetenek ve direnç puanlarınızı sıfırlar." : "Üretim ve toplama puanlarınızı sıfırlar."}}, g.name, *at);
     }
+    // ---- appended so earlier NPC ids stay stable (#12) ----
+    // 1. maden* nodes skipped above: the (0,0) per-type templates stand at their placements.json "nodes" spot (NONCANONICAL
+    // spread, VOD: herb bushes in streets/parks/quay, ore beams on squares); Çamur/Yeraltı Mantarı yield their rarity-0
+    // component; a centre with no support within 6 units takes the nearest arrival-component cell within 20.
+    for (const unsigned uid : late_nodes) {
+        const auto& a = locs.at(uid); const auto type = get(a, "locationtypename"); const auto& t = triggers_by_uid.at(uid);
+        auto [raw_uid, raw] = raw_component(type, false); if (!raw) std::tie(raw_uid, raw) = raw_component(type, true);
+        const auto key = std::to_string(uid); const Ordered* row = placements.at("nodes").contains(key) ? &placements.at("nodes").at(key) : nullptr;
+        const std::string zone = row ? row->at("zone").get<std::string>() : t.grid->name; const Grid& g = grids.at(zone);
+        std::optional<std::pair<int, int>> at;
+        if (row) at = place_at(zone, spot(*row), 20, 3, 3);
+        else if (t.x != 0 || t.y != 0) at = ring_search(t.x, t.y, 0, 20, 0, [&](int x, int y) { return g.walk(x, y) && entries[zone].contains(g.component(x, y)); });
+        if (!raw || integer(*raw, "crafttype") < 3 || integer(*raw, "crafttype") > 5 || !at || !items.contains("o" + std::to_string(raw_uid)) || !renders(uid)) {
+            std::cerr << "skipped gather node " << uid << ' ' << type << (row || t.x != 0 || t.y != 0 ? "" : ": (0,0) template without a placements.json spot") << '\n'; continue;
+        }
+        add_npc(gather_node(uid, a, raw_uid, *raw), zone, *at);
+    }
+    // 2. classes.dat npc records the tables above do not place, at their placements.json rows: bankers (Kasa, Sandık, Bankacı
+    // Fare), clan chests (Gözlükler for Klan Parası, guide F7), talkers, and interactable=0 props (flags, birds, fans, robots).
+    for (const auto& [key, row] : placements.at("npcs").items()) {
+        const unsigned uid = unsigned(std::stoul(key));
+        if (placed_uids.contains(uid)) continue;
+        if (!actors.contains(uid) || !renders(uid)) { std::cerr << "skipped placed npc " << uid << ": model does not assemble\n"; continue; }
+        const auto& a = actors.at(uid); const std::string zone = row.at("zone");
+        const auto at = place_at(zone, spot(row), 30, 4, 3);
+        if (!at) { std::cerr << "skipped placed npc " << uid << ": no free cell near its spot in " << zone << '\n'; continue; }
+        Ordered n = {{"source_uid", uid}, {"source_class", std::max(1, integer(a, "classid"))}, {"name", get(a, "name")}, {"hp", 100}};
+        if (get(a, "interactable") == "0") { n["kind"] = "prop"; n["interactable"] = false; n["dialogue"] = get(a, "name"); }
+        else if (integer(a, "banker") == 1) { n["kind"] = "questgiver"; n["banker"] = true; n["dialogue"] = "Kasanıza buradan ulaşabilirsiniz. (İşlemler → Kasamı göster)"; }
+        else if (integer(a, "merchant") == 1 && !get(a, "clan").empty()) {
+            const std::string prefix = get(a, "clan") == "arz" ? "Arzın Çocukları Gözlüğü" : "Lodos Gözlüğü"; Ordered shop = Ordered::array();
+            for (const auto& [ouid, o] : objects) if (number(*o, "pvpprice") > 0 && get(*o, "name").starts_with(prefix) && items.contains("o" + std::to_string(ouid)) && shop.size() < 16) shop.push_back("o" + std::to_string(ouid));
+            n["kind"] = "merchant"; n["shop"] = std::move(shop); n["dialogue"] = "Klan sandığı: gözlükler Klan Parası ile satılır.";
+        } else { n["kind"] = "questgiver"; n["dialogue"] = "Selam yolcu."; }
+        add_npc(std::move(n), zone, *at);
+    }
+    // 3. every other <loc> with a centre (quest props and trigger markers): kind "prop" carrying its locationname, arearadius
+    // and requiredquestid for quest objectives. Interactable props show their model; id_dummy markers (and models that do not
+    // assemble) are hidden from clients. Skipped: maden*/damage1 locs, (0,0) centres, and stacks of 3+ locs parked on one centre
+    // (the Karaköy Telsiz/Diafon/Sandal... set at Çemberlitaş [294,1035]).
+    std::set<unsigned> represented; for (const auto& n : npcs) represented.insert(n.at("source_uid").get<unsigned>());
+    std::map<std::pair<double, double>, int> stacked; for (const auto& [uid, t] : triggers_by_uid) ++stacked[{t.x, t.y}];
+    for (const auto& [uid, t] : triggers_by_uid) {
+        const auto& a = locs.at(uid); const auto type = get(a, "locationtypename");
+        if (represented.contains(uid) || type.starts_with("maden") || type == "damage1") continue;
+        if ((t.x == 0 && t.y == 0) || stacked.at({t.x, t.y}) >= 3) { std::cerr << "skipped prop " << uid << ' ' << get(a, "locationname") << ": parked centre\n"; continue; }
+        const Grid& g = *t.grid;
+        const auto at = ring_search(t.x, t.y, 0, t.radius + 6, 0, [&](int x, int y) { return g.walk(x, y); });
+        if (!at) { std::cerr << "skipped prop " << uid << ": no support near its centre\n"; continue; }
+        if (type.starts_with("gather_")) { // Büyük Hol / Karaköy mineral and flower spots (detail "Maden")
+            const auto [raw_uid, raw] = raw_component(type, true);
+            if (raw && integer(*raw, "crafttype") >= 3 && integer(*raw, "crafttype") <= 5 && items.contains("o" + std::to_string(raw_uid)) && renders(uid)) { add_npc(gather_node(uid, a, raw_uid, *raw), g.name, *at); continue; }
+        }
+        const bool hidden = lower(get(a, "path")).find("id_dummy") != std::string::npos || !renders(uid);
+        Ordered n = {{"source_uid", uid}, {"source_class", std::max(1, integer(a, "classid"))}, {"name", get(a, "name")}, {"hp", 100}, {"kind", "prop"},
+                     {"dialogue", get(a, "detail").empty() || hidden ? get(a, "name") : get(a, "detail")}, {"interactable", !hidden && integer(a, "interactable") == 1},
+                     {"loc", get(a, "locationname")}, {"radius", clamp(t.radius * 1000, 1000, 200000)}};
+        if (hidden) n["hidden"] = true;
+        if (t.quest >= 0) n["required_quest"] = t.quest;
+        add_npc(std::move(n), g.name, *at);
+    }
+    // 4. every spawn group member beyond the legacy enemy slots.
+    for (const char* zone : legacy_enemy_zones) members[zone].erase(members[zone].begin(), members[zone].begin() + legacy_enemies_per_zone);
+    for (const auto& [zone, list] : members) for (const auto& [n, at] : list) add_npc(n, zone, at);
+    for (const auto& [zone, n, at] : appended) add_npc(n, zone, at); // 5. "append" spawn groups, in placements.json order
+    // NONCANONICAL recipe sellers (scroll sources were server data), by trade: Kuyumcu Agop sarraf, İşportacı Genç madenci, Aktar
+    // Şevket kimyacı and lokman, Demirci Rüstem silahtar, Terzi Fahri zırhçı (professions[] order).
+    constexpr std::pair<unsigned, int> scroll_sellers[] = {{1002, 4}, {1017, 3}, {1003, 2}, {1003, 5}, {1004, 0}, {1006, 1}};
+    for (auto& n : npcs)
+        for (const auto& [seller, craft] : scroll_sellers)
+            if (n.at("source_uid") == seller && recipe_scrolls.contains(craft)) for (const auto& id : recipe_scrolls.at(craft)) n["shop"].push_back(id);
     // NONCANONICAL: later-tier Tılsım without a recipe scroll (drop tables were server data) join the Şef tables in turn
     // (guide: Şefs drop important items).
     std::set<std::string> crafted; for (const auto& [id, r] : recipes.items()) crafted.insert(r.at("product").get<std::string>());
@@ -1047,6 +1057,73 @@ int main(int argc, char** argv) try {
     for (const auto& id : later_glyphs) if (!crafted.contains(id) && !chiefs_in_order.empty()) {
         for (size_t tries = 0; tries < chiefs_in_order.size(); ++tries, ++turn) if (auto& d = (*chiefs_in_order[turn % chiefs_in_order.size()])["drops"]; d.size() < 16) { d.push_back(id); ++turn; break; }
     }
+    // ---- quests (rows 7, 18; wave 11 Gaps #4/#5/#6/#13): the original chains from tools/data/quests_original.json, built by
+    // analysis/porting-wave11/Quests/build_quests.py from the fandom/official quest lists (ids = original server quest numbers,
+    // matching classes.dat <loc> requiredquestid and quest_NNN_finish markers), the VOD and the reward pages; provenance per quest.
+    // classes.dat uids resolve to the first placed NPC/prop/door with that source uid, monster uids to their spawned template,
+    // <loc> uids to the prop/door standing there. "{at:npc|mon|loc:UID}" in a text becomes that entity's minimap coordinate
+    // "[x,y]" (texel = 1024 - 2/3 position, client 00477775; a monster family: the medoid member of its most populated zone).
+    const Ordered quest_data = [] { std::ifstream in(IKV_QUESTS); if (!in) throw std::runtime_error("cannot read " IKV_QUESTS); return Ordered::parse(in); }();
+    std::map<unsigned, size_t> placed_by_uid; std::map<std::string, std::vector<size_t>> spawned_by_template;
+    for (size_t i = 0; i < npcs.size(); ++i) // rescue props (trapped quest NPCs) count as their family's spawns for {at:mon:UID}
+        if (npcs[i].at("kind") == "enemy") spawned_by_template[npcs[i].at("template").get<std::string>()].push_back(i);
+        else if (npcs[i].value("rescue", false)) spawned_by_template["m" + npcs[i].at("source_uid").dump()].push_back(i);
+        else placed_by_uid.emplace(npcs[i].at("source_uid").get<unsigned>(), i);
+    const auto entity_of = [&](const Ordered& uid) -> Ordered& {
+        const auto f = placed_by_uid.find(uid.get<unsigned>()); if (f == placed_by_uid.end()) throw std::runtime_error("quest entity not placed: " + uid.dump());
+        return npcs[f->second];
+    };
+    const auto family = [&](const Ordered& uid) -> const Ordered& { // the medoid member of the family's most populated zone
+        const auto f = spawned_by_template.find("m" + uid.dump()); if (f == spawned_by_template.end()) throw std::runtime_error("quest monster not spawned: " + uid.dump());
+        std::map<std::string, std::vector<size_t>> by_zone; for (auto i : f->second) by_zone[npcs[i].at("zone").get<std::string>()].push_back(i);
+        const auto& list = std::max_element(by_zone.begin(), by_zone.end(), [](const auto& l, const auto& r) { return l.second.size() < r.second.size(); })->second;
+        size_t best = list.front(); double least = 1e300;
+        for (auto i : list) { double sum = 0; for (auto j : list) sum += std::hypot(npcs[i].at("x").get<double>() - npcs[j].at("x").get<double>(), npcs[i].at("y").get<double>() - npcs[j].at("y").get<double>()); if (sum < least) { least = sum; best = i; } }
+        return npcs[best];
+    };
+    const auto hinted = [&](std::string text) {
+        for (size_t at; (at = text.find("{at:")) != std::string::npos;) {
+            const size_t colon = text.find(':', at + 4), end = text.find('}', at);
+            const auto kind = text.substr(at + 4, colon - at - 4); const auto uid = Ordered::parse(text.substr(colon + 1, end - colon - 1));
+            const Ordered& e = kind == "mon" ? family(uid) : entity_of(uid);
+            text.replace(at, end - at + 1, "[" + std::to_string(std::lround(1024 - e.at("x").get<double>() / 1500)) + "," + std::to_string(std::lround(1024 - e.at("y").get<double>() / 1500)) + "]");
+        }
+        return text;
+    };
+    Ordered quests = Ordered::object();
+    for (const auto& d : quest_data.at("quests")) {
+        const std::string id = d.at("id");
+        Ordered q = {{"name", d.at("name")}, {"giver", entity_of(d.at("giver")).at("id")}};
+        if (d.contains("turn_in")) q["turn_in"] = entity_of(d.at("turn_in")).at("id");
+        q["level"] = d.at("level");
+        for (const char* key : {"min_level", "class", "time_limit", "source_quest_id"}) if (d.contains(key)) q[key] = d.at(key);
+        if (d.value("auto", false)) q["auto"] = true;
+        if (d.contains("requires")) { // the first prerequisite; any further ones must be done as well
+            q["requires"] = d.at("requires")[0];
+            if (d.at("requires").size() > 1) { q["requires_also"] = d.at("requires"); q["requires_also"].erase(0); }
+        }
+        const auto& o = d.at("objective"); const std::string kind = o.at("kind"); Ordered objective = {{"kind", kind}};
+        if (kind == "kill" || (kind == "collect" && o.contains("monster"))) { family(o.at("monster")); objective["target"] = "m" + o.at("monster").dump(); }
+        if (kind == "kill") objective["count"] = o.at("count");
+        if (kind == "collect") { objective["item"] = o.at("item"); objective["count"] = o.at("count");
+            if (o.contains("also")) { objective["also"] = Ordered::array(); // an 'also' item may drop from its own monster family
+                for (const auto& v : o.at("also")) { Ordered a = {{"item", v.at("item")}, {"count", v.at("count")}}; if (v.contains("monster")) { family(v.at("monster")); a["target"] = "m" + v.at("monster").dump(); } objective["also"].push_back(std::move(a)); } } }
+        if (kind == "visit") { // a <loc> prop/trigger (its arearadius) or an NPC's spot (10 units)
+            const Ordered& e = entity_of(o.contains("loc") ? o.at("loc") : o.at("npc"));
+            objective.update({{"zone", e.at("zone")}, {"x", e.at("x")}, {"y", e.at("y")}, {"radius", o.contains("loc") ? e.value("radius", 20000) : 10000}});
+        }
+        if (kind == "use") {
+            Ordered targets = Ordered::array(); for (const auto& u : o.contains("locs") ? o.at("locs") : o.at("npcs")) targets.push_back(entity_of(u).at("id"));
+            objective["targets"] = std::move(targets); objective["count"] = o.at("count"); if (o.contains("cooldown")) objective["cooldown"] = o.at("cooldown");
+        }
+        q["objective"] = std::move(objective);
+        for (const char* key : {"objective_text", "description", "complete_text"}) if (d.contains(key)) q[key] = hinted(d.at(key));
+        q["reward"] = d.at("reward"); // provenance stays in the data file (the quest definition travels in every state catalog)
+        if (!q.value("auto", false)) entity_of(d.at("giver"))["quests"].push_back(id);
+        if (d.contains("turn_in") || q.value("auto", false)) entity_of(d.contains("turn_in") ? d.at("turn_in") : d.at("giver"))["quests"].push_back(id);
+        quests[id] = std::move(q);
+    }
+    for (auto& n : npcs) if (n.contains("quests")) { auto& list = n["quests"]; std::vector<Ordered> v(list.begin(), list.end()); v.erase(std::unique(v.begin(), v.end()), v.end()); list = Ordered(v); }
     Ordered defaults = config.at("defaults"); defaults["zone"] = "eminonu"; defaults["x"] = wire(spawns.at("eminonu").first); defaults["y"] = wire(spawns.at("eminonu").second);
     defaults["inventory"] = Ordered::array({Ordered{{"item", "p253"}, {"quantity", 3}}});
     Ordered used = Ordered::object();
@@ -1055,11 +1132,23 @@ int main(int argc, char** argv) try {
     use("p253");
     for (const auto& n : npcs) if (n.contains("gather")) for (const char* key : {"item", "rare"}) if (n.at("gather").contains(key)) use(n.at("gather").at(key).get<std::string>());
     for (const auto& [id, r] : recipes.items()) { use(id); use(r.at("product").get<std::string>()); for (const auto& c : r.at("components")) use(c.at("item").get<std::string>()); }
-    for (const auto& [id, q] : quests.items()) { for (const auto& v : q.at("reward").at("items")) use(v.at("item").get<std::string>()); if (q.at("objective").contains("item")) use(q.at("objective").at("item").get<std::string>()); }
+    // Quest items, rewards and every class/sex variant of a reward item (the server hands out the variant the character can
+    // wear: W-REW lists one reward line per class) plus their reward prefixes.
+    std::set<std::string> reward_names; Ordered reward_prefixes = Ordered::array();
+    for (const auto& [id, q] : quests.items()) {
+        for (const auto& v : q.at("reward").at("items")) { use(v.at("item").get<std::string>()); reward_names.insert(items.at(v.at("item").get<std::string>()).at("name").get<std::string>()); if (v.contains("prefixes")) for (const auto& p : v.at("prefixes")) reward_prefixes.push_back(p); }
+        if (q.at("objective").contains("item")) use(q.at("objective").at("item").get<std::string>());
+        if (q.at("objective").contains("also")) for (const auto& v : q.at("objective").at("also")) use(v.at("item").get<std::string>());
+    }
+    for (const auto& [id, item] : items.items()) if (item.contains("slot") && (item.contains("class") || item.contains("sex")) && reward_names.contains(item.at("name").get<std::string>())) use(id);
     // Every prefix any catalog item can carry: fixed classes.dat prefix1/prefix2 plus the random drop pools (rarity > 0).
     Ordered used_prefixes = Ordered::object();
     for (const auto& [id, p] : prefix_table.items()) if (p.at("rarity").get<int>() > 0) used_prefixes[id] = p;
     for (const auto& [id, item] : used.items()) if (item.contains("prefixes")) for (const auto& p : item.at("prefixes")) used_prefixes[std::to_string(p.get<int>())] = prefix_table.at(std::to_string(p.get<int>()));
+    for (const auto& p : reward_prefixes) { // a reward prefix and its same-name/same-index siblings (other class limits)
+        const auto& want = prefix_table.at(std::to_string(p.get<int>()));
+        for (const auto& [id, other] : prefix_table.items()) if (other.at("name") == want.at("name") && other.at("index") == want.at("index")) used_prefixes[id] = other;
+    }
     config["provenance"] = "NONCANONICAL playable world generated by tools/generate_content.cpp. Original classes.dat: NPC/monster names, model UIDs, "
         "levels, combat stats (scaled by 100/383, VOD level-2 Enerji 383 = native 100 HP), weapon/armour stats, slots, class/sex limits, icons, prices, "
         "durability, rarity and fixed prefix1/prefix2; prefixes.dat potion names/amounts and Efsun prefixes (attribute ids per client 004338f0/00402f60); "

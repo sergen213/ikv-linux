@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
 #include <limits>
 #include <sstream>
@@ -115,10 +116,20 @@ constexpr std::array<const char*,6> craft_stats{"silahtar","zirhci","kimyaci","m
 // Original crafttype index -> name table at 0x5d6150 (strings 0x58d424..0x58d3d4); classes.dat crafttype indexes it.
 constexpr std::array<const char*,6> craft_names{"Silahtar","Zırhçı","Kimyacı","Madenci","Sarraf","Lokman"};
 bool craft_stat(const std::string& stat) { return std::find(craft_stats.begin(),craft_stats.end(),std::string_view(stat)) != craft_stats.end(); }
-constexpr size_t quest_active_max = 20; // NONCANONICAL cap on accepted, unfinished quests (catalog bound and Görev al)
-int quest_count(const Json& q) { return q.at("objective").at("kind") == "talk" ? 1 : q.at("objective").at("count").get<int>(); }
+constexpr size_t quest_active_max = 16; // NONCANONICAL cap on accepted, unfinished quests (catalog bound and Görev al); 16 keeps the 16
+                                         // largest original quests (texts + every reward item) inside the 64 KiB state envelope
+int quest_count(const Json& q) { const auto& o = q.at("objective"); return o.at("kind") == "talk" || o.at("kind") == "visit" ? 1 : o.at("count").get<int>(); }
 bool quest_finished(const Json& s, const std::string& quest) { const auto& d = s.at("quests_done"); return std::binary_search(d.begin(), d.end(), Json(quest)); }
-int carried(const Json& s, const Json& item) { int n = 0; for (const auto& e : s.at("inventory")) if (e.at("item") == item) n += e.at("quantity").get<int>(); return n; }
+// Quest items "çantanızdayken" (in the bag): worn entries do not count and are never handed over.
+bool worn(const Json& s, const Json& entry) { for (const auto& [slot, uid] : s.at("equipment").items()) { (void)slot; if (uid == entry.at("uid")) return true; } return false; }
+int carried(const Json& s, const Json& item) { int n = 0; for (const auto& e : s.at("inventory")) if (e.at("item") == item && !worn(s, e)) n += e.at("quantity").get<int>(); return n; }
+// A quest reward line for another class: a class-limited weapon with no sex variants (W-REW lists one per class; armour comes in
+// class/sex variants of one name and is handed out as the character's own variant), or a line only some class pages list ("classes").
+bool other_class_reward(const Json& items, const Json& line, int class_id) {
+    const auto& item = items.at(line.at("item").get<std::string>());
+    if (line.contains("classes") && std::find(line.at("classes").begin(), line.at("classes").end(), Json(class_id)) == line.at("classes").end()) return true;
+    return item.contains("class") && !item.contains("sex") && item.at("class").get<int>() + 1 != class_id;
+}
 // A clan's Sancak (banner NPC with "clan") can only be struck by a member of another clan.
 bool shielded(const Json& npc, const Json& s) { return npc.contains("clan") && (!s.value("clan",0) || s.value("clan",0) == npc.at("clan").get<int>()); }
 // Guide "Klan OOK'leri": clan NPCs (recruiters, merchants, arena guardians; non-enemy kinds with combat stats "aggro") attack the
@@ -137,6 +148,11 @@ int64_t point_reset_price(const Json& config, const Json& machine, const Json& s
     return plus ? full/3 : full;
 }
 constexpr const char* gbm0b_refusal = "GBM 0-B'yi kullanabilmek için Plus Paket sahibi olmanız gerekir."; // NONCANONICAL wording
+// Banka tabs ("Kasanız iki sekmeden oluşmaktadır", guide l.880): 004401d0 steps the page 0x611454 within 0..1 and 0043f330 shows
+// cells page·64..page·64+63, so economy.bank_slots is the 8×8 cells of one tab. A vault entry's "tab" is 1 on the second tab, absent on the first.
+constexpr int bank_tabs = 2;
+size_t bank_tab_size(const Json& vault, int tab) { return size_t(std::count_if(vault.begin(),vault.end(),[&](const Json& e){ return e.value("tab",0) == tab; })); }
+constexpr const char* kasa_refusal = "Kasanıza her yerden ulaşabilmek için Kasa Erişimi ürününe sahip olmanız gerekir."; // NONCANONICAL wording (guide l.875-878)
 // Original attribute ids (names 004338f0) per element in resistance-row order: Hasar(Ateş..Asit) 48-52, Direnç(Ateş..Asit) 12-16;
 // skill schools in the same order. classes.dat monster resistances are emitted in this order too.
 constexpr std::array<int,5> element_damage{48,49,50,52,51}, element_resist{12,13,14,16,15};
@@ -149,11 +165,21 @@ double attribute_curve(const Json& curve, int level) {
     const auto& l = curve.at("line"); return l[0].get<double>() + l[1].get<double>()*level;
 }
 // Tılsım (classes.dat glyph; the client only shows "[Tılsım]" and the detail, the effect was server-only). NONCANONICAL: the best
-// carried Tılsım of each kind (and proc field) modifies the skill definition used for this cast (see tools/generate_content.cpp
+// slotted Tılsım of each kind (and proc field) modifies the skill definition used for this cast (see tools/generate_content.cpp
 // glyph_rules); character-state kinds are read through glyph() where their stat is computed.
+// Slotted = in the Tılsım row: the first row of the UI2 Eşyalar grid is 2 red + 2 blue cells (atlas 242,177 art), fandom "Tılsım
+// Sistemi": "karakter çantanızın ilk 4 bölmesi farklı bir renge dönüşüyor ... Majör tılsımlar kırmızı bölmeye 2 Adet ... Minör
+// tılsımlar ise, 2 Adet mavi bölmeye". NONCANONICAL: which glyph is Majör/Minör is not in classes.dat (the tooltip colour of
+// 00437590 reads item +0x164, unpopulated by any glyph attribute), so any Tılsım works in any of the four cells.
+constexpr size_t talisman_cells = 4;
+std::vector<const Json*> talismans(const Json& s) { // grid cells are the unworn entries in order (item_move)
+    std::vector<const Json*> cells;
+    for (const auto& e : s.at("inventory")) { if (cells.size() == talisman_cells) break; if (!worn(s, e)) cells.push_back(&e); }
+    return cells;
+}
 Json glyphed(const Json& config, const Json& s, const std::string& skill) {
     Json d = config.at("skills").at(skill); std::map<std::pair<std::string,std::string>,int> best;
-    for (const auto& entry : s.at("inventory")) {
+    for (const Json* slotted : talismans(s)) { const auto& entry = *slotted;
         const auto& item = config.at("items").at(entry.at("item").get<std::string>());
         if (!item.contains("glyph")) continue;
         const auto& g = item.at("glyph");
@@ -189,12 +215,12 @@ Json glyphed(const Json& config, const Json& s, const std::string& skill) {
     }
     return d;
 }
-// Best value of a carried Tılsım of `kind` for `skill`, −1 when none (character-state riders: armor_energy, armor_dodge,
+// Best value of a slotted Tılsım of `kind` for `skill`, −1 when none (character-state riders: armor_energy, armor_dodge,
 // stance_damage, crit_armor, stance_crit, efsun_boost).
 int glyph(const Json& config, const Json& s, const char* skill, const char* kind) {
     int best = -1;
-    for (const auto& entry : s.at("inventory")) {
-        const auto& item = config.at("items").at(entry.at("item").get<std::string>());
+    for (const Json* slotted : talismans(s)) {
+        const auto& item = config.at("items").at(slotted->at("item").get<std::string>());
         if (!item.contains("glyph") || item.at("glyph").at("kind") != kind) continue;
         const auto& skills = item.at("glyph").at("skills");
         if (std::find(skills.begin(),skills.end(),Json(skill)) != skills.end()) best = std::max(best,item.at("glyph").at("value").get<int>());
@@ -241,16 +267,20 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 for (int level = 1; level <= 100; ++level) require(resource_curve(c, level) >= 1, "config", "Resource curve not positive");
             }
             const auto& hit = f.at("hit_percent"); require(hit.is_array() && hit.size() == 2 && integer(hit[0], 0, 100) <= integer(hit[1], 0, 100), "config", "Hit chance bounds invalid");
+            real(f.at("monster_unit"), 1, 100);
         }
         // Wire distances: 1000 per source scene unit, and a source actor stands ~7500 tall.
         for (const char* key : {"cell_size","aoi","interaction_range","combat_range","trade_range"}) integer(config_.at(key), 1, 200000);
         integer(config_.at("inventory_slots"), 1, 32); integer(config_.at("currency_cap"), 1, 999000000); // "En fazla 999 milyon paranız olabilir." (0x5927f8)
         integer(config_.at("resource_cap"),1,1000000);
-        integer(config_.at("death_currency_percent"), 0, 100);
+        { const auto& fee = config_.at("death_fee"); require(fee.at("quadratic").is_array() && fee.at("quadratic").size() == 3, "config", "Death fee curve invalid");
+          for (const auto& v : fee.at("quadratic")) require(v.is_number() && std::abs(v.get<double>()) <= 1e5, "config", "Death fee curve invalid");
+          integer(fee.at("plus_divisor"), 1, 100); }
+        { const auto& levels = config_.at("free_resets").at("levels"); require(levels.is_array() && levels.size() <= 100, "config", "Free reset levels invalid"); for (const auto& v : levels) integer(v, 2, 100); }
         integer(config_.at("death_resurrect_delay"), 0, 72000);
         if (config_.contains("auto_retaliate")) require(config_.at("auto_retaliate").is_boolean(), "config", "auto_retaliate must be a boolean");
         if (config_.contains("regeneration")) { // NONCANONICAL passive out-of-combat regeneration (row 31)
-            const auto& r = config_.at("regeneration"); integer(r.at("interval"), 1, 72000); integer(r.at("hp"), 0, 10000); integer(r.at("mana"), 0, 10000);
+            const auto& r = config_.at("regeneration"); integer(r.at("interval"), 1, 72000); integer(r.at("hp"), 0, 10000); integer(r.at("mana"), 0, 10000); integer(r.value("posture_multiplier", Json(1)), 1, 100);
         }
         // NONCANONICAL day clock + environment records (original server 'thgf' 0x004a4c90: hour + byte record).
         if (config_.contains("clock")) {
@@ -290,7 +320,8 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 for (const auto& registry : zone.at("instances")) integer(registry, 0, 70);
             }
         }
-        require(config_.at("items").is_object() && config_.at("items").size() <= 1024 && config_.at("quests").is_object() && config_.at("quests").size() <= 1024, "config", "Catalog limit");
+        // 2048 items: the original quest rewards bring every class/sex variant of their armour (wave 11 Quests).
+        require(config_.at("items").is_object() && config_.at("items").size() <= 2048 && config_.at("quests").is_object() && config_.at("quests").size() <= 1024, "config", "Catalog limit");
         require(config_.at("skills").is_object() && config_.at("skills").size() <= 64, "config", "Catalog limit");
         for (const char* key : {"skill_points_base","skill_points_per_level","skill_rank_max","skill_rank_percent","passive_rank_percent","skill_global_cooldown"}) integer(config_.at(key), 0, 1000);
         for (const char* key : {"resistance_per_level","craft_per_level","charisma"}) integer(config_.at("character_points").at(key), 0, 1000);
@@ -405,13 +436,14 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             require(values.is_array() && values.size() <= 16, "config", "Item list invalid");
             for (const auto& v : values) { require(config_.at("items").contains(text(v.at("item"), 32)), "config", "Unknown item"); integer(v.at("quantity"), 1, 1000); }
         };
-        require(config_.at("npcs").is_array() && config_.at("npcs").size() <= 1024, "config", "NPC limit");
+        require(config_.at("npcs").is_array() && config_.at("npcs").size() <= 2048, "config", "NPC limit");
         for (const auto& definition : config_.at("npcs")) {
             auto id = target_id(definition.at("id")); require(id > INT32_MAX && !npcs_.contains(id), "config", "NPC IDs must be unique high uint32 identifiers");
             // node: a classes.dat <loc> gathering node (Toplama); anvil: a <loc> örs; door: a <loc> door/crystal/barrier/elevator
             // that moves its user to "door.to"/"door.arrive" (original: entity type 3, cursor_interact, click sends 'nchr');
-            // reset: a <loc> GBM-0 ("reset": "skills", resetleyici) or GBM 0-B ("reset": "crafts", uretimsifirlayici) machine.
-            const auto kind = text(definition.at("kind")); require(kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "trap" || kind == "reset", "config", "NPC kind invalid");
+            // reset: a <loc> GBM-0 ("reset": "skills", resetleyici) or GBM 0-B ("reset": "crafts", uretimsifirlayici) machine;
+            // prop: a <loc> quest prop or trigger marker / non-interactable classes.dat npc (talking shows its dialogue).
+            const auto kind = text(definition.at("kind")); require(kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "trap" || kind == "reset" || kind == "prop", "config", "NPC kind invalid");
             if (kind == "reset") { require(definition.at("reset") == "skills" || definition.at("reset") == "crafts", "config", "Reset machine kind invalid");
                 integer(config_.at("point_reset").at(definition.at("reset").get<std::string>()), 1, 1000000); } // NONCANONICAL Lira per level
             if (kind == "door") {
@@ -424,6 +456,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             if (kind == "trap") { // fixed classes.dat trap (Labirent Tuzağı): range, damage and rate of its strikes
                 const auto& trap = definition.at("trap"); integer(trap.at("range"), 1000, 200000); integer(trap.at("damage"), 1, 100000); integer(trap.at("cooldown"), 1, 100000);
             }
+            if (definition.value("rescue", false)) integer(definition.at("respawn"), 20, 72000); // a freed quest NPC returns after respawn ticks
             text(definition.at("name"), 128); const auto zone = text(definition.at("zone"), 32);
             auto x = integer(definition.at("x"), -coordinate_limit, coordinate_limit), y = integer(definition.at("y"), -coordinate_limit, coordinate_limit);
             require(config_.at("zones").contains(zone) && passable(zone, x, y), "config", "NPC position invalid");
@@ -431,6 +464,11 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             if(definition.contains("source_uid"))target_id(definition.at("source_uid"));
             if(definition.contains("source_class"))integer(definition.at("source_class"),1,65535); // classes.dat classid reaches 527
             if(definition.contains("appearance"))require(valid_appearance(definition.at("appearance")),"config","NPC appearance invalid");
+            if(definition.contains("equipment")){ // classes.dat rhweaponid/lhweaponid visuals: the client's visible-equipment shape
+                const auto& e=definition.at("equipment");require(e.is_array() && e.size()<=2,"config","NPC equipment invalid");
+                for(const auto& v:e){integer(v.at("slot"),11,12);integer(v.at("source_uid"),1,INT32_MAX);}
+                require(e.size()<2 || e[0].at("slot")!=e[1].at("slot"),"config","NPC equipment slot repeated");
+            }
             if(definition.contains("idlewalktend") && integer(definition.at("idlewalktend"),0,100)) integer(definition.at("walk_speed"),1,100000); // classes.dat idle walk percent, animation.dat walk speed
             for (const auto& item : definition.at("shop")) require(config_.at("items").contains(text(item)), "config", "Shop item missing");
             for (const auto& quest : definition.at("quests")) require(config_.at("quests").contains(text(quest)), "config", "Quest missing");
@@ -502,8 +540,10 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 }
             }
         }
-        // Quests: giver (accept; not for auto quests) and turn_in (completion, default giver) must list the quest; objectives
-        // kill/collect name an enemy template (collect: its quest item drops on each kill), talk completes at turn_in.
+        // Quests: giver (accept; not for auto quests) and turn_in (completion, default giver) must list the quest. Objectives:
+        // kill an enemy template; collect items (in the bag at hand-in; with a target, its kills drop them while the quest is
+        // active; "also": further items); talk (completes at turn_in); visit a spot (zone, x, y, radius: <loc> trigger, prop
+        // or NPC spot); use (Kullan/Konuş on one of the target NPCs/props, count times).
         std::set<int> gate_ids;
         for (const auto& [id, quest] : config_.at("quests").items()) {
             text(id,32); text(quest.at("name"),128); integer(quest.at("level"),1,100);
@@ -516,14 +556,30 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             if (!automatic) lists("giver"); else require(npcs_.contains(target_id(quest.at("giver"))),"config","Quest giver missing");
             lists(quest.contains("turn_in") ? "turn_in" : "giver");
             const auto& objective = quest.at("objective"); const auto kind = text(objective.at("kind"),16);
-            require(kind == "kill" || kind == "collect" || kind == "talk", "config", "Unknown quest objective");
-            if (kind != "talk") {
-                text(objective.at("target"),32); integer(objective.at("count"),1,1000);
-                bool enemy_found=false;
-                for(const auto& [npc_id,n]:npcs_){(void)npc_id;if(n.definition.at("kind")=="enemy" && n.definition.at("template")==objective.at("target"))enemy_found=true;}
-                require(enemy_found,"config","Quest objective enemy missing");
+            require(kind == "kill" || kind == "collect" || kind == "talk" || kind == "visit" || kind == "use", "config", "Unknown quest objective");
+            const auto enemy_exists = [&](const Json& target) { text(target,32);
+                require(std::any_of(npcs_.begin(),npcs_.end(),[&](const auto& n){return n.second.definition.at("kind")=="enemy" && n.second.definition.at("template")==target;}),"config","Quest objective enemy missing"); };
+            if (kind == "kill" || (kind == "collect" && objective.contains("target"))) enemy_exists(objective.at("target"));
+            if (kind == "kill" || kind == "collect" || kind == "use") integer(objective.at("count"),1,1000);
+            if (kind == "collect") {
+                require(config_.at("items").contains(text(objective.at("item"),32)),"config","Quest item missing");
+                if (objective.contains("also")) { require(objective.at("also").is_array() && objective.at("also").size() <= 4,"config","Quest items invalid");
+                    for (const auto& v : objective.at("also")) { require(config_.at("items").contains(text(v.at("item"),32)),"config","Quest item missing"); integer(v.at("count"),1,1000); if (v.contains("target")) enemy_exists(v.at("target")); } }
             }
-            if (kind == "collect") require(config_.at("items").contains(text(objective.at("item"),32)),"config","Quest item missing");
+            if (kind == "visit") { require(config_.at("zones").contains(text(objective.at("zone"))),"config","Quest zone missing");
+                integer(objective.at("x"),-coordinate_limit,coordinate_limit); integer(objective.at("y"),-coordinate_limit,coordinate_limit); integer(objective.at("radius"),1,500000); }
+            if (kind == "use") { require(objective.at("targets").is_array() && !objective.at("targets").empty() && objective.at("targets").size() <= 16,"config","Quest use targets invalid");
+                for (const auto& t : objective.at("targets")) require(npcs_.contains(target_id(t)) && npcs_.at(target_id(t)).definition.at("kind") != "enemy","config","Quest use target missing");
+                if (objective.contains("cooldown")) integer(objective.at("cooldown"),1,86400); }
+            if (quest.contains("requires_also")) { require(quest.contains("requires") && quest.at("requires_also").is_array() && quest.at("requires_also").size() <= 8,"config","Quest prerequisites invalid");
+                for (const auto& r : quest.at("requires_also")) require(config_.at("quests").contains(text(r,32)) && r != id,"config","Quest prerequisite missing"); }
+            if (quest.contains("min_level")) integer(quest.at("min_level"),1,100);
+            if (quest.contains("class")) integer(quest.at("class"),1,3);
+            for (const auto& v : quest.at("reward").at("items")) {
+                if (v.contains("prefixes")) { require(v.at("prefixes").is_array() && v.at("prefixes").size() <= 2,"config","Item prefixes invalid");
+                    for (const auto& p : v.at("prefixes")) require(config_.at("prefixes").contains(std::to_string(integer(p,1,999999))),"config","Item prefix missing"); }
+                if (v.contains("classes")) { require(v.at("classes").is_array() && !v.at("classes").empty() && v.at("classes").size() <= 3,"config","Reward classes invalid"); for (const auto& c : v.at("classes")) integer(c,1,3); }
+            }
             if(quest.contains("requires") || automatic)require(config_.at("quests").contains(text(quest.at("requires"),32)) && quest.at("requires")!=id,"config","Quest prerequisite missing");
             if(quest.contains("time_limit"))integer(quest.at("time_limit"),1,86400);
             if(quest.contains("source_quest_id"))require(gate_ids.insert(integer(quest.at("source_quest_id"),0,100000)).second,"config","Duplicate source quest id");
@@ -535,7 +591,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         }
         // Üretim recipes (classes.dat objecttype recipe): the scroll item id keys its profession, level, product and inputs.
         const auto& economy=config_.at("economy");
-        integer(economy.at("bank_slots"),1,128); integer(economy.at("recipe_limit"),1,200); integer(economy.at("gather_ticks"),1,1200); integer(economy.at("gather_rare_percent"),0,100);
+        integer(economy.at("bank_slots"),1,64); integer(economy.at("recipe_limit"),1,200); integer(economy.at("gather_ticks"),1,1200); integer(economy.at("gather_rare_percent"),0,100); // bank_slots: one 8×8 Banka tab
         integer(economy.value("guild_level",Json(1)),1,100); // NONCANONICAL level of a new lonca (lonca progression is server-only)
         integer(economy.at("guild_level_cost"),1,999000000); // NONCANONICAL Lonca Parası (donated Klan Parası) per level: level × cost
         require(config_.at("recipes").is_object() && config_.at("recipes").size() <= 1024,"config","Recipe limit");
@@ -557,6 +613,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         require(rules.at("clans").is_object() && rules.at("clans").size()<=15,"config","Clan table invalid");
         for(const auto& [clan,name]:rules.at("clans").items()){integer(Json::parse(clan),1,15);text(name,32);}
         require(rules.at("safe_zones").is_array(),"config","Safe zone list invalid");for(const auto& zone:rules.at("safe_zones"))text(zone,32);
+        if(rules.contains("guild_zones")){require(rules.at("guild_zones").is_array() && rules.at("guild_zones").size()<=8,"config","Guild zone list invalid");for(const auto& zone:rules.at("guild_zones"))text(zone,32);}
         require(rules.at("emotes").is_object() && rules.at("emotes").size()<=64,"config","Emote table invalid");
         for(const auto& [name,clip]:rules.at("emotes").items()){require(!name.empty() && name.size()<=16,"config","Emote name invalid");integer(clip,0,255);}
         // Held postures: an RP clip whose animation.dat jumptoid loops (78 Sit, 80 Lay, 82 Çok; 79/83 settle into 78/82).
@@ -615,12 +672,13 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         std::sort(item_sizes.rbegin(),item_sizes.rend());
         Json item_bound=Json::object();
         for(size_t n=0;n<std::min<size_t>(item_sizes.size(),config_.at("inventory_slots").get<size_t>());++n)item_bound[item_sizes[n].second]=config_.at("items").at(item_sizes[n].second);
-        // State catalogs carry the active quests (at most quest_active_max) plus budgeted NPC offers: bound by the largest ones.
-        std::vector<std::pair<size_t,std::string>> quest_sizes;
-        for(const auto& [id,quest]:config_.at("quests").items()){size_t bytes=Json({{id,quest}}).dump().size();for(const auto& v:quest.at("reward").at("items"))bytes+=Json({{v.at("item").get<std::string>(),config_.at("items").at(v.at("item").get<std::string>())}}).dump().size();quest_sizes.push_back({bytes,id});}
+        // State catalogs carry the active quests (at most quest_active_max) plus budgeted NPC offers: bound by the largest ones,
+        // each with the reward items one class receives (another class's weapon never enters a character's catalog).
+        std::vector<std::tuple<size_t,std::string,int>> quest_sizes;
+        for(const auto& [id,quest]:config_.at("quests").items())for(int cls=1;cls<=3;++cls){size_t bytes=Json({{id,quest}}).dump().size();for(const auto& v:quest.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,cls))bytes+=Json({{v.at("item").get<std::string>(),config_.at("items").at(v.at("item").get<std::string>())}}).dump().size();quest_sizes.push_back({bytes,id,cls});}
         std::sort(quest_sizes.rbegin(),quest_sizes.rend());
         Json quest_bound=Json::object();
-        for(size_t n=0;n<std::min(quest_sizes.size(),quest_active_max);++n){const auto& quest=config_.at("quests").at(quest_sizes[n].second);quest_bound[quest_sizes[n].second]=quest;for(const auto& v:quest.at("reward").at("items"))item_bound[v.at("item").get<std::string>()]=config_.at("items").at(v.at("item").get<std::string>());}
+        for(size_t n=0;n<quest_sizes.size() && quest_bound.size()<quest_active_max;++n){const auto& [bytes,id,cls]=quest_sizes[n];(void)bytes;if(quest_bound.contains(id))continue;const auto& quest=config_.at("quests").at(id);quest_bound[id]=quest;for(const auto& v:quest.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,cls))item_bound[v.at("item").get<std::string>()]=config_.at("items").at(v.at("item").get<std::string>());}
         Json skill_bound=Json::object();
         for(int source_class=0;source_class<3;++source_class) {
             Json skills=Json::object();
@@ -656,8 +714,8 @@ World::Actor& World::actor(uint32_t id) { auto it = actors_.find(id); require(it
 void World::emit(uint32_t id, Json value) {
     auto found = actors_.find(id); if (found == actors_.end()) return;
     auto& a=found->second;
-    if(a.bot) { // bots read world state directly; only player chat addressed to them (/dismiss) is kept
-        if(value.at("type")=="chat" && (value.at("channel")=="group" || value.at("channel")=="private") && actors_.contains(value.at("from").get<uint32_t>()) &&
+    if(a.bot) { // bots read world state (invitations, trades) directly; only players' chat reaching them is kept for replies
+        if(value.at("type")=="chat" && (value.at("channel")=="group" || value.at("channel")=="private" || value.at("channel")=="local") && actors_.contains(value.at("from").get<uint32_t>()) &&
            !actors_.at(value.at("from").get<uint32_t>()).bot && bots_.at(id).inbox.size()<8) bots_.at(id).inbox.push_back(std::move(value));
         return;
     }
@@ -760,7 +818,7 @@ void World::set_source_zones(std::map<std::string,std::shared_ptr<const Zone>> z
     }
     for (const auto& [name, z] : config_.at("zones").items()) // instance copies share their zone's original support grid
         if (z.contains("instance_of") && zones.contains(z.at("instance_of").get<std::string>())) zones[name] = zones.at(z.at("instance_of").get<std::string>());
-    auto previous=std::move(source_zones_);source_zones_=std::move(zones);
+    auto previous=std::move(source_zones_);source_zones_=std::move(zones);route_steps_.clear();
     try {
         const auto supported=[&](const std::string& name,const Json& point) {
             if(!passable(name,point[0],point[1]))throw std::invalid_argument("configured point is outside supported grid cells");
@@ -784,7 +842,7 @@ void World::set_source_zones(std::map<std::string,std::shared_ptr<const Zone>> z
                 if(route(name,x,y,n.x,n.y).empty())throw std::invalid_argument("configured NPC patrol cannot return to spawn");
             }
         }
-    } catch (...) { source_zones_=std::move(previous);throw; }
+    } catch (...) { source_zones_=std::move(previous);route_steps_.clear();throw; }
 }
 bool World::clear_path(const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny) const {
     if (!passable(zone,nx,ny)) return false;
@@ -808,49 +866,70 @@ bool World::clear_path(const std::string& zone,int32_t x,int32_t y,int32_t nx,in
     }
     return true;
 }
-std::vector<std::pair<int32_t,int32_t>> World::route(const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny,int limit) const {
-    if(!passable(zone,x,y) || !passable(zone,nx,ny))return {};
-    if(clear_path(zone,x,y,nx,ny))return {{nx,ny}};
-    if(!source_zones_.contains(zone))return {{nx,ny}}; // Independent fixture movement retains its collision correction.
+// partial: when the node cap ends the search, the route leads to the explored cell nearest the goal (a bot walks there and plans
+// the next stretch on a later think); empty when that is the start.
+std::vector<std::pair<int32_t,int32_t>> World::route(const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny,int limit,bool partial) const {
+    RouteSearch r;
+    if(auto trivial=route_begin(r,zone,x,y,nx,ny))return *trivial;
+    route_step(r,limit); // Source-compatible 1000 popped-node ceiling for clicks; bots plan long walks in slices (bots_tick).
+    return route_finish(r,partial);
+}
+std::optional<std::vector<std::pair<int32_t,int32_t>>> World::route_begin(RouteSearch& r,const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny) const {
+    using Path=std::vector<std::pair<int32_t,int32_t>>;
+    if(!passable(zone,x,y) || !passable(zone,nx,ny))return Path{};
+    if(clear_path(zone,x,y,nx,ny))return Path{{nx,ny}};
+    if(!source_zones_.contains(zone))return Path{{nx,ny}}; // Independent fixture movement retains its collision correction.
     const auto grid_cell=[](int32_t n){return int(std::round((float(n)/1000.0f)*0x1.555556p-1f))+1024;};
-    const int sx=grid_cell(x),sy=grid_cell(y),gx=grid_cell(nx),gy=grid_cell(ny);
-    const auto key=[](int a,int b){return b*2048+a;};
-    const auto heuristic=[&](int a,int b){const int dx=std::abs(gx-a),dy=std::abs(gy-b);return 10*std::max(dx,dy)+4*std::min(dx,dy);};
-    struct Node { int cost,parent; };
-    struct Pending { int score,cost,key;bool operator<(const Pending& rhs)const{return score>rhs.score;} };
-    std::unordered_map<int,Node> visited;visited.reserve(8001);
-    std::priority_queue<Pending> open;
-    const int start=key(sx,sy),goal=key(gx,gy);visited.emplace(start,Node{0,start});open.push({heuristic(sx,sy),0,start});
-    bool found=false;
-    // Source-compatible 1000 popped-node ceiling for clicks; bots plan an errand's long walk once with a larger one.
-    for(int popped=0;!open.empty() && popped<limit;++popped) {
-        const auto current=open.top();open.pop();
-        if(visited.at(current.key).cost!=current.cost)continue;
-        if(current.key==goal){found=true;break;}
+    r=RouteSearch{};r.zone=zone;r.x=x;r.y=y;r.nx=nx;r.ny=ny;
+    r.sx=grid_cell(x);r.sy=grid_cell(y);r.gx=grid_cell(nx);r.gy=grid_cell(ny);
+    r.start=r.best=r.sy*2048+r.sx;r.goal=r.gy*2048+r.gx;
+    const int dx=std::abs(r.gx-r.sx),dy=std::abs(r.gy-r.sy);r.best_h=10*std::max(dx,dy)+4*std::min(dx,dy);
+    r.visited.reserve(8001);r.visited.emplace(r.start,std::pair{0,r.start});r.open.push({r.best_h,0,r.start});
+    return std::nullopt;
+}
+void World::route_step(RouteSearch& r,int nodes) const {
+    const auto heuristic=[&](int a,int b){const int dx=std::abs(r.gx-a),dy=std::abs(r.gy-b);return 10*std::max(dx,dy)+4*std::min(dx,dy);};
+    auto& steps=route_steps_.try_emplace(r.zone,nullptr,std::free).first->second;
+    if(!steps)steps.reset(static_cast<uint16_t*>(std::calloc(2048u*2048u,sizeof(uint16_t))));
+    if(!steps)throw std::bad_alloc();
+    for(int n=0;!r.found && !r.open.empty() && n<nodes;++n,++r.popped) {
+        const auto current=r.open.top();r.open.pop();
+        if(r.visited.at(current.key).first!=current.cost)continue;
+        if(current.key==r.goal){r.found=true;break;}
+        if(current.score-current.cost<r.best_h){r.best_h=current.score-current.cost;r.best=current.key;}
         const int cx=current.key%2048,cy=current.key/2048;
         for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx) {
             if(!dx && !dy)continue;
             const int px=cx+dx,py=cy+dy;
-            if(px<0 || py<0 || px>=2048 || py>=2048 ||
-               !clear_path(zone,(cx-1024)*1500,(cy-1024)*1500,(px-1024)*1500,(py-1024)*1500))continue;
-            const int next=key(px,py),cost=current.cost+(dx && dy?14:10);
-            const auto old=visited.find(next);if(old!=visited.end() && old->second.cost<=cost)continue;
-            visited.insert_or_assign(next,Node{cost,current.key});open.push({cost+heuristic(px,py),cost,next});
+            if(px<0 || py<0 || px>=2048 || py>=2048)continue;
+            const int d=(dy+1)*3+dx+1-(dy>0 || (dy==0 && dx>0)); uint16_t& memo=steps[current.key];
+            if(!(memo>>d&1))memo|=uint16_t((1u<<d)|(clear_path(r.zone,(cx-1024)*1500,(cy-1024)*1500,(px-1024)*1500,(py-1024)*1500)?1u<<(8+d):0u));
+            if(!(memo>>(8+d)&1))continue;
+            const int next=py*2048+px,cost=current.cost+(dx && dy?14:10);
+            const auto old=r.visited.find(next);if(old!=r.visited.end() && old->second.first<=cost)continue;
+            r.visited.insert_or_assign(next,std::pair{cost,current.key});r.open.push({cost+heuristic(px,py),cost,next});
         }
     }
-    if(!found)return {};
+    r.over=r.found || r.open.empty();
+}
+// cells: at most this many grid cells of the path are kept (smoothing is quadratic in path length); a cut path ends short of
+// the goal like a partial one.
+std::vector<std::pair<int32_t,int32_t>> World::route_finish(RouteSearch& r,bool partial,size_t cells) const {
+    if(!r.found && (!partial || r.best==r.start))return {};
+    const int goal=r.found?r.goal:r.best;int32_t x=r.x,y=r.y;
     std::vector<std::pair<int32_t,int32_t>> points;
-    for(int at=goal;at!=start;at=visited.at(at).parent)points.emplace_back((at%2048-1024)*1500,(at/2048-1024)*1500);
+    for(int at=goal;at!=r.start;at=r.visited.at(at).second)points.emplace_back((at%2048-1024)*1500,(at/2048-1024)*1500);
     // Leave via the start cell centre: the segment from an off-centre position straight to a neighbour centre can clip a
     // blocked corner cell, which made every route from such a stop point fail (players stuck, "Hedefe ulaşılamıyor.").
-    points.emplace_back((sx-1024)*1500,(sy-1024)*1500);
-    std::reverse(points.begin(),points.end());points.emplace_back(nx,ny);
+    points.emplace_back((r.sx-1024)*1500,(r.sy-1024)*1500);
+    std::reverse(points.begin(),points.end());
+    const bool whole=r.found && points.size()<=cells;if(points.size()>cells)points.resize(cells);if(whole)points.emplace_back(r.nx,r.ny);
     std::vector<std::pair<int32_t,int32_t>> smoothed;
     size_t at=0;
     while(at<points.size()) {
-        if(!clear_path(zone,x,y,points[at].first,points[at].second))return {};
+        if(!clear_path(r.zone,x,y,points[at].first,points[at].second))return {};
         size_t end=at;
-        while(end+1<points.size() && clear_path(zone,x,y,points[end+1].first,points[end+1].second))++end;
+        while(end+1<points.size() && clear_path(r.zone,x,y,points[end+1].first,points[end+1].second))++end;
         smoothed.push_back(points[end]);x=points[end].first;y=points[end].second;at=end+1;
     }
     return smoothed;
@@ -885,12 +964,13 @@ World::Npc& World::npc(uint32_t player, uint32_t target, const char* kind) {
 }
 void World::commit(const std::map<uint32_t, Json>& proposed, const Json* bank) {
     require(!bank || proposed.size() == 1, "state", "Banka işlemi tek bir karaktere ait olmalı.");
-    std::vector<CharacterSave> saves; saves.reserve(proposed.size());
+    std::vector<CharacterSave> saves; saves.reserve(proposed.size()); std::vector<Json> carry(proposed.size(), Json::array());
     for (const auto& [id,s] : proposed) {
         require(s.dump().size()<=8192,"state","Karakter verisi sınırı aşıldı.");
         require(s.at("equipment").is_object() && s.at("equipment").size()<=8,"equipment","Bütün giyim yerleri dolu.");
         const auto& a = actors_.at(id); saves.push_back({a.account_id,a.character_id,s,bank ? *bank : Json()});
         resources(saves.back().state); // every committed level/equipment change re-derives max Enerji/Kudret
+        quest_carry(saves.back().state, carry[saves.size()-1]); // collect quests count what the bag holds after any change
         persisted_visual(saves.back().state);
     }
     // Persistence is the commit point. No cache or acknowledgement changes precede it. Bot-only changes are saved by save_all()
@@ -899,6 +979,7 @@ void World::commit(const std::map<uint32_t, Json>& proposed, const Json* bank) {
     if (std::any_of(proposed.begin(),proposed.end(),[&](const auto& p){return !actors_.at(p.first).bot;}) || bank) persist_(saves);
     size_t saved=0;
     for (const auto& [id,s] : proposed) { (void)s; auto& a=actors_.at(id); a.character["state"] = std::move(saves[saved].state); a.character["state"].erase("visual"); if (bank) a.bank = std::move(saves[saved].bank); ++saved; }
+    saved=0; for (const auto& [id,s] : proposed) { (void)s; for (auto& e : carry[saved++]) emit(id,std::move(e)); }
 }
 Json& World::owned(Json& s, const std::string& uid) {
     for (auto& entry : s.at("inventory")) if (entry.at("uid") == uid) return entry;
@@ -931,15 +1012,27 @@ void World::take(Json& s, const std::string& uid, int quantity) {
     throw Rejected{"ownership","Bu eşya size ait değil."};
 }
 void World::currency(Json& s, int64_t change) const { int64_t next = s.at("currency").get<int64_t>() + change; require(next >= 0,"currency","Yeterli paranız yok."); require(next <= config_.at("currency_cap").get<int64_t>(),"currency","En fazla 999 milyon paranız olabilir."); s["currency"] = next; }
-void World::xp(Json& s, int amount) const {
+void World::xp(Json& s, int amount, Json& events) const {
     amount = int(int64_t(amount) * xp_rate_ / 100); // administrator XP rate (NONCANONICAL), 100 = unchanged
     int value = s.at("xp").get<int>() + amount, level = s.at("level"); const int before = level;
     while (level < 100 && value >= xp_needed(config_,level)) { value -= xp_needed(config_,level); ++level; }
     s["xp"] = std::min(value,10000000); s["level"] = level;
-    if (level != before) { resources(s); s["hp"] = s.at("max_hp"); s["mana"] = s.at("max_mana"); } // a level-up refills both
+    if (level == before) return;
+    resources(s); s["hp"] = s.at("max_hp"); s["mana"] = s.at("max_mana"); // a level-up refills both
+    // Guide l.938-940 (every 5 levels up to 30, then at 40) and VOD 49:45 text: reaching a free_resets level refunds the
+    // Yetenekler and Dirençler points (the budgets are derived from the level, so emptying them is the refund).
+    int reset = 0; for (const auto& v : config_.at("free_resets").at("levels")) if (v.get<int>() > before && v.get<int>() <= level) reset = std::max(reset,v.get<int>());
+    if (!reset) return;
+    s["skills"] = Json::object(); s["resistances"] = Json::object();
+    events.push_back({{"type","notice"},{"text",std::to_string(reset)+" seviye olduğunuz için yeteneklerinizi/dirençlerinizi ÜCRETSİZ sıfırlandı. Tekrar dağıtabilirsiniz!"}});
 }
+// VOD "Yeniden canlanma için N para kaybettiniz": N = 8/15/25 at levels 3/4/5 (34:20, 37:15, 52:15) is exactly
+// death_fee.quadratic c0 + c1·L + c2·L² (NONCANONICAL fit); guide/PlusPackage: Plus Paket holders lose a third.
 void World::die(uint32_t id, Json& s) const {
-    (void)id; s["hp"] = 0; s["buffs"] = Json::array(); s["currency"] = s.at("currency").get<int64_t>() * (100-config_.at("death_currency_percent").get<int>())/100;
+    const auto& q = config_.at("death_fee").at("quadratic"); const double level = s.at("level").get<int>();
+    int64_t fee = std::max<int64_t>(0,std::llround(q[0].get<double>()+q[1].get<double>()*level+q[2].get<double>()*level*level));
+    if (const auto a = actors_.find(id); a != actors_.end() && a->second.plus) fee /= config_.at("death_fee").at("plus_divisor").get<int64_t>();
+    s["hp"] = 0; s["buffs"] = Json::array(); s["currency"] = std::max<int64_t>(0,s.at("currency").get<int64_t>()-fee);
     s.erase("kabadayi"); // NONCANONICAL: death ends Kabadayı mode (the original menu has no way back)
     // helps.xml Para: every death damages the worn equipment (repair at an örs); the amount is NONCANONICAL.
     wear(s,true,item_rule(config_,"death_wear_permille")); wear(s,false,item_rule(config_,"death_wear_permille"));
@@ -1037,13 +1130,14 @@ World::Landed World::land(const Blow& b, double defense, double armor, double cr
     return r;
 }
 // Physical damage against a monster loses its classes.dat dmgred for the weapon's best attack type (K slash, D pierce, E bludgeon),
-// less a Meteorit crit's armor_break percent; Kışkırtma's defense_break takes classes.dat defense points.
+// less a Meteorit crit's armor_break percent; Kışkırtma's defense_break takes classes.dat defense points. The Savunma that meets
+// the player's Saldırı is classes.dat defense / formulas.monster_unit (the sheet unit, see the NPC bite in advance()).
 World::Landed World::land_npc(const Blow& b, const Json& d, const Json& debuffs) const {
     double armor = 0;
     if (d.contains("dmgred") && !b.types.empty()) { armor = 1; for (char t : b.types) armor = std::min(armor,d.at("dmgred").at(std::string(1,t)).get<double>()); }
     armor *= std::max(0,100-buff_sum(debuffs,"armor_break"))/100.0;
     std::array<double,5> resist{}; if (d.contains("resist")) for (size_t i = 0; i < 5; ++i) resist[i] = d.at("resist")[i].get<double>();
-    return land(b,std::max(0.0,d.value("defense",0.0)-buff_sum(debuffs,"defense_break")),armor,0,resist);
+    return land(b,std::max(0.0,d.value("defense",0.0)-buff_sum(debuffs,"defense_break"))/formulas(config_).at("monster_unit").get<double>(),armor,0,resist);
 }
 void World::resources(Json& s) const {
     const auto g = gear(s); const auto e = [&](int id) { const auto it = g.efsun.find(id); return it == g.efsun.end() ? 0.0 : it->second; };
@@ -1144,6 +1238,7 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
               if (!config_.at("quests").contains(quest) || !p.is_object()) continue;
               if (p.contains("completed") && p.at("completed") == true) { done.push_back(quest); continue; }
               Json kept{{"progress", p.contains("progress") ? p.at("progress") : Json(0)}};
+              if (p.contains("used") && p.at("used").is_object()) kept["used"] = p.at("used"); // use quests: props already credited
               if (const auto& q = config_.at("quests").at(quest); q.contains("time_limit")) kept["deadline"] = tick_ + 20 * q.at("time_limit").get<uint32_t>();
               active[quest] = std::move(kept);
           }
@@ -1174,13 +1269,14 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
         a.bank = record.value("bank",Json{{"items",Json::array()},{"currency",0}});
         require(a.bank.is_object() && a.bank.value("items",Json()).is_array(),"state","Bank invalid");
         for (auto it=a.bank["items"].begin(); it!=a.bank["items"].end();) { if (it->is_object() && it->value("item",Json()).is_string() && !config_.at("items").contains(it->at("item").get<std::string>())) it=a.bank["items"].erase(it); else ++it; }
-        require(a.bank.at("items").size() <= config_.at("economy").at("bank_slots").get<size_t>(),"state","Bank limit");
+        for (int tab = 0; tab < bank_tabs; ++tab) require(bank_tab_size(a.bank.at("items"),tab) <= config_.at("economy").at("bank_slots").get<size_t>(),"state","Bank limit");
         integer(a.bank.at("currency"),0,config_.at("currency_cap"));
         { std::set<std::string> bank_uids;
           for (const auto& entry : a.bank.at("items")) {
               const auto uid = text(entry.at("uid"),32);
               require(uid.size()==32 && std::all_of(uid.begin(),uid.end(),[](char c){return (c>='0' && c<='9') || (c>='a' && c<='f');}) && bank_uids.insert(uid).second,"state","Invalid bank uid");
               integer(entry.at("quantity"),1,config_.at("items").at(text(entry.at("item"),32)).at("stack"));
+              if (entry.contains("tab")) integer(entry.at("tab"),1,bank_tabs-1);
           } }
         // Live buffs/cooldowns expire at disconnect; no server tick is reused across restarts.
         s["buffs"] = Json::array();
@@ -1349,8 +1445,9 @@ bool World::combat(uint32_t id, uint32_t target, int damage, Json caster, Json e
             if (!proposed.contains(member)) proposed[member] = actors_.at(member).character.at("state");
             auto& reward = proposed.at(member);
             int amount = n.definition.at("xp"); if (reward.at("level").get<int>() > n.definition.value("level",1)+5) amount /= 2;
-            xp(reward,amount/static_cast<int>(recipients.size()));
-            quest_kill(reward, n.definition, quest_events[member] = Json::array());
+            auto& events = quest_events[member] = Json::array();
+            xp(reward,amount/static_cast<int>(recipients.size()),events);
+            quest_kill(reward, n.definition, events);
             // NONCANONICAL lockout: a Şef's kill credit in a group-zone copy bars re-entry to that group zone (handle "interact").
             if (const auto& z = config_.at("zones").at(n.definition.at("zone").get<std::string>()); n.definition.value("boss",false) && z.contains("instance_of"))
                 reward["lockouts"][z.at("instance_of").get<std::string>()] = int64_t(std::time(nullptr)) + config_.at("activities").at("lockout").get<int64_t>();
@@ -1563,6 +1660,8 @@ void World::engage(uint32_t id, Actor& a) {
     if ((pvp ? a.looting || !hostile(id,a.engaged) : found == npcs_.end() || (found->second.hp > 0) == a.looting || found->second.definition.at("zone") != s.at("zone")) || !close(id,a.engaged,config_.at("aoi"))) {
         a.engaged = 0; a.moving = false; a.route.clear(); return;
     }
+    // Bots never take a monster a real player has clicked or hit, even after the bot's own click (no swing, no first hit).
+    if (a.bot && !pvp && !a.looting && strikable(found->second.definition,s) && player_claim(id,a.engaged)) { a.engaged = 0; a.moving = false; a.route.clear(); return; }
     const int32_t tx = pvp ? coordinate(player->second.character.at("state"),"x") : found->second.x;
     const int32_t ty = pvp ? coordinate(player->second.character.at("state"),"y") : found->second.y;
     const Json* weapon = s.at("equipment").contains("weapon") ? &config_.at("items").at(owned(s,s.at("equipment").at("weapon")).at("item").get<std::string>()) : nullptr;
@@ -1628,6 +1727,7 @@ bool World::strike(uint32_t source, uint32_t victim, const Blow& blow, uint32_t 
     const int dodge=blow.physical>0 && active(s.at("buffs"),"defansif_dovusme") ? glyph(config_,s,"defansif_dovusme","armor_dodge") : -1;
     if(!landed.hit || (dodge>0 && random_below(10000)<uint32_t(f.armor*dodge))) { project_event(source,{{"type","combat"},{"entity",source},{"source",source},{"target",victim},{"damage",0},{"hp",s.at("hp")},{"miss",true}}); return true; }
     auto next=s; wear(next,false,item_rule(config_,"hit_wear_permille")); // NONCANONICAL: every landed hit wears the worn armour
+    actors_.at(victim).posture=0; // NONCANONICAL: a landed blow stands the victim up, ending the ×10 sitting regeneration
     int damage=landed.damage*(100+buff_sum(s.at("buffs"),"vulnerable"))/100;
     // Sarsılmaz ignores attacks; Can Kurtaran absorbs one hit above 5% of maximum health (skills.dat detail text).
     if(buff_flag(s.at("buffs"),"immune"))damage=0;
@@ -1722,7 +1822,14 @@ void World::action(uint32_t id, const Json& request) {
       catch (const std::exception&) { reject(id,"persistence","İşlem kaydedilemedi."); }
 }
 void World::moderation(uint32_t id, bool muted) { if (actors_.contains(id)) actors_.at(id).externally_muted = muted; }
-void World::entitlement(uint32_t id, bool plus) { if (actors_.contains(id)) actors_.at(id).plus = plus; }
+void World::entitlement(uint32_t id, bool plus, bool kasa) {
+    if (!actors_.contains(id)) return;
+    auto& a = actors_.at(id); a.plus = plus; a.kasa = kasa;
+    if (!kasa && a.banker == id) a.banker = 0; // a revoked Kasa Erişimi closes the remote bank
+}
+bool World::bank_reach(uint32_t id, const Actor& a) const {
+    return a.banker && (a.banker == id ? a.kasa : npcs_.contains(a.banker) && close(id,a.banker,config_.at("interaction_range")));
+}
 void World::handle(uint32_t id, const Json& request) {
     require(request.is_object() && request.dump().size() <= 8192,"request","İstek çok büyük.");
     auto& a = actor(id); require(!a.kicked,"permission","Yönetici tarafından oyundan atıldınız.");
@@ -1741,6 +1848,7 @@ void World::handle(uint32_t id, const Json& request) {
             require(close(id,t,config_.at("aoi")),"range","Hedef çok uzakta."); a.engaged = t; a.looting = false; a.dx = a.dy = 0; ack(); return;
         }
         auto& n = npc(id,t); require(n.definition.at("kind") != "enemy","target","Düşman bir hedefle etkileşime geçemezsiniz.");
+        quest_use(id,t); // Kullan/Konuş on a quest prop or NPC (W-AGL "Stokları yakmalısınız", "Şalteri indirmelisiniz", ...)
         if (n.definition.at("kind") == "anvil") { handle(id,{{"action","repair"},{"target",t}}); return; } // clicking an örs repairs (helps.xml Para)
         if (n.definition.at("kind") == "reset") { // GBM machines: right-click offers the level price; the Dikkat ✓ sends point_reset
             if (n.definition.at("reset") == "crafts") require(a.plus,"plus",gbm0b_refusal);
@@ -1751,6 +1859,12 @@ void World::handle(uint32_t id, const Json& request) {
             // ids no configured quest carries stay open (their chains were server data).
             const auto& door = n.definition.at("door");
             require(!door.value("gmonly",false) || a.admin,"permission","Bu geçit yalnızca yöneticilere açıktır.");
+            // social.guild_zones (TopkapiPage.aspx: "Yalnızca loncaların girebildiği özel bir sayfiye alanı", "Ruh taşlarını sadece
+            // Lonca'ya mensup insanların kullanabileceğini"): entering needs a lonca; leaving stays open so nobody is stranded inside
+            // after leaving their lonca. NONCANONICAL refusal text.
+            for (const auto& zone : config_.at("social").value("guild_zones",Json::array()))
+                if (zone == door.at("to"))
+                    require(a.admin || (current.contains("guild") && current.at("guild").is_object()),"guild","Lonca Merkezi'ne yalnızca bir loncaya üye olanlar girebilir.");
             if (door.contains("required_quest")) {
                 const int q = door.at("required_quest"); bool open = true;
                 for (const auto& [key,quest] : config_.at("quests").items())
@@ -1780,16 +1894,19 @@ void World::handle(uint32_t id, const Json& request) {
         const auto is = [&](const Json& configured) { const uint32_t c = configured; return t == c || (t > c && (t-c) % 65536 == 0 && npcs_.contains(c) && n.definition.at("source_uid") == npcs_.at(c).definition.at("source_uid")); };
         if (action == "quest_accept") {
             require(q.value("auto",false) ? n.definition.value("auto_quests",false) : is(q.at("giver")),"quest","Bu görevi bu kişi vermiyor.");
-            require(!s.at("quests").contains(quest) && !quest_finished(s,quest),"quest","Bu görevi zaten aldınız."); require(s.at("level").get<int>() >= q.at("level").get<int>(),"level","Bu görev için seviyeniz yetersiz.");
-            if (q.contains("requires")) require(quest_finished(s,q.at("requires").get<std::string>()),"quest","Önce bir önceki görevi tamamlamalısınız.");
+            require(!s.at("quests").contains(quest) && !quest_finished(s,quest),"quest","Bu görevi zaten aldınız.");
+            require(s.at("level").get<int>() >= q.value("min_level",q.at("level").get<int>()),"level","Bu görev için seviyeniz yetersiz."); // OFF-Q Seviye Gereksinimi
+            require(!q.contains("class") || q.at("class") == a.character.at("class_id"),"class","Bu görev sınıfınıza verilmiyor."); // W-AGL Silah Takası: "sadece Savaşçı"
+            require(quest_open(q,s),"quest","Önce bir önceki görevi tamamlamalısınız.");
             require(s.at("quests").size() < quest_active_max,"quest","Görev listeniz dolu.");
             Json p{{"progress",q.at("objective").at("kind") == "talk" ? 1 : 0}};
             if (q.contains("time_limit")) p["deadline"] = tick_ + 20 * q.at("time_limit").get<uint32_t>();
             s["quests"][quest] = std::move(p); events.push_back(quest_event(quest,"accepted"));
+            quest_carry(s,events); // items already in the bag count at once
         } else {
             require(is(q.contains("turn_in") ? q.at("turn_in") : q.at("giver")),"quest","Bu görev bu kişiye teslim edilmez.");
             require(s.at("quests").contains(quest) && s.at("quests").at(quest).at("progress").get<int>() >= quest_count(q),"quest","Görev henüz tamamlanmadı.");
-            quest_finish(s,quest,events);
+            quest_finish(s,a.character,quest,events);
         }
         commit({{id,s}}); for (auto& e : events) emit(id,std::move(e)); ack(); return;
     }
@@ -1818,7 +1935,8 @@ void World::handle(uint32_t id, const Json& request) {
         require(!buff_flag(current.at("buffs"),"immune"),"state","Sarsılmaz etkisindeyken bunu yapamazsınız.");
         const auto t = target();
         if (actors_.contains(t)) require(hostile(id,t),"target","Bu oyuncu düşmanınız değil."); // Kabadayı or enemy clan
-        else { auto found = npcs_.find(t); require(found != npcs_.end() && strikable(found->second.definition,current),"target","Bu hedefe saldıramazsınız."); require(found->second.hp > 0,"dead","Hedef ölü! Etkileşime geçemezsiniz!"); }
+        else { auto found = npcs_.find(t); require(found != npcs_.end() && strikable(found->second.definition,current),"target","Bu hedefe saldıramazsınız."); require(found->second.hp > 0,"dead","Hedef ölü! Etkileşime geçemezsiniz!");
+               require(!a.bot || !player_claim(id,t),"target","Bu hedef başka bir oyuncunun."); } // NONCANONICAL bot fairness
         require(close(id,t,config_.at("aoi")),"range","Hedef çok uzakta.");
         a.engaged = t; a.looting = false; a.dx = a.dy = 0; ack(); return;
     }
@@ -1911,7 +2029,7 @@ void World::handle(uint32_t id, const Json& request) {
         }
         if (kind == "enemy" || kind == "enemies") {
             // Hostile NPCs, and players hostile under the original relation 00478090 (Kabadayı / enemy clans).
-            const auto foe = [&](uint32_t t) { const auto found = npcs_.find(t); return actors_.contains(t) ? hostile(id,t) : found != npcs_.end() && found->second.hp > 0 && strikable(found->second.definition,current); };
+            const auto foe = [&](uint32_t t) { const auto found = npcs_.find(t); return actors_.contains(t) ? hostile(id,t) : found != npcs_.end() && found->second.hp > 0 && strikable(found->second.definition,current) && (!a.bot || !player_claim(id,t)); };
             std::vector<uint32_t> targets;
             if (kind == "enemy") {
                 const auto t = target(); require(foe(t),"target","Bir düşman seçmelisiniz."); require(close(id,t,definition.at("range")),"range","Hedef çok uzakta."); targets.push_back(t);
@@ -2050,10 +2168,16 @@ void World::handle(uint32_t id, const Json& request) {
     if (action == "resurrect") {
         require(current.at("hp").get<int>() == 0,"state","Ölü değilsiniz."); auto s = current; Json spawn = config_.at("zones").at(s.at("zone").get<std::string>()).at("spawn");
         if (tick_ < a.resurrect_ready) throw Rejected{"cooldown",std::to_string((a.resurrect_ready-tick_+19)/20)+" saniye geçmeden sadece şifacılar sizi canlandırabilir."}; // 20 Hz ticks
-        // Guide "Klan sancakları": clan members resurrect at their clan's standing banner; NONCANONICAL: the nearest, else the zone spawn.
-        int64_t nearest = INT64_MAX;
+        // Guide l.1688-1690: "en yakın güvenli bölgede (Klandaysanız klan karargahı veya klan sancağında)". NONCANONICAL safe points: the
+        // zone spawn and each Ruh Taşı arrival in this zone (original soul stones); VOD Eminönü deaths all rose at the courtyard spawn.
+        const int32_t x0 = coordinate(s,"x"), y0 = coordinate(s,"y");
+        int64_t nearest = distance(spawn[0],spawn[1],x0,y0);
+        for (const auto& [stone_id,n] : npcs_) if (n.definition.contains("door") && n.definition.at("name") == "Ruh Taşı" && n.definition.at("door").at("to") == s.at("zone"))
+            if (const auto& at = n.definition.at("door").at("arrive"); distance(at[0],at[1],x0,y0) < nearest) { nearest = distance(at[0],at[1],x0,y0); spawn = at; }
+        // Clan members rise at their clan's nearest standing banner (clan headquarters positions are unknown).
+        nearest = INT64_MAX;
         for (const auto& [banner_id,b] : npcs_) if (b.hp > 0 && b.definition.value("banner",false) && b.definition.at("zone") == s.at("zone") && b.definition.at("clan") == s.value("clan",0))
-            if (const auto d = distance(b.x,b.y,s.at("x"),s.at("y")); d < nearest) { nearest = d; spawn = {b.x,b.y}; }
+            if (const auto d = distance(b.x,b.y,x0,y0); d < nearest) { nearest = d; spawn = {b.x,b.y}; }
         require(passable(s.at("zone"),spawn[0],spawn[1]),"collision","Canlanma noktası kullanılamıyor.");
         s["x"] = spawn[0]; s["y"] = spawn[1]; s["hp"] = s.at("max_hp"); s["mana"] = s.at("max_mana");
         auto zone = current.at("zone").get<std::string>(); auto x = coordinate(current,"x"), y = coordinate(current,"y"); commit({{id,s}}); index(id,zone,x,y,false); index(id,zone,s.at("x"),s.at("y"),true); a.moving = false;a.route.clear(); a.dx = a.dy = 0; a.engaged = 0;
@@ -2240,8 +2364,11 @@ void World::handle(uint32_t id, const Json& request) {
         require(!worn(owned(s,uid)),"equipped","Giyilenler penceresi içerisinde taşıma yapamazsınız.");
         auto& inventory=s.at("inventory");std::vector<size_t> cells;size_t from=0;
         for (size_t i=0;i<inventory.size();++i) { if (inventory[i].at("uid") == uid) from=i; if (!worn(inventory[i])) cells.push_back(i); }
+        const bool slotting=to<talisman_cells && std::find(cells.begin(),cells.end(),from)-cells.begin()>=std::ptrdiff_t(talisman_cells) &&
+                            config_.at("items").at(inventory[from].at("item").get<std::string>()).contains("glyph");
         if (to < cells.size()) std::swap(inventory[from],inventory[cells[to]]);
         else { Json moved=std::move(inventory[from]); inventory.erase(inventory.begin()+std::ptrdiff_t(from)); inventory.push_back(std::move(moved)); }
+        if (slotting) s["mana"]=0; // fandom SSS: "Her tılsım taktığınızda, tılsımın ağır etkisi nedeniyle kudretiniz tükenecektir"
         commit({{id,s}});ack();return;
     }
     if (action == "guild_create" || action == "guild_invite" || action == "guild_accept" || action == "guild_leave" || action == "guild_kick" || action == "guild_donate") {
@@ -2408,17 +2535,20 @@ void World::advance() {
         // Skill regeneration: Meditasyon mana each second, İyileştirme Çemberi health every 3 seconds.
         if (tick_ % 20 == 0) if (const int regen = buff_sum(buffs,"regen")) s["mana"] = std::min(s.at("max_mana").get<int>(),s.at("mana").get<int>()+regen);
         if (tick_ % 60 == 0) if (const int hot = buff_sum(buffs,"hot")) s["hp"] = std::min(s.at("max_hp").get<int>(),s.at("hp").get<int>()+hot);
-        // Passive regeneration while not auto-attacking (VOD 14:20-14:55: "+3 enerji" every 5 s out of combat).
-        if (const auto r = config_.find("regeneration"); r != config_.end() && !a.engaged && tick_ % r->at("interval").get<uint32_t>() == 0) {
-            s["hp"] = std::min(s.at("max_hp").get<int>(), s.at("hp").get<int>() + r->at("hp").get<int>() * regen_rate_ / 100); // administrator regen rate
-            s["mana"] = std::min(s.at("max_mana").get<int>(), s.at("mana").get<int>() + r->at("mana").get<int>() * regen_rate_ / 100);
+        // Passive regeneration every interval, in combat too (VOD 14:20-14:55 "+3 enerji" every 5 s; 13:55 and 15:10 the floater
+        // shows between rat bites while the player melees). Guide l.1123-1125: a held /otur or /yat posture refills Kudret and
+        // Enerji "normalden 10 kat hızlı" (regeneration.posture_multiplier).
+        if (const auto r = config_.find("regeneration"); r != config_.end() && tick_ % r->at("interval").get<uint32_t>() == 0) {
+            const int rate = regen_rate_ * (a.posture ? r->value("posture_multiplier",1) : 1); // administrator regen rate
+            s["hp"] = std::min(s.at("max_hp").get<int>(), s.at("hp").get<int>() + r->at("hp").get<int>() * rate / 100);
+            s["mana"] = std::min(s.at("max_mana").get<int>(), s.at("mana").get<int>() + r->at("mana").get<int>() * rate / 100);
         }
         if (a.engaged) { a.posture=0; engage(id,a); } // may commit state: re-read buffs below
         if (a.gathering) gather_tick(id,a); // Toplama completes or is cancelled (move/attack/range); may commit state
         auto x=coordinate(s,"x"),y=coordinate(s,"y"); int nx=x,ny=y,step=config_.at("movement_step").get<int>()*move_percent(s.at("buffs"))/100;
         // Hareket Hızı Efsun (61): NONCANONICAL percent on the step (one prefixes.dat entry carries 2).
         if (step && (a.moving || a.dx || a.dy)) if (const auto g = gear(s); g.efsun.contains(61)) step = int(step*(100+g.efsun.at(61))/100);
-        if (tick_ % 20 == 0) quest_expiry(id,a); // "... görevinin süresi doldu!" (VOD 44:35); may commit state
+        if (tick_ % 20 == 0) quest_tick(id,a); // "... görevinin süresi doldu!" (VOD 44:35) and visit spots; may commit state
         if (!step) continue;
         const bool source=source_zones_.contains(s.at("zone").get<std::string>()), routed=a.moving;
         if (a.moving) {
@@ -2529,13 +2659,17 @@ void World::advance() {
             std::tie(gx,gy)=spot(victim);
             // NONCANONICAL Şef skills (classes.dat normalskillgroup = "cast", onhitskillgroup = "hit"; both were server skill tables).
             if(n.definition.contains("skills") && !buff_flag(n.debuffs,"silence")) boss_skills(id,n,"cast",victim);
-            // Within classes.dat attackrange the NPC stands and bites at its attackrate; it never walks onto the player.
-            const int64_t reach=n.definition.value("attack_range",config_.at("combat_range").get<int>());
+            // Within classes.dat attackrange (attackrangeremote for ranged mobs: generator "ranged_range") the NPC stands and bites at
+            // its attackrate; it never walks onto the player.
+            const int64_t reach=std::max(n.definition.value("attack_range",config_.at("combat_range").get<int>()),n.definition.value("ranged_range",0));
             if(distance(n.x,n.y,gx,gy)<=reach*reach) {
                 if(tick_<n.attack_ready)continue;
-                // classes.dat dmgmin-dmgmax, attack (vs the victim's Savunma) and criticalchance x criticalscale; physical only.
+                // classes.dat dmgmin-dmgmax, attack (vs the victim's Savunma) and criticalchance x criticalscale; physical only. classes.dat
+                // attack/damage are formulas.monster_unit × the Karakter Bilgisi unit: VOD damage taken Keme 9-12 → "-3/-5 enerji" (28:30),
+                // Yeşil Örümcek 12-15 → "-4/-5" (38:05), "Cin Dev…ç (14)" ≈ Cin Dövüşçü 85-145 → "-33" (36:50); L1 Fare 60/50 ÷3 ≈ an L1 sheet's 22/22.
                 const auto& d=n.definition; const auto& range=d.contains("damage_range")?d.at("damage_range"):Json::array({d.at("damage"),d.at("damage")});
-                Blow bite{d.value("attack",-1.0),uniform(range[0].get<double>(),range[1].get<double>()),d.contains("crit")?d.at("crit")[0].get<double>():0,d.contains("crit")?d.at("crit")[1].get<double>():2,{},""};
+                const double unit=formulas(config_).at("monster_unit"), attack=d.value("attack",-1.0);
+                Blow bite{attack<0?attack:attack/unit,uniform(range[0].get<double>(),range[1].get<double>())/unit,d.contains("crit")?d.at("crit")[0].get<double>():0,d.contains("crit")?d.at("crit")[1].get<double>():2,{},""};
                 if(!actors_.contains(victim)) hit_summon(id,victim,std::max(1,int(std::lround(bite.physical))));
                 else { const int before=actors_.at(victim).character.at("state").at("hp"); if(!strike(id,victim,bite))continue;
                     if(n.definition.contains("skills") && actors_.at(victim).character.at("state").at("hp").get<int>()<before) boss_skills(id,n,"hit",victim); }
@@ -2579,7 +2713,8 @@ Json World::state(uint32_t id) {
     for(const auto& entry:own.at("inventory"))catalog(items,entry.at("item").get<std::string>());
     // Quest catalog: the active quests here; quests offered by visible NPCs join with their entity below (budgeted).
     Json quests=Json::object();
-    for(const auto& [quest_id,progress]:own.at("quests").items()){(void)progress;const auto& quest=config_.at("quests").at(quest_id);quests[quest_id]=quest;for(const auto& v:quest.at("reward").at("items"))catalog(items,v.at("item").get<std::string>());}
+    const int own_class=a.character.at("class_id");
+    for(const auto& [quest_id,progress]:own.at("quests").items()){(void)progress;const auto& quest=config_.at("quests").at(quest_id);quests[quest_id]=quest;for(const auto& v:quest.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,own_class))catalog(items,v.at("item").get<std::string>());}
     Json result{{"self",id},{"tick",tick_},{"character",a.character},{"entities",Json::array()},{"events",Json::array()},{"catalogs",{{"items",std::move(items)},{"quests",std::move(quests)},{"skills",std::move(skills)}}}};
     if(a.admin)result["admin"]=true; // original privilege%100 gates İsim Yansıt / Yanına Işınla menu items (0041a230)
     const auto& zone=config_.at("zones").at(a.character.at("state").at("zone").get<std::string>());
@@ -2628,9 +2763,10 @@ Json World::state(uint32_t id) {
         auto& listed=result["catalogs"]["items"]; Json recipes=Json::object();
         for(const auto& r:own.at("recipes")){const auto& recipe=config_.at("recipes").at(r.get<std::string>());recipes[r.get<std::string>()]=recipe;catalog(listed,recipe.at("product").get<std::string>());for(const auto& c:recipe.at("components"))catalog(listed,c.at("item").get<std::string>());}
         result["catalogs"]["recipes"]=std::move(recipes);
-        if(a.banker && npcs_.contains(a.banker) && close(id,a.banker,config_.at("interaction_range"))) {
-            for(const auto& entry:a.bank.at("items"))catalog(listed,entry.at("item").get<std::string>());
-            result["bank"]={{"items",a.bank.at("items")},{"currency",a.bank.at("currency")},{"slots",config_.at("economy").at("bank_slots")},{"banker",a.banker}};
+        if(bank_reach(id,a)) { // only the shown tab's cells: both full tabs with their catalog entries would not fit one state frame
+            Json shown=Json::array();
+            for(const auto& entry:a.bank.at("items"))if(entry.value("tab",0)==a.bank_tab){catalog(listed,entry.at("item").get<std::string>());shown.push_back(entry);}
+            result["bank"]={{"items",std::move(shown)},{"currency",a.bank.at("currency")},{"slots",config_.at("economy").at("bank_slots")},{"tab",a.bank_tab},{"banker",a.banker}};
         }
     }
     std::vector<std::pair<int64_t,uint32_t>> visible;
@@ -2667,8 +2803,10 @@ Json World::state(uint32_t id) {
     for(const auto& [d,other]:visible) {
         (void)d;if(result["entities"].size()>=96)break; // client snapshot entity limit (dense <loc> door/node areas)
         const auto& n=npcs_.at(other);
+        if(n.definition.value("hidden",false) || (n.definition.value("rescue",false) && !n.hp))continue; // <loc> id_dummy markers stay server-side; a freed Cin has left
         const Json offered=quests_at(n,own);
-        Json entity={{"id",other},{"kind",n.definition.at("kind")},{"name",n.definition.at("name")},{"appearance",n.definition.value("appearance",Json::object())},{"equipment",Json::array()},{"source_uid",n.definition.at("source_uid")},{"source_class",n.definition.at("source_class")},{"x",n.x},{"y",n.y},{"hp",n.hp},{"max_hp",n.definition.at("hp")},{"alive",n.hp>0},{"quests",offered},{"shop",n.definition.at("shop")},{"owner",n.owner},{"looted",n.looted}};
+        Json entity={{"id",other},{"kind",n.definition.at("kind")},{"name",n.definition.at("name")},{"appearance",n.definition.value("appearance",Json::object())},{"equipment",n.definition.value("equipment",Json::array())},{"source_uid",n.definition.at("source_uid")},{"source_class",n.definition.at("source_class")},{"x",n.x},{"y",n.y},{"hp",n.hp},{"max_hp",n.definition.at("hp")},{"alive",n.hp>0},{"quests",offered},{"shop",n.definition.at("shop")},{"owner",n.owner},{"looted",n.looted}};
+        if(n.definition.at("kind")=="prop")entity["interactable"]=n.definition.value("interactable",false); // <loc> entity type 3 cursor
         if(n.definition.contains("clan"))entity["clan"]=n.definition.at("clan"); // relation 00478090 clan bits (Klan OOK / Sancak)
         if(n.definition.value("recruiter",false))entity["recruiter"]=true; // entity flag 0x20000: Klana Katıl / Klandan Ayrıl
         if(n.definition.value("no_buy",false))entity["no_buy"]=true; // entity flag +0x82&0x40: "Bu hedef, eşya satın almaz." (004344b0)
@@ -2682,7 +2820,7 @@ Json World::state(uint32_t id) {
         if(n.drop.is_array())for(const auto& v:n.drop)if(v.is_object() && v.contains("item"))add(v.at("item").get<std::string>()); // rolled Ganimet slot names/icons
         if(const auto g=n.definition.find("gather");g!=n.definition.end())for(const char* key:{"item","rare"})if(g->contains(key))add(g->at(key).get<std::string>()); // Toplandı notice names
         Json added_quests=Json::object();
-        for(const auto& quest:offered){const auto& q=quest.get_ref<const std::string&>();if(catalog_quests.contains(q) || added_quests.contains(q))continue;const auto& definition=config_.at("quests").at(q);added_quests[q]=definition;bytes+=Json(q).dump().size()+definition.dump().size()+2;for(const auto& v:definition.at("reward").at("items"))add(v.at("item").get<std::string>());}
+        for(const auto& quest:offered){const auto& q=quest.get_ref<const std::string&>();if(catalog_quests.contains(q) || added_quests.contains(q))continue;const auto& definition=config_.at("quests").at(q);added_quests[q]=definition;bytes+=Json(q).dump().size()+definition.dump().size()+2;for(const auto& v:definition.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,own_class))add(v.at("item").get<std::string>());}
         if(used+bytes>65533)continue;
         used+=bytes;result["entities"].push_back(std::move(entity));catalog_items.update(added);catalog_quests.update(added_quests);
     }
@@ -2711,9 +2849,15 @@ Json World::status() const {
     for(const auto& [id,n]:npcs_){(void)id;if(n.hp>0&&!n.master)++counts[n.definition.at("zone").get<std::string>()][2];}
     Json zones=Json::array();
     for(const auto& [name,z]:config_.at("zones").items()){const auto& c=counts[name];zones.push_back({{"zone",name},{"players",c[0]},{"bots",c[1]},{"npcs",c[2]},{"disabled",disabled_zones_.contains(z.value("instance_of",name))}});}
-    Json result{{"tick",tick_},{"tick_hz",20},{"players",online.size()},{"npcs",npcs_.size()},{"zones",zones},{"online",online},{"bots",bots()},{"trades",trades_.size()},{"groups",groups_.size()},{"logs",logs_},{"provenance",config_.at("provenance")},
+    Json result{{"tick",tick_},{"tick_hz",20},{"players",online.size()},{"npcs",npcs_.size()},{"zones",zones},{"online",online},{"trades",trades_.size()},{"groups",groups_.size()},{"logs",logs_},{"provenance",config_.at("provenance")},
                 {"rates",{{"xp_rate",xp_rate_},{"drop_rate",drop_rate_},{"regen_rate",regen_rate_}}}};
     if(config_.contains("clock"))result["clock_hour"]=clock_hour();
+    // The store rejects a status over 64 KiB (Store::world_status); 256 bot rows alone exceed it. Bot rows fill what is left
+    // after the rest and a 4 KiB margin for the server's heartbeat fields; bots_total is the whole population (per-zone counts
+    // stay complete in "zones").
+    std::size_t budget=60*1024, used=result.dump().size(); Json rows=Json::array();
+    for(auto& row:bots()){const auto size=row.dump().size()+1;if(used+size>budget)break;used+=size;rows.push_back(std::move(row));}
+    result["bots"]=std::move(rows);result["bots_total"]=bots_.size();
     return result;
 }
 double World::clock_hour() const {
@@ -2817,33 +2961,36 @@ void World::economy(uint32_t id, const std::string& action, const Json& request)
         a.moving = false; a.route.clear(); a.dx = a.dy = 0; a.engaged = 0; a.looting = false;
         project_event(id,{{"type","gather"},{"phase","start"},{"entity",id},{"source",id},{"target",t}}); return;
     }
-    if (action == "bank_open") {
-        const auto t = target_id(request.at("target")); require(npc(id,t).definition.value("banker",false),"target","Bu kişi bankacı değil");
+    if (action == "bank_open") { // a banker/Kasa NPC in range, or the player's own panel ("Kasamı Göster" 0x58ec64) with Kasa Erişimi
+        const auto t = target_id(request.at("target"));
+        if (t == id) require(a.kasa,"kasa",kasa_refusal); else require(npc(id,t).definition.value("banker",false),"target","Bu kişi bankacı değil");
         a.banker = t; ack(); return;
     }
     if (action == "bank_close") { a.banker = 0; ack(); return; }
-    require(a.banker && npcs_.contains(a.banker) && close(id,a.banker,config_.at("interaction_range")),"bank","Banka kapalı: bir bankacıyla konuşun");
+    require(bank_reach(id,a),"bank","Banka kapalı: bir bankacıyla konuşun");
+    if (action == "bank_tab") { a.bank_tab = integer(request.at("tab"),0,bank_tabs-1); ack(); return; } // ← / → (00440110/004401d0)
     // Every bank move builds the new state and bank together and commits them in one row update (Store::save_characters);
     // the cached copies change only after that succeeds, so a repeated or failed request can never duplicate anything.
     Json bank = a.bank; auto& vault = bank["items"];
-    const auto plain = [](const Json& entry) { return entry.size() == 3; }; // {uid,item,quantity}: no durability/prefix instance data
+    const auto plain = [](const Json& entry) { return entry.size() - entry.contains("tab") == 3; }; // {uid,item,quantity[,tab]}: no durability/prefix instance data
     if (action == "bank_deposit") {
-        const auto uid = text(request.at("uid"),32); const int quantity = integer(request.at("quantity"),1,1000);
+        const auto uid = text(request.at("uid"),32); const int quantity = integer(request.at("quantity"),1,1000), tab = integer(request.value("tab",Json(0)),0,bank_tabs-1);
         for (const auto& [slot,worn] : s.at("equipment").items()) { (void)slot; require(worn != uid,"equipped","Giyilen bir eşyayı çıkarmadan bankaya koyamazsınız!"); } // 0x591a8c
         Json entry = owned(s,uid); const auto item = entry.at("item").get<std::string>(); const int stack = config_.at("items").at(item).at("stack"), had = entry.at("quantity");
         take(s,uid,quantity); int left = quantity;
-        if (plain(entry)) for (auto& slot : vault) if (plain(slot) && slot.at("item") == item && left) { const int add = std::min(left,stack-slot.at("quantity").get<int>()); slot["quantity"] = slot.at("quantity").get<int>()+add; left -= add; }
+        if (plain(entry)) for (auto& slot : vault) if (plain(slot) && slot.at("item") == item && slot.value("tab",0) == tab && left) { const int add = std::min(left,stack-slot.at("quantity").get<int>()); slot["quantity"] = slot.at("quantity").get<int>()+add; left -= add; }
         if (left) { // a whole, unstacked entry keeps its uid; split remainders get a fresh one
-            require(vault.size() < economy.at("bank_slots").get<size_t>(),"bank","Banka dolu");
+            require(bank_tab_size(vault,tab) < economy.at("bank_slots").get<size_t>(),"bank","Banka dolu");
             if (left != had) entry["uid"] = new_uid();
-            entry["quantity"] = left; vault.push_back(std::move(entry));
+            entry["quantity"] = left; if (tab) entry["tab"] = tab;
+            vault.push_back(std::move(entry));
         }
     } else if (action == "bank_withdraw") {
         const auto uid = text(request.at("uid"),32); const int quantity = integer(request.at("quantity"),1,1000);
         const auto found = std::find_if(vault.begin(),vault.end(),[&](const Json& entry){ return entry.at("uid") == uid; });
         require(found != vault.end(),"ownership","Eşya bankanızda değil"); const int count = found->at("quantity"); require(count >= quantity,"quantity","Yeterli eşyanız yok.");
         if (plain(*found)) give(s,found->at("item").get<std::string>(),quantity);
-        else { require(quantity == count,"quantity","Bu eşya bölünemez; tamamını taşıyın."); require(s.at("inventory").size() < config_.at("inventory_slots").get<size_t>(),"inventory","Çantanızda yer yok!!"); s["inventory"].push_back(*found); }
+        else { require(quantity == count,"quantity","Bu eşya bölünemez; tamamını taşıyın."); require(s.at("inventory").size() < config_.at("inventory_slots").get<size_t>(),"inventory","Çantanızda yer yok!!"); s["inventory"].push_back(*found); s["inventory"].back().erase("tab"); }
         if (count == quantity) vault.erase(found); else (*found)["quantity"] = count-quantity;
     } else if (action == "bank_currency") { // NONCANONICAL: Help_Bank shows no money field; positive deposits, negative withdraws.
         const int amount = integer(request.at("amount"),-config_.at("currency_cap").get<int>(),config_.at("currency_cap").get<int>()); require(amount != 0,"request","Miktar girmelisiniz.");
@@ -2876,20 +3023,34 @@ void World::gather_tick(uint32_t id, Actor& a) {
 }
 }
 namespace ikv {
-// ---- Quests (rows 7, 18). VOD 08:16-52:30 chat (all yellow system lines): "Yeni bir görev aldınız.", "<ad> [<seviye>] : (n/10)"
-// (also a red floater over the player, 24:30), "... görevini teslim edebilirsiniz!", "... görevini bitirdiniz!" followed by
-// the NPC's completion text, "... görevinin süresi doldu!". Objectives, texts, timers and rewards were server data: the
-// generated quests are NONCANONICAL. Auto quests ("otomatik gelen görevler", exe 0x592f88) follow their prerequisite at
-// once; a deleted one is offered again only by the auto_quests NPC (GB-Anı in Mısır Çarşısı).
+// ---- Quests (rows 7, 18; wave 11). VOD 08:16-52:30 chat (all yellow system lines): "Yeni bir görev aldınız.", "<ad> [<seviye>] :
+// (n/10)" (also a red floater over the player, 24:30), "... görevini teslim edebilirsiniz!", "... görevini bitirdiniz!" followed by
+// the NPC's completion text, "... görevinin süresi doldu!". The chains, prerequisites, levels, timers and most texts/rewards are
+// the original ones (tools/data/quests_original.json, provenance per quest); the server rules below stay NONCANONICAL. Auto
+// quests ("otomatik gelen görevler", exe 0x592f88) follow their prerequisite at once; a deleted one is offered again only by the
+// auto_quests NPC (GB-Anı in Mısır Çarşısı).
 bool World::quest_done(const Json& s, int source_quest_id) const {
     for (const auto& [id, q] : config_.at("quests").items()) if (q.value("source_quest_id", -1) == source_quest_id && quest_finished(s, id)) return true;
     return false;
 }
+bool World::quest_open(const Json& q, const Json& s) const { // every prerequisite done (OFF-Q "Görev Gereksinimi")
+    if (q.contains("requires") && !quest_finished(s, q.at("requires").get<std::string>())) return false;
+    if (q.contains("requires_also")) for (const auto& r : q.at("requires_also")) if (!quest_finished(s, r.get<std::string>())) return false;
+    return true;
+}
+// Konuş lists the NPC's taken quests ("Alınmış görevler") and the ones whose prerequisites are done ("alınabilecek görevler",
+// guide l.1018-1037); the level and class rules answer at Görev al. GB-Anı lists the deleted auto quests.
 Json World::quests_at(const Npc& n, const Json& s) const {
-    if (!n.definition.value("auto_quests", false)) return n.definition.at("quests");
     Json list = Json::array();
+    if (!n.definition.value("auto_quests", false)) {
+        for (const auto& quest : n.definition.at("quests")) {
+            const auto& id = quest.get_ref<const std::string&>(); const auto& q = config_.at("quests").at(id);
+            if (s.at("quests").contains(id) || (!q.value("auto", false) && !quest_finished(s, id) && quest_open(q, s))) list.push_back(quest);
+        }
+        return list;
+    }
     for (const auto& [id, q] : config_.at("quests").items())
-        if (q.value("auto", false) && !s.at("quests").contains(id) && !quest_finished(s, id) && quest_finished(s, q.at("requires").get<std::string>()) &&
+        if (q.value("auto", false) && !s.at("quests").contains(id) && !quest_finished(s, id) && quest_open(q, s) &&
             q.at("level").get<int>() <= s.at("level").get<int>() && list.size() < 16) list.push_back(id);
     return list;
 }
@@ -2899,52 +3060,130 @@ Json World::quest_event(const std::string& quest, const char* stage, int progres
     if (std::string_view(stage) == "completed" && q.contains("complete_text")) e["text"] = q.at("complete_text");
     return e;
 }
+// One step of progress (kill, use, visit) with its "(n/m)" and "teslim edebilirsiniz" lines.
+void World::quest_step(Json& s, const std::string& quest, int now, Json& events) const {
+    auto& p = s["quests"][quest]; const int count = quest_count(config_.at("quests").at(quest));
+    now = std::min(now, count); if (now == p.at("progress").get<int>()) return;
+    p["progress"] = now; events.push_back(quest_event(quest, "progress", now));
+    if (now == count) events.push_back(quest_event(quest, "ready", now));
+}
+// Kill credit (shared by the group, guide l.1275-1280: "yaratık öldürme görevleri ortaktır"); a collect quest's monster drops
+// its item straight into the bag while the quest is active (the bag count is the progress, quest_carry), and so does an 'also'
+// item's own "target" family (Islah: Akrep Gözü from scorpions, Örümcek Ağı from spiders).
 void World::quest_kill(Json& s, const Json& enemy, Json& events) {
-    for (auto& [quest, p] : s.at("quests").items()) {
-        const auto& q = config_.at("quests").at(quest); const auto& objective = q.at("objective");
-        if (objective.at("kind") == "talk" || objective.at("target") != enemy.value("template", Json())) continue;
-        const int count = quest_count(q), before = p.at("progress");
-        int now = std::min(before + 1, count);
-        if (objective.at("kind") == "collect") { // the quest item drops straight into the bag while the quest is active
-            try { give(s, objective.at("item").get<std::string>(), 1); } catch (const Rejected&) { continue; } // full bag: no drop
-            now = std::min(carried(s, objective.at("item")), count);
+    std::vector<std::string> active; for (const auto& [quest, p] : s.at("quests").items()) { (void)p; active.push_back(quest); }
+    const auto drop = [&](const Json& from, const Json& item, int count) { // full bag: no drop
+        if (from.contains("target") && from.at("target") == enemy.value("template", Json()) && carried(s, item) < count) { try { give(s, item.get<std::string>(), 1); } catch (const Rejected&) {} }
+    };
+    for (const auto& quest : active) {
+        const auto& objective = config_.at("quests").at(quest).at("objective");
+        if (objective.at("kind") == "kill") { if (objective.at("target") == enemy.value("template", Json())) quest_step(s, quest, s.at("quests").at(quest).at("progress").get<int>() + 1, events); }
+        else if (objective.at("kind") == "collect") {
+            drop(objective, objective.at("item"), quest_count(config_.at("quests").at(quest)));
+            if (objective.contains("also")) for (const auto& v : objective.at("also")) drop(v, v.at("item"), v.at("count"));
         }
-        if (now == before) continue;
-        p["progress"] = now; events.push_back(quest_event(quest, "progress", now));
-        if (now == count) events.push_back(quest_event(quest, "ready", now));
     }
 }
-void World::quest_finish(Json& s, const std::string& quest, Json& events) {
+// Collect progress follows the bag ("... çantanızdayken ... konuşmalısınız"): refreshed on every committed state change.
+void World::quest_carry(Json& s, Json& events) const {
+    std::vector<std::string> active; for (const auto& [quest, p] : s.at("quests").items()) { (void)p; active.push_back(quest); }
+    for (const auto& quest : active) {
+        const auto& objective = config_.at("quests").at(quest).at("objective");
+        if (objective.at("kind") != "collect") continue;
+        int have = carried(s, objective.at("item"));
+        if (objective.contains("also")) for (const auto& v : objective.at("also")) if (carried(s, v.at("item")) < v.at("count").get<int>()) have = std::min(have, objective.at("count").get<int>() - 1);
+        quest_step(s, quest, have, events);
+    }
+}
+// Kullan/Konuş on a quest prop or NPC (Stoklar, Şalter, Zarf, Gramofon, Kafes, Sandık, Kitabe ...): any NPC carrying a configured
+// target's classes.dat uid (instanced zone copies, every trapped Cin of a rescue group). NONCANONICAL: a count>1 objective credits each prop instance once
+// ("used", Kurtarıcımız: 20 different trapped Cin), or once per objective "cooldown" seconds when the text repeats one prop
+// (Kadim İşçilik: 10 Antik Mızrak from the two Silahlık). A freed "rescue" NPC leaves until its respawn.
+void World::quest_use(uint32_t id, uint32_t target) {
+    auto& a = actor(id); Json s, events = Json::array(); const auto now = int64_t(std::time(nullptr)); const auto key = std::to_string(target);
+    if (npcs_.at(target).definition.value("rescue", false) && !npcs_.at(target).hp) return; // already freed by someone else
+    for (const auto& [quest, p] : a.character.at("state").at("quests").items()) {
+        const auto& objective = config_.at("quests").at(quest).at("objective");
+        if (objective.at("kind") != "use" || p.at("progress").get<int>() >= objective.at("count").get<int>()) continue;
+        const auto uid = npcs_.at(target).definition.value("source_uid", Json());
+        const bool hit = std::any_of(objective.at("targets").begin(), objective.at("targets").end(), [&](const Json& c) {
+            return c == target || (!uid.is_null() && npcs_.at(c.get<uint32_t>()).definition.value("source_uid", Json()) == uid); });
+        if (!hit) continue;
+        const bool repeat = objective.at("count").get<int>() > 1;
+        if (repeat && p.contains("used") && p.at("used").contains(key) &&
+            (!objective.contains("cooldown") || now - p.at("used").at(key).get<int64_t>() < objective.at("cooldown").get<int64_t>())) continue;
+        if (s.is_null()) s = a.character.at("state");
+        if (repeat) s["quests"][quest]["used"][key] = now;
+        quest_step(s, quest, p.at("progress").get<int>() + 1, events);
+    }
+    if (s.is_null()) return;
+    commit({{id, s}}); for (auto& e : events) emit(id, std::move(e));
+    if (auto& n = npcs_.at(target); n.definition.value("rescue", false)) { n.hp = 0; n.respawn_at = tick_ + n.definition.at("respawn").get<uint32_t>(); }
+}
+void World::quest_finish(Json& s, const Json& character, const std::string& quest, Json& events) {
     const auto& q = config_.at("quests").at(quest); const auto& objective = q.at("objective");
-    if (objective.at("kind") == "collect") { // hand the collected items over
-        int left = quest_count(q);
-        require(carried(s, objective.at("item")) >= left, "quest", "Görev eşyaları eksik.");
+    const auto hand_over = [&](const Json& item, int left) {
+        require(carried(s, item) >= left, "quest", "Görev eşyaları eksik.");
         for (size_t i = s.at("inventory").size(); i-- > 0 && left;) {
             const auto entry = s.at("inventory")[i];
-            if (entry.at("item") != objective.at("item")) continue;
+            if (entry.at("item") != item || worn(s, entry)) continue;
             const int n = std::min(left, entry.at("quantity").get<int>()); take(s, entry.at("uid"), n); left -= n;
         }
-    }
+    };
+    if (objective.at("kind") == "collect") { hand_over(objective.at("item"), objective.at("count")); if (objective.contains("also")) for (const auto& v : objective.at("also")) hand_over(v.at("item"), v.at("count")); }
     int reward_xp = q.at("reward").at("xp"); if (s.at("level").get<int>() > q.at("level").get<int>() + 5) reward_xp /= 2;
-    xp(s, reward_xp); currency(s, q.at("reward").at("currency"));
-    for (const auto& item : q.at("reward").at("items")) give(s, item.at("item"), item.at("quantity"));
+    xp(s, reward_xp, events); currency(s, q.at("reward").at("currency"));
+    // W-REW lists one reward line per class: each item is handed out as the variant (same name) this character's class and sex
+    // can wear, and a class-limited prefix moves to its same-name sibling; another class's weapon is not given.
+    const int cls = character.at("class_id").get<int>() - 1, sex = character.value("appearance", Json::object()).value("sex", 1);
+    const auto& catalog = config_.at("items"); const auto fits = [&](const Json& d) { return (!d.contains("class") || d.at("class") == cls) && (!d.contains("sex") || d.at("sex") == sex); };
+    for (const auto& reward : q.at("reward").at("items")) {
+        if (reward.contains("classes") && std::find(reward.at("classes").begin(), reward.at("classes").end(), Json(cls + 1)) == reward.at("classes").end()) continue; // another class page's line
+        std::string item = reward.at("item");
+        if (!fits(catalog.at(item))) { item.clear(); for (const auto& [other, d] : catalog.items()) if (d.contains("slot") && d.at("name") == catalog.at(reward.at("item").get<std::string>()).at("name") && fits(d)) { item = other; break; } }
+        if (item.empty()) continue;
+        Json instance = Json::object();
+        if (reward.contains("prefixes")) {
+            instance["prefixes"] = Json::array();
+            for (const auto& pid : reward.at("prefixes")) {
+                std::string chosen = std::to_string(pid.get<int>()); const auto& want = config_.at("prefixes").at(chosen);
+                if (want.contains("class") && want.at("class") != cls) for (const auto& [other, p] : config_.at("prefixes").items()) if (p.at("name") == want.at("name") && p.at("index") == want.at("index") && (!p.contains("class") || p.at("class") == cls)) { chosen = other; break; }
+                instance["prefixes"].push_back(std::stoi(chosen));
+            }
+        }
+        give(s, item, reward.at("quantity"), instance);
+    }
     s["quests"].erase(quest);
     auto& done = s["quests_done"]; done.insert(std::lower_bound(done.begin(), done.end(), Json(quest)), quest);
     events.push_back(quest_event(quest, "completed", quest_count(q)));
+    if (events.back().contains("text")) { // VOD 09:20 "Al bakalım büyücü kardeşim": the NPC names the class
+        static constexpr const char* classes[] = {"savaşçı", "büyücü", "şifacı"}; auto text = events.back().at("text").get<std::string>();
+        if (const auto at = text.find("{sınıf}"); at != std::string::npos) { text.replace(at, std::string("{sınıf}").size(), classes[std::clamp(cls, 0, 2)]); events.back()["text"] = text; }
+    }
     for (const auto& [id, next] : config_.at("quests").items()) // auto follow-ups arrive at once (VOD 50:25)
-        if (next.value("auto", false) && next.at("requires") == quest && !s.at("quests").contains(id) && !quest_finished(s, id) && s.at("quests").size() < quest_active_max) {
+        if (next.value("auto", false) && next.at("requires") == quest && quest_open(next, s) && !s.at("quests").contains(id) && !quest_finished(s, id) && s.at("quests").size() < quest_active_max) {
             Json p{{"progress", next.at("objective").at("kind") == "talk" ? 1 : 0}};
             if (next.contains("time_limit")) p["deadline"] = tick_ + 20 * next.at("time_limit").get<uint32_t>();
             s["quests"][id] = std::move(p); events.push_back(quest_event(id, "accepted"));
         }
 }
-void World::quest_expiry(uint32_t id, Actor& a) {
+// Once a second: timed quests run out ("Zamanlı sınırlamalı görevlerde ... görev otomatik olarak listenizden silinir", guide
+// l.1039-1040) and visit objectives complete inside their spot ("Krateri keşfetmelisiniz", <loc> questtrigger*/quest_NNN_finish).
+void World::quest_tick(uint32_t id, Actor& a) {
     const auto& current = a.character.at("state"); Json s, events = Json::array();
-    for (const auto& [quest, p] : current.at("quests").items())
+    const auto zone = config_.at("zones").at(current.at("zone").get<std::string>()).value("instance_of", current.at("zone").get<std::string>());
+    for (const auto& [quest, p] : current.at("quests").items()) {
+        const auto& objective = config_.at("quests").at(quest).at("objective");
         if (p.contains("deadline") && p.at("deadline").get<uint32_t>() <= tick_) {
             if (s.is_null()) s = current;
             s["quests"].erase(quest); events.push_back(quest_event(quest, "expired"));
+        } else if (objective.at("kind") == "visit" && p.at("progress") == 0 && objective.at("zone") == zone) {
+            const int64_t dx = int64_t(current.at("x").get<int32_t>()) - objective.at("x").get<int32_t>(), dy = int64_t(current.at("y").get<int32_t>()) - objective.at("y").get<int32_t>();
+            if (dx * dx + dy * dy > objective.at("radius").get<int64_t>() * objective.at("radius").get<int64_t>()) continue;
+            if (s.is_null()) s = current;
+            quest_step(s, quest, 1, events);
         }
+    }
     if (s.is_null()) return;
     try { commit({{id, s}}); } catch (const std::exception&) { return; } // retried next second
     for (auto& e : events) emit(id, std::move(e));

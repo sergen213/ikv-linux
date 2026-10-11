@@ -1114,16 +1114,17 @@ private:
         const auto kind=subject->value("kind",std::string{});
         // 0041a230 offers nothing on a hostile (00478090 == 1) or a <loc>: attacking and looting are clicks on the body or the Ganimet sack.
         if (player) {
-            if (session_ && target_==session_->self) { // 0041a230 self: PRVL Gruptan Çık in a group, else MDBK Kabadayı Moduna Geç; privileged SNAY
+            if (session_ && target_==session_->self) { // 0041a230 self: PRVL Gruptan Çık in a group, else MDBK Kabadayı Moduna Geç; BANK; privileged SNAY
                 if (!group_members_.empty()) items.emplace_back("Gruptan Çık",nullptr,"group-leave");
                 else if (!st.value("kabadayi",false)) items.emplace_back("Kabadayı Moduna Geç",nullptr,"kabadayi");
+                items.emplace_back("Kasamı Göster",nullptr,"bank-open"); // 0x58ec64 'BANK', always listed; the server checks Kasa Erişimi (guide l.875-878)
                 if (state_.value("admin",false)) items.emplace_back("İsim Yansıt",nullptr,"reflect:"+std::to_string(target_));
             } else player_items(items,target_,false);
         } else if (kind!="enemy" && relation(*subject)!=1) { // 0041a230 NPC branch: TALK (+0x80&0x50), BANK (+0x81&0x10), DART traders, clan items
             if (kind=="node") items.emplace_back("Topla",target_action("gather"),""); // Toplama node (classes.dat <loc> maden*)
             else if (kind=="anvil") items.emplace_back("Tamir et",target_action("repair"),""); // örs (helps.xml Para: sağ tık ile tamir)
-            else if (kind=="reset") items.emplace_back("Kullan",target_action("interact"),""); // GBM-0 / GBM 0-B (guide: sağ tuşla etkileşerek); label NONCANONICAL
-            else if (kind!="door" && kind!="summon" && kind!="trap") items.emplace_back("Konuş",target_action("interact"),"");
+            else if (kind=="reset" || (kind=="prop" && subject->value("interactable",false))) items.emplace_back("Kullan",target_action("interact"),""); // GBM-0 / GBM 0-B (guide: sağ tuşla etkileşerek), <loc> quest props; label NONCANONICAL
+            else if (kind!="door" && kind!="summon" && kind!="trap" && kind!="prop") items.emplace_back("Konuş",target_action("interact"),"");
             if (subject->value("banker",false)) items.emplace_back("Kasamı göster",nullptr,"bank-open");
             if (kind=="merchant") items.emplace_back("Alışveriş Başlat",nullptr,"vendor");
             if (subject->value("recruiter",false)) { // claninviter (flag 0x20000): Klana Katıl while clanless, Klandan Ayrıl on its own clan
@@ -1470,6 +1471,8 @@ private:
         const auto& items=state_.at("catalogs").at("items"); const auto found=items.find(item);
         return found==items.end()?nullptr:&*found;
     }
+    // The shown Banka tab (original page 0x611454): the server sends only that tab's cells ("bank" "tab").
+    int bank_tab() const { const auto b=state_.find("bank"); return b!=state_.end() && b->is_object()?b->value("tab",0):0; }
     const Json* bank_item(const std::string& uid) const {
         if (state_.contains("bank") && state_.at("bank").is_object()) for (const auto& e:state_.at("bank").value("items",Json::array())) if (e.value("uid",std::string{})==uid) return &e;
         return nullptr;
@@ -1555,7 +1558,7 @@ private:
             break;
         case win_bank:
             if (!worn.empty()) notice("Giyilen bir eşyayı çıkarmadan bankaya koyamazsınız!"); // 0x591a8c
-            else if (!banked) send(Json{{"action","bank_deposit"},{"uid",uid},{"quantity",quantity}});
+            else if (!banked) send(Json{{"action","bank_deposit"},{"uid",uid},{"quantity",quantity},{"tab",bank_tab()}});
             break;
         case win_vendor: sell_item(uid,banked); break;
         case win_trade: { // 004344b0 → own cell 16+34c,27+34r (0043b8e0)
@@ -1853,15 +1856,24 @@ private:
         std::string goal=quest.value("objective_text",std::string{});
         if (quest_done(st,id)) goal+=" (tamamlandı)";
         else if (progress.is_object()) {
-            if (objective.value("kind",std::string{})!="talk") goal+=" ("+std::to_string(progress.value("progress",0))+"/"+std::to_string(objective.value("count",0))+")";
+            const auto kind=objective.value("kind",std::string{}); // talk/visit are one step; kill/collect/use count (n/m)
+            if (kind!="talk" && kind!="visit") goal+=" ("+std::to_string(progress.value("progress",0))+"/"+std::to_string(objective.value("count",0))+")";
             if (progress.contains("deadline")) { // NONCANONICAL countdown for timed quests (VOD 44:35 "görevinin süresi doldu!")
                 const auto left=(std::max<std::int64_t>(0,progress.value("deadline",0ll)-state_.value("tick",0ll))+19)/20;
                 goal+="\nKalan süre: "+std::to_string(left/60)+":"+(left%60<10?"0":"")+std::to_string(left%60);
             }
         }
         // The original window shows no reward line (server-only rule); the native reward is listed so it is visible before accepting.
+        // A reward lists every class's line (W-REW): another class's weapon (class limit, no sex variants) is not shown; armour is
+        // handed out as this character's class/sex variant of the same name.
         std::string prize="Ödül: "+std::to_string(reward.value("xp",0))+" tecrübe, "+std::to_string(reward.value("currency",0))+" para";
-        for (const auto& item:reward.value("items",Json::array())) prize+=", "+std::to_string(item.value("quantity",1))+" "+item_name(state_,item.value("item",std::string{}));
+        const int own_class=state_.at("character").value("class_id",0);
+        for (const auto& item:reward.value("items",Json::array())) {
+            const Json* d=item_def(item.value("item",std::string{}));
+            if (!d || (d->contains("class") && !d->contains("sex") && d->at("class").get<int>()+1!=own_class)) continue; // the server sends own-class lines only
+            if (item.contains("classes") && std::ranges::find(item.at("classes"),Json(own_class))==item.at("classes").end()) continue; // W-REW line of another class page
+            prize+=", "+std::to_string(item.value("quantity",1))+" "+item_name(state_,item.value("item",std::string{}));
+        }
         const std::array<std::pair<std::string,Rgba>,4> sections{{{quest.value("name",id)+" ["+std::to_string(quest.value("level",1))+"]",quest_title_rgba},
             {"Yapman gerekenler\n\n"+goal,white_rgba},{"Açıklama\n\n"+quest.value("description",std::string{}),white_rgba},{prize,dim_rgba}}};
         for (const auto& [text,color]:sections) {
@@ -1884,8 +1896,9 @@ private:
             if (!quest.is_string() || !quest_catalog().contains(quest.get<std::string>())) continue;
             const auto& id=quest.get_ref<const std::string&>(); const auto& q=quest_catalog().at(id);
             const bool active=st.contains("quests") && st.at("quests").contains(id);
-            const bool accept=!active && !quest_done(st,id) && (!q.contains("requires") || !q.at("requires").is_string() || quest_done(st,q.at("requires").get<std::string>())) &&
-                q.value("auto",false)!=is(q.value("giver",Json()));
+            bool open=!q.contains("requires") || !q.at("requires").is_string() || quest_done(st,q.at("requires").get<std::string>());
+            for (const auto& also:q.value("requires_also",Json::array())) open=open && also.is_string() && quest_done(st,also.get<std::string>());
+            const bool accept=!active && !quest_done(st,id) && open && q.value("auto",false)!=is(q.value("giver",Json()));
             if (accept || (active && is(q.contains("turn_in")?q.at("turn_in"):q.value("giver",Json())))) pages.push_back(id);
         }
         return pages;
@@ -1934,6 +1947,7 @@ private:
         if (!npc) { dialogue_=nullptr; return; } // the NPC left view
         const auto quests=dialogue_quests(dialogue_.value("quests",Json::array()),target,st);
         const int pages=1+static_cast<int>(quests.size());
+        if (dialogue_page_<0) dialogue_page_=quests.empty()?0:1; // the event's frame can precede the first applied state_
         dialogue_page_=std::clamp(dialogue_page_,0,pages-1);
         const int w=S(213),x=(width_-w)/2,y=S(140),tab=S(14),width=w-S(14);
         const int px=ui_->pixel_size(); ui_->set_pixel_size(small_px());
@@ -2103,7 +2117,7 @@ private:
                 action_row("Kullan",nullptr,"item-use");
                 action_row("Sat",nullptr,"item-sell");
                 if (selected->value("quantity",1)>1) action_row("Böl",nullptr,"item-split");
-                if (is_open(win_bank)) action_row("Bankaya koy",Json{{"action","bank_deposit"},{"uid",selected_uid_},{"quantity",selected->value("quantity",1)}});
+                if (is_open(win_bank)) action_row("Bankaya koy",Json{{"action","bank_deposit"},{"uid",selected_uid_},{"quantity",selected->value("quantity",1)},{"tab",bank_tab()}});
                 const bool offered=std::any_of(trade_items_.begin(),trade_items_.end(),[&](const auto& i){return i.at("uid")==selected_uid_;});
                 action_row(offered?"Takastan çıkar":"Takasa ekle",nullptr,"offer-item");
             }
@@ -2189,15 +2203,19 @@ private:
         hits_.push_back({x+S(146),y+S(312),S(23),S(24),nullptr,-1,"craft-forget"}); // trash: Seçili reçeteyi hafızamdan sil
         hits_.push_back({x+S(185),y+S(312),S(23),S(24),nullptr,-1,"craft-make"});   // anvil: Seçili reçetedekini üret
     }
-    // Original Banka window (UI2 233,720 290x298, 8x8 cells; Help_Bank.dds "Banka", title "Banka 1" 0x5928f8). The money
-    // strip below is NONCANONICAL (the original window has none).
+    // Original Banka window (UI2 233,720 290x298, 8x8 cells; Help_Bank.dds "Banka"). Two tabs ("Kasanız iki sekmeden
+    // oluşmaktadır", guide l.880): 00441950 places the ← (95,4) / → (112,4) 16-px arrows, 00440110/004401d0 step the page
+    // 0x611454 within 0..1 and retitle "Banka %d"; 0043f330 shows bank cells page·64..page·64+63. The money strip below is
+    // NONCANONICAL (the original window has none).
     void paint_bank(int x,int y,int h,const Json& st) {
         const float fx=static_cast<float>(x),fy=static_cast<float>(y);
         ui_atlas(original_ui2_,fx,fy,0,0,290,298,233,720,290,298);
         hits_.push_back({x,y,S(290),S(298),nullptr,-1,{}});
         hits_.push_back({x+S(268),y+S(2),S(20),S(20),nullptr,win_bank,{}});
+        hits_.push_back({x+S(95),y+S(4),S(16),S(16),nullptr,-1,"bank-tab:-"});
+        hits_.push_back({x+S(112),y+S(4),S(16),S(16),nullptr,-1,"bank-tab:+"});
         window_rects_.push_back({win_bank,{x,y,S(290),h}});
-        label(x+S(19),y+S(14)-lh()/2,"Banka 1",gold_rgba);
+        label(x+S(19),y+S(14)-lh()/2,"Banka "+std::to_string(bank_tab()+1),gold_rgba);
         const Json bank=state_.value("bank",Json());
         if (!bank.is_object()) {
             paragraph(x+S(24),y+S(40),S(240),y+S(290),"Banka kapalı. Bir Bankacıya sağ tıklayıp İşlemler → Kasamı göster seçin.",white_rgba);
@@ -2655,7 +2673,8 @@ private:
         if (const Json* e=session_ && id!=session_->self?entity(id):nullptr) {
             const auto k=e->value("kind",std::string{});
             if (k!="player" && relation(*e)==1) kind=e->value("alive",true)?cursor_attack:!e->value("looted",true) && e->value("owner",0u)==session_->self?cursor_grab:cursor_point;
-            else if (k=="door" || k=="reset" || k=="anvil" || k=="node") kind=cursor_interact; // classes.dat <loc>: entity type 3 (004b6970)
+            else if (k=="door" || k=="reset" || k=="anvil" || k=="node" || (k=="prop" && e->value("interactable",false))) kind=cursor_interact; // classes.dat <loc>: entity type 3 (004b6970)
+            else if (k=="prop") kind=cursor_point; // non-interactable prop (flag, bird, fan)
             else if (k!="player" && k!="summon" && k!="enemy") kind=cursor_talk; // an own-clan banner gets the plain cursor
         }
         if (kind==cursor_ || !cursors_[static_cast<std::size_t>(kind)]) return;
@@ -2840,12 +2859,14 @@ private:
                 actor->binding.at("equipment")==equipment && actor->source_class==source_class &&
                 actor->binding.at("uid")==data.value("source_uid",0u)) continue;
             ModelChange change; change.data=row; change.member=std::move(member); change.source.source_class=source_class;
-            if (pc && change.member.empty()) {
+            if (change.member.empty()) {
                 auto& source=change.source;
-                source.face=appearance.value("face",0u); source.hair=appearance.value("hair",0u);
-                source.hair_color=appearance.value("hair_color",0u); source.beard=appearance.value("beard",0u);
-                source.beard_color=appearance.value("beard_color",0u);
-                source.equipment.reserve(equipment.size());
+                if (pc) {
+                    source.face=appearance.value("face",0u); source.hair=appearance.value("hair",0u);
+                    source.hair_color=appearance.value("hair_color",0u); source.beard=appearance.value("beard",0u);
+                    source.beard_color=appearance.value("beard_color",0u);
+                }
+                source.equipment.reserve(equipment.size()); // NPCs: classes.dat rhweaponid/lhweaponid, server-sent like a PC's
                 for (const auto& item:equipment) source.equipment.push_back({item.at("slot").get<unsigned>(),item.at("source_uid").get<unsigned>()});
             }
             if (changes.empty()) changes.reserve(mutation.actors.size());
@@ -2865,7 +2886,7 @@ private:
                 const auto uid=change.data->value("source_uid",0u);
                 try {
                     if (pc) ikv::attach_source_actor(scene,root,change.source,id);
-                    else ikv::attach_source_npc(scene,root,uid,id);
+                    else ikv::attach_source_npc(scene,root,uid,id,change.source.equipment);
                 } catch (const std::exception& error) {
                     std::cerr<<"actor "<<id<<(pc?" class ":" source uid ")<<(pc?change.source.source_class:uid)<<" not rendered: "<<error.what()<<'\n';
                     unassembled.push_back(id);
@@ -3236,10 +3257,10 @@ private:
         if (state_.contains("bank")!=bank_session_) { bank_session_=!bank_session_; if (bank_session_) toggle_window(win_bank,true); }
         const auto& state=state_;
         const auto& cs=character_state(state_);
-        // VOD 34:00 chat: "Yeniden canlanma için N para kaybettiniz" (server text; native takes death_currency_percent at death).
+        // VOD 34:00 chat: "Yeniden canlanma için N para kaybettiniz." (server text; native takes the death_fee at death).
         if (cs.value("hp",1)<=0 && hud_values_.value("hp",1)>0 && hud_values_.contains("currency") && cs.contains("currency"))
             if (const auto lost=hud_values_.at("currency").get<std::int64_t>()-cs.at("currency").get<std::int64_t>(); lost>0)
-                chat_line("Yeniden canlanma için "+std::to_string(lost)+" para kaybettiniz",original_rgba(chat_channels[chat_system].argb));
+                chat_line("Yeniden canlanma için "+std::to_string(lost)+" para kaybettiniz.",original_rgba(chat_channels[chat_system].argb));
         // VOD 34:00 yellow chat + red notice (server text): every death damages the worn equipment (world wear()).
         if (cs.value("hp",1)<=0 && hud_values_.value("hp",1)>0 && hud_values_.contains("inventory") && cs.contains("inventory") && hud_values_.at("inventory")!=cs.at("inventory")) {
             const std::string text="Öldüğünüz için eşyalarınız zarar gördü. Eşyalarınızı örs ile tamir edebilirsiniz.";
@@ -3374,6 +3395,7 @@ private:
                 else if (action=="item_move" || action=="bank_deposit" || action=="bank_withdraw") audio_->play_event("ui\\itemdrop.raw");
             }
             else if (type=="arena") chat_line(event.value("text",std::string{}),original_rgba(chat_channels[chat_system].argb)); // Er Meydanı server lines (world.cpp activities)
+            else if (type=="notice") notice(event.value("text",std::string{})); // server line shown centred and in chat (VOD 49:45 free reset)
             else if (type=="dialogue") {
                 // Merchants open Satıcı; questgivers and the banker open the Konuş window (the bank itself opens from İşlemler → Kasamı göster).
                 // A merchant with quest pages here opens both (classes.dat merchant+questGiver NPCs, e.g. Agop).
@@ -3381,7 +3403,7 @@ private:
                 const bool shop=!event.value("shop",Json::array()).empty();
                 const auto pages=dialogue_quests(event.value("quests",Json::array()),event.value("target",0u),character_state(state_));
                 if (shop) { notice(event.value("text",std::string{})); toggle_window(win_vendor,true); }
-                if (!shop || !pages.empty()) { dialogue_=event; dialogue_page_=pages.empty()?0:1; }
+                if (!shop || !pages.empty()) { dialogue_=event; dialogue_page_=pages.empty()?-1:1; } // -1: first quest page once painted
                 // 00419683: talking to Agah Efendi below level 2 opens Seviye1c (İlk Görev, Nasıl Yürünür) over Seviye1b.
                 if (const Json* e=entity(target_); e && e->value("name",std::string{})=="Agah Efendi" && character_state(state_).value("level",2)<2) {
                     tutorial_target_=target_; open_help("Seviye1c");
@@ -3766,6 +3788,10 @@ private:
             else if (value=="craft-make") send(Json{{"action","craft"},{"recipe",craft_selected_}});
             else ask(Json{{"action","recipe_forget"},{"recipe",craft_selected_}},"Bu üretim reçetesi hafızanızdan kalıcı olarak silinecektir. Emin misiniz?"); // 0x590f40
         }
+        else if (value.starts_with("bank-tab:")) { // 00440110/004401d0: ← only above tab 0, → only below tab 1
+            const int tab=bank_tab()+(value.back()=='+'?1:-1);
+            if (tab>=0 && tab<=1 && state_.contains("bank")) { send(Json{{"action","bank_tab"},{"tab",tab}}); bank_selected_.clear(); }
+        }
         else if (value.starts_with("bank-item:")) bank_selected_=value.substr(10);
         else if (value=="bank-take") {
             for (const auto& entry:state_.value("bank",Json::object()).value("items",Json::array()))
@@ -3854,7 +3880,7 @@ private:
         // A hostile Klan OOK (other clan) is attacked like a monster.
         const auto kind=e->value("kind",std::string{});
         const bool hostile=kind!="player" && relation(*e)==1; // monsters, other clans' banners and Klan OOK guards
-        if (!hostile && (kind=="merchant" || kind=="questgiver" || kind=="anvil" || kind=="door" || kind=="reset")) { send(target_action("interact")); return; }
+        if (!hostile && (kind=="merchant" || kind=="questgiver" || kind=="anvil" || kind=="door" || kind=="reset" || (kind=="prop" && e->value("interactable",false)))) { send(target_action("interact")); return; }
         if (!hostile) return;
         if (e->value("alive",true)) send(target_action("attack"));
         else if (!e->value("looted",true) && e->value("owner",0u)==session_->self) send(target_action("loot"));

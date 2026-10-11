@@ -250,11 +250,12 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
     if (body.contains("bank")) {
         const auto& bank = body.at("bank");
         if (!bank.is_object()) invalid();
-        integer(bank.at("currency"), 0, INT64_MAX); integer(bank.at("banker"), 1, UINT32_MAX);
-        const auto& stored = bank.at("items"); array_limit(stored, static_cast<std::size_t>(integer(bank.at("slots"), 1, 128)));
+        integer(bank.at("currency"), 0, INT64_MAX); integer(bank.at("banker"), 1, UINT32_MAX); integer(bank.at("tab"), 0, 1); // shown tab (original page 0x611454)
+        const auto& stored = bank.at("items"); array_limit(stored, static_cast<std::size_t>(integer(bank.at("slots"), 1, 64))); // the shown tab's 8×8 cells
         for (const auto& item : stored) {
             if (!item.is_object()) invalid();
             uid(item.at("uid")); text(item.at("item"), 128); integer(item.at("quantity"), 1, INT32_MAX);
+            if (item.contains("tab")) integer(item.at("tab"), 1, 1); // second Banka tab; absent = first
         }
     }
     if (state.contains("recipes")) { array_limit(state.at("recipes"), 200); for (const auto& recipe : state.at("recipes")) text(recipe, 128); }
@@ -324,7 +325,7 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         text(entity.at("name"), 128);
         const auto& kind = entity.at("kind").get_ref<const std::string&>();
         if (kind == "player") { integer(entity.at("class_id"), 1, 3); if (entity.contains("posture")) integer(entity.at("posture"), 1, 255); } // held RP clip
-        else if (kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "summon" || kind == "trap" || kind == "reset") { // node/anvil/door/reset: classes.dat <loc>; summon: Boz Ayı/Tesla Küresi/Çağrı; trap: Labirent Tuzağı
+        else if (kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "summon" || kind == "trap" || kind == "reset" || kind == "prop") { // node/anvil/door/reset/prop: classes.dat <loc>; summon: Boz Ayı/Tesla Küresi/Çağrı; trap: Labirent Tuzağı
             integer(entity.at("source_uid"), 1, UINT32_MAX);
             integer(entity.at("source_class"), 1, 65535); // classes.dat classid reaches 527
         } else invalid();

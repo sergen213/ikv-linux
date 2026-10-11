@@ -1,22 +1,28 @@
 #include "ikv/bots.hpp"
 #include <algorithm>
 #include <iostream>
+#include <random>
 #include <set>
 #include <stdexcept>
 
 namespace ikv {
 BotHost::BotHost(World& world, Store& store, std::string instance) : world_(world), store_(store), instance_(std::move(instance)) {}
 
-// Reuse an idle persisted bot (within two levels of a requested level), else create one with a fresh original-style name.
+// Reuse an idle persisted bot whose level fits the spec (levels [lo,hi], or within two of level), else create one with a fresh
+// original-style name at a random level of the range.
 std::uint32_t BotHost::spawn(const Json& spec, Json& roster) {
     if (!account_) account_ = store_.bot_account();
-    const int level = spec.value("level", 0);
+    int level = spec.value("level", 0), lo = level ? level-2 : 0, hi = level ? level+2 : 1000;
+    if (spec.contains("levels")) {
+        lo = spec.at("levels").at(0).get<int>(); hi = std::max(lo, spec.at("levels").at(1).get<int>());
+        thread_local std::mt19937 engine{std::random_device{}()}; level = std::uniform_int_distribution<int>(lo,hi)(engine);
+    }
     const auto admit = [&](std::int64_t character, const Json& record) {
         try { return world_.add_bot(account_, character, record, spec); }
         catch (...) { store_.leave_character(account_, character); throw; }
     };
     for (auto& row : roster) {
-        if (row.at("leased").get<bool>() || (level && std::abs(row.at("level").get<int>() - level) > 2)) continue;
+        if (row.at("leased").get<bool>() || row.at("level").get<int>() < lo || row.at("level").get<int>() > hi) continue;
         row["leased"] = true; // taken by this or an earlier spawn of the same command
         try { return admit(row.at("id"), store_.enter_character({account_, false}, row.at("id"), instance_)); }
         catch (const ApiError&) { continue; } // leased elsewhere meanwhile
@@ -76,6 +82,12 @@ Json BotHost::command(const std::string& command, const Json& arguments) {
     throw std::invalid_argument("unknown bot command");
 }
 
-void BotHost::pump() { for (const auto& [account, character] : world_.released_bots()) store_.leave_character(account, character); }
+// Release removed bots' leases, then log churned-out bots back in once their offline time is over.
+void BotHost::pump() {
+    for (const auto& [account, character] : world_.released_bots()) store_.leave_character(account, character);
+    const auto due = world_.bot_returns(); if (due.empty()) return;
+    auto roster = store_.bot_characters(account_);
+    for (const auto& spec : due) try { spawn(spec, roster); } catch (const std::exception&) { std::cerr << "bot_return_failed\n"; }
+}
 void BotHost::stop() { for (const auto& row : world_.bots()) store_.leave_character(account_, row.at("character_id")); }
 }
