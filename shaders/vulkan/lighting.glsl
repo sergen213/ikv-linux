@@ -160,7 +160,7 @@ float sunVisibility=1.;
 if(frame.params.x<.5&&frame.sun.w>.5&&fract(draw.extra.w)<.25&&dot(worldNormal,frame.sun.xyz)>0) {
     vec3 facet=rtUnit(rtFacet);
     if(dot(facet,frame.eye.xyz-worldPosition)<0)facet=-facet;
-    sunVisibility=rtSunVisibilityMasked(worldPosition,facet,rtUnit(frame.sun.xyz),2u);
+    sunVisibility=rtSunVisibilityMasked(worldPosition,facet,rtUnit(frame.sun.xyz),2u,0u);
 }
 #endif
 vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.rgb,sourceAlpha);

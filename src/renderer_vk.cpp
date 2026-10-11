@@ -939,9 +939,11 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      VkPhysicalDeviceBufferDeviceAddressFeatures bda{};bda.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
      VkPhysicalDeviceAccelerationStructureFeaturesKHR as{};as.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
      VkPhysicalDeviceRayQueryFeaturesKHR rq{};rq.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+     VkPhysicalDeviceDescriptorIndexingFeatures indexing{};indexing.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
      if(rt_enabled_) {
          bda.bufferDeviceAddress=VK_TRUE;bda.pNext=&as;as.accelerationStructure=VK_TRUE;
          as.pNext=&rq;rq.rayQuery=VK_TRUE;
+         rq.pNext=&indexing;indexing.shaderSampledImageArrayNonUniformIndexing=VK_TRUE; // rt_lighting.glsl rtAlphaTextures
      }
      VkDeviceCreateInfo dc{};dc.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
      dc.queueCreateInfoCount=1;dc.pQueueCreateInfos=&qc;
@@ -1018,10 +1020,11 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      checked(vkCreateDescriptorSetLayout(device_,&lc,nullptr,&set_layout_),"material descriptor layout");
      std::array<VkDescriptorSetLayout,2> layouts{set_layout_,VK_NULL_HANDLE};
      if(rt_enabled_) {
-         VkDescriptorSetLayoutBinding rbindings[2]{
+         VkDescriptorSetLayoutBinding rbindings[3]{
              {0,VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
-             {1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}};
-         lc.bindingCount=2;lc.pBindings=rbindings;
+             {1,VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr},
+             {2,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,rt_alpha_texture_slots,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}};
+         lc.bindingCount=3;lc.pBindings=rbindings;
          checked(vkCreateDescriptorSetLayout(device_,&lc,nullptr,&rt_layout_),"RT descriptor layout");
          layouts[1]=rt_layout_;rt_=std::make_unique<VulkanRtScene>(physical_,device_,queue_,family_,options_.progress);
      }
@@ -1341,7 +1344,12 @@ void clear_material_sets() {
      for(auto pool:material_pools_)if(pool)vkDestroyDescriptorPool(device_,pool,nullptr);
      material_pools_.clear();material_cache_.clear();material_sets_.clear();
 }
- void write_rt(){if(!rt_enabled_)return;VkAccelerationStructureKHR as=rt_->acceleration_structure();if(!as)throw std::runtime_error("RT scene has no acceleration structure");VkWriteDescriptorSetAccelerationStructureKHR acceleration{};acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&as;VkDescriptorBufferInfo triangles{rt_->triangles(),0,rt_->triangle_bytes()};VkWriteDescriptorSet writes[2]{};writes[0] = {};writes[0].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[0].pNext=&acceleration;writes[0].dstSet=rt_set_;writes[0].dstBinding=0;writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;writes[1] = {};writes[1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[1].dstSet=rt_set_;writes[1].dstBinding=1;writes[1].descriptorCount=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[1].pBufferInfo=&triangles;vkUpdateDescriptorSets(device_,2,writes,0,nullptr);}
+ void write_rt(){if(!rt_enabled_)return;VkAccelerationStructureKHR as=rt_->acceleration_structure();if(!as)throw std::runtime_error("RT scene has no acceleration structure");VkWriteDescriptorSetAccelerationStructureKHR acceleration{};acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&as;VkDescriptorBufferInfo triangles{rt_->triangles(),0,rt_->triangle_bytes()};VkWriteDescriptorSet writes[3]{};writes[0] = {};writes[0].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[0].pNext=&acceleration;writes[0].dstSet=rt_set_;writes[0].dstBinding=0;writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;writes[1] = {};writes[1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[1].dstSet=rt_set_;writes[1].dstBinding=1;writes[1].descriptorCount=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[1].pBufferInfo=&triangles;
+     // Alpha-tested ray hits sample their diffuse alpha by slot (vulkan_rt.cpp alpha_slot); unused slots stay white.
+     std::array<VkDescriptorImageInfo,rt_alpha_texture_slots> alpha;alpha.fill({sampler_,white_.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+     const auto names=rt_->alpha_textures();for(std::size_t i=0;i<names.size()&&i<alpha.size();++i)alpha[i].imageView=texture(names[i],white_).view;
+     writes[2] = {};writes[2].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[2].dstSet=rt_set_;writes[2].dstBinding=2;writes[2].descriptorCount=rt_alpha_texture_slots;writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=alpha.data();
+     vkUpdateDescriptorSets(device_,3,writes,0,nullptr);}
  // retained: actor attach/detach keeps every frame-target set (in-flight frames bind them) and only adds material sets.
  void descriptors(bool retained=false) {
      progress();
@@ -1361,7 +1369,7 @@ void clear_material_sets() {
      }
      if(retained)return;
      const std::uint32_t sets=2+(rt_enabled_?1:0)+(denoise_enabled_?8:0)+(glow_pass_?4:0);
-     VkDescriptorPoolSize sizes[4]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*(denoise_enabled_?11u:9u)},{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1}};
+     VkDescriptorPoolSize sizes[4]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*(denoise_enabled_?11u:9u)+(rt_enabled_?rt_alpha_texture_slots:0u)},{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1}};
      VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
      p.maxSets=sets;p.poolSizeCount=rt_enabled_?4:2;p.pPoolSizes=sizes;
      checked(vkCreateDescriptorPool(device_,&p,nullptr,&descriptor_pool_),"descriptor pool");

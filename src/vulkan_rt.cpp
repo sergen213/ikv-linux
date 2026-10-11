@@ -3,6 +3,7 @@
 #include "ikv/renderer.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <array>
 #include <cstddef>
@@ -26,6 +27,35 @@ bool extension(const std::vector<VkExtensionProperties>& extensions, const char*
 }
 struct Triangle { std::array<float, 4> a, b, c, color; };
 static_assert(sizeof(Triangle) == 64);
+// Triangle records carry the vertex UVs as half2 bits in a/b/c.w for rt_lighting.glsl's source alpha test; instances
+// whose material is alpha-tested (source cutoff, scene.cpp) are FORCE_NO_OPAQUE with the rtAlphaTextures slot + 1 in
+// their shader binding table offset (unused by ray queries otherwise).
+float half_uv(const Vertex& vertex) {
+    const auto half = [](float x) {
+        return std::uint32_t(std::bit_cast<std::uint16_t>(static_cast<_Float16>(std::isfinite(x) ? std::clamp(x, -65504.f, 65504.f) : 0.f)));
+    };
+    return std::bit_cast<float>(half(vertex.u) | half(vertex.v) << 16);
+}
+Triangle triangle_record(const Vertex& a, const Vertex& b, const Vertex& c, const std::array<float, 4>& color) {
+    return {{a.x,a.y,a.z,half_uv(a)}, {b.x,b.y,b.z,half_uv(b)}, {c.x,c.y,c.z,half_uv(c)}, color};
+}
+// Marks an alpha-tested placement: slot + 1 of its material's diffuse in `slots` (appended when `assign` and room
+// remains); no slot leaves it opaque.
+void alpha_test(VkAccelerationStructureInstanceKHR& instance, const Scene& scene, std::uint32_t material,
+                std::vector<std::string>& slots, bool assign) {
+    if (material >= scene.materials.size()) return;
+    const auto& m = scene.materials[material];
+    if (!(m.alpha_cutoff > 0) || m.diffuse.empty()) return;
+    auto found = std::find(slots.begin(), slots.end(), m.diffuse);
+    if (found == slots.end()) {
+        // ponytail: textures past rt_alpha_texture_slots (zones use <= 22) and those first met by an in-frame actor
+        // append stay opaque quads until the next rebuild.
+        if (!assign || slots.size() >= rt_alpha_texture_slots) return;
+        found = slots.insert(slots.end(), m.diffuse);
+    }
+    instance.instanceShaderBindingTableRecordOffset = (static_cast<std::uint32_t>(found - slots.begin()) + 1) & 0xffffffu;
+    instance.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+}
 constexpr std::uint8_t mesh_referenced = 1;
 constexpr std::uint8_t mesh_color_draw = 2;
 // Inputs, instances and triangle records are also copy destinations of record_refresh's staged per-frame updates.
@@ -69,6 +99,9 @@ VulkanRtFeatures query_rt_features(VkPhysicalDevice physical) {
     address.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
     address.pNext = &acceleration;
     acceleration.pNext = &ray;
+    VkPhysicalDeviceDescriptorIndexingFeatures indexing{};
+    indexing.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+    ray.pNext = &indexing;
     VkPhysicalDeviceFeatures2 features{};
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features.pNext = &address;
@@ -76,7 +109,9 @@ VulkanRtFeatures query_rt_features(VkPhysicalDevice physical) {
     const bool dependencies = extension(extensions, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
     return {dependencies && extension(extensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && acceleration.accelerationStructure,
             extension(extensions, VK_KHR_RAY_QUERY_EXTENSION_NAME) && ray.rayQuery,
-            address.bufferDeviceAddress != VK_FALSE};
+            address.bufferDeviceAddress != VK_FALSE, indexing.shaderSampledImageArrayNonUniformIndexing != VK_FALSE
+                && std::min(properties.limits.maxPerStageDescriptorSamplers, properties.limits.maxPerStageDescriptorSampledImages)
+                       >= rt_alpha_texture_slots + 16};
 }
 
 struct VulkanRtScene::Impl {
@@ -151,6 +186,7 @@ struct VulkanRtScene::Impl {
         std::vector<std::size_t> mesh_blas, vertex_counts, index_counts;
         std::vector<std::uint32_t> mesh_offset;
         std::vector<std::uint64_t> revisions, keys;
+        std::vector<std::string> alpha_textures; // rtAlphaTextures slots (alpha_test)
         bool rebuild_top = false; // Retired/moved BLAS: the next TLAS build may not update in place.
         std::vector<VkAccelerationStructureInstanceKHR> cpu_instances;
         std::uint32_t instance_count = 0;
@@ -395,7 +431,7 @@ struct VulkanRtScene::Impl {
     }
     void bottom_input(BuildInput& input, const Mesh& mesh, const Acceleration& acceleration) {
         input.geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-        input.geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+        input.geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR; // alpha-tested placements: FORCE_NO_OPAQUE (alpha_test)
         auto& triangles = input.geometry.geometry.triangles;
         triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
         triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -493,6 +529,8 @@ struct VulkanRtScene::Impl {
             instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02 : 0x01;
             // Source clockwise-front triangles are ray back faces by default; rt_lighting.glsl culls back faces.
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
+            alpha_test(instance, scene, preview || scene.instances[i].material == UINT32_MAX
+                ? scene.meshes[mesh].material : scene.instances[i].material, state->alpha_textures, false);
             instance.accelerationStructureReference = state->bottom[state->mesh_blas[mesh]]->address;
             instances.push_back(instance);
         }
@@ -573,7 +611,7 @@ struct VulkanRtScene::Impl {
                 const auto& c = mesh.vertices[mesh.indices[i+2]];
                 if (skin && !std::isfinite(a.x + a.y + a.z + b.x + b.y + b.z + c.x + c.y + c.z))
                     throw std::runtime_error("Non-finite RT mesh vertex");
-                triangles[i/3] = {{a.x,a.y,a.z,1}, {b.x,b.y,b.z,1}, {c.x,c.y,c.z,1}, color};
+                triangles[i/3] = triangle_record(a, b, c, color);
             }
             updates.emplace_back();
             bottom_input(updates.back(), mesh, acceleration);
@@ -780,7 +818,7 @@ struct VulkanRtScene::Impl {
                 const auto& a = mesh.vertices[mesh.indices[i]];
                 const auto& b = mesh.vertices[mesh.indices[i+1]];
                 const auto& c = mesh.vertices[mesh.indices[i+2]];
-                records.push_back({{a.x,a.y,a.z,1}, {b.x,b.y,b.z,1}, {c.x,c.y,c.z,1}, color});
+                records.push_back(triangle_record(a, b, c, color));
             }
             Acceleration inputs(device, destroy);
             inputs.vertices = allocate(mesh.vertices.size() * sizeof(Vertex), input_usage, mesh.vertices.data(), true, &shared);
@@ -1052,13 +1090,12 @@ struct VulkanRtScene::Impl {
                 const auto& a = mesh.vertices[mesh.indices[i]];
                 const auto& b = mesh.vertices[mesh.indices[i+1]];
                 const auto& c = mesh.vertices[mesh.indices[i+2]];
-                triangle_data.push_back({{a.x,a.y,a.z,1}, {b.x,b.y,b.z,1}, {c.x,c.y,c.z,1}, color});
+                triangle_data.push_back(triangle_record(a, b, c, color));
             }
             inputs.emplace_back();
             auto& input = inputs.back();
             input.geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-            // Opaque geometry proxy: recovered alpha textures are not sampled in ray hits.
-            input.geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+            input.geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR; // alpha-tested placements: FORCE_NO_OPAQUE (alpha_test)
             input.geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
             auto& triangles = input.geometry.geometry.triangles;
             triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -1120,6 +1157,8 @@ struct VulkanRtScene::Impl {
             instance.instanceCustomIndex = mesh_offset[mesh] & 0xffffffu;
             instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02 : 0x01; // see the refresh path
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
+            alpha_test(instance, scene, preview || scene.instances[i].material == UINT32_MAX
+                ? scene.meshes[mesh].material : scene.instances[i].material, next->alpha_textures, true);
             instance.accelerationStructureReference = next->bottom[mesh_blas[mesh]]->address;
             instances.push_back(instance);
         }
@@ -1198,5 +1237,8 @@ VkBuffer VulkanRtScene::triangles() const noexcept {
 }
 VkDeviceSize VulkanRtScene::triangle_bytes() const noexcept {
     return impl_->state ? impl_->state->triangles.size : 0;
+}
+std::span<const std::string> VulkanRtScene::alpha_textures() const noexcept {
+    return impl_->state ? std::span<const std::string>(impl_->state->alpha_textures) : std::span<const std::string>();
 }
 } // namespace ikv
