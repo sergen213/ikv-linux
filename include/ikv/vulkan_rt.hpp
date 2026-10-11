@@ -41,6 +41,9 @@ public:
     VulkanRtScene(const VulkanRtScene&) = delete;
     VulkanRtScene& operator=(const VulkanRtScene&) = delete;
     void rebuild(const Scene&, std::span<const RenderEntity> entities = {});
+    // The caller replaces the Scene at the same address: the next rebuild() builds everything (no retained BLAS);
+    // structures stay alive until it returns.
+    void forget_scene() noexcept;
     // In-frame update of the scene last passed to rebuild() (same Scene object): skin/transform changes and actor
     // attach/detach (retained meshes kept by key, new meshes appended). Records staged copies, new-BLAS builds and an
     // in-place BLAS/TLAS update or TLAS rebuild into the caller's frame command buffer ahead of its ray queries, with

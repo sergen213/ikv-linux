@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.4.2 LANGUAGES CXX)
+project(ikv_native VERSION 0.5.0 LANGUAGES CXX)
 
 if(NOT UNIX)
     message(FATAL_ERROR "The native implementation targets Linux/POSIX.")

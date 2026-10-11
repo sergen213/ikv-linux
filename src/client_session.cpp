@@ -328,6 +328,7 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         else if (kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "summon" || kind == "trap" || kind == "reset" || kind == "prop") { // node/anvil/door/reset/prop: classes.dat <loc>; summon: Boz Ayı/Tesla Küresi/Çağrı; trap: Labirent Tuzağı
             integer(entity.at("source_uid"), 1, UINT32_MAX);
             integer(entity.at("source_class"), 1, 65535); // classes.dat classid reaches 527
+            if (entity.contains("destination")) { if (kind != "door") invalid(); integer(entity.at("destination"), 0, 70); } // NONCANONICAL seamless door target row
         } else invalid();
         if (!valid_appearance(entity.at("appearance"))) invalid();
         visual_equipment(entity.at("equipment"));
@@ -338,6 +339,17 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
     }
     std::sort(entity_ids.begin(), entity_end);
     if (std::adjacent_find(entity_ids.begin(), entity_end) != entity_end) invalid();
+    if (body.contains("party")) { // NONCANONICAL connected party (world.cpp state()): the other group members, any zone
+        const auto& party = body.at("party");
+        array_limit(party, 5);
+        for (const auto& member : party) {
+            if (!member.is_object() || integer(member.at("id"), 1, UINT32_MAX) == self) invalid();
+            text(member.at("name"), 128); integer(member.at("level"), 1, INT32_MAX); integer(member.at("class_id"), 1, 3);
+            health(member); integer(member.at("mana"), 0, integer(member.at("max_mana"), 0, INT32_MAX)); text(member.at("zone"), 128);
+            if (const auto& source = member.at("source_registry_id"); !source.is_null()) integer(source, 0, 70);
+            if (!member.at("alive").is_boolean() || member.at("alive").get<bool>() != (member.at("hp").get<std::int64_t>() > 0)) invalid();
+        }
+    }
     const auto& events = body.at("events");
     array_limit(events, 32);
     for (const auto& event : events) {

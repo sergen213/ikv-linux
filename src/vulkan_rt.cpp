@@ -1225,6 +1225,7 @@ VulkanRtScene::VulkanRtScene(VkPhysicalDevice physical, VkDevice device, VkQueue
     : impl_(std::make_unique<Impl>(physical, device, queue, family, std::move(progress))) {}
 VulkanRtScene::~VulkanRtScene() noexcept = default;
 void VulkanRtScene::rebuild(const Scene& scene, std::span<const RenderEntity> entities) { impl_->rebuild(scene, entities); }
+void VulkanRtScene::forget_scene() noexcept { if (impl_->state) impl_->state->source = nullptr; }
 bool VulkanRtScene::record_refresh(const Scene& scene, std::span<const RenderEntity> entities, VkCommandBuffer frame,
     unsigned slot) {
     return impl_->record_refresh(scene, entities, frame, slot);

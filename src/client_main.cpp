@@ -585,6 +585,14 @@ class Application {
     struct LoadingArt { ikv::assets::DdsImage art{},logo{}; std::vector<ikv::assets::DdsImage> frames; } loading_art_;
     ikv::Scene loading_scene_; // empty scene: the renderer presents only the loading overlay
     float loading_progress_=0;
+    // NONCANONICAL seamless doors (wave 15): the nearest door's destination Scene is decoded ahead on a worker (one extra Scene
+    // at most), and a zone change during play swaps under a scene fade instead of loadingN.jpg (the first load keeps it).
+    std::future<ikv::Scene> prefetch_; unsigned prefetch_source_=0;
+    std::optional<Clock::time_point> fade_out_,fade_in_,zone_message_; // fade_out_: old scene fading, swap pending
+    Clock::time_point last_present_{},black_since_{}; bool swapped_=false; const char* transition_prefetch_="";
+    double transition_black_ms_=0,transition_first_ms_=0,transition_worst_ms_=0; // evidence log at the end of the fade-in
+    static constexpr float fade_seconds=.25f;
+    float shown_fade_=0; // fade of the frame draw() last composed; at 1 the world label layer is hidden too
     std::array<bool,7> chat_hidden_{}; // 'F' filter; Sistem cannot be filtered
     std::uint32_t whisper_to_=0,whisper_from_=0;
     std::string whisper_name_,whisper_from_name_;
@@ -685,7 +693,7 @@ private:
         const bool changed_source=!accepted_source_ || *accepted_source_!=source;
         const auto tick=state.at("tick").get<std::uint32_t>();
         PendingMutation mutation; mutation.source=source; mutation.reset=changed_source;
-        if (changed_source) accepted_actors_.clear();
+        if (changed_source) { accepted_actors_.clear(); if (!zone_message_) zone_message_=Clock::now(); }
         auto visit=[&](std::uint32_t id,const Json& given,const Json& status,bool pc) {
             // Karakter Detay Mes. (0x5eabc0; 004a9614 -> 0043fd40, 0043fe40 in range): another PC farther than pref*170 scene
             // units wears the sex's default set (face/hair 0: K_BST_NIC/E_BST_MEL, SAC_001_SIY; Mavi Kot Pantolon 5211/5219,
@@ -784,13 +792,28 @@ private:
     }
     void apply_pending() {
         while (!pending_mutations_.empty()) {
+            const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=pending_mutations_.front().source;
+            // In play the old frame fades out first while the destination decodes; presentation stays frozen until black.
+            if (loading && scene_.source_registry_id) {
+                if (!fade_out_) {
+                    const auto source=pending_mutations_.front().source;
+                    const bool held=prefetch_.valid() && same_scene(prefetch_source_,source);
+                    transition_prefetch_=!held?"miss":prefetch_.wait_for(std::chrono::seconds(0))==std::future_status::ready?"hit":"decoding";
+                    // A jump during a fade-in continues from the shown level instead of flashing the new zone.
+                    fade_out_=Clock::now()-std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(transition_fade()*fade_seconds));
+                    fade_in_.reset(); swapped_=false; transition_worst_ms_=0; prefetch(source);
+                }
+                // Swap once a fully black frame (world labels hidden) is on screen; the timeout covers frames draw() skips.
+                if (shown_fade_<1 && Clock::now()-*fade_out_<std::chrono::duration<float>(2*fade_seconds)) return;
+            }
             auto mutation=std::move(pending_mutations_.front());
             pending_mutations_.pop_front(); pending_bytes_-=mutation.bytes;
-            const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=mutation.source;
-            if (loading) begin_loading();
+            if (loading && !fade_out_) { begin_loading(); zone_message_.reset(); }
+            if (loading && fade_out_) black_since_=Clock::now();
             load_authoritative_scene(mutation.source);
             attach_models(mutation,loading);
             if (loading) { loading_stage(1); loading_=false; } // the first real frame's GPU upload keeps this frame presented
+            if (loading && fade_out_) { fade_out_.reset(); swapped_=true; } // that upload happens under black (draw())
             for (std::size_t i=0;i<mutation.actors.size();++i) {
                 const auto& row=*mutation.actors[i];
                 const auto id=row.at("id").get<std::uint32_t>();
@@ -812,8 +835,43 @@ private:
             painted_snapshot_revision_=snapshot_revision_; has_snapshot_=session_->has_snapshot;
             changed_snapshot=true;
         }
-        if (changed_state) state_changed();
+        if (changed_state) { state_changed(); prefetch_doors(); }
         if (changed_snapshot) movement_changed();
+    }
+    // Instance copies (Er Meydanı 1-20, Migrat/Sığınaklar/Çemberlitaş copies) decode to identical Scenes.
+    static bool same_scene(unsigned a,unsigned b) {
+        const auto &x=ikv::source_scene_descriptor(a),&y=ikv::source_scene_descriptor(b);
+        return x.support_id==y.support_id && x.members==y.members && x.environment_key==y.environment_key && x.minute==y.minute && x.lightmap==y.lightmap;
+    }
+    // Starts decoding `source` unless its content is already held or decoding, dropping a finished unwanted Scene. Never
+    // blocks the frame: a running decode finishes first, so at most one extra Scene exists.
+    void prefetch(std::optional<unsigned> source) {
+        if (prefetch_.valid() && prefetch_.wait_for(std::chrono::seconds(0))!=std::future_status::ready) return;
+        if (source && prefetch_.valid() && same_scene(prefetch_source_,*source)) return;
+        prefetch_={};
+        if (!source) return;
+        prefetch_source_=*source;
+        prefetch_=std::async(std::launch::async,[root=options_.assets,id=*source]{return ikv::load_source_scene(root,id);});
+    }
+    // The nearest door within 40 m leading to other content; kept until 80 m.
+    // ponytail: fixed radii; scale with run speed if a sprint reaches a door before its decode (~0.3 s) finishes.
+    void prefetch_doors() {
+        if (!scene_.source_registry_id || !state_.contains("entities")) return;
+        const auto& own=character_state(state_);
+        std::optional<unsigned> want; double nearest=80000;
+        for (const auto& e:state_.at("entities")) if (const auto to=e.find("destination"); to!=e.end()) {
+            const double d=std::hypot(e.at("x").get<double>()-own.value("x",0.0),e.at("y").get<double>()-own.value("y",0.0));
+            if (d<nearest && !same_scene(to->get<unsigned>(),*scene_.source_registry_id)) { nearest=d; want=to->get<unsigned>(); }
+        }
+        if (want && nearest>=40000 && !(prefetch_.valid() && same_scene(prefetch_source_,*want))) want.reset();
+        prefetch(want);
+    }
+    // Scene fade: out while the swap is pending, black for the first new-zone frame (its upload), then in.
+    float transition_fade() const {
+        const auto since=[](Clock::time_point t){return std::chrono::duration<float>(Clock::now()-t).count()/fade_seconds;};
+        if (fade_out_) return std::min(1.f,since(*fade_out_));
+        if (swapped_) return 1;
+        return fade_in_?std::max(0.f,1-since(*fade_in_)):0;
     }
     void shutdown() noexcept {
         session_.reset(); audio_.reset(); ui_.reset(); renderer_.reset();
@@ -861,24 +919,36 @@ private:
     }
     void load_authoritative_scene(unsigned source) {
         if (scene_.source_registry_id && *scene_.source_registry_id==source) return;
-        auto replacement=load_cpu([&]{return ikv::load_source_scene(options_.assets,source);});
+        auto replacement=take_scene(source);
         // The record fog lives in the game state (004b43a0), not the zone: a received server fog survives the zone load.
         if (scene_.lighting.source_hour>=0) { replacement.lighting.fog_record=scene_.lighting.fog_record; replacement.lighting.fog_color=scene_.lighting.fog_color; }
         loading_stage(.5f);
-        // Providers borrow Scene resources. Destroy them before replacing the source scene at this stable address.
+        // Providers borrow Scene resources: forget them before replacing the source scene at this stable address. A seamless
+        // swap keeps the renderer (device, pipelines, FSR, RT pipeline); the first load rebuilds it behind loadingN.jpg.
         // Keep yaw/pitch; options_.camera.distance stays the desired zoom, the renderer holds the occlusion-clamped one.
         const auto camera=renderer_->camera();
-        renderer_.reset(); options_.camera.yaw=camera.yaw; options_.camera.pitch=camera.pitch;
+        if (fade_out_) renderer_->release_scene();
+        else { renderer_.reset(); options_.camera.yaw=camera.yaw; options_.camera.pitch=camera.pitch; }
         ui_.reset(); scene_=std::move(replacement); actors_.clear(); poses_.clear(); sacks_.clear();
         entities_.clear(); rendered_.clear(); players_.clear();
         target_=0; help_page_=0; help_book_.clear(); elapsed_=0;
-        reset_renderer(); init_original_ui(); loading_stage(.7f);
+        if (!renderer_) reset_renderer();
+        init_original_ui(); loading_stage(.7f);
         effect_cues_.clear();
         if (effects_) effects_->attach_scene(scene_); // zone *_particles.adf type-11 emitters
         apply_prefs();
         // Scene diagnostics are developer evidence, not player HUD text.
         for (const auto& message:scene_.diagnostics) std::cerr << message << '\n';
         std::cerr << "Özgün sahne: " << ikv::source_scene_descriptor(source).label << '\n';
+    }
+    // The prefetched Scene when its content matches (joined while the network pumps), else a fresh decode. An unmatched
+    // prefetch is released before that decode: one extra Scene at most.
+    ikv::Scene take_scene(unsigned source) {
+        if (prefetch_.valid()) {
+            auto ready=load_cpu([&]{return prefetch_.get();});
+            if (same_scene(prefetch_source_,source)) { ready.source_registry_id=source; return ready; }
+        }
+        return load_cpu([&]{return ikv::load_source_scene(options_.assets,source);});
     }
     static ikv::assets::DdsImage read_ui_image(const std::filesystem::path& path) {
         const auto size=std::filesystem::file_size(path);
@@ -1049,6 +1119,18 @@ private:
             if (e.value("id",0u)==id) return &e;
         return nullptr;
     }
+    // NONCANONICAL connected party (world.cpp state() "party"): a group member's status wherever it is.
+    const Json* party_row(std::uint32_t id) const {
+        if (session_ && state_.contains("party")) for (const auto& e:state_.at("party"))
+            if (e.value("id",0u)==id) return &e;
+        return nullptr;
+    }
+    // The member's zone label (source registry label, else the zone key) when it is not in the own zone.
+    std::string party_zone(const Json& row) const {
+        if (row.value("zone",std::string{})==state_.value("zone",std::string{})) return {};
+        const auto& source=row.at("source_registry_id");
+        return source.is_null()?row.value("zone",std::string{}):ikv::source_scene_descriptor(source.get<unsigned>()).label;
+    }
     // Original UI2 plain window (close x top-right), nine-sliced so the frame keeps atlas pixels.
     // Returns the content rectangle as left, top, right, bottom.
     std::array<int,4> frame(int id,int x,int y,int w,int h,const std::string& title) {
@@ -1092,14 +1174,23 @@ private:
             if (!session_ || !member.is_number_unsigned() || member==session_->self) continue;
             const auto id=member.get<std::uint32_t>();
             const Json* e=entity(id);
+            const Json* p=e?nullptr:party_row(id);
             ui_atlas(original_ui2_,0,0,0,y,168,74,0,112,168,74);
             if (e) {
                 paint_effects(e->value("debuffs",Json::array()),168,y+5,15);
                 ui_atlas(original_ui2_,0,0,16,y+27,59*resource_ratio(*e,"hp","max_hp"),8,153,189,2,8);
                 ui_atlas(original_ui2_,0,0,14,y+24,62,11,169,51,62,11);
                 percent(45.5f*s_,(y+31)*s_,resource_ratio(*e,"hp","max_hp"));
+            } else if (p) { // out of view or in another zone: HP and MP bars as on the PC target frame (0x485110), zone line below
+                ui_atlas(original_ui2_,0,0,16,y+27,59*resource_ratio(*p,"hp","max_hp"),8,153,189,2,8);
+                ui_atlas(original_ui2_,0,0,14,y+24,62,11,169,51,62,11);
+                percent(45.5f*s_,(y+31)*s_,resource_ratio(*p,"hp","max_hp"));
+                ui_atlas(original_ui2_,0,0,95,y+27,59*resource_ratio(*p,"mana","max_mana"),8,156,189,2,8);
+                ui_atlas(original_ui2_,0,0,93,y+24,62,11,169,51,62,11);
+                percent(124.5f*s_,(y+31)*s_,resource_ratio(*p,"mana","max_mana"));
+                if (const auto where=party_zone(*p);!where.empty()) label(S(36),S(y+48)-lh()/2,fit(where,S(125)),dim_rgba); // right of the frame's round ornament
             }
-            label(S(15),S(y+15)-lh()/2,fit(e?e->value("name",std::string{}):"#"+std::to_string(id),S(92)));
+            label(S(15),S(y+15)-lh()/2,fit(e?e->value("name",std::string{}):p?p->value("name",std::string{}):"#"+std::to_string(id),S(92)));
             hits_.push_back({0,S(y),S(168),S(60),nullptr,-1,"target:"+std::to_string(id)});
             y+=74;
             if (y>330) break;
@@ -1273,7 +1364,7 @@ private:
     void update_labels() {
         std::vector<Label> next; next.reserve(poses_.size());
         const auto* self=session_?pose(session_->self):nullptr;
-        if (self && width_>0 && height_>0) {
+        if (self && width_>0 && height_>0 && shown_fade_<1) { // a black world shows no name labels (seamless swap)
             const auto planes=ikv::frustum_planes(ikv::camera_view_projection(renderer_->camera(),width_,height_));
             for (const auto& pose:poses_) {
                 if (pose.id==session_->self) continue;
@@ -2403,8 +2494,10 @@ private:
                 if (!member.is_number_unsigned()) continue;
                 const auto member_id=member.get<std::uint32_t>();
                 const Json* e=entity(member_id);
+                const Json* p=e?nullptr:party_row(member_id);
                 std::string text=session_ && member_id==session_->self?state_.at("character").value("name",std::string{}):
-                    e?e->value("name",std::string{}):"#"+std::to_string(member_id);
+                    e?e->value("name",std::string{}):p?p->value("name",std::string{})+printf_text("  %.0f%%",100*resource_ratio(*p,"hp","max_hp")):"#"+std::to_string(member_id);
+                if (p) if (const auto where=party_zone(*p);!where.empty()) text+=" · "+where;
                 if (y+lh()<=bottom) ui_->text(left,y,fit(text,width));
                 y+=lh();
             }
@@ -2611,6 +2704,7 @@ private:
     // 00478710 runs in the name loop for every root that passed the frustum test (labels_; the own root is always
     // visible, 0047c820): line rect left = anchor x − width/2, top = anchor y − offset, at the unlifted 0047c530 anchor.
     void paint_floaters() {
+        if (shown_fade_>=1) return; // nor floating text
         const auto now=Clock::now();
         for (const auto& f:floaters_) {
             const auto* p=pose(f.id);
@@ -3354,6 +3448,7 @@ private:
     void disconnect(const std::string& message) {
         // 'sjfr' 0045b6c5: "Bağlantınız kesildi çünkü %s" is the one-button 004b8230 box, which plays ui\warning.raw (0x77d314).
         disconnected_=true; loading_=false; session_.reset(); trade_.reset(); trade_seen_rows_=0; trade_pending_present_=false; notice(message);
+        fade_out_.reset(); zone_message_.reset(); // a pending seamless swap is dropped with its queued state
         audio_->play_event("ui\\warning.raw");
     }
     void leave() { quit_=true; if (session_ && !disconnected_) session_->stop(); }
@@ -3418,7 +3513,7 @@ private:
                 hud_values_[key]=cs.at(key); hud_dirty_=true;
             }
         }
-        for (const auto* key:{"catalogs","character","group","guild","xp_interval","zone","source_registry_id"}) {
+        for (const auto* key:{"catalogs","character","group","guild","party","xp_interval","zone","source_registry_id"}) {
             if (std::string_view(key)=="character") {
                 if (state.contains(key) && state.at(key).contains("name") &&
                     (!hud_values_.contains("name") || hud_values_.at("name")!=state.at(key).at("name"))) {
@@ -4042,6 +4137,7 @@ private:
         return id;
     }
     void pick(float x,float y) {
+        if (fade_out_) return; // the world on screen is no longer the authoritative zone
         if (const auto id=label_at(x,y); id && id!=session_->self) { click_entity(id); return; }
         std::optional<std::array<float,3>> hit;
         if (const auto id=entity_at(x,y,hit)) { click_entity(id); return; }
@@ -4206,6 +4302,7 @@ private:
             });
         }
         audio_->frame(scene_,poses_,session_?session_->self:0,ikv::camera_basis(renderer_->camera()));
+        shown_fade_=transition_fade();
         update_labels();
         hud_frame();
         if (!flash_.empty() && Clock::now()>=flash_until_) { flash_.clear(); hud_dirty_=true; }
@@ -4262,6 +4359,7 @@ private:
         }
         tutorial();
         renderer_->set_grayscale(dead()); // VOD 34:00: the dead player's world view is grayscale, HUD stays in colour
+        renderer_->set_fade(shown_fade_);
         // 004b3ba0 hover pick: the single entity under the cursor gets the contour shell, red for actors (473f17) and green for
         // the Ganimet box (4a9c3b); never self, dead hostiles or while Alt is held (DIK_LMENU/RMENU 0x5d7eb1/0x5d7f31).
         const bool alt=(SDL_GetModState()&SDL_KMOD_ALT)!=0;
@@ -4275,6 +4373,23 @@ private:
         // Next frame's update_scene skips actors out of view; one that came into view now is skinned before it is drawn.
         if (hold_offscreen_skins()) ikv::update_scene(scene_,elapsed_);
         renderer_->render(scene_,poses_,session_?session_->self:0,dt);
+        if (const auto now=Clock::now(); swapped_ || fade_out_ || fade_in_) {
+            const auto ms=[&](Clock::time_point since){return std::chrono::duration<double,std::milli>(now-since).count();};
+            if (swapped_) { // first new-zone frame (its upload) presented under black
+                transition_black_ms_=ms(black_since_); transition_first_ms_=zone_message_?ms(*zone_message_):0;
+                swapped_=false; fade_in_=now; zone_message_.reset();
+            } else transition_worst_ms_=std::max(transition_worst_ms_,ms(last_present_));
+            if (fade_in_ && transition_fade()==0) {
+                fade_in_.reset();
+                std::cerr<<"Seamless zone source="<<scene_.source_registry_id.value_or(0)<<" prefetch="<<transition_prefetch_
+                         <<" zoneToFirstFrameMs="<<transition_first_ms_<<" blackMs="<<transition_black_ms_
+                         <<" worstVisibleFrameMs="<<transition_worst_ms_<<'\n'<<std::flush;
+            }
+            // Evidence capture (developer env like IKV_HUD_TRACE): every transition frame as PPM; the readback skews timings.
+            static unsigned traced=0;
+            if (const char* trace=std::getenv("IKV_SEAMLESS_TRACE")) screenshot_request_=std::string(trace)+"/seamless-"+std::to_string(++traced)+".ppm";
+        }
+        last_present_=Clock::now();
         if (trade_pending_present_) {
             if (trade_.active() && trade_.revision()==trade_painted_revision_) {
                 trade_seen_rows_|=trade_pending_rows_;

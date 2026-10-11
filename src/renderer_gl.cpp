@@ -332,6 +332,7 @@ void main(){
     if(mode==0)c=c*0.45+texture(second,texcoord).rgb*0.55;
     else if(mode==1)c=(0.25+step_gain.z)*(texture(first,texcoord-step_gain.xy).rgb+texture(first,texcoord+step_gain.xy).rgb)+0.5*c;
     else if(mode==2)c*=0.8;
+    else if(mode==4){output_color=vec4(0.0,0.0,0.0,step_gain.w);return;} // NONCANONICAL seamless door fade
     else c=min(pow(c,vec3(1.0/1.2))*1.005,vec3(1.0)); // mode 3: fullscreen gamma ramp 0x467030(1,1,1.2), final pass
     output_color=vec4(clamp(c,0.0,1.0),1.0);
 }
@@ -478,6 +479,7 @@ class GlRenderer final : public Renderer {
     GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1;
     SourceScrollState source_scroll_;
     bool overlay_present_=false,rendered_=false,grayscale_=false;
+    float fade_=0;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
     bool source_presented_=false;
     const Scene* scene_=nullptr;
@@ -631,6 +633,7 @@ public:
         progress();
     }
     void set_grayscale(bool on) override { grayscale_=on; }
+    void set_fade(float black) override { fade_=std::clamp(black,0.f,1.f); }
     void set_overlay(const Overlay& overlay,std::span<const std::array<int,4>> changed) override {
         current();
         if(overlay.width==0 && overlay.height==0 && overlay.rgba.empty()){overlay_present_=false;return;}
@@ -880,6 +883,12 @@ public:
         }
         draw_particles(true);
         glDepthMask(GL_TRUE);
+        if(fade_>0) { // below the HUD, like Vulkan's post.frag fade
+            glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram_(glow_program_);glBindVertexArray_(overlay_vao_);
+            const std::array<float,4> black{0,0,0,fade_};
+            glUniform1i_(glow_mode_location_,4);glUniform4fv_(glow_step_location_,1,black.data());glDrawArrays(GL_TRIANGLES,0,3);
+        }
         if(overlay_present_) {
             glDisable(GL_CULL_FACE);
             glDisable(GL_DEPTH_TEST);glUseProgram_(overlay_program_);glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,overlay_texture_);
@@ -1018,7 +1027,7 @@ private:
         if(mesh.vao)glDeleteVertexArrays_(1,&mesh.vao);
         mesh={};
     }
-    void release_scene() noexcept {
+    void release_scene() noexcept override {
         for(auto& mesh:meshes_)release(mesh);
         if(!textures_.empty())glDeleteTextures(static_cast<GLsizei>(textures_.size()),textures_.data());
         meshes_.clear();materials_.clear();textures_.clear();texture_names_.clear();scene_=nullptr;

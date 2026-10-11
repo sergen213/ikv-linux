@@ -24,6 +24,8 @@ layout(set=0,binding=0,std140) uniform Frame {
     vec4 sourceTime;
     // xy: this frame's sub-pixel projection jitter in NDC (vp includes it); zw: the previous frame's (previousVP).
     vec4 jitter;
+    // x: NONCANONICAL seamless door transition, scene blended towards black (post.frag); HUD unaffected.
+    vec4 fade;
 } frame;
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
 // Applied once to display values on every present path (scene in post.frag, HUD in overlay.frag), fullscreen only.

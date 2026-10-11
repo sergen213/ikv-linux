@@ -49,8 +49,8 @@ struct MemoryPool {
 struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;};
-static_assert(sizeof(Frame)==464 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448);
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;};
+static_assert(sizeof(Frame)==480 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
@@ -107,6 +107,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  std::vector<DrawItem> draws_;
  SourceScrollState source_scroll_;
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
+ float fade_=0; // NONCANONICAL seamless door fade (post.frag frame.fade.x)
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
  // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance,
  // or any appearance with faithful RT (RtStyle). Enhanced appearance keeps its sampling/FSR either way.
@@ -1760,6 +1761,9 @@ public:
      }
  }
 void set_grayscale(bool on)override { grayscale_=on; }
+void set_fade(float black)override { fade_=std::clamp(black,0.f,1.f); }
+// load() sees a different Scene and takes its full path (wait_idle, release, upload, full RT rebuild, fsr_reset_).
+void release_scene()override { scene_=nullptr; if(rt_)rt_->forget_scene(); }
 void set_upscaling(Upscaler upscaler,FsrQuality quality,float sharpness,bool frame_generation)override {
     if(!std::isfinite(sharpness)||sharpness<0||sharpness>1)throw std::invalid_argument("FSR sharpness requires [0,1]");
     // Render extent, targets, or the frame-generation contexts/swapchain owner change.
@@ -1976,6 +1980,7 @@ void set_particles(const ParticleFrame& frame)override {
      // w: original fullscreen gamma ramp 0x467030(1,1,1.2) (post.frag/overlay.frag); D3D9 SetGammaRamp is fullscreen-only.
      f.source_time={float(source_ticks),float(source_ticks)*.001f,grayscale_?1.f:0.f,
          (SDL_GetWindowFlags(window_)&SDL_WINDOW_FULLSCREEN)?1.f:0.f};
+     f.fade={fade_,0,0,0};
      uniform_offset_=slot*uniform_stride_;
      std::memcpy(static_cast<std::byte*>(uniform_.mapped)+uniform_offset_,&f,sizeof(f));
      unsigned current=frame_&1u;

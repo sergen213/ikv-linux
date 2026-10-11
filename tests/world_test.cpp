@@ -1048,6 +1048,13 @@ void activity_rules(const ikv::Json& mechanics) {
     player(4,14900,0);player(5,14900,0);world.action(4,{{"action","group_invite"},{"target",5}});world.action(5,{{"action","group_accept"}});
     world.action(4,{{"action","interact"},{"target",in}});
     check(own(4).at("zone")=="migrat1" && hp_of(4,chief+copy)==40,"the emptied copy reset: the next group meets a living Şef");
+    // Wave 15 connected party: invite/accept across zones; "party" carries every other member's status wherever it is; leaving clears it.
+    const auto party_row=[&](uint32_t viewer,uint32_t id)->ikv::Json{const auto frame=world.state(viewer);for(const auto& m:frame.at("party"))if(m.at("id")==id)return m;return nullptr;};
+    world.action(4,{{"action","group_invite"},{"target",3}});world.action(3,{{"action","group_accept"}}); // leader in migrat1, invitee in migrat
+    check(party_row(4,3).value("zone","")=="migrat" && party_row(4,3).at("hp")==own(3).at("hp") && party_row(4,3).at("alive")==true &&
+          party_row(4,5).value("zone","")=="eminonu" && party_row(4,5).at("source_registry_id")==0 && party_row(3,4).value("zone","")=="migrat1","cross-zone invite and party status");
+    world.action(3,{{"action","group_leave"}});
+    check(party_row(4,3).is_null() && world.state(3).at("party").empty() && party_row(4,5).value("zone","")=="eminonu","leaving clears the party row");
     // Er Meydanı: /kpsavas stake prompt and stakes, kind separation, capture areas, banners (own-clan shield, score, resurrection),
     // guardians, kill score, payout, headquarters.
     player(6,0,1,500);player(7,0,2,300,5);player(8,0,0);

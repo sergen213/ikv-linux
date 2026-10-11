@@ -702,9 +702,14 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             {"bounds",Json::array({-coordinate_limit,-coordinate_limit,coordinate_limit,coordinate_limit})},
             {"character",{{"name",std::string(32,'"')},{"class_id",3},{"equipment",player_bound.at("equipment")},
             {"appearance",std::move(appearance_bound)},{"state",{{"p",std::string(8184,'x')}}}}},
-            {"entities",std::move(entity_bounds)},{"events",std::move(event_bounds)},
+            {"entities",std::move(entity_bounds)},{"events",std::move(event_bounds)},{"party",Json::array()},
             {"catalogs",{{"items",std::move(item_bound)},{"quests",std::move(quest_bound)},{"skills",std::move(skill_bound)}}}};
         require(trade_bound.dump().size()<=32768 && wire_bound.dump().size()<=65533,"config","Full supported trade/state schema exceeds protocol envelope");
+        // A group member travels as a player entity when in view, else as a "party" row (state()), never both: five
+        // player_bound entities above bound either form.
+        const Json party_row={{"id",UINT32_MAX},{"name",std::string(32,'"')},{"level",INT32_MAX},{"class_id",3},{"hp",INT32_MAX},{"max_hp",INT32_MAX},{"mana",INT32_MAX},{"max_mana",INT32_MAX},
+                              {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true}};
+        require(party_row.dump().size()<=player_bound.dump().size(),"config","Party row exceeds the player entity bound");
         initializing_=false;
     } catch (const Rejected& e) { throw std::invalid_argument("gameplay config: " + e.message); }
       catch (const Json::exception& e) { throw std::invalid_argument(std::string("gameplay config: ") + e.what()); }
@@ -795,6 +800,8 @@ std::string World::instance(uint32_t id, const std::string& zone) const {
         for (const auto& [other, b] : actors_) if (other != id && b.character.at("state").at("zone") == name && (!member || group(other) == leader)) return true;
         return false;
     };
+    // Wave 15 party rule: the leader's copy first, so a member who held another copy before joining follows the leader's.
+    if (const auto& here = actors_.at(leader).character.at("state").at("zone").get_ref<const std::string&>(); leader != id && config_.at("zones").at(here).value("instance_of", std::string{}) == zone) return here;
     for (size_t n = 1; n <= copies; ++n) if (occupant(zone + std::to_string(n), true)) return zone + std::to_string(n); // the group's copy
     for (size_t n = 1; n <= copies; ++n) if (!occupant(zone + std::to_string(n), false)) return zone + std::to_string(n); // a free one
     return zone; // every copy is held by another group: the shared zone
@@ -2481,12 +2488,14 @@ void World::handle(uint32_t id, const Json& request) {
         else throw Rejected{"chat","Bilinmeyen sohbet kanalı."};
         a.chat_ready = tick_+10; return;
     }
+    // NONCANONICAL [INFERENCE]: the original also offered "Gruba Davet Et" on chat names, so invite and accept reach any online
+    // character, not only one within the AOI (wave 15 connected parties).
     if (action == "group_invite") {
-        auto t = target(); actor(t); require(t != id && !group(t),"group","Bu kişi zaten bir grupta."); require(close(id,t,config_.at("aoi")),"range","Davet edilen kişi çok uzakta.");
+        auto t = target(); actor(t); require(t != id && !group(t),"group","Bu kişi zaten bir grupta.");
         auto leader = group(id); require(!leader || leader == id,"group","Yalnızca grup lideri davet edebilir."); require(!leader || groups_.at(leader).size() < 6,"group","Grup dolu."); invites_[t] = id; emit(t,{{"type","group_invite"},{"from",id},{"name",a.character.at("name")}}); ack(); return;
     }
     if (action == "group_accept") {
-        require(invites_.contains(id) && !group(id),"group","Grup davetiniz yok."); auto leader = invites_.at(id); actor(leader); require(close(id,leader,config_.at("aoi")),"range","Grup lideri çok uzakta."); require(!group(leader) || group(leader) == leader,"group","Davet eden artık grup lideri değil.");
+        require(invites_.contains(id) && !group(id),"group","Grup davetiniz yok."); auto leader = invites_.at(id); actor(leader); require(!group(leader) || group(leader) == leader,"group","Davet eden artık grup lideri değil.");
         if (!groups_.contains(leader)) groups_[leader] = {leader};
         require(groups_.at(leader).size() < 6,"group","Grup dolu."); groups_[leader].push_back(id); invites_.erase(id); for (auto other : groups_.at(leader)) emit(other,{{"type","group"},{"leader",leader},{"members",groups_.at(leader)}}); return;
     }
@@ -2780,6 +2789,15 @@ Json World::state(uint32_t id) {
     std::sort(players.begin(),players.end());
     if(players.size()>31)players.resize(31); // snapshot() lists the same 31 beside self
     std::sort(visible.begin(),visible.end());
+    { // NONCANONICAL connected party (wave 15): the other members not in view (any zone); members in view are entities below.
+        Json party=Json::array();
+        if(leader)for(auto member:groups_.at(leader))if(member!=id && std::none_of(players.begin(),players.end(),[&](const auto& p){return std::get<2>(p)==member;})) {
+            const auto& m=actors_.at(member);const auto& s=m.character.at("state");
+            party.push_back({{"id",member},{"name",m.character.at("name")},{"level",s.at("level")},{"class_id",m.character.at("class_id")},{"hp",s.at("hp")},{"max_hp",s.at("max_hp")},{"mana",s.at("mana")},{"max_mana",s.at("max_mana")},
+                             {"zone",s.at("zone")},{"source_registry_id",config_.at("zones").at(s.at("zone").get<std::string>()).value("source_registry_id",Json(nullptr))},{"alive",s.at("hp").get<int>()>0}});
+        }
+        result["party"]=std::move(party);
+    }
     size_t used=result.dump().size();
     // Events are delivered once (the queue is cleared below) while entities are resent every frame, so every queued event
     // (≤32 events, ≤32768 bytes) is reserved before optional entities. Players first: group members always (the
@@ -2813,6 +2831,8 @@ Json World::state(uint32_t id) {
         if(n.master)entity["master"]=n.master; // summon: the caster it fights for
         if(n.definition.value("banker",false))entity["banker"]=true; // original entity flag +0x81&0x10: İşlemler "Kasamı göster" (0041a62f)
         if(!n.debuffs.empty())entity["debuffs"]=shown_effects(n.debuffs); // target frame icons
+        // NONCANONICAL seamless doors (wave 15): the target zone's registry row, so the client can decode it before the jump.
+        if(const auto door=n.definition.find("door");door!=n.definition.end())if(const auto& z=config_.at("zones").at(door->at("to").get<std::string>());z.contains("source_registry_id"))entity["destination"]=z.at("source_registry_id");
         Json added=Json::object();size_t bytes=entity.dump().size()+1;
         const auto add=[&](const std::string& item){if(catalog_items.contains(item) || added.contains(item))return;catalog(added,item);bytes+=Json(item).dump().size()+added.at(item).dump().size()+2;};
         for(const auto& item:n.definition.at("shop"))add(item.get<std::string>());

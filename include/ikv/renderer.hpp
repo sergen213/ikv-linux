@@ -268,6 +268,11 @@ public:
     virtual void set_particles(const ParticleFrame&) = 0;
     // Original death view (VOD 34:00): desaturates the 3D scene and particles for following render() calls; HUD stays in colour.
     virtual void set_grayscale(bool) = 0;
+    // NONCANONICAL seamless door transition: blends the 3D scene towards black (0 = none, 1 = black); HUD stays visible.
+    virtual void set_fade(float) = 0;
+    // Forgets the borrowed Scene before the caller replaces it at the same address: the next render() uploads it in full
+    // (and rebuilds RT structures, resets temporal history) while device, swapchain, pipelines and targets stay.
+    virtual void release_scene() = 0;
     // Vulkan applies upscaler/quality/sharpness/frame generation from the next render() (targets rebuilt on change);
     // OpenGL renders natively.
     virtual void set_upscaling(Upscaler, FsrQuality, float /*sharpness*/, bool /*frame_generation*/) {}

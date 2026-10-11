@@ -14,4 +14,5 @@ if(hi-lo>=max(.0312,hi*.125)){vec2 direction=vec2(-((lnw+lne)-(lsw+lse)),((lnw+l
 if(frame.params.x>.5){c*=frame.params.y;c=clamp((c*(2.51*c+.03))/(c*(2.43*c+.59)+.14),0,1);c=pow(c,vec3(1./2.2));}
 // sourceTime.z: original death view grayscale (HUD overlay is drawn afterwards in colour).
 if(frame.sourceTime.z>.5)c=vec3(luminance(c));
+c*=1.-frame.fade.x;
 color=vec4(sourceGammaRamp(c),1);}
