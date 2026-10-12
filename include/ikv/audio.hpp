@@ -23,7 +23,7 @@ struct Scene;
 struct RenderEntity;
 struct CameraBasis;
 
-// SDL3.4 output and the installed /usr/bin/ffmpeg decoder. Call on the client
+// SDL3.4 output and the in-process stb_vorbis Ogg decoder. Call on the client
 // thread; call update each frame and destroy before the application's SDL_Quit.
 // Two background beds (music, ambient) plus 32 one-shot effects mix on one device.
 class Audio {
@@ -34,7 +34,7 @@ public:
     ~Audio();
     Audio(const Audio&) = delete;
     Audio& operator=(const Audio&) = delete;
-    // Original Ogg file (OggS, <=32 MiB, <=600 s, 15 s decoder wall time) read and decoded off-thread;
+    // Original Ogg file (OggS, <=32 MiB, <=600 s, 8..48 kHz) read and decoded off-thread;
     // replaces the bed when ready (a failure stops it). loop=false plays once, as the original music stream does.
     void bed(Bed bed, std::filesystem::path ogg, bool loop);
     void stop(Bed bed);

@@ -10,6 +10,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -34,6 +35,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSaveFile>
 #include <QSpinBox>
 #include <QSslCertificate>
@@ -43,6 +45,7 @@
 #include <QStyle>
 #include <QTabWidget>
 #include <QTableWidget>
+#include <QSysInfo>
 #include <QTcpServer>
 #include <QThread>
 #include <QTimer>
@@ -57,6 +60,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <cerrno>
+#include <climits>
 #include <csignal>
 #include <cstdio>
 #include <tuple>
@@ -228,6 +232,53 @@ QSslConfiguration pinnedTls(const QString& caPath) {
     tls.setCaCertificates(certificates); // only the host's own development CA, never the system store
     return tls;
 }
+// Access mode lives in host.json `bind`: 127.0.0.1 = this PC only, 0.0.0.0 = LAN (all IPv4 interfaces; the admin API
+// stays 127.0.0.1). LAN SANs = loopback, every up non-loopback IPv4 except container/VM bridges, the host name and the
+// optional `lan_name`; `host` (the launcher profile) = lan_name, else the default-route address. Recomputed at each
+// start so a changed DHCP address gets a reissued leaf from the same CA. Any other bind (pre-wave-17 LAN servers fixed
+// one interface address) keeps its provisioned SANs.
+QJsonObject withAccessIdentity(QJsonObject config) {
+    const auto bind = config.value("bind").toString();
+    if (bind != "127.0.0.1" && bind != "0.0.0.0") return config;
+    QStringList sans{"DNS:localhost", "IP:127.0.0.1"};
+    QString host = "localhost";
+    if (bind == "0.0.0.0") {
+        QString route; // default-route interface with the lowest metric (/proc/net/route destination 00000000)
+        QFile table("/proc/net/route");
+        if (table.open(QIODevice::ReadOnly)) {
+            int best = INT_MAX;
+            for (const auto& line : QString::fromLatin1(table.read(65536)).split('\n'))
+                if (const auto fields = line.split('\t'); fields.size() > 6 && fields[1] == "00000000" && fields[6].toInt() < best) { route = fields[0]; best = fields[6].toInt(); }
+        }
+        QString first;
+        for (const auto& interface : QNetworkInterface::allInterfaces()) {
+            const auto name = interface.name();
+            if (!(interface.flags() & QNetworkInterface::IsUp) || (interface.flags() & QNetworkInterface::IsLoopBack) ||
+                name.startsWith("docker") || name.startsWith("br-") || name.startsWith("virbr") || name.startsWith("veth")) continue;
+            for (const auto& entry : interface.addressEntries()) {
+                if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol || entry.ip().isLoopback()) continue;
+                const auto ip = entry.ip().toString();
+                sans << "IP:" + ip;
+                if (first.isEmpty()) first = ip;
+                if (name == route && host == "localhost") host = ip;
+            }
+        }
+        if (host == "localhost" && !first.isEmpty()) host = first;
+        const QRegularExpression dnsName("^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$");
+        if (const auto machine = QSysInfo::machineHostName(); dnsName.match(machine).hasMatch() && machine != "localhost") sans << "DNS:" + machine;
+        if (const auto dns = config.value("lan_name").toString(); dnsName.match(dns).hasMatch()) { sans << "DNS:" + dns; host = dns; }
+        sans.removeDuplicates();
+    }
+    config.insert("sans", QJsonArray::fromStringList(sans)); config.insert("host", host);
+    return config;
+}
+// Host page toggle and `ikv-launcher --host-lan on|off`: the supervisor applies it (bind, SANs, leaf) at its next start.
+void setAccess(const QString& dir, bool lan) {
+    auto config = readJson(dir + "/host.json");
+    if (config.isEmpty()) throw hostIssue("host.json okunamadı; sunucu kurulmamış");
+    config.insert("bind", lan ? "0.0.0.0" : "127.0.0.1");
+    saveJson(dir + "/host.json", withAccessIdentity(config));
+}
 // supervisor.lock: held LOCK_EX by the running supervisor (content: its pid).
 // launcher.lock: held LOCK_SH by every open launcher; without one a non-keep-alive supervisor stops.
 bool lockHeld(const QString& path) {
@@ -277,13 +328,26 @@ public:
     void start() {
         watch_.start();
         try {
-            config_ = readJson(dir_ + "/host.json");
+            config_ = withAccessIdentity(readJson(dir_ + "/host.json"));
             if (config_.isEmpty()) throw hostIssue("host.json okunamadı; sunucu kurulmamış");
             bin_ = pgBinDir();
             phase("database");
-            if (runCode(openssl(), {"x509", "-checkend", "172800", "-noout", "-in", dir_ + "/secrets/tls-cert"}) != 0) {
-                say("hizmet sertifikası yenileniyor");
-                issueServiceCertificate(dir_ + "/secrets", config_.value("sans").toVariant().toStringList(), false);
+            const auto wanted = config_.value("sans").toVariant().toStringList();
+            QStringList current;
+            QFile leaf(dir_ + "/secrets/tls-cert");
+            if (leaf.open(QIODevice::ReadOnly))
+                for (const auto& certificate : QSslCertificate::fromData(leaf.read(1 << 20)).mid(0, 1)) {
+                    const auto names = certificate.subjectAlternativeNames();
+                    for (auto it = names.cbegin(); it != names.cend(); ++it) current << (it.key() == QSsl::DnsEntry ? "DNS:" : "IP:") + it.value();
+                }
+            if (QSet(current.begin(), current.end()) != QSet(wanted.begin(), wanted.end()) ||
+                runCode(openssl(), {"x509", "-checkend", "172800", "-noout", "-in", dir_ + "/secrets/tls-cert"}) != 0) {
+                say("hizmet sertifikası yenileniyor: " + wanted.join(','));
+                issueServiceCertificate(dir_ + "/secrets", wanted, false);
+            }
+            auto saved = readJson(dir_ + "/host.json"); // only the derived fields: the panel may be saving settings
+            if (saved.value("sans") != config_.value("sans") || saved.value("host") != config_.value("host")) {
+                saved.insert("sans", config_.value("sans")); saved.insert("host", config_.value("host")); saveJson(dir_ + "/host.json", saved);
             }
             startPostgres(dir_, bin_);
             say("PostgreSQL çalışıyor");
@@ -371,7 +435,8 @@ private:
         });
     }
     void post(const QString& path, const QJsonObject& body, std::function<void(int, const QJsonObject&)> done) {
-        QUrl url; url.setScheme("https"); url.setHost(config_.value("bind").toString()); url.setPort(authPort_); url.setPath(path);
+        const auto bind = config_.value("bind").toString();
+        QUrl url; url.setScheme("https"); url.setHost(bind == "0.0.0.0" ? "127.0.0.1" : bind); url.setPort(authPort_); url.setPath(path);
         QNetworkRequest request(url); request.setSslConfiguration(pinnedTls(dir_ + "/secrets/client-ca.pem"));
         request.setTransferTimeout(30000); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
         auto* reply = network_.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
@@ -495,7 +560,6 @@ private:
     QLineEdit *name_{}, *adminUser_{}, *adminPassword_{}, *lanName_{};
     QSpinBox *bots_{}, *authPort_{}, *adminPort_{}, *worldPort_{};
     QRadioButton *local_{}, *lan_{};
-    QComboBox* lanAddress_{};
     QWidget* advanced_{};
     QPushButton* createButton_{};
     QListWidget* steps_{};
@@ -503,7 +567,7 @@ private:
     QPushButton *start_{}, *stop_{}, *restart_{}, *cancel_{}, *login_{}, *logout_{}, *browser_{}, *delete_{};
     QSpinBox* restartDelay_{};
     QLineEdit* loginPassword_{};
-    QCheckBox *keepAlive_{}, *autostart_{};
+    QCheckBox *keepAlive_{}, *autostart_{}, *lanMode_{};
     QLineEdit *announce_{}, *banReason_{}, *accountSearch_{};
     QComboBox* banDuration_{};
     QTableWidget *playersTable_{}, *accounts_{};
@@ -583,13 +647,8 @@ private:
         f->addRow("Bot sayısı", bots_);
         auto* access = new QHBoxLayout;
         local_ = named(new QRadioButton("Yerel (yalnız bu bilgisayar)"), "hostLocal"); local_->setChecked(true);
-        lan_ = named(new QRadioButton("LAN (yerel ağ)"), "hostLan");
-        lanAddress_ = named(new QComboBox, "hostLanAddress"); lanAddress_->setEditable(true);
-        for (const auto& address : QNetworkInterface::allAddresses())
-            if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isLoopback()) lanAddress_->addItem(address.toString());
-        lanAddress_->setEnabled(false);
-        connect(lan_, &QRadioButton::toggled, lanAddress_, &QWidget::setEnabled);
-        access->addWidget(local_); access->addWidget(lan_); access->addWidget(lanAddress_, 1);
+        lan_ = named(new QRadioButton("LAN (yerel ağ: tüm IPv4 arayüzleri; sonradan değiştirilebilir)"), "hostLan");
+        access->addWidget(local_); access->addWidget(lan_, 1);
         f->addRow("Erişim", access);
         auto* more = named(new QCheckBox("Gelişmiş (portlar, LAN DNS adı)"), "hostAdvanced"); v->addWidget(more);
         advanced_ = new QWidget; auto* af = new QFormLayout(advanced_); advanced_->setVisible(false); v->addWidget(advanced_);
@@ -620,7 +679,7 @@ private:
 
         auto* overview = new QWidget; auto* ov = new QVBoxLayout(overview);
         auto* f = new QFormLayout; ov->addLayout(f);
-        state_ = field(f, "Durum", "hostState"); addresses_ = field(f, "Adresler", "hostAddresses");
+        state_ = field(f, "Durum", "hostState"); addresses_ = field(f, "Adresler", "hostAddresses"); addresses_->setWordWrap(true);
         uptime_ = field(f, "Çalışma süresi", "hostUptime"); players_ = field(f, "Çevrimiçi oyuncu", "hostPlayers");
         botCount_ = field(f, "Bot", "hostBotCount"); zones_ = field(f, "Bölgeler", "hostZones");
         tickLabel_ = field(f, "Tick / süre", "hostTick"); memory_ = field(f, "Bellek", "hostMemory");
@@ -645,8 +704,11 @@ private:
         connect(keepAlive_, &QCheckBox::toggled, this, [this](bool on) { guarded([&] { saveSetting("keep_alive", on); }); });
         autostart_ = named(new QCheckBox("Başlatıcı açılınca yerel sunucuyu otomatik başlat"), "hostAutostart"); ov->addWidget(autostart_);
         connect(autostart_, &QCheckBox::toggled, this, [this](bool on) { guarded([&] { saveSetting("autostart", on); }); });
+        lanMode_ = named(new QCheckBox("LAN'a açık: yerel ağdaki bilgisayarlar bağlanabilir (çalışıyorsa yeniden başlatılır)"), "hostLanMode"); ov->addWidget(lanMode_);
+        connect(lanMode_, &QCheckBox::toggled, this, [this](bool on) { guarded([&] { switchAccess(on); }); });
         auto* extra = new QHBoxLayout; ov->addLayout(extra);
         browser_ = button(extra, "Yönetim paneli (tarayıcı, gelişmiş)", "hostAdmin", [this] { openBrowser(); });
+        button(extra, "CA dosyasını kaydet", "hostExportCa", [this] { exportCa(); });
         extra->addStretch();
         delete_ = button(extra, "Sunucuyu sil", "hostDelete", [this] { deleteServer(); });
         ov->addStretch();
@@ -1030,20 +1092,10 @@ private:
         requireTools();
         auto config = readJson(dir() + "/host.json");
         const bool provisioned = !config.isEmpty();
-        if (!provisioned) { // SANs are fixed at provisioning; renewal reuses them.
-            QString bind = "127.0.0.1", host = "localhost";
-            QStringList sans{"DNS:localhost", "IP:127.0.0.1"};
-            if (lan_->isChecked()) {
-                const QHostAddress address(lanAddress_->currentText().trimmed());
-                if (address.protocol() != QAbstractSocket::IPv4Protocol || address.isLoopback() || !QNetworkInterface::allAddresses().contains(address))
-                    throw hostIssue("LAN için bu bilgisayarın bir IPv4 arayüz adresini seçin");
-                bind = host = address.toString(); sans << "IP:" + bind;
-                if (const QString dns = lanName_->text().trimmed(); !dns.isEmpty()) {
-                    if (!QRegularExpression("^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$").match(dns).hasMatch()) throw hostIssue("Geçersiz LAN DNS adı");
-                    sans << "DNS:" + dns; host = dns;
-                }
-            }
-            config = {{"bind", bind}, {"host", host}, {"sans", QJsonArray::fromStringList(sans)}, {"keep_alive", false}, {"autostart", false}};
+        if (!provisioned) { // the access mode can be switched later; each start recomputes SANs/host (withAccessIdentity)
+            const QString dns = lan_->isChecked() ? lanName_->text().trimmed() : QString();
+            if (!dns.isEmpty() && !QRegularExpression("^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$").match(dns).hasMatch()) throw hostIssue("Geçersiz LAN DNS adı");
+            config = withAccessIdentity({{"bind", lan_->isChecked() ? "0.0.0.0" : "127.0.0.1"}, {"lan_name", dns}, {"keep_alive", false}, {"autostart", false}});
         }
         config.insert("name", title); config.insert("bots", bots_->value());
         config.insert("auth_port", authPort_->value()); config.insert("admin_port", adminPort_->value()); config.insert("world_port", worldPort_->value());
@@ -1128,6 +1180,24 @@ private:
         call("POST", "/v1/admin/control", {{"command", "restart"}, {"delay_seconds", restartDelay_->value()}, {"message", "Bakım için kısa bir ara."}},
              [this](const QJsonObject&) { info(QString("Dünya %1 sn sonra yeniden başlatılacak (oyunculara duyuruldu)").arg(restartDelay_->value())); });
     }
+    void switchAccess(bool lan) {
+        if (mode_ != Mode::Idle) throw hostIssue("Sunucu başlatılıyor veya durduruluyor; bitince tekrar deneyin");
+        setAccess(dir(), lan);
+        info(lan ? "LAN erişimi açıldı (tüm IPv4 arayüzleri; sertifika başlatırken yenilenir)" : "LAN erişimi kapatıldı: yalnız bu bilgisayar");
+        if (alive()) { afterStop_ = [this] { startServer(); }; stopServer(); }
+        tick();
+    }
+    // Only the public CA certificate (never a key) so another PC's server profile can pin this server.
+    void exportCa() {
+        QFile source(ca());
+        const auto pem = source.open(QIODevice::ReadOnly) ? source.read(1 << 20) : QByteArray();
+        if (QSslCertificate::fromData(pem).isEmpty() || pem.contains("PRIVATE KEY")) throw hostIssue("Sunucu CA'sı okunamadı: " + ca());
+        const auto target = QFileDialog::getSaveFileName(this, "Sunucu CA dosyasını kaydet", QDir::homePath() + "/ikv-sunucu-ca.pem", "PEM sertifikası (*.pem *.crt)");
+        if (target.isEmpty()) return;
+        QSaveFile out(target);
+        if (!out.open(QIODevice::WriteOnly) || out.write(pem) < 0 || !out.commit()) throw hostIssue("Yazılamadı: " + target);
+        info("CA kaydedildi: " + target + " — diğer bilgisayarda sunucu profilinin CA dosyası olarak seçin");
+    }
     void deleteServer() {
         if (mode_ != Mode::Idle || alive()) throw hostIssue("Önce yerel sunucuyu durdurun");
         if (QMessageBox::question(this, "Sunucuyu sil", "Yerel sunucunun hesapları, karakterleri, veritabanı, yedekleri ve anahtarları kalıcı olarak silinsin mi?\n" + dir()) != QMessageBox::Yes) return;
@@ -1195,21 +1265,34 @@ private:
                          : phase == "failed" ? "Durduruldu (hata: " + state.value("message").toString() + ")"
                          : provisioned ? QString("Durduruldu") : QString("Kurulmadı"));
         state_->setText(status_->text());
-        addresses_->setText(running ? QString("oyuncular https://%1:%2 · dünya %1:%3 · yönetim 127.0.0.1:%4 (yalnız bu bilgisayar)")
-                                          .arg(state.value("host").toString()).arg(state.value("auth_port").toInt()).arg(state.value("world_port").toInt()).arg(state.value("admin_port").toInt())
-                                    : QString("—"));
+        const int authPort = (running ? state : config).value("auth_port").toInt(), worldPort = (running ? state : config).value("world_port").toInt();
+        QStringList lan;
+        if (config.value("bind").toString() != "127.0.0.1")
+            for (const auto& san : config.value("sans").toVariant().toStringList())
+                if (san != "IP:127.0.0.1" && san != "DNS:localhost") lan << QString("https://%1:%2").arg(san.section(':', 1)).arg(authPort);
+        QFile ufw("/etc/ufw/ufw.conf"); // world-readable; its rules need root, so only the enabled flag is known
+        const bool ufwOn = !lan.isEmpty() && ufw.open(QIODevice::ReadOnly) && ufw.read(4096).contains("\nENABLED=yes");
+        addresses_->setText(!provisioned ? QString("—")
+            : (lan.isEmpty() ? QString("yalnız bu bilgisayar: https://localhost:%1 (LAN kapalı)").arg(authPort)
+                             : "LAN oyuncuları (sunucu profili adresi): " + lan.join(" · ") +
+                               "\nDiğer bilgisayarda profilin CA dosyası olarak 'CA dosyasını kaydet' ile alınan dosyayı seçin." +
+                               (ufwOn ? QString("\nufw etkin: izin verilmediyse diğer bilgisayarlar bağlanamaz; TCP %1 ve %2 portlarını açın: sudo ufw allow %1,%2/tcp")
+                                      : QString("\nGüvenlik duvarı açıksa TCP %1 ve %2 portlarına izin verin (ör. sudo ufw allow %1,%2/tcp · "
+                                                "sudo firewall-cmd --add-port=%1/tcp --add-port=%2/tcp).")).arg(authPort).arg(worldPort)) +
+              (running ? QString("\ndünya portu %1 · yönetim 127.0.0.1:%2 (yalnız bu bilgisayar)").arg(worldPort).arg(state.value("admin_port").toInt()) : QString()));
         if (!running) {
             for (auto* label : {uptime_, players_, botCount_, zones_, tickLabel_, memory_, countdown_}) label->setText("—");
             if (playersTable_->rowCount()) playersTable_->setRowCount(0);
         } else if (session_.isEmpty()) uptime_->setText(since((QDateTime::currentMSecsSinceEpoch() - state.value("started_at").toInteger()) / 1000));
         {
-            QSignalBlocker a(keepAlive_), b(autostart_);
+            QSignalBlocker a(keepAlive_), b(autostart_), c(lanMode_);
             keepAlive_->setChecked(config.value("keep_alive").toBool()); autostart_->setChecked(config.value("autostart").toBool());
+            lanMode_->setChecked(config.value("bind").toString() != "127.0.0.1");
         }
         identity_->setText(session_.isEmpty() ? QString("Yönetim işlemleri için giriş yapın (%1):").arg(config.value("admin").toString().toHtmlEscaped())
                                               : "Yönetici: " + config.value("admin").toString().toHtmlEscaped());
         // A half-finished creation (no admin yet) keeps its access mode and ports.
-        for (QWidget* widget : std::initializer_list<QWidget*>{local_, lan_, lanAddress_, lanName_}) widget->setEnabled(!provisioned && mode_ == Mode::Idle && (widget != lanAddress_ || lan_->isChecked()));
+        for (QWidget* widget : std::initializer_list<QWidget*>{local_, lan_, lanName_}) widget->setEnabled(!provisioned && mode_ == Mode::Idle);
         if (provisioned && !admin) { lan_->setChecked(config.value("bind").toString() != "127.0.0.1"); local_->setChecked(!lan_->isChecked()); }
         tailLog();
         if (running && ++ticks_ % 4 == 1) poll();
@@ -1268,9 +1351,24 @@ private:
 
 QDialog* createHostPanel(QWidget* parent, QPushButton* chip, Hooks hooks) { return new Panel(parent, chip, std::move(hooks)); }
 
-bool isSupervisorInvocation(int argc, char** argv) { return argc > 1 && std::strcmp(argv[1], "--host-supervisor") == 0; }
+bool isSupervisorInvocation(int argc, char** argv) {
+    return argc > 1 && (std::strcmp(argv[1], "--host-supervisor") == 0 || std::strcmp(argv[1], "--host-lan") == 0);
+}
 
 int supervisorMain(int argc, char** argv) {
+    if (std::strcmp(argv[1], "--host-lan") == 0) { // the host page's LAN toggle for scripts/headless hosts
+        if (argc != 4 || (std::strcmp(argv[2], "on") != 0 && std::strcmp(argv[2], "off") != 0)) {
+            std::fprintf(stderr, "kullanım: ikv-launcher --host-lan on|off DIR\n"); return 2;
+        }
+        const QString dir = QFileInfo(QFile::decodeName(argv[3])).absoluteFilePath();
+        if (!privateDirectoryOk(dir)) { std::fprintf(stderr, "Sunucu klasörü (0700) geçersiz: %s\n", argv[3]); return 2; }
+        try { setAccess(dir, std::strcmp(argv[2], "on") == 0); } catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); return 1; }
+        const auto config = readJson(dir + "/host.json");
+        std::printf("bind=%s host=%s sans=%s%s\n", config.value("bind").toString().toUtf8().constData(), config.value("host").toString().toUtf8().constData(),
+                    config.value("sans").toVariant().toStringList().join(',').toUtf8().constData(),
+                    lockHeld(dir + "/supervisor.lock") ? " (sunucu çalışıyor: yeniden başlatınca uygulanır)" : "");
+        return 0;
+    }
     if (argc < 3) { std::fprintf(stderr, "kullanım: ikv-launcher --host-supervisor DIR --asset-root PATH [--bootstrap-admin NAME]\n"); return 2; }
     const QString dir = QFileInfo(QFile::decodeName(argv[2])).absoluteFilePath();
     QString assets, admin;

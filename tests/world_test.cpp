@@ -1379,6 +1379,7 @@ int main(int argc, char** argv) {
         bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
         portal_copies(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
+        check(world.state(1).at("clock").at("interior")==ikv::Json::array({200,157,142,126,105,110,184,199,217,78,0}),"roofed zones get the interior_hour (noon) record at every hour");
         world.action(1, {{"action", "buy"}, {"target", 2147493650u}, {"item", "healing_tonic"}, {"quantity", 1}});
         check(event(world.state(1), "error", "range"), "merchant range");
         world.destination(1, 200, 0, 1); ticks(world, 2);

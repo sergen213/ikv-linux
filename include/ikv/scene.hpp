@@ -43,7 +43,9 @@ struct SourceSurface {
 };
 enum class SourceScalarUse : std::uint8_t { ReplacedNormal,NoColorNormal,DegenerateNormal,InactiveLightmapUv,UnorderedBounds,InactiveSkinNormal,ZeroWeightPosition,UnreferencedNormal };
 struct SourceScalarWord { std::uint32_t resource=0,chunk=0,offset=0,bits=0; SourceScalarUse use=SourceScalarUse::ReplacedNormal; };
-struct SourceSceneDescriptor { unsigned registry_id=0,support_id=0; std::string key,label,environment_key; float minute=749; std::string lightmap; std::vector<std::string> members; };
+// roofed (NONCANONICAL wave 17): drawn geometry covers the zone's walkable cells from above (an interior); such zones take
+// the server's interior record (clock.interior) instead of the day/night cycle.
+struct SourceSceneDescriptor { unsigned registry_id=0,support_id=0; std::string key,label,environment_key; float minute=749; std::string lightmap; std::vector<std::string> members; bool roofed=false; };
 struct SourceEquipment { unsigned slot=0,uid=0; bool operator==(const SourceEquipment&) const = default; };
 struct SourceAppearance { unsigned source_class=3,face=0,hair=0,hair_color=0,beard=0,beard_color=0; std::vector<SourceEquipment> equipment; bool operator==(const SourceAppearance&) const = default; };
 // skin_held (set by the caller before update_scene): skip CPU skinning of this actor's meshes this frame, like original

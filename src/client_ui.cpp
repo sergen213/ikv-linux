@@ -2,7 +2,9 @@
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#ifndef _WIN32
 #include <fontconfig/fontconfig.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -79,8 +81,12 @@ struct ClientUI::Impl {
     FT_Library library = nullptr;
     FT_Face face = nullptr, original_fallback = nullptr, native_notdef = nullptr, bold = nullptr; // bold: sibling verdanab.ttf
     bool bold_active = false;
+#ifdef _WIN32
+    std::vector<std::filesystem::path> native_files; // NONCANONICAL: %WINDIR%\Fonts list in place of Fontconfig
+#else
     FcConfig* font_config = nullptr;
     FcFontSet* native_fonts = nullptr;
+#endif
     std::vector<FT_Face> native_faces;
     std::vector<bool> native_attempted;
     int pixel_size = 0;
@@ -140,8 +146,10 @@ struct ClientUI::Impl {
         if (original_fallback) FT_Done_Face(original_fallback);
         if (bold) FT_Done_Face(bold);
         for (auto native : native_faces) if (native) FT_Done_Face(native);
+#ifndef _WIN32
         if (native_fonts) FcFontSetDestroy(native_fonts);
         if (font_config) FcConfigDestroy(font_config);
+#endif
         if (library) FT_Done_FreeType(library);
     }
 
@@ -159,12 +167,16 @@ struct ClientUI::Impl {
     FT_Face native_face(int index) {
         if (!native_attempted[index]) {
             native_attempted[index] = true;
+#ifdef _WIN32
+            native_faces[index] = load_face(native_files[index]);
+#else
             FcChar8* path = nullptr;
             int face_index = 0;
             if (FcPatternGetString(native_fonts->fonts[index], FC_FILE, 0, &path) == FcResultMatch) {
                 FcPatternGetInteger(native_fonts->fonts[index], FC_INDEX, 0, &face_index);
                 native_faces[index] = load_face(reinterpret_cast<const char*>(path), face_index);
             }
+#endif
         }
         return native_faces[index];
     }
@@ -176,10 +188,12 @@ struct ClientUI::Impl {
                 return;
             }
         }
-        for (int i = 0; i < native_fonts->nfont; ++i) {
+        for (int i = 0; i < static_cast<int>(native_faces.size()); ++i) {
+#ifndef _WIN32
             FcCharSet* charset = nullptr;
             if (FcPatternGetCharSet(native_fonts->fonts[i], FC_CHARSET, 0, &charset) != FcResultMatch ||
                 !FcCharSetHasChar(charset, codepoint)) continue;
+#endif
             auto native = native_face(i);
             if (native && (result.index = FT_Get_Char_Index(native, codepoint))) {
                 result.face = native;
@@ -255,6 +269,16 @@ ClientUI::ClientUI(const std::filesystem::path& font, int pixelSize) : impl_(std
             throw std::runtime_error("Original Unicode UI fallback unavailable: " + fallback.string());
     }
     if (const auto bold = font.parent_path() / "verdanab.ttf"; std::filesystem::is_regular_file(bold)) impl_->bold = impl_->load_face(bold);
+#ifdef _WIN32
+    // Common Unicode sans/symbol/CJK faces stand in for Fontconfig's sorted sans-serif set; the original font comes last
+    // so a drawable .notdef exists even in a bare (Wine) Fonts directory.
+    const wchar_t* windows = _wgetenv(L"WINDIR");
+    const auto fonts = std::filesystem::path(windows && *windows ? windows : L"C:\\Windows") / "Fonts";
+    for (const char* name : {"segoeui.ttf", "arial.ttf", "tahoma.ttf", "seguisym.ttf", "msyh.ttc", "malgun.ttf", "msgothic.ttc", "nirmala.ttf"})
+        if (std::filesystem::is_regular_file(fonts / name)) impl_->native_files.push_back(fonts / name);
+    impl_->native_files.push_back(font);
+    const auto native_count = impl_->native_files.size();
+#else
     impl_->font_config = FcInitLoadConfigAndFonts();
     if (!impl_->font_config) throw std::runtime_error("Cannot initialize native Fontconfig fallback");
     const std::unique_ptr<FcPattern, decltype(&FcPatternDestroy)> pattern(FcPatternCreate(), FcPatternDestroy);
@@ -270,9 +294,11 @@ ClientUI::ClientUI(const std::filesystem::path& font, int pixelSize) : impl_(std
     FcResult match_result{};
     impl_->native_fonts = FcFontSort(impl_->font_config, pattern.get(), FcFalse, nullptr, &match_result);
     if (!impl_->native_fonts) throw std::runtime_error("Cannot discover native UI font fallback");
-    impl_->native_faces.resize(impl_->native_fonts->nfont, nullptr);
-    impl_->native_attempted.resize(impl_->native_fonts->nfont, false);
-    for (int i = 0; i < impl_->native_fonts->nfont; ++i) {
+    const auto native_count = static_cast<std::size_t>(impl_->native_fonts->nfont);
+#endif
+    impl_->native_faces.resize(native_count, nullptr);
+    impl_->native_attempted.resize(native_count, false);
+    for (int i = 0; i < static_cast<int>(native_count); ++i) {
         const auto native = impl_->native_face(i);
         if (native && !FT_Load_Glyph(native, 0, FT_LOAD_DEFAULT | FT_LOAD_NO_BITMAP) &&
             !FT_Render_Glyph(native->glyph, FT_RENDER_MODE_NORMAL) &&

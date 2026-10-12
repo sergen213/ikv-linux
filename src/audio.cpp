@@ -8,31 +8,20 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 #include <algorithm>
-#include <cerrno>
 #include <cmath>
-#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
 #include <stdexcept>
-#include <sys/mman.h>
-#include <sys/resource.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <thread>
-#include <unistd.h>
+#define STB_VORBIS_HEADER_ONLY
+#include "../third_party/stb_vorbis/stb_vorbis.c" // declarations only; the implementation is its own TU (-w)
 
 namespace ikv {
 namespace {
 constexpr std::size_t input_limit = 32 * 1024 * 1024;
-constexpr std::size_t bytes_per_second = 48000 * 2 * sizeof(std::int16_t);
-const SDL_AudioSpec pcm_format{SDL_AUDIO_S16LE, 2, 48000};
+const SDL_AudioSpec pcm_format{SDL_AUDIO_S16LE, 2, 48000}; // device request
 constexpr std::size_t grid_bytes = 2048 * 2048;
 
-[[noreturn]] void system_error(const char* operation) {
-    throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
-}
 void sdl_check(bool result, const char* operation) {
     if (!result) throw std::runtime_error(std::string(operation) + ": " + SDL_GetError());
 }
@@ -50,135 +39,47 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path, std::size
     return bytes;
 }
 
-// Unlinked, owner-only scratch files bound both encoded input and decoded output.
-// A regular output file lets us allocate the exact PCM size once, without growing
-// a vector or risking deadlock between ffmpeg's input and output pipes.
-struct Scratch {
-    int fd = -1;
-    Scratch() {
-        char path[] = "/tmp/ikv-audio-XXXXXX";
-        fd = ::mkostemp(path, O_CLOEXEC);
-        if (fd == -1) system_error("creating audio scratch file");
-        if (::unlink(path) == -1) {
-            const int saved = errno;
-            ::close(fd);
-            errno = saved;
-            system_error("unlinking audio scratch file");
-        }
-        if (fd <= STDERR_FILENO) {
-            const int replacement = ::fcntl(fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-            const int saved = errno;
-            ::close(fd);
-            fd = replacement;
-            if (fd == -1) { errno = saved; system_error("duplicating audio descriptor"); }
-        }
-    }
-    ~Scratch() { if (fd != -1) ::close(fd); }
-    Scratch(const Scratch&) = delete;
-    Scratch& operator=(const Scratch&) = delete;
-};
-struct Child {
-    pid_t pid;
-    ~Child() {
-        if (pid <= 0) return;
-        ::kill(pid, SIGKILL);
-        while (::waitpid(pid, nullptr, 0) == -1 && errno == EINTR) {}
-    }
-};
-
 } // namespace
 
 struct Audio::PcmData {
-    Bytes owner; // shared original RAW file bytes, or empty for a decoder mapping
+    Bytes owner; // shared original RAW file bytes, or the decoded Ogg PCM
     std::span<const std::uint8_t> view;
-    void* mapping = MAP_FAILED;
-    std::size_t mapped_size = 0;
+    int rate = 0; // decoded Ogg: S16LE stereo at this rate
 
-    PcmData(Bytes bytes, std::span<const std::uint8_t> frames) : owner(std::move(bytes)), view(frames) {}
-    PcmData(int fd, std::size_t size)
-        : mapping(::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0)), mapped_size(size) {
-        if (mapping == MAP_FAILED) system_error("mapping decoded audio");
-        view = {static_cast<const std::uint8_t*>(mapping), size};
-    }
-    ~PcmData() { if (mapping != MAP_FAILED) ::munmap(mapping, mapped_size); }
+    PcmData(Bytes bytes, std::span<const std::uint8_t> frames, int freq = 0) : owner(std::move(bytes)), view(frames), rate(freq) {}
     PcmData(const PcmData&) = delete;
     PcmData& operator=(const PcmData&) = delete;
     const std::uint8_t* data() const noexcept { return view.data(); }
     std::size_t size() const noexcept { return view.size(); }
 };
 
+// In-process stb_vorbis (third_party/stb_vorbis: SDL_mixer's CVE-2023-45675..45682-patched v1.22) replaced a forked
+// /usr/bin/ffmpeg: no runtime dependency, no fork of the multi-GiB client, same code on Windows. Output stays S16LE
+// stereo (mono is duplicated); SDL resamples. Every decoder allocation comes from a fixed 2 MiB arena (the largest
+// original Ogg needs 215 KiB): a hostile header fails with VORBIS_outofmem instead of sizing heap allocations.
 Audio::Pcm Audio::decode(std::vector<std::uint8_t> ogg) {
-    const std::size_t decoded_limit = bytes_per_second * 600;
-    Scratch input;
-    Scratch output;
-    std::size_t offset = 0;
-    while (offset < ogg.size()) {
-        const ssize_t count = ::write(input.fd, ogg.data() + offset, ogg.size() - offset);
-        if (count == -1 && errno == EINTR) continue;
-        if (count <= 0) system_error("writing Ogg scratch input");
-        offset += static_cast<std::size_t>(count);
-    }
-    if (::lseek(input.fd, 0, SEEK_SET) == -1) system_error("rewinding Ogg input");
-    const int errors = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
-    if (errors == -1) system_error("opening decoder diagnostic sink");
-    // All arguments and limits are prepared before vfork: the child only makes async-signal-safe syscalls until exec.
-    // fork() would copy this multi-GiB client's page tables and make every later parent write a COW fault: a 10 ms
-    // stall of the frame thread on each zone-music change.
-    const char* const argv[] = {
-        "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-threads", "1", "-protocol_whitelist", "pipe", "-f", "ogg",
-        "-i", "pipe:0", "-map", "0:a:0", "-vn", "-sn", "-dn",
-        "-threads", "1", "-t", "600.001",
-        "-ac", "2", "-ar", "48000", "-acodec", "pcm_s16le",
-        "-f", "s16le", "pipe:1", nullptr
-    };
-    const rlimit output_bound{decoded_limit + 65536, decoded_limit + 65536};
-    const rlimit memory_bound{1024ULL * 1024 * 1024, 1024ULL * 1024 * 1024};
-    const rlimit cpu_bound{12, 12};
-    const rlimit core_bound{0, 0};
-    const pid_t pid = ::vfork();
-    if (pid == 0) {
-        if (::dup2(input.fd, STDIN_FILENO) == -1 ||
-            ::dup2(output.fd, STDOUT_FILENO) == -1 ||
-            ::dup2(errors, STDERR_FILENO) == -1 ||
-            ::setrlimit(RLIMIT_FSIZE, &output_bound) == -1 ||
-            ::setrlimit(RLIMIT_AS, &memory_bound) == -1 ||
-            ::setrlimit(RLIMIT_CPU, &cpu_bound) == -1 ||
-            ::setrlimit(RLIMIT_CORE, &core_bound) == -1)
-            ::_exit(126);
-        ::close(input.fd);
-        ::close(output.fd);
-        if (errors > STDERR_FILENO) ::close(errors);
-        ::execv(argv[0], const_cast<char* const*>(argv));
-        ::_exit(127);
-    }
-    const int saved = errno;
-    ::close(errors);
-    if (pid == -1) { errno = saved; system_error("forking Ogg decoder"); }
-    Child child{pid};
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-    int status = 0;
-    for (;;) {
-        const pid_t result = ::waitpid(pid, &status, WNOHANG);
-        if (result == pid) { child.pid = -1; break; }
-        if (result == -1) {
-            if (errno == EINTR) continue;
-            if (errno == ECHILD) child.pid = -1;
-            system_error("waiting for Ogg decoder");
-        }
-        if (std::chrono::steady_clock::now() >= deadline)
-            throw std::runtime_error("Ogg decoder exceeded its 15-second wall-time limit");
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
-        throw std::runtime_error("ffmpeg Ogg decoding failed (missing decoder, corrupt data, or resource limit)");
-    struct stat info {};
-    if (::fstat(output.fd, &info) == -1) system_error("measuring decoded audio");
-    if (info.st_size <= 0 || static_cast<std::uint64_t>(info.st_size) > decoded_limit || info.st_size % 4 != 0)
+    int error = 0;
+    std::vector<char> arena(2 * 1024 * 1024);
+    const stb_vorbis_alloc alloc{arena.data(), static_cast<int>(arena.size())};
+    const std::unique_ptr<stb_vorbis, void (*)(stb_vorbis*)> vorbis(
+        stb_vorbis_open_memory(ogg.data(), static_cast<int>(ogg.size()), &error, &alloc), stb_vorbis_close);
+    if (!vorbis) throw std::runtime_error("Ogg Vorbis decoding failed (error " + std::to_string(error) + ")");
+    const auto info = stb_vorbis_get_info(vorbis.get());
+    const std::size_t frames = stb_vorbis_stream_length_in_samples(vorbis.get());
+    if (info.sample_rate < 8000 || info.sample_rate > 48000 || frames == 0 || frames > info.sample_rate * 600ULL)
         throw std::runtime_error("Ogg clip is empty, invalid, or exceeds 600 seconds");
-    // MAP_PRIVATE/PROT_READ keeps the unlinked scratch file alive through shared
-    // PCM ownership, without a second full allocation/read/copy of long music.
-    return std::make_shared<const PcmData>(output.fd, static_cast<std::size_t>(info.st_size));
+    auto pcm = std::make_shared<std::vector<std::uint8_t>>(frames * 4);
+    std::size_t decoded = 0;
+    while (decoded < frames) {
+        const int count = stb_vorbis_get_samples_short_interleaved(vorbis.get(), 2,
+            reinterpret_cast<short*>(pcm->data() + decoded * 4), static_cast<int>((frames - decoded) * 2));
+        if (count <= 0) break;
+        decoded += static_cast<std::size_t>(count);
+    }
+    if (decoded == 0) throw std::runtime_error("Ogg clip decoded no audio");
+    pcm->resize(decoded * 4);
+    const std::span<const std::uint8_t> view(*pcm);
+    return std::make_shared<const PcmData>(std::move(pcm), view, static_cast<int>(info.sample_rate));
 }
 
 void Audio::StreamDeleter::operator()(SDL_AudioStream* stream) const noexcept {
@@ -207,7 +108,7 @@ Audio::~Audio() {
     for (auto& voice : voices_) voice.reset();
     SDL_CloseAudioDevice(device_);
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
-    // Pending futures join their bounded (15 s) decoders here; results are discarded.
+    // Pending futures join their in-process decoders here; results are discarded.
 }
 void Audio::volume(float value) {
     check_volume(value);
@@ -339,7 +240,7 @@ void Audio::update() {
         Pcm pcm;
         try { pcm = ready.pcm.get(); } // Rethrows a read/decoder failure to the caller.
         catch (...) { if (current) voices_[ready.bed].reset(); throw; } // 00455eb0: "couldn't load background music" leaves no stream.
-        if (current) start(ready.bed, std::move(pcm), pcm_format, ready.loop, std::nullopt);
+        if (current) start(ready.bed, pcm, {SDL_AUDIO_S16LE, 2, pcm->rate}, ready.loop, std::nullopt);
     }
     for (std::size_t slot = 0; slot < voices_.size(); ++slot) {
         if (!voices_[slot]) continue;

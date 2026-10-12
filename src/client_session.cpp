@@ -5,6 +5,11 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define poll WSAPoll // NONCANONICAL: WSAPoll; pre-2004 Windows 10 reports a refused connect as the 5 s timeout
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <poll.h>
@@ -12,6 +17,10 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
+using SOCKET = int;
+constexpr SOCKET INVALID_SOCKET = -1;
+#define closesocket close
+#endif
 
 #include <algorithm>
 #include <array>
@@ -40,11 +49,16 @@ int remaining_ms(Clock::time_point deadline) {
     if (remaining <= Clock::duration::zero()) throw std::runtime_error("secure connection timed out");
     return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count() + 1);
 }
-short wait_socket(int fd, short events, Clock::time_point deadline) {
+#ifdef _WIN32
+bool interrupted(int) { return false; }
+#else
+bool interrupted(int ready) { return ready < 0 && errno == EINTR; }
+#endif
+short wait_socket(SOCKET fd, short events, Clock::time_point deadline) {
     for (;;) {
         pollfd descriptor{fd, events, 0};
         const int ready = poll(&descriptor, 1, remaining_ms(deadline));
-        if (ready < 0 && errno == EINTR) continue;
+        if (interrupted(ready)) continue;
         if (ready < 0 || (descriptor.revents & POLLNVAL)) transport_error();
         if (ready == 0) continue;
         return descriptor.revents;
@@ -57,6 +71,9 @@ short tls_want(SSL* ssl, int result) {
     transport_error();
 }
 
+#ifdef _WIN32
+class NoSigpipe { public: NoSigpipe() {} }; // Winsock has no SIGPIPE
+#else
 // OpenSSL's socket BIO writes without MSG_NOSIGNAL on Linux. Block SIGPIPE
 // only on this thread, consume only a newly generated signal, and restore the
 // caller's mask without changing process-wide signal handlers.
@@ -82,6 +99,7 @@ private:
     sigset_t old_{};
     bool previously_pending_ = false;
 };
+#endif
 
 struct Resolution {
     std::mutex mutex;
@@ -220,9 +238,12 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         if (!clock.is_object() || !clock.at("hour").is_number()) invalid();
         const auto hour = clock.at("hour").get<double>();
         if (!(hour >= 0 && hour < 24)) invalid();
-        const auto& environment = clock.at("environment");
-        if (!environment.is_array() || environment.size() != 11) invalid();
-        for (const auto& byte : environment) integer(byte, 0, 255);
+        const auto record = [&](const Json& environment) {
+            if (!environment.is_array() || environment.size() != 11) invalid();
+            for (const auto& byte : environment) integer(byte, 0, 255);
+        };
+        record(clock.at("environment"));
+        if (clock.contains("interior")) record(clock.at("interior")); // wave 17: the record of roofed zones
         // Original thgf fog start/end distances (record +0xec/+0xf0).
         const auto& fog = clock.at("fog");
         if (!fog.is_array() || fog.size() != 2 || !fog[0].is_number() || !fog[1].is_number()) invalid();
@@ -442,7 +463,7 @@ struct ClientSession::Impl {
         Frame(const Frame&) = delete;
         Frame& operator=(const Frame&) = delete;
     };
-    int fd = -1;
+    SOCKET fd = INVALID_SOCKET;
     SSL_CTX* context = nullptr;
     SSL* ssl = nullptr;
     Decoder decoder;
@@ -473,7 +494,7 @@ struct ClientSession::Impl {
     ~Impl() {
         if (ssl) SSL_free(ssl);
         if (context) SSL_CTX_free(context);
-        if (fd >= 0) close(fd);
+        if (fd != INVALID_SOCKET) closesocket(fd);
     }
     void queue(const Message& message, bool secret = false) {
         auto bytes = encode(message);
@@ -491,30 +512,44 @@ struct ClientSession::Impl {
     }
     void connect_to(const std::string& host, std::uint16_t port, const std::filesystem::path& ca) {
         const auto deadline = Clock::now() + io_timeout;
+#ifdef _WIN32
+        static const bool winsock = [] { WSADATA data{}; return WSAStartup(MAKEWORD(2, 2), &data) == 0; }(); // process lifetime
+        if (!winsock) transport_error();
+#endif
         context = SSL_CTX_new(TLS_client_method());
         if (!context || SSL_CTX_set_min_proto_version(context, TLS1_2_VERSION) != 1 ||
-            SSL_CTX_load_verify_locations(context, ca.c_str(), nullptr) != 1) transport_error();
+            SSL_CTX_load_verify_locations(context, reinterpret_cast<const char*>(ca.u8string().c_str()), nullptr) != 1) transport_error();
         SSL_CTX_set_verify(context, SSL_VERIFY_PEER, nullptr);
         SSL_CTX_set_options(context, SSL_OP_NO_COMPRESSION);
         const auto resolution = resolve(host, port, deadline);
         for (auto* address = resolution->addresses; address; address = address->ai_next) {
             remaining_ms(deadline);
+#ifdef _WIN32
+            // Not inheritable (CLOEXEC), nonblocking via FIONBIO.
+            fd = WSASocketW(address->ai_family, SOCK_STREAM, address->ai_protocol, nullptr, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+            u_long nonblocking = 1;
+            if (fd != INVALID_SOCKET && ioctlsocket(fd, FIONBIO, &nonblocking) != 0) { closesocket(fd); fd = INVALID_SOCKET; }
+            if (fd == INVALID_SOCKET) continue;
+            bool connected = connect(fd, address->ai_addr, static_cast<int>(address->ai_addrlen)) == 0;
+            if (!connected && WSAGetLastError() == WSAEWOULDBLOCK) {
+#else
             fd = socket(address->ai_family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, address->ai_protocol);
             if (fd < 0) continue;
             bool connected = connect(fd, address->ai_addr, address->ai_addrlen) == 0;
             if (!connected && errno == EINPROGRESS) {
+#endif
                 wait_socket(fd, POLLOUT, deadline);
                 int error = 0;
                 socklen_t size = sizeof(error);
-                connected = getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0 && error == 0;
+                connected = getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) == 0 && error == 0;
             }
             if (connected) break;
-            close(fd);
-            fd = -1;
+            closesocket(fd);
+            fd = INVALID_SOCKET;
         }
-        if (fd < 0) transport_error();
+        if (fd == INVALID_SOCKET) transport_error();
         ssl = SSL_new(context);
-        if (!ssl || SSL_set_fd(ssl, fd) != 1) transport_error();
+        if (!ssl || SSL_set_fd(ssl, static_cast<int>(fd)) != 1) transport_error();
         auto* verification = SSL_get0_param(ssl);
         X509_VERIFY_PARAM_set_hostflags(verification, X509_CHECK_FLAG_NEVER_CHECK_SUBJECT | X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
         std::array<unsigned char, 16> ip{};
@@ -661,7 +696,7 @@ void ClientSession::pump(int wait_ms, const std::function<void(Type)>& on_messag
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(impl_->deadline() - Clock::now()).count();
         const int timeout = SSL_pending(impl_->ssl) > 0 ? 0 : static_cast<int>(std::clamp<long long>(left + 1, 0, wait_ms));
         const int ready = poll(&descriptor, 1, timeout);
-        if (ready < 0 && errno == EINTR) return;
+        if (interrupted(ready)) return;
         if (ready < 0 || (descriptor.revents & POLLNVAL)) transport_error();
         impl_->deadlines(descriptor.revents);
         const short available = descriptor.revents;

@@ -342,6 +342,9 @@ const SourceSceneDescriptor& source_scene_descriptor(unsigned registry_id) {
   add(68,12,"buyukhol","Büyük Hol","buyukhol",749,members("buyukhol"),"textures/pureblack.dds");
   add(69,13,"karakoy","Karakoy","karakoy",749,members("karakoy",true),"textures/clouds.dds");
   add(70,17,"karakoyic","Karakoy İç Mekan","karakoyic",749,members("karakoyic",true),"textures/clouds.dds");
+  // NONCANONICAL wave 17: drawn geometry covers >= 99.5 % of 400 sampled walk cells from above (sky_box membership does
+  // not: Karaköy İç is roofed with it, Sivri Ada open without it); analysis/porting-wave17/MisirLights/roof.cpp.
+  for(auto& row:out)for(const char* key:{"misir","antrepo","labirent","migrat","siginak","buyukhol","karakoyic"})row.roofed=row.roofed||row.environment_key==key;
   return out;
  }();
  need(registry_id<rows.size(),"original scene registry ID outside supplied corpus");return rows[registry_id];
@@ -879,6 +882,7 @@ void scene_decoder_self_test() {
  set_scene_clock(daylight,3.5f,{255,0,0,0,0,0,0,0,0,51,255});need(daylight.lighting.glow==1&&daylight.lighting.sky_blend==.75f&&daylight.lighting.ambient_multiplier[0]==1&&daylight.lighting.lightmap_strength==.2f,"004a4c90 night ramp and 004b6970 record self-check");
  set_scene_clock(daylight,23.5f,{});need(daylight.lighting.sky_blend==.25f,"004a4c90 evening ramp self-check");set_scene_clock(daylight,12,{});need(daylight.lighting.sky_blend==0,"004a4c90 day self-check");
  set_scene_environment(daylight,4);need(daylight.lighting.source_minute==590,"source zone clock initializer self-check");
+ need(source_scene_descriptor(1).roofed&&source_scene_descriptor(68).roofed&&source_scene_descriptor(70).roofed&&source_scene_descriptor(30).roofed&&!source_scene_descriptor(0).roofed&&!source_scene_descriptor(5).roofed&&!source_scene_descriptor(26).roofed,"roofed interiors self-check");
  const auto store=[](std::vector<std::uint8_t>& b,std::size_t p,std::uint32_t w){for(unsigned i=0;i<4;++i)b.at(p+i)=std::uint8_t(w>>(8*i));};
  const auto real=[&](std::vector<std::uint8_t>& b,std::size_t p,float f){store(b,p,std::bit_cast<std::uint32_t>(f));};
  std::vector<assets::AdfChunk> chunks{{"mate",0,std::vector<std::uint8_t>(468)},{"item",1,std::vector<std::uint8_t>(256)},{"vert",1,std::vector<std::uint8_t>(144)},{"tris",1,std::vector<std::uint8_t>(160)},{"qkey",1,std::vector<std::uint8_t>(64)}};

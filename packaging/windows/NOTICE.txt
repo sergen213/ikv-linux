@@ -1,0 +1,50 @@
+IKV native Windows client and launcher — packaging notice
+==========================================================
+
+tools/package_windows.py cross-builds the IKV client and launcher from this source tree in the pinned container
+tools/windows/Dockerfile (Debian 13 snapshot 20261007T000000Z, MinGW-w64 GCC 14 posix/SEH/msvcrt). It produces the
+Setup.exe (NSIS) and the portable .zip. The package contains no original game data, installer, artwork or credentials:
+the launcher imports the original files only from the user's own installer or installation folder. The icon is generic
+packaging artwork. Every downloaded input is SHA-256 pinned in tools/windows/Dockerfile.
+
+Bundled third-party components (licence texts in this directory, share\licenses\):
+  Qt 6.11.3 qtbase, official prebuilt win64_mingw: Qt6Core/Gui/Widgets/Network.dll and the plugins
+    platforms\qwindows, styles\qmodernwindowsstyle, tls\qschannelbackend + qcertonlybackend,
+    imageformats\qico/qjpeg/qgif (bin\)                             LGPL-3.0, qt\ (GPL-3.0 text referenced)
+  innoextract 1.9, signed upstream Windows build, unmodified (bin\innoextract.exe)
+                                         zlib licence + static Boost/liblzma/libstdc++, innoextract\
+  GCC 14.2 runtime libstdc++-6.dll, libgcc_s_seh-1.dll (Debian gcc-mingw-w64 27, "14.2.0-19+27+b1")
+                                         GPL-3.0 with the GCC Runtime Library Exception,
+                                         gcc-mingw-w64-x86-64-posix-runtime.copyright
+  mingw-w64 12.0.0 winpthreads libwinpthread-1.dll (Debian mingw-w64 12.0.0-5)
+                                         MIT/BSD-style, mingw-w64-common.copyright
+  Statically linked into ikv-client.exe / ikv-launcher.exe:
+    OpenSSL 3.5.9                        Apache-2.0, openssl\
+    SDL 3.4.18                           zlib licence, SDL3\
+    FreeType 2.14.3                      FreeType Licence (FTL), freetype\
+    libjpeg-turbo 3.2.0 (libturbojpeg)   IJG / BSD-3-Clause / zlib, libjpeg-turbo\
+    zlib 1.3.2                           zlib licence, zlib\
+    Boost 1.92 (header-only libraries)   BSL-1.0, boost\
+    nlohmann_json 3.12.0                 MIT, nlohmann_json\
+    stb_vorbis (nothings/stb)            public domain or MIT, stb_vorbis\
+    AMD FidelityFX SDK 1.1.4 / FSR 3.1.4 MIT, ..\doc\ikv_native\third_party\FidelityFX-SDK-LICENSE.txt
+                                         (local patches: third_party/FidelityFX-SDK/IKV-PROVENANCE.txt)
+  Build time only, not shipped: Vulkan-Headers 1.4.363 (Apache-2.0/MIT, Vulkan-Headers\) and the Vulkan-Loader
+  1.4.363 import library (Apache-2.0, Vulkan-Loader\); vulkan-1.dll comes from the GPU driver.
+
+Source locations
+  IKV:            this repository (the same tag as the release).
+  Qt 6.11.3:      https://download.qt.io/online/qtsdkrepository/all_os/qt/qt6_6113_unix_line_endings_src/qt.qt6.6113.src/6.11.3-0-202609240252qtbase-everywhere-src-6.11.3.tar.xz
+                  (Qt's SHA-1 7f9741b0c01e881854b785ad95f67c76b130be36); the binaries are the unmodified
+                  qt.qt6.6113.win64_mingw qtbase archive from download.qt.io (sha256 pinned in tools/windows/Dockerfile).
+  innoextract:    https://constexpr.org/innoextract/files/innoextract-1.9.tar.gz (+ .sig; key ADE96537 03D4ADE0 E9977581 28555A66 D7E1DEC9)
+  GCC runtime, winpthreads: Debian source packages gcc-mingw-w64 27 and mingw-w64 12.0.0-5 from
+                  https://snapshot.debian.org/archive/debian/20261007T000000Z/
+  Statically linked components: the release tarballs named and pinned in tools/windows/Dockerfile.
+
+LGPL / GPL notes and source offer
+  Qt is used unmodified and dynamically linked. To use a modified or different build of Qt (ABI-compatible MinGW
+  6.11.x), replace the Qt6*.dll files and the plugin DLLs in bin\ of the installed or unpacked program; the IKV
+  executables load them from that folder. The GCC runtime DLLs are covered by the GCC Runtime Library Exception.
+  The project maintainers will also provide the corresponding sources of the LGPL/GPL components on request through
+  the project's issue tracker for at least three years after each release.

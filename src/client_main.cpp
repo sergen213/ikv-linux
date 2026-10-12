@@ -983,9 +983,12 @@ private:
         decoding_=std::async(std::launch::async,[root=options_.assets,source]{return ikv::load_source_scene(root,source);});
     }
     // thgf clock and record fog (004a4680 params 6/7, scaled by Görüş Mesafesi 0046b630/0046b660); true when the fog changed.
+    // A roofed zone (an interior, SourceSceneDescriptor::roofed) takes the server's interior record when sent (wave 17).
     static bool apply_clock(ikv::Scene& zone,const Json& clock) {
+        const bool roofed=zone.source_registry_id && ikv::source_scene_descriptor(*zone.source_registry_id).roofed && clock.contains("interior");
+        const auto& bytes=clock.at(roofed?"interior":"environment");
         std::array<std::uint8_t,11> record{};
-        for (std::size_t i=0;i<record.size();++i) record[i]=clock.at("environment")[i].get<std::uint8_t>();
+        for (std::size_t i=0;i<record.size();++i) record[i]=bytes[i].get<std::uint8_t>();
         ikv::set_scene_clock(zone,clock.at("hour").get<float>(),record);
         const std::array<float,2> fog{clock.at("fog")[0].get<float>(),clock.at("fog")[1].get<float>()};
         if (fog==zone.lighting.fog_record) return false;
@@ -4130,7 +4133,12 @@ private:
             // 0041c2a0 -> 00468010: releasing PrintScreen (DIK_SYSRQ) saves EKRAN_<_strdate>_<_strtime> with '/' -> '-' and
             // ':' -> '.' into the working directory: BMP with Shift, else TGA with Ctrl, else JPG.
             if (event.type==SDL_EVENT_KEY_UP && event.key.key==SDLK_PRINTSCREEN && session_) {
-                const auto now=std::time(nullptr); std::tm local{}; localtime_r(&now,&local);
+                const auto now=std::time(nullptr); std::tm local{};
+#ifdef _WIN32
+                localtime_s(&local,&now);
+#else
+                localtime_r(&now,&local);
+#endif
                 char name[40]; std::strftime(name,sizeof name,"EKRAN_%m-%d-%y_%H.%M.%S",&local);
                 screenshot_request_=std::string(name)+((event.key.mod&SDL_KMOD_SHIFT)?".BMP":(event.key.mod&SDL_KMOD_CTRL)?".TGA":".JPG");
             }
@@ -4936,7 +4944,7 @@ private:
             {"frame_generation",options_.frame_generation},{"texture_detail",options_.texture_detail},
             {"lightmap_detail",options_.lightmap_detail},{"preferences",options_.prefs},
             {"camera",{{"yaw",c.yaw},{"pitch",c.pitch},{"distance",options_.camera.distance}}}};
-        const auto temp=options_.settings.string()+".tmp";
+        auto temp=options_.settings; temp+=".tmp";
         std::ofstream file(temp,std::ios::trunc); file << settings.dump(2) << '\n'; file.close();
         if (!file) throw std::runtime_error("settings write failed");
         std::filesystem::rename(temp,options_.settings);
@@ -4951,7 +4959,10 @@ int main(int argc,char** argv) {
         if (options.renderer=="vulkan")
             throw std::runtime_error("Vulkan renderer is unavailable in this OpenGL-only build; rebuild with IKV_BUILD_VULKAN=ON");
 #endif
-        std::signal(SIGINT,interrupt_handler); std::signal(SIGTERM,interrupt_handler); std::signal(SIGPIPE,SIG_IGN);
+        std::signal(SIGINT,interrupt_handler); std::signal(SIGTERM,interrupt_handler);
+#ifndef _WIN32
+        std::signal(SIGPIPE,SIG_IGN);
+#endif
         Secret secret;
         if (options.headless) return headless(options,secret);
         Application app(options,secret); return app.run();

@@ -296,6 +296,9 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             // NONCANONICAL fog start/end distances (original thgf 004a4680 params 6/7 = client record +0xec/+0xf0).
             const auto& fog = clock.at("fog"); require(fog.is_array() && fog.size() == 2, "config", "Clock fog is [start, end]");
             integer(fog[1], integer(fog[0], 0, 1000000), 1000000);
+            // NONCANONICAL wave 17: roofed interiors (client SourceSceneDescriptor::roofed) take the record of this fixed
+            // hour, sent as clock.interior, instead of the cycle (the invented night record turned them dark blue).
+            if (clock.contains("interior_hour")) integer(clock.at("interior_hour"), 0, 23);
         }
         require(config_.at("vendor_return_denominator") == 5 && config_.at("vendor_plus_return_denominator") == 3, "config", "Guide vendor ratios required");
         require(config_.at("zones").is_object() && config_.at("zones").size() > 0 && config_.at("zones").size() <= 32, "config", "Zone count invalid");
@@ -730,7 +733,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             {"stats",{{"attack",INT32_MAX},{"defense",INT32_MAX},{"attack_cooldown",10000},{"weapon_damage",Json::array({INT32_MAX,INT32_MAX})},{"armor",Json::array({1000,100})},{"charisma",1000},{"resistance_points",1000000},{"craft_points",1000000},
                       {"clan_rank",std::string(32,'"')},{"guild_rank",std::string(32,'"')},{"arena_power",1000},
                       {"crit",Json::array({INT32_MIN,10})},{"efsun",[&]{Json e=Json::object();for(const auto& [pid,p]:config_.at("prefixes").items()){(void)pid;for(const auto& a:p.at("attributes"))e[std::to_string(a[0].get<int>())]=INT32_MIN;}return e;}()}}},
-            {"clock",{{"hour",23.999999999999996},{"environment",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"fog",Json::array({1000000,1000000})}}},
+            {"clock",{{"hour",23.999999999999996},{"environment",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"interior",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"fog",Json::array({1000000,1000000})}}},
             {"bounds",Json::array({-coordinate_limit,-coordinate_limit,coordinate_limit,coordinate_limit})},
             {"character",{{"name",std::string(32,'"')},{"class_id",3},{"equipment",player_bound.at("equipment")},
             {"appearance",std::move(appearance_bound)},{"state",{{"p",std::string(8184,'x')}}}}},
@@ -2893,12 +2896,16 @@ Json World::state(uint32_t id) {
     if(config_.contains("clock")) {
         // Cyclic linear blend between the configured hourly records; 20 ticks per real second.
         const auto& clock=config_.at("clock");const auto& records=clock.at("records");
+        const auto environment=[&](double hour) {
+            std::size_t from_index=records.size()-1;for(std::size_t i=0;i<records.size();++i)if(records[i][0].get<double>()<=hour)from_index=i;
+            const auto& from=records[from_index];const auto& to=records[(from_index+1)%records.size()];
+            const double span=std::fmod(to[0].get<double>()-from[0].get<double>()+24.0,24.0),t=span>0?std::fmod(hour-from[0].get<double>()+24.0,24.0)/span:0;
+            Json bytes=Json::array();for(std::size_t k=1;k<12;++k)bytes.push_back(int(std::lround(from[k].get<double>()+(to[k].get<double>()-from[k].get<double>())*t)));
+            return bytes;
+        };
         const double hour=clock_hour();
-        std::size_t from_index=records.size()-1;for(std::size_t i=0;i<records.size();++i)if(records[i][0].get<double>()<=hour)from_index=i;
-        const auto& from=records[from_index];const auto& to=records[(from_index+1)%records.size()];
-        const double span=std::fmod(to[0].get<double>()-from[0].get<double>()+24.0,24.0),t=span>0?std::fmod(hour-from[0].get<double>()+24.0,24.0)/span:0;
-        Json environment=Json::array();for(std::size_t k=1;k<12;++k)environment.push_back(int(std::lround(from[k].get<double>()+(to[k].get<double>()-from[k].get<double>())*t)));
-        result["clock"]={{"hour",hour},{"environment",std::move(environment)},{"fog",clock.at("fog")}};
+        result["clock"]={{"hour",hour},{"environment",environment(hour)},{"fog",clock.at("fog")}};
+        if(clock.contains("interior_hour"))result["clock"]["interior"]=environment(clock.at("interior_hour").get<double>());
     }
     result["character"]["equipment"]=visible_equipment(a.character.at("state"));
     // Puan: the original shows cumulative XP over the next cumulative threshold (VOD 1811/3183); state xp is within the level.

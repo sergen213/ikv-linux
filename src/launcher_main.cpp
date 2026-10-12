@@ -80,7 +80,18 @@
 namespace {
 using Callback = std::function<void(const QByteArray&)>;
 QString failure(const std::exception& e) { return QString::fromUtf8(e.what()); }
-std::filesystem::path fs(const QString& p) { return std::filesystem::path(p.toStdString()); }
+std::filesystem::path fs(const QString& p) { return std::filesystem::path(p.toStdU16String()); }
+#ifdef _WIN32
+// NONCANONICAL: server hosting (launcher_server.cpp: PostgreSQL + ikv-auth/ikv-server supervisor) and the
+// AppImage self-update are Linux-only; the Windows launcher joins servers through Sunucu ekle.
+constexpr char platformName[] = "Windows", innoextractName[] = "innoextract.exe", innoextractLabel[] = "innoextract.exe",
+               innoextractPrompt[] = "innoextract.exe programını seçin (Windows)", innoextractMagic[] = "MZ";
+#else
+constexpr char platformName[] = "Linux", innoextractName[] = "innoextract", innoextractLabel[] = "innoextract (ELF)",
+               innoextractPrompt[] = "Linux innoextract programını seçin (ELF)", innoextractMagic[] = "\x7f" "ELF";
+#endif
+constexpr char hostingNote[] = "Sunucu barındırma (Sunucu Kur) Linux sürümündedir. Ağdaki bir İKV sunucusuna katılmak için "
+                               "Sunucu ekle ile adresini ve CA sertifika dosyasını girin.";
 QString dataRoot() { return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation); }
 void saveJson(const QString& path, const QJsonObject& value) {
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -112,6 +123,7 @@ bool frameProcessLines(QByteArray& pending, const QByteArray& chunk, const QByte
     if (finished && !pending.isEmpty()) publish();
     return true;
 }
+#ifndef _WIN32
 // Startup argv before QApplication strips Qt options; handoff/restart re-exec with exactly these.
 std::vector<QByteArray> startArguments;
 // ikv-updater and verify_release take a PEM path: an empty trust setting selects the compiled-in
@@ -169,6 +181,7 @@ QString handoff() {
         return "Kurulu güncelleme kullanılamadı; bu sürümle devam ediliyor: " + failure(e);
     }
 }
+#endif
 class Launcher final : public QWidget {
     QSettings settings;
     QNetworkAccessManager network;
@@ -313,10 +326,13 @@ class Launcher final : public QWidget {
         if (renderer->currentText() == "opengl" && upscaler->currentData().toString() != "off")
             throw std::runtime_error("OpenGL renders natively; select Vulkan for FSR 3.1.4");
         settings.setValue("installation/root", root->text()); settings.setValue("assets/source", assetSource->text());
-        settings.setValue("assets/extractor", extractor->text()); settings.setValue("updates/repo", repo->text());
+        settings.setValue("assets/extractor", extractor->text());
+#ifndef _WIN32
+        settings.setValue("updates/repo", repo->text());
         settings.setValue("updates/trust", trust->text()); settings.setValue("updates/ca", updateCa->text());
         // release_channel replaces 0.3's updates/channel, which saved an unchosen "stable" default.
         settings.setValue("updates/api", releaseApi->text()); settings.setValue("updates/release_channel", channel->currentText()); settings.remove("updates/channel");
+#endif
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/renderer", renderer->currentText());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/render_scale", renderScale->value());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/fsr", upscaler->currentData().toString());
@@ -424,7 +440,7 @@ class Launcher final : public QWidget {
         place(pages, {286, 105, 289, 244});
         place(status, {230, 378, 344, 38}); status->setAlignment(Qt::AlignLeft | Qt::AlignTop);
         place(progress, {226, 420, 352, 18}); progress->setVisible(true);
-        place(updateBanner, {226, 442, 352, 30}); updateBanner->setVisible(!offeredVersion.isEmpty());
+        if (updateBanner) { place(updateBanner, {226, 442, 352, 30}); updateBanner->setVisible(!offeredVersion.isEmpty()); }
 
         auto* left = box({44, 355, 127, 118}, "Sunucu");
         skinLeft = left->parentWidget();
@@ -438,10 +454,11 @@ class Launcher final : public QWidget {
         skinLog->document()->setMaximumBlockCount(500); activity->addWidget(skinLog, 1);
         skinLog->moveCursor(QTextCursor::End);
         auto* news = box({344, 558, 243, 112}, "Sunucu Kur");
-        auto* body = new QLabel("Bu bilgisayarda kendi özel topluluk sunucunuzu kurun, başlatın ve yönetin.");
+        auto* hostButton = findChild<QPushButton*>("hostButton"); // absent on Windows (hostingNote)
+        auto* body = new QLabel(hostButton ? "Bu bilgisayarda kendi özel topluluk sunucunuzu kurun, başlatın ve yönetin." : hostingNote);
         body->setObjectName("skinBody"); body->setWordWrap(true); news->addWidget(body);
-        auto* hostButton = findChild<QPushButton*>("hostButton");
-        news->addWidget(hostButton, 0, Qt::AlignLeft); hostButton->show(); news->addStretch();
+        if (hostButton) { news->addWidget(hostButton, 0, Qt::AlignLeft); hostButton->show(); }
+        news->addStretch();
 
         skinActions = new QWidget; place(skinActions, {39, 481, 136, 49});
         skinPlay = findChild<QPushButton*>("playButton"); skinPlay->setParent(skinActions); new SkinFace(skinPlay, art[141]);
@@ -585,6 +602,7 @@ class Launcher final : public QWidget {
             done(bytes);
         });
     }
+#ifndef _WIN32
     void runHelper(const QStringList& arguments, std::function<void()> done) {
         if (busy || !replies.isEmpty()) throw std::runtime_error("Another installation/update or HTTPS request is active");
         QString helper = QCoreApplication::applicationDirPath() + "/ikv-updater";
@@ -705,6 +723,7 @@ class Launcher final : public QWidget {
         settings.sync();
         execInto(target);
     }
+#endif
     void play() {
 #if !IKV_HAS_VULKAN
         if (renderer->currentIndex() < 0)
@@ -720,8 +739,8 @@ class Launcher final : public QWidget {
         const QString assets = root->text() + "/assets";
         if (!QFileInfo(assets).isDir()) throw std::runtime_error("Import legitimate original assets first");
         // OYNA runs this launcher's own client: after a startup handoff that is the newest installed release.
-        const QString executable = QCoreApplication::applicationDirPath() + "/ikv-client";
-        if (!QFileInfo(executable).isExecutable()) throw std::runtime_error("ikv-client başlatıcının yanında bulunamadı: " + executable.toStdString());
+        const QString executable = QStandardPaths::findExecutable("ikv-client", {QCoreApplication::applicationDirPath()});
+        if (executable.isEmpty()) throw std::runtime_error("ikv-client başlatıcının yanında bulunamadı: " + QCoreApplication::applicationDirPath().toStdString() + "/ikv-client");
         QString certificate = serverCertificate();
         if (certificate.isEmpty()) {
             certificate = qEnvironmentVariable(X509_get_default_cert_file_env(), QString::fromLocal8Bit(X509_get_default_cert_file()));
@@ -752,7 +771,7 @@ class Launcher final : public QWidget {
         if (!audioPath->text().isEmpty()) {
             const auto relative = fs(audioPath->text());
             if (relative.is_absolute() || std::any_of(relative.begin(), relative.end(), [](const auto& p) { return p == ".."; })) throw std::runtime_error("Original audio path must stay inside imported assets");
-            args << "--audio" << QString::fromStdString((fs(assets) / relative).string());
+            args << "--audio" << QString::fromStdU16String((fs(assets) / relative).u16string());
         }
         status->setText("Sunucu denetleniyor…");
         api("/v1/status", "GET", {}, false, [this, executable, host, args](const QByteArray& bytes) {
@@ -799,14 +818,15 @@ class Launcher final : public QWidget {
         connect(thread, &QThread::finished, this, [this, thread] { workers.removeOne(thread); thread->deleteLater(); });
         thread->start();
     }
-    // First ELF innoextract among: the configured path, beside the launcher, the source tree's .tools, PATH.
+    // First native innoextract among: the configured path, beside the launcher, the source tree's .tools, PATH.
     QString innoextract() {
         const QString bundled = "/.tools/innoextract-1.9-linux/bin/amd64/innoextract", dir = QCoreApplication::applicationDirPath();
-        for (const QString& candidate : {extractor->text(), dir + "/innoextract", dir + "/.." + bundled, QDir::currentPath() + bundled, QStandardPaths::findExecutable("innoextract")}) {
+        const QByteArray magic(innoextractMagic);
+        for (const QString& candidate : {extractor->text(), dir + "/" + innoextractName, dir + "/.." + bundled, QDir::currentPath() + bundled, QStandardPaths::findExecutable("innoextract")}) {
             QFile file(candidate);
-            if (QFileInfo(candidate).isFile() && QFileInfo(candidate).isExecutable() && file.open(QIODevice::ReadOnly) && file.read(4) == QByteArray("\x7f" "ELF", 4)) return candidate;
+            if (QFileInfo(candidate).isFile() && QFileInfo(candidate).isExecutable() && file.open(QIODevice::ReadOnly) && file.read(magic.size()) == magic) return candidate;
         }
-        const QString chosen = QFileDialog::getOpenFileName(this, "Linux innoextract programını seçin (ELF)");
+        const QString chosen = QFileDialog::getOpenFileName(this, innoextractPrompt);
         if (!chosen.isEmpty()) { extractor->setText(chosen); persist(); }
         return chosen;
     }
@@ -950,11 +970,12 @@ class Launcher final : public QWidget {
         auto* install = new QGroupBox("Kurulum"); auto* iv = new QVBoxLayout(install); auto* iff = new QFormLayout; iv->addLayout(iff); av->addWidget(install);
         root = text(iff, "Kurulum klasörü", "installRoot", settings.value("installation/root", dataRoot()).toString());
         assetSource = text(iff, "Özgün dosya kaynağı", "assetSource", settings.value("assets/source").toString());
-        extractor = text(iff, "innoextract (ELF)", "extractor", settings.value("assets/extractor").toString());
+        extractor = text(iff, innoextractLabel, "extractor", settings.value("assets/extractor").toString());
         extractor->setPlaceholderText("otomatik bulunur");
         auto* ir = new QHBoxLayout; iv->addLayout(ir);
         button(ir, "Dosyaları doğrula", "verifyButton", [this] { verifyAssets(false); });
         button(ir, "Onar", "repairButton", [this] { verifyAssets(true); });
+#ifndef _WIN32
         button(ir, "İmzalı paket kur", "installButton", [this] { installBundle(); });
         auto* updates = new QGroupBox("Güncellemeler"); auto* uv = new QVBoxLayout(updates); auto* uf = new QFormLayout; uv->addLayout(uf); av->addWidget(updates);
         repo = text(uf, "GitHub OWNER/REPOSITORY", "updateRepo", settings.value("updates/repo").toString());
@@ -971,6 +992,7 @@ class Launcher final : public QWidget {
             persist();
             runHelper({"rollback", "--trust", trustPem(trust->text()), "--root", root->text()}, [this] { restartIntoInstalled(); });
         });
+#endif
         auto* content = new QGroupBox("Özgün içerik eşlemeleri (isteğe bağlı)"); auto* cf = new QFormLayout(content); av->addWidget(content);
         modelMap = text(cf, "Model eşlemesi (id:N → JSON)", "modelMap", settings.value("graphics/modelMap").toString());
         audioPath = text(cf, "Ses klasörü (göreli)", "audioPath", settings.value("graphics/audioPath").toString());
@@ -999,7 +1021,7 @@ class Launcher final : public QWidget {
     }
     // ---- Sunucu Kur / Sunucu Yönetimi: src/launcher_server.cpp (docs/SELF_HOSTING.md) ----
     void showHost() { hostDialog->show(); hostDialog->raise(); hostDialog->activateWindow(); }
-    void offerHost() { if (hostAfterInstall->isChecked()) showHost(); }
+    void offerHost() { if (hostAfterInstall && hostAfterInstall->isChecked()) showHost(); }
     ikv::launcher_server::Hooks hostHooks() {
         return {[this] { return root->text(); }, [this] { return hasAssets(); }, [this](const QString& line) { log(line); },
             [this](const QString& auth, const QString& ca, const QString& user, const QString& secret, bool select) {
@@ -1021,10 +1043,12 @@ public:
         buildSettings(); buildServerDialog();
         auto* main = new QVBoxLayout(this);
         auto* header = new QHBoxLayout; main->addLayout(header);
-        auto* title = new QLabel("<span style='font-size:20pt;font-weight:bold'>İstanbul Kıyamet Vakti</span><br>Bağımsız Linux başlatıcısı");
+        auto* title = new QLabel(QString("<span style='font-size:20pt;font-weight:bold'>İstanbul Kıyamet Vakti</span><br>Bağımsız %1 başlatıcısı").arg(platformName));
         header->addWidget(title, 1);
         button(header, "⚙ Ayarlar", "settingsButton", [this] { settingsDialog->show(); settingsDialog->raise(); settingsDialog->activateWindow(); });
+#ifndef _WIN32
         hostDialog = ikv::launcher_server::createHostPanel(this, button(header, "Sunucu Kur", "hostButton", [] {}), hostHooks()); // live status chip
+#endif
         pages = new QStackedWidget; pages->setObjectName("pages"); main->addWidget(pages, 1);
 
         installPage = new QWidget; installPage->setObjectName("installPage"); auto* iv = new QVBoxLayout(installPage);
@@ -1033,8 +1057,12 @@ public:
         intro->setWordWrap(true); iv->addWidget(intro);
         button(iv, "Kurulum dosyasını seç (istanbulkur6_0.exe)", "extractButton", [this] { importAssets(true); })->setMinimumHeight(48);
         button(iv, "Mevcut kurulum klasörünü seç", "importButton", [this] { importAssets(false); });
+#ifdef _WIN32
+        auto* hostNote = new QLabel(hostingNote); hostNote->setObjectName("hostingNote"); hostNote->setWordWrap(true); iv->addWidget(hostNote);
+#else
         hostAfterInstall = new QCheckBox("Bu bilgisayarda yerel sunucu da kur (Sunucu Kur)"); hostAfterInstall->setObjectName("hostAfterInstall");
         iv->addWidget(hostAfterInstall);
+#endif
         installNote = new QLabel; installNote->setWordWrap(true); installNote->setEnabled(false); iv->addWidget(installNote);
         iv->addStretch(); pages->addWidget(installPage);
 
@@ -1070,11 +1098,13 @@ public:
         cv->addStretch();
         pages->addWidget(playPage);
 
+#ifndef _WIN32
         updateBanner = new QWidget; updateBanner->setObjectName("updateBanner"); updateBanner->hide();
         auto* ub = new QHBoxLayout(updateBanner); ub->setContentsMargins(0, 0, 0, 0);
         updateLabel = new QLabel; updateLabel->setObjectName("updateLabel"); ub->addWidget(updateLabel, 1);
         updateNow = button(ub, "Güncelle", "updateNow", [this] { updateInstalled ? restartIntoInstalled() : installUpdate(); });
         main->addWidget(updateBanner);
+#endif
         status = new QLabel("Hazır"); status->setObjectName("status"); status->setWordWrap(true); main->addWidget(status);
         progress = new QProgressBar; progress->setObjectName("progress"); progress->setTextVisible(false); progress->setVisible(false); main->addWidget(progress);
 
@@ -1087,6 +1117,7 @@ public:
         showPage();
         log("Native Qt " QT_VERSION_STR " platform=" + QApplication::platformName());
     }
+#ifndef _WIN32
     // Normal start: report an unusable installed release, then check for updates without blocking.
     void startup(const QString& handoffIssue) {
         QTimer::singleShot(0, this, [this, handoffIssue] {
@@ -1102,24 +1133,35 @@ public:
         root->setText(parser.value("install-root")); repo->setText(parser.value("repo")); trust->setText(parser.value("trust")); updateCa->setText(parser.value("update-ca")); releaseApi->setText(parser.value("release-api")); channel->setCurrentText(parser.value("channel"));
         QTimer::singleShot(0, this, [this] { try { persist(); checkUpdates(false); } catch (const std::exception& e) { error(failure(e)); } });
     }
+#endif
     ~Launcher() override { for (auto* worker : workers) worker->wait(); session.fill('\0'); }
 };
 } // namespace
 int main(int argc, char** argv) {
+#ifndef _WIN32
     if (ikv::launcher_server::isSupervisorInvocation(argc, argv)) return ikv::launcher_server::supervisorMain(argc, argv);
+#endif
     QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
     QCoreApplication::setApplicationVersion(ikv::release::version);
+#ifndef _WIN32
     for (int i = 0; i < argc; ++i) startArguments.emplace_back(argv[i]);
     const QString handoffIssue = handoff(); // returns only when this build stays in charge
     if (!handoffIssue.isEmpty()) fprintf(stderr, "ikv-launcher: %s\n", handoffIssue.toUtf8().constData());
+#endif
     QApplication app(argc, argv);
     QCommandLineParser parser; parser.setApplicationDescription("Native own-server İKV launcher; no official credentials or endpoints"); parser.addHelpOption(); parser.addVersionOption();
+#ifndef _WIN32
     parser.addOption({"update-once", "Check the release API, install a newer release through Güncelle and restart into it; exit when current (no dialogs)"});
     for (const char* option : {"install-root", "repo", "trust", "update-ca", "release-api"}) parser.addOption({option, "Explicit update configuration", "value"});
     parser.addOption({"network-timeout-ms", "Reduce HTTPS wall deadlines (1..60000); operation deadline is three times this value", "milliseconds", "60000"});
-    parser.addOption({"channel", "Release channel stable|experimental", "channel", ikv::release::channel}); parser.process(app);
+    parser.addOption({"channel", "Release channel stable|experimental", "channel", ikv::release::channel});
+#endif
+    parser.process(app);
     try {
     Launcher launcher;
+#ifdef _WIN32
+    launcher.show();
+#else
     if (parser.isSet("update-once")) {
         for (const char* required : {"install-root", "repo", "trust", "update-ca"}) if (parser.value(required).isEmpty()) { fprintf(stderr, "--%s required\n", required); return 2; }
         if (parser.value("channel") != "stable" && parser.value("channel") != "experimental") return 2;
@@ -1127,6 +1169,7 @@ int main(int argc, char** argv) {
         if (!timeoutOk || timeout < 1 || timeout > 60000) return 2;
         launcher.updateOnce(parser);
     } else { launcher.show(); launcher.startup(handoffIssue); }
+#endif
     return app.exec();
     } catch (const std::exception& e) {
         fprintf(stderr, "ikv-launcher: %s\n", e.what()); return 1;

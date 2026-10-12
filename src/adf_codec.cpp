@@ -242,7 +242,7 @@ void adf_decoder_self_test() {
     };
     const auto compressed = [&](std::span<const std::uint8_t> source) {
         std::vector<std::uint8_t> result(compressBound(static_cast<uLong>(source.size())));
-        uLongf size = result.size();
+        uLongf size = static_cast<uLongf>(result.size()); // uLongf is 32-bit on Windows (LLP64); compressBound fits
         const std::uint8_t empty = 0;
         require(compress2(result.data(), &size, source.empty() ? &empty : source.data(),
                           static_cast<uLong>(source.size()), Z_BEST_COMPRESSION) == Z_OK);

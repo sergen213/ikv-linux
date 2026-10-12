@@ -54,6 +54,7 @@
   "clock": {
     "start_hour": 7,
     "rate": 4,
+    "interior_hour": 12,
     "records": [[4,70,80,120,10,12,25,25,30,50,78,0],[6,170,120,110,150,90,60,200,150,120,78,0],[8,200,157,142,126,105,110,184,199,217,78,0],[18,200,157,142,126,105,110,184,199,217,78,0],[20,170,120,110,150,90,60,200,150,120,78,0],[22,70,80,120,10,12,25,25,30,50,78,0]],
     "fog": [300,1090],
     "provenance": "NONCANONICAL: the original server sent the hour and a byte environment record (packet thgf, client 0x004a4c90/0x004a4680/0x004b6970). Rate 4 = VOD minimap clock 7:02 at 18:30 to 9:18 at 52:30; start hour 7 = first VOD sample. Record = [hour, ambient (lighting_multipliers_1) rgb, sun (lighting_multipliers_2) rgb, horizon/clear rgb, lightmap shadow strength, HDR glow (c308; 0 = the original value before any server record)] bytes. Day ambient/sun/shadow bytes are the original client's Eminonu zone-load constants (0x0041c9a0: .784 .616 .556 / .496 .412 .432 / .304); dawn, dusk, night and horizon bytes are invented. fog = thgf float fog start/end distances (004a4680 params 6/7, client record +0xec/+0xf0; the client draws D3D fog start*view .. end*view+110 and culls emitters beyond sqrt(.5)*end*view, 0046b630/0046b660/00478586): the official values were server-only; 300/1090 keep the earlier 300..1200 haze."

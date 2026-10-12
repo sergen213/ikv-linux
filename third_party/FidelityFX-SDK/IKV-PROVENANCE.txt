@@ -23,8 +23,9 @@ IKV-owned files around it (not upstream)
                                       (HDR, sharpen), the 11 frame-interpolation passes (render-resolution unjittered motion,
                                       non-inverted depth) and the 7 optical-flow passes (SDR) + SPIR-V descriptor reflection into
                                       build-*/generated/ikv_fsr3_blobs.h
-  third_party/ikv-ffx-posix/ikv_ffx_posix.h  force-included POSIX stand-ins (_countof, wcscpy_s, strcpy_s, sprintf_s) and
-                                      FFX_SDK_DEFAULT_CONTEXT_SIZE 1 MiB (wchar_t is 4 bytes on Linux)
+  third_party/ikv-ffx-posix/ikv_ffx_posix.h  force-included CRT stand-ins (POSIX: _countof, wcscpy_s, strcpy_s, sprintf_s;
+                                      MinGW-w64: swprintf_s), missing std headers, FFX_SDK_DEFAULT_CONTEXT_SIZE 1 MiB
+                                      (wchar_t is 4 bytes on Linux)
   include/ikv/fsr_vk.hpp, src/fsr_vk.cpp  IKV wrapper: blob accessor, capability clamp, shared resources, upscale dispatch,
                                       optical flow + frame interpolation contexts/dispatch (interpolate())
 

@@ -165,7 +165,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
     const QString admin = requiredString(fixture, "admin_username"), adminPassword = requiredString(fixture, "admin_password");
     const int seconds = fixture.value("timeout_seconds").toInt(900), bots = fixture.value("bots").toInt(2);
     const int basePort = fixture.value("base_port").toInt(27400);
-    const QString lan = fixture.value("lan_address").toString(); // optional: provision a LAN bind + IP SAN
+    const QString lan = fixture.value("lan_address").toString(); // optional: LAN mode (bind 0.0.0.0); this machine's default-route IPv4
     const QString canonicalSource = QFileInfo(source).canonicalFilePath();
     if (canonicalSource.isEmpty()) throw std::runtime_error("Host fixture source must exist");
     if (basePort < 1024 || basePort > 65000) throw std::runtime_error("base_port must be in 1024..65000");
@@ -296,8 +296,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
     };
     const auto verifyServer = [&](const char* run) {
         const auto saved = json(serverDir + "/host.json");
-        if (saved.value("admin").toString() != admin || saved.value("bind").toString() != (lan.isEmpty() ? "127.0.0.1" : lan))
-            throw std::runtime_error("host.json lacks admin/loopback bind");
+        if (saved.value("admin").toString() != admin || saved.value("bind").toString() != (lan.isEmpty() ? "127.0.0.1" : "0.0.0.0") ||
+            (!lan.isEmpty() && !saved.value("sans").toVariant().toStringList().contains("IP:" + lan)))
+            throw std::runtime_error("host.json lacks admin/loopback bind (or LAN 0.0.0.0 bind + IP SAN)");
         const auto stored = QJsonDocument::fromJson(QSettings{}.value("profiles/Localhost").toByteArray()).object();
         const QUrl auth(stored.value("auth").toString());
         if (auth.host() != (lan.isEmpty() ? "localhost" : lan) || auth.port() != json(serverDir + "/state.json").value("auth_port").toInt() ||
@@ -367,7 +368,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         ctl(static_cast<QSpinBox*>(nullptr), "hostAuthPort")->setValue(basePort);
         ctl(static_cast<QSpinBox*>(nullptr), "hostAdminPort")->setValue(basePort + 1);
         ctl(static_cast<QSpinBox*>(nullptr), "hostWorldPort")->setValue(basePort + 2);
-        if (!lan.isEmpty()) { ctl(static_cast<QRadioButton*>(nullptr), "hostLan")->setChecked(true); ctl(static_cast<QComboBox*>(nullptr), "hostLanAddress")->setEditText(lan); }
+        if (!lan.isEmpty()) ctl(static_cast<QRadioButton*>(nullptr), "hostLan")->setChecked(true);
         QTcpServer occupied; // the requested account port is taken: creation must pick the next free one
         if (!occupied.listen(QHostAddress(lan.isEmpty() ? QString("127.0.0.1") : lan), static_cast<quint16>(basePort)))
             throw std::runtime_error("Cannot occupy the fixture base port");

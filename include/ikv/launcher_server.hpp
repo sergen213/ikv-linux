@@ -26,6 +26,7 @@ QDialog* createHostPanel(QWidget* parent, QPushButton* chip, Hooks hooks);
 
 // `ikv-launcher --host-supervisor DIR --asset-root PATH [--bootstrap-admin NAME]` (password on stdin):
 // daemonizes, holds DIR/supervisor.lock and runs the server until stopped.
+// `ikv-launcher --host-lan on|off DIR`: the host page's LAN switch (applied at the server's next start).
 bool isSupervisorInvocation(int argc, char** argv);
 int supervisorMain(int argc, char** argv);
 

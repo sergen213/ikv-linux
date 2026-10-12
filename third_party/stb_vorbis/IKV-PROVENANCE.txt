@@ -1,0 +1,14 @@
+IKV provenance: stb_vorbis v1.22 as patched by SDL_mixer (Ogg Vorbis decoder), unmodified
+  Upstream  https://github.com/libsdl-org/SDL_mixer, branch SDL2, commit 556de667736eac58815acba8175a493963801b6b
+            (file last changed in ce30df3a979eceab256671d7b7b4e11c52744b9c, 2026-07-13)
+  File      https://raw.githubusercontent.com/libsdl-org/SDL_mixer/556de667736eac58815acba8175a493963801b6b/src/codecs/stb_vorbis/stb_vorbis.h
+            saved as stb_vorbis.c (same bytes; the name keeps it a separate translation unit)
+  sha256    90b5123e409e8551d18b7b75c754529490bf5a0a941c577f09aa71862d7e09cb (fetched 2026-10-12)
+  Base      nothings/stb stb_vorbis.c v1.22 plus SDL_mixer's fixes, among them CVE-2023-45675..45682 (comment_list_length
+            and codebook size overflows, setup_malloc/setup_temp_malloc 64-bit size checks, wild reads, invalid free),
+            the floor1 inverse_db_table index fix and the end-of-stream silence fix. Its SDL_RWops code is compiled out
+            (STB_VORBIS_SDL undefined).
+  License   public domain or MIT, at the user's choice (end of the file)
+Use: compiled as C++ with -w (CMakeLists.txt) into ikv-client/audio-check; src/audio.cpp includes its header part
+(STB_VORBIS_HEADER_ONLY) and decodes original Ogg beds in-process on Linux and Windows with every decoder allocation in a
+fixed 2 MiB stb_vorbis_alloc arena. Previously vendored: nothings/stb 2c980bb (unpatched v1.22, sha256 4c7cb2ff...).
