@@ -73,6 +73,14 @@ inline Matrix4 multiply_matrix(const Matrix4& a, const Matrix4& b) {
             for (unsigned k = 0; k < 4; ++k) result[c * 4 + r] += a[k * 4 + r] * b[c * 4 + k];
     return result;
 }
+// Wave 16 see-through doorway (NONCANONICAL). The destination is drawn in its own coordinates with a virtual camera
+// (view-projection · to_primary), clipped to the pyramid eye→quad and beyond the quad plane, then sealed with the quad's depth.
+struct PortalView {
+    const Scene* scene = nullptr;            // resident destination, stable address
+    Matrix4 to_primary{};                     // rigid: destination world → primary world
+    std::array<std::array<float, 3>, 4> quad{}; // opening in primary world coords (convex, in order); destination beyond its plane
+    std::span<const RenderEntity> entities;   // destination-side actors, destination coords
+};
 inline void validate_camera(const Camera& c) {
     for (float v : c.target) if (!std::isfinite(v)) throw std::invalid_argument("non-finite camera target");
     if (!std::isfinite(c.yaw) || !std::isfinite(c.pitch) || std::abs(c.pitch) >= 1.55f ||
@@ -254,8 +262,18 @@ void write_rgb_image(const std::filesystem::path& path,int width,int height,std:
 class Renderer {
 public:
     virtual ~Renderer() = default;
-    // Draws and presents. Scene remains alive until provider destruction or next different Scene.
-    virtual void render(const Scene&, std::span<const RenderEntity>, std::uint32_t self, float dt) = 0;
+    // Draws and presents. Scene remains alive until provider destruction or next different Scene. A resident Scene (see
+    // make_resident) is switched to without a load; one that was last frame's portal destination keeps temporal history.
+    // portals: drawn only when their Scene is resident (others are skipped); entities of a portal use its own coordinates.
+    virtual void render(const Scene&, std::span<const RenderEntity>, std::uint32_t self, float dt,
+                        std::span<const PortalView> portals = {}) = 0;
+    // Starts/continues a budgeted background upload (incl. RT) of a non-primary Scene; idempotent. Scene must keep its
+    // address and content until evict() (or release_scene()) and outlive the next render(). Resident cap: primary + 2 (LRU).
+    virtual void make_resident(const Scene&) = 0;
+    // Fully uploaded: usable as primary or portal without a stall. Always false when the provider cannot draw portals
+    // (no clip distances): the caller then keeps the fade fallback.
+    virtual bool resident(const Scene&) const = 0;
+    virtual void evict(const Scene&) = 0; // deferred free; Scene must outlive the next render()
     virtual void resize(int width, int height) = 0;
     virtual void screenshot(const std::filesystem::path&) = 0;
     virtual void set_camera(const Camera&) = 0;

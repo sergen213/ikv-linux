@@ -63,6 +63,12 @@ void independent_v2_bytes() {
     require(encoded.size() == 18 && encoded[3] == 14 &&
             std::equal(destination.begin(), destination.end(), encoded.begin() + 4),
             "destination encoder violates independent wire layout");
+    // Wave 16: + u32 see-through door id (x,y then in its linked zone); id 0 is only the 14-byte form.
+    const std::array<std::uint8_t, 18> through{2, 7, 0, 0, 0, 9, 0, 0, 0x03, 0xe8, 0xff, 0xff, 0xfc, 0x18, 0x80, 0, 0x27, 0x31};
+    const auto portal = ikv::decode(through);
+    require(portal.sequence == 9 && portal.x == 1000 && portal.y == -1000 && portal.id == 2147493681U, "portal destination decoded incorrectly");
+    encoded = ikv::encode(portal);
+    require(encoded.size() == 22 && encoded[3] == 18 && std::equal(through.begin(), through.end(), encoded.begin() + 4), "portal destination encoder violates wire layout");
 
     for (const auto type : {ikv::Type::state, ikv::Type::action}) {
         const auto body = json_body(type, "{\"text\":\"Türkçe\",\"literal\":\"[{}]\"}");
@@ -228,6 +234,12 @@ void hello_destination_rejections() {
     for (std::size_t cut = 0; cut < target.size(); ++cut) rejects([&] { ikv::decode(std::span(target).first(cut)); });
     target.push_back(0);
     rejects([&] { ikv::decode(target); });
+    for (const std::size_t size : {16U, 17U, 18U, 19U}) { // 18 bytes with door id 0 is non-canonical
+        auto sized = target; sized.resize(size, 0);
+        rejects([&] { ikv::decode(sized); });
+    }
+    target.resize(18, 0); target[17] = 1;
+    require(ikv::decode(target).id == 1, "18-byte destination carries the door id");
 }
 void malformed_frame_poison() {
     const auto good = ikv::encode({ikv::Type::goodbye});

@@ -26,6 +26,12 @@ layout(set=0,binding=0,std140) uniform Frame {
     vec4 jitter;
     // x: NONCANONICAL seamless door transition, scene blended towards black (post.frag); HUD unaffected.
     vec4 fade;
+    // NONCANONICAL wave-16 portal view (scene_portal.vert): gl_ClipDistance[i] = dot(world, clip[i]), 4 pyramid sides and
+    // the portal plane in this view's (destination) world; toPrimary maps that world into the primary's (guide normals).
+    vec4 clip[5];
+    mat4 toPrimary;
+    // Split-mode source OR plane: gl_ClipDistance[1] = max(dot(world, clip[1]), dot(world, clipOr)); (0,0,0,-1e9) = none.
+    vec4 clipOr;
 } frame;
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
 // Applied once to display values on every present path (scene in post.frag, HUD in overlay.frag), fullscreen only.

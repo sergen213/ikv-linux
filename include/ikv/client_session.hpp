@@ -34,7 +34,8 @@ public:
     bool eof = false;
 
     void pump(int wait_ms, const std::function<void(Type)>& on_message = {});
-    void destination(std::int32_t x, std::int32_t y);
+    // door != 0: NONCANONICAL wave-16 walk through that open portal door, x/y in its linked zone's frame (18-byte body).
+    void destination(std::int32_t x, std::int32_t y, std::uint32_t door = 0);
     void action(const nlohmann::json& body);
     // NONCANONICAL headless helper: a deterministic 100-fixed-point-unit cardinal
     // destination per snapshot, never client-side integration or native WASD.

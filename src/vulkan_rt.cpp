@@ -391,8 +391,10 @@ struct VulkanRtScene::Impl {
         }
         return result;
     }
+    // shared_scratch: the caller places the build scratch (stream()'s arena) and receives its size; the BLAS then owns
+    // none until refresh() needs one for a rebuild.
     std::unique_ptr<Acceleration> prepare(VkAccelerationStructureBuildGeometryInfoKHR& info, std::uint32_t primitives,
-                                          Pool* shared = nullptr) {
+                                          Pool* shared = nullptr, VkDeviceSize* shared_scratch = nullptr) {
         auto acceleration = std::make_unique<Acceleration>(device, destroy);
         VkAccelerationStructureBuildSizesInfoKHR size_info{};
         size_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
@@ -400,7 +402,8 @@ struct VulkanRtScene::Impl {
         acceleration->storage = allocate(size_info.accelerationStructureSize,
             VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, nullptr, false, shared);
         const VkDeviceSize alignment = properties.minAccelerationStructureScratchOffsetAlignment;
-        acceleration->scratch = allocate(std::max({size_info.buildScratchSize, size_info.updateScratchSize, VkDeviceSize{1}}) + alignment - 1,
+        if (shared_scratch) *shared_scratch = aligned(std::max(size_info.buildScratchSize, VkDeviceSize{1}), alignment);
+        else acceleration->scratch = allocate(std::max({size_info.buildScratchSize, size_info.updateScratchSize, VkDeviceSize{1}}) + alignment - 1,
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT, nullptr, false, shared);
         VkAccelerationStructureCreateInfoKHR creation{};
         creation.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
@@ -615,6 +618,17 @@ struct VulkanRtScene::Impl {
             }
             updates.emplace_back();
             bottom_input(updates.back(), mesh, acceleration);
+            if (!acceleration.scratch.handle) { // stream() BLAS built from the shared arena
+                auto& info = updates.back().info;
+                info.pGeometries = &updates.back().geometry;
+                VkAccelerationStructureBuildSizesInfoKHR size_info{};
+                size_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+                sizes(device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &info, &updates.back().range.primitiveCount, &size_info);
+                const VkDeviceSize alignment = properties.minAccelerationStructureScratchOffsetAlignment;
+                acceleration.scratch = allocate(std::max({size_info.buildScratchSize, size_info.updateScratchSize, VkDeviceSize{1}}) + alignment - 1,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+                info.scratchData.deviceAddress = aligned(acceleration.scratch.address, alignment);
+            }
         }
         Buffer replacement_instances;
         std::uint32_t capacity = state->instance_capacity;
@@ -1021,6 +1035,179 @@ struct VulkanRtScene::Impl {
         else if (!refresh(scene, entities, {}, frame, slot)) return false;
         return true;
     }
+    // NONCANONICAL wave-16 background build: see VulkanRtScene::stream. Only the unkeyed zone prefix is streamed (actor
+    // attach/detach never moves it); keyed actor meshes are appended in-frame by the first record_refresh.
+    struct Stream {
+        std::unique_ptr<State> next;
+        std::vector<std::uint8_t> used;
+        std::size_t prefix = 0, cursor = 0, records = 0;
+        Pool pool;
+    };
+    std::unique_ptr<Stream> streaming;
+    Buffer scratch_arena;                 // shared build scratch of the static BLAS of one stream() chunk
+    std::array<Buffer, 2> retired_arenas; // outgrown arena, freed once the caller completed that slot's next frame
+    bool stream(const Scene& scene, VkCommandBuffer frame, unsigned slot, VkDeviceSize budget) {
+        pulse();
+        retired_arenas[slot & 1u] = {};
+        if (state) throw std::logic_error("RT stream requires a fresh scene");
+        constexpr auto none = std::numeric_limits<std::size_t>::max();
+        if (!streaming) {
+            auto s = std::make_unique<Stream>();
+            while (s->prefix < scene.meshes.size() && !scene.meshes[s->prefix].key) ++s->prefix;
+            s->used.assign(s->prefix, scene.instances.empty() ? mesh_referenced : 0);
+            if (instance_bound(scene) > properties.maxInstanceCount || instance_bound(scene) > std::numeric_limits<std::uint32_t>::max())
+                throw std::runtime_error("Scene exceeds RT instance limit");
+            if (scene.instances.empty())
+                for (std::size_t m = 0; m < s->prefix; ++m)
+                    if (scene_source_color_draw(scene, static_cast<std::uint32_t>(m))) s->used[m] |= mesh_color_draw;
+            for (const auto& instance : scene.instances) {
+                if (instance.mesh >= scene.meshes.size()) throw std::runtime_error("Invalid RT scene mesh reference");
+                const bool color_draw = scene_source_color_draw(scene, instance.mesh, instance.material,
+                    instance.source_ordinary_color_participates);
+                if (instance.occlusion_proxy || instance.sky || instance.mesh >= s->prefix) continue;
+                s->used[instance.mesh] |= mesh_referenced | (color_draw ? mesh_color_draw : 0);
+            }
+            std::size_t drawable = 0;
+            for (std::size_t m = 0; m < s->prefix; ++m)
+                if (s->used[m] & mesh_color_draw) drawable += scene.meshes[m].indices.size() / 3;
+            if (drawable > max_triangle_bytes / sizeof(Triangle) || drawable > 0xffffffu)
+                throw std::runtime_error("Scene exceeds RT triangle buffer or instance custom index limits");
+            s->next = std::make_unique<State>();
+            s->next->mesh_blas.assign(s->prefix, none);
+            s->next->mesh_offset.assign(s->prefix, 0);
+            s->next->triangles = allocate(triangle_capacity(drawable), triangle_usage, nullptr, true);
+            streaming = std::move(s);
+        }
+        auto& s = *streaming;
+        auto& next = *s.next;
+        std::vector<BuildInput> builds;
+        std::vector<VkDeviceSize> scratch; // per build; 0 = owns its scratch (skins update in place)
+        VkDeviceSize bytes = 0;
+        while (s.cursor < s.prefix && bytes < budget) {
+            const auto m = s.cursor++;
+            if (!s.used[m]) continue;
+            const auto& mesh = scene.meshes[m];
+            const auto color = validate_mesh(scene, m);
+            if (!(s.used[m] & mesh_color_draw) || mesh.indices.empty()) continue;
+            next.mesh_offset[m] = static_cast<std::uint32_t>(s.records);
+            auto* records = reinterpret_cast<Triangle*>(next.triangles.mapped()) + s.records;
+            for (std::size_t i = 0; i < mesh.indices.size(); i += 3)
+                records[i/3] = triangle_record(mesh.vertices[mesh.indices[i]], mesh.vertices[mesh.indices[i+1]],
+                    mesh.vertices[mesh.indices[i+2]], color);
+            s.records += mesh.indices.size() / 3;
+            Acceleration inputs(device, destroy);
+            inputs.vertices = allocate(mesh.vertices.size() * sizeof(Vertex), input_usage, mesh.vertices.data(), true, &s.pool);
+            inputs.indices = allocate(mesh.indices.size() * sizeof(std::uint32_t), input_usage, mesh.indices.data(), true, &s.pool);
+            builds.emplace_back();
+            auto& input = builds.back();
+            bottom_input(input, mesh, inputs);
+            input.info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+            input.info.srcAccelerationStructure = VK_NULL_HANDLE;
+            input.info.pGeometries = &input.geometry;
+            auto& size = scratch.emplace_back(0);
+            auto acceleration = prepare(input.info, input.range.primitiveCount, &s.pool, mesh.influences.empty() ? &size : nullptr);
+            acceleration->vertices = std::move(inputs.vertices);
+            acceleration->indices = std::move(inputs.indices);
+            next.mesh_blas[m] = next.bottom.size();
+            next.bottom.push_back(std::move(acceleration));
+            bytes += mesh.vertices.size() * sizeof(Vertex) + mesh.indices.size() * (sizeof(std::uint32_t) + sizeof(Triangle) / 3);
+        }
+        VkDeviceSize total = 0;
+        for (auto size : scratch) total += size;
+        const VkDeviceSize alignment = properties.minAccelerationStructureScratchOffsetAlignment;
+        if (total && total + alignment > scratch_arena.size) {
+            const auto grown = std::max(total, scratch_arena.size * 2) + alignment;
+            retired_arenas[slot & 1u] = std::move(scratch_arena); // earlier frames' chunk builds may still use it
+            scratch_arena = allocate(grown, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        }
+        VkDeviceAddress cursor = aligned(scratch_arena.address, alignment);
+        build_infos.clear();
+        build_ranges.clear();
+        for (std::size_t i = 0; i < builds.size(); ++i) {
+            if (scratch[i]) {builds[i].info.scratchData.deviceAddress = cursor; cursor += scratch[i];}
+            builds[i].info.pGeometries = &builds[i].geometry;
+            build_infos.push_back(builds[i].info);
+            build_ranges.push_back(&builds[i].range);
+        }
+        VkMemoryBarrier dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        // The previous chunk's builds (same arena) finish before this chunk reuses its scratch.
+        dependency.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        dependency.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        vkCmdPipelineBarrier(frame, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &dependency, 0, nullptr, 0, nullptr);
+        if (!build_infos.empty())
+            build(frame, static_cast<std::uint32_t>(build_infos.size()), build_infos.data(), build_ranges.data());
+        if (s.cursor < s.prefix) return false;
+        // Last chunk: the TLAS over the zone placements (actors are placed by the first record_refresh).
+        auto& instances = next.cpu_instances;
+        for (const auto& placement : scene.instances) {
+            if (placement.occlusion_proxy || placement.sky || placement.entity_id || placement.mesh >= s.prefix
+                || next.mesh_blas[placement.mesh] == none
+                || !scene_source_color_draw(scene, placement.mesh, placement.material, placement.source_ordinary_color_participates))
+                continue;
+            validate_transform(placement.transform);
+            VkAccelerationStructureInstanceKHR instance{};
+            for (std::size_t row = 0; row < 3; ++row)
+                for (std::size_t column = 0; column < 4; ++column)
+                    instance.transform.matrix[row][column] = placement.transform.matrix[column*4 + row];
+            instance.instanceCustomIndex = next.mesh_offset[placement.mesh] & 0xffffffu;
+            instance.mask = 0x01; // see the refresh path
+            instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
+            alpha_test(instance, scene, placement.material == UINT32_MAX ? scene.meshes[placement.mesh].material : placement.material,
+                next.alpha_textures, true);
+            instance.accelerationStructureReference = next.bottom[next.mesh_blas[placement.mesh]]->address;
+            instances.push_back(instance);
+        }
+        if (scene.instances.empty())
+            for (std::size_t m = 0; m < s.prefix; ++m) {
+                if (next.mesh_blas[m] == none) continue;
+                VkAccelerationStructureInstanceKHR instance{};
+                instance.transform.matrix[0][0] = instance.transform.matrix[1][1] = instance.transform.matrix[2][2] = 1;
+                instance.instanceCustomIndex = next.mesh_offset[m] & 0xffffffu;
+                instance.mask = 0x01;
+                instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
+                alpha_test(instance, scene, scene.meshes[m].material, next.alpha_textures, true);
+                instance.accelerationStructureReference = next.bottom[next.mesh_blas[m]]->address;
+                instances.push_back(instance);
+            }
+        next.instance_count = static_cast<std::uint32_t>(instances.size());
+        if (instances.empty()) instances.emplace_back();
+        next.instance_capacity = instance_capacity(instance_bound(scene));
+        next.instances = allocate(VkDeviceSize{next.instance_capacity} * sizeof(VkAccelerationStructureInstanceKHR), input_usage, nullptr, true);
+        upload(next.instances, instances.data(), instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+        BuildInput top;
+        top.geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+        top.geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+        top.geometry.geometry.instances.data.deviceAddress = next.instances.address;
+        top.info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+        top.info.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+        top.info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+        top.info.geometryCount = 1;
+        top.info.pGeometries = &top.geometry;
+        top.range.primitiveCount = next.instance_count;
+        next.top = prepare(top.info, next.instance_capacity);
+        top.info.pGeometries = &top.geometry;
+        dependency.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR; // every chunk's BLAS, then the TLAS
+        vkCmdPipelineBarrier(frame, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &dependency, 0, nullptr, 0, nullptr);
+        const auto* top_range = &top.range;
+        build(frame, 1, &top.info, &top_range);
+        dependency.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(frame, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &dependency, 0, nullptr, 0, nullptr);
+        next.source = &scene;
+        for (std::size_t m = 0; m < s.prefix; ++m) {
+            next.vertex_counts.push_back(scene.meshes[m].vertices.size());
+            next.index_counts.push_back(scene.meshes[m].indices.size());
+            next.revisions.push_back(scene.meshes[m].revision);
+            next.keys.push_back(0);
+        }
+        updates.reserve(scene.meshes.size() + 1);
+        state = std::move(s.next);
+        streaming.reset();
+        return true;
+    }
     void rebuild(const Scene& scene, std::span<const RenderEntity> entities) {
         pulse();
         std::vector<std::unique_ptr<Acceleration>> retired;
@@ -1225,7 +1412,9 @@ VulkanRtScene::VulkanRtScene(VkPhysicalDevice physical, VkDevice device, VkQueue
     : impl_(std::make_unique<Impl>(physical, device, queue, family, std::move(progress))) {}
 VulkanRtScene::~VulkanRtScene() noexcept = default;
 void VulkanRtScene::rebuild(const Scene& scene, std::span<const RenderEntity> entities) { impl_->rebuild(scene, entities); }
-void VulkanRtScene::forget_scene() noexcept { if (impl_->state) impl_->state->source = nullptr; }
+bool VulkanRtScene::stream(const Scene& scene, VkCommandBuffer frame, unsigned slot, VkDeviceSize budget) {
+    return impl_->stream(scene, frame, slot, budget);
+}
 bool VulkanRtScene::record_refresh(const Scene& scene, std::span<const RenderEntity> entities, VkCommandBuffer frame,
     unsigned slot) {
     return impl_->record_refresh(scene, entities, frame, slot);

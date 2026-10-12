@@ -34,9 +34,9 @@ public:
     ~Audio();
     Audio(const Audio&) = delete;
     Audio& operator=(const Audio&) = delete;
-    // Original Ogg (OggS, <=32 MiB, <=600 s, 15 s decoder wall time) decoded off-thread;
-    // replaces the bed when ready. loop=false plays once, as the original music stream does.
-    void bed(Bed bed, std::vector<std::uint8_t> ogg, bool loop);
+    // Original Ogg file (OggS, <=32 MiB, <=600 s, 15 s decoder wall time) read and decoded off-thread;
+    // replaces the bed when ready (a failure stops it). loop=false plays once, as the original music stream does.
+    void bed(Bed bed, std::filesystem::path ogg, bool loop);
     void stop(Bed bed);
     // Original audio/...raw (mono S16LE 44100). With a world position the voice is attenuated
     // and panned from the listener like the original DirectSound3D source (0x00454070: min
@@ -99,6 +99,9 @@ public:
     // selection at the controlled player, and clip audio for every changed ActorAnimation::audio_cue.
     void frame(const Scene& scene, std::span<const RenderEntity> poses, std::uint32_t self,
                const CameraBasis& listener);
+    // NONCANONICAL wave 16: reads a zone's music/sound grids on a worker before the player enters it (one zone ahead), so
+    // frame() switches grids without its synchronous 8 MiB read.
+    void preload(unsigned support);
     // Per frame without a local player (character screen): the 004573e0 no-player branch plays
     // playlist index 8 while the credits window is shown, else 2, and ambient index 0 (silence).
     void frontend(bool credits);
@@ -113,6 +116,9 @@ private:
     std::vector<std::pair<std::string, std::vector<std::pair<std::string, float>>>> sounds_;
     std::vector<std::uint8_t> music_grid_, sound_grid_;
     unsigned grid_zone_ = UINT32_MAX;
+    using Grids = std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>>;
+    std::future<Grids> next_grids_;
+    unsigned next_zone_ = UINT32_MAX;
     std::size_t song_ = SIZE_MAX, bed_ = SIZE_MAX;
     bool override_ = false, music_on_ = false, bed_on_ = false;
     float music_volume_ = 1;

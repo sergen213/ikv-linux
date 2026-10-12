@@ -41,9 +41,12 @@ public:
     VulkanRtScene(const VulkanRtScene&) = delete;
     VulkanRtScene& operator=(const VulkanRtScene&) = delete;
     void rebuild(const Scene&, std::span<const RenderEntity> entities = {});
-    // The caller replaces the Scene at the same address: the next rebuild() builds everything (no retained BLAS);
-    // structures stay alive until it returns.
-    void forget_scene() noexcept;
+    // NONCANONICAL wave-16 background build of a scene this object never built: each call copies up to `budget` bytes
+    // of BLAS inputs/triangle records and records those BLAS builds into the caller's frame command buffer (scratch
+    // from one shared arena); the call that reaches the end also records the TLAS of the zone placements and returns
+    // true, after which the object behaves as after rebuild(scene) without entities (record_refresh places actors).
+    // The caller completed the previous frame of `slot` first and keeps every frame using the result ordered after it.
+    bool stream(const Scene&, VkCommandBuffer frame, unsigned slot, VkDeviceSize budget);
     // In-frame update of the scene last passed to rebuild() (same Scene object): skin/transform changes and actor
     // attach/detach (retained meshes kept by key, new meshes appended). Records staged copies, new-BLAS builds and an
     // in-place BLAS/TLAS update or TLAS rebuild into the caller's frame command buffer ahead of its ray queries, with

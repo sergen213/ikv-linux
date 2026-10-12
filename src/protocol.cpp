@@ -155,7 +155,7 @@ std::vector<std::uint8_t> encode(const Message& message) {
     case Type::input: length += 6; break;
     case Type::snapshot: length += 6 + static_cast<std::uint32_t>(message.players.size()) * 12; break;
     case Type::goodbye: break;
-    case Type::destination: length += 12; break;
+    case Type::destination: length += message.id ? 16 : 12; break; // wave 16: + u32 see-through door id (x,y in its linked zone)
     case Type::state:
     case Type::action: length += static_cast<std::uint32_t>(message.json.size()); break;
     }
@@ -193,6 +193,7 @@ std::vector<std::uint8_t> encode(const Message& message) {
         u32(bytes, message.sequence);
         u32(bytes, std::bit_cast<std::uint32_t>(message.x));
         u32(bytes, std::bit_cast<std::uint32_t>(message.y));
+        if (message.id) u32(bytes, message.id);
         break;
     case Type::state:
     case Type::action:
@@ -237,10 +238,11 @@ Message decode(std::span<const std::uint8_t> body) {
         if (body.size() != 2) invalid();
         break;
     case Type::destination:
-        if (body.size() != 14) invalid();
+        if (body.size() != 14 && body.size() != 18) invalid();
         message.sequence = read_u32(body, 2);
         message.x = std::bit_cast<std::int32_t>(read_u32(body, 6));
         message.y = std::bit_cast<std::int32_t>(read_u32(body, 10));
+        if (body.size() == 18 && !(message.id = read_u32(body, 14))) invalid(); // id 0 is the 14-byte form
         break;
     case Type::state:
     case Type::action:

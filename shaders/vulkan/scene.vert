@@ -29,6 +29,9 @@ layout(location=13) out vec4 motionPrevious;
 // v_dif_lit oD0 before the saturate, split for faithful RT (lighting.glsl shadows only the directional term).
 layout(location=14) out vec3 sourceAmbientTerm;
 layout(location=15) out vec3 sourceSunTerm;
+#ifdef IKV_PORTAL_CLIP
+out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[5]; };
+#endif
 void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
@@ -50,7 +53,17 @@ void main(){
     if(draw.extra.y>.5)vertexAmbient=vec4(.80000001*sqrt(max(frame.ambient.rgb,vec3(0))),1);
     if(ocean)vertexAmbient=vec4(frame.ambient.rgb,1);
     shadowPosition=frame.lightVP*world;
+    // Normal-offset receiver (renderer_gl.cpp scene_vertex): up to 2 shadow-map texels out along the normal as the surface
+    // turns from the sun, so curved actor skin stops self-shadowing against its own neighbouring texels.
+    if(frame.params.x>.5&&dot(worldNormal,worldNormal)>.5) { // false for degenerate (NaN) source normals
+        float texel=2./(2048.*max(length(vec3(frame.lightVP[0][0],frame.lightVP[1][0],frame.lightVP[2][0])),1e-6));
+        shadowPosition+=frame.lightVP*vec4(worldNormal*texel*2.*(1.-max(dot(worldNormal,normalize(frame.sun.xyz)),0.)),0);
+    }
     gl_Position=frame.vp*world;
+#ifdef IKV_PORTAL_CLIP
+    for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(vec4(world.xyz,1),frame.clip[i]);
+    gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(vec4(world.xyz,1),frame.clipOr));
+#endif
     motionCurrent=vec4(gl_Position.xy-frame.jitter.xy*gl_Position.w,gl_Position.zw);
     // Ocean displacement is evaluated at this frame's time for both: only the transform moves the water.
     vec4 previousWorld=draw.previousModel*vec4(previousPosition,1);

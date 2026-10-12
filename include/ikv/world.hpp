@@ -21,7 +21,7 @@ public:
     void add(uint32_t id, int64_t account_id, int64_t character_id, const Json& record, bool admin = false);
     void remove(uint32_t id);
     void input(uint32_t id, int8_t dx, int8_t dy, uint32_t sequence);
-    void destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence);
+    void destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence, uint32_t portal = 0); // portal: a see-through door here; (x,y) in its linked zone
     void action(uint32_t id, const Json& request);
     void moderation(uint32_t id, bool muted);
     void entitlement(uint32_t id, bool plus, bool kasa = false); // Plus Paket (accounts.plus), Kasa Erişimi (accounts.kasa); refreshed by the server's session heartbeat
@@ -57,6 +57,10 @@ private:
         bool moving = false, looting = false; // looting: engaged target is a corpse to walk to and claim
         std::vector<std::pair<int32_t,int32_t>> route;
         size_t waypoint = 0;
+        // See-through doorways (wave 16): the door walked through since the last state(); a portal destination's door and its
+        // target in the linked zone; the linked zone copy shown through each open door in view (the crossing enters it).
+        uint32_t crossed = 0; struct Beyond { uint32_t door = 0; int32_t x = 0, y = 0; } beyond;
+        std::map<uint32_t, std::string> peek;
         std::map<std::string, uint32_t> cooldowns;
         Json bank; // Banka: persisted beside (not inside) state, written only by bank actions
         uint32_t banker = 0, gathering = 0, gather_ready = 0; // open bank NPC (own id: Kasa Erişimi); Toplama node and completion tick
@@ -152,6 +156,24 @@ private:
     std::vector<std::pair<int32_t,int32_t>> route_finish(RouteSearch& r, bool partial, size_t cells = SIZE_MAX) const;
     std::string instance(uint32_t id, const std::string& zone) const; // zone, or the player's group copy of an instanced zone
     void transfer(uint32_t id, const std::string& zone, int32_t x, int32_t y);
+    void move_zone(uint32_t id, const std::string& old, int32_t ox, int32_t oy); // state already moved: index, trade, engagement, vacated copy
+    // See-through doorways (wave 16, NONCANONICAL). Every door with "door.portal" (instance copies included) and its rigid map M
+    // onto the partner's zone: midpoint onto midpoint, a->b onto the partner's b->a, no scale (through()). The apron (opening width
+    // x apron depth on the approach side) is walkable whatever the grid says (passable()): the walk grid stops short of door walls.
+    struct Portal { uint32_t pair = 0; int32_t ax = 0, ay = 0, bx = 0, by = 0, apron = 0; double c = 1, s = 0, ox = 0, oy = 0, tx = 0, ty = 0, ux = 1, uy = 0, half = 0; };
+    std::map<uint32_t, Portal> portals_;
+    std::map<std::string, std::vector<uint32_t>> zone_portals_; // zone -> its portal door ids
+    std::pair<int32_t,int32_t> through(const Portal& p, int32_t x, int32_t y) const;
+    uint32_t copy_index(const std::string& zone) const; // n of an instance copy "<zone><n>", 0 for a base zone
+    uint32_t exit_door(uint32_t door, const std::string& to) const; // the partner door in the zone copy `to`
+    std::optional<std::pair<std::string,std::string>> door_gate(uint32_t id, uint32_t door) const; // (code, message) while shut for this player
+    std::string linked(uint32_t id, uint32_t door) const; // the zone copy behind a door: peek, else as interact would transfer
+    std::optional<std::string> window(uint32_t id, uint32_t door) const; // linked zone when the door is open and within aoi
+    std::vector<std::tuple<uint32_t,uint32_t,int64_t>> in_view(uint32_t id) const; // (entity, see-through door or 0, squared distance in own frame): state() and snapshot()
+    void cross(uint32_t id, uint32_t door, int32_t nx, int32_t ny); // a step over an entering threshold
+    void set_peek(uint32_t id, std::map<uint32_t,std::string> next); // replace peek; copies that drop out of every peek get vacated()
+    std::vector<uint32_t> nearby_at(const std::string& zone, int32_t x, int32_t y, int range) const;
+    void check_portals() const; // walk-grid rules of every base portal (constructor, set_source_zones())
     Json visible_equipment(const Json& state) const;
     // Saved rows carry state.visual (the worn visuals) so the character list can dress its slot actors; never live state.
     void persisted_visual(Json& state) const { state["visual"]=visible_equipment(state); }

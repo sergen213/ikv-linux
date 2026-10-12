@@ -31,4 +31,8 @@ int main() {
     auto empty = mutation(1, {});
     ikv::fold_mutation(empty, mutation(2, {}, {}, Json::array({{{"type", "c"}}})));
     check(empty.events.is_array() && empty.events.size() == 1, "events append onto an event-free mutation");
+    auto flip = mutation(4, {{{"id", 1}, {"hp", 70}, {"zone", 30}}}); flip.source = 30; flip.reset = true; flip.flip = 2147493937u;
+    ikv::fold_mutation(flip, mutation(5, {{{"id", 1}, {"hp", 60}, {"zone", 30}}}, {}, Json::array({{{"type", "d"}}})));
+    check(flip.flip == 2147493937u && flip.source == 30 && flip.reset, "a same-zone successor folds into a walk-through, which stays one");
+    check(flip.actors.size() == 1 && flip.actors[0]->at("hp") == 60 && flip.events.size() == 1, "folded walk-through keeps the latest rows");
 }

@@ -1124,6 +1124,15 @@ int main(int argc, char** argv) try {
         quests[id] = std::move(q);
     }
     for (auto& n : npcs) if (n.contains("quests")) { auto& list = n["quests"]; std::vector<Ordered> v(list.begin(), list.end()); v.erase(std::unique(v.begin(), v.end()), v.end()); list = Ordered(v); }
+    // ---- see-through doorways (wave 16): tools/data/portals.json rows by <loc> uid (Doorways door wall planes plus NONCANONICAL approach
+    // aprons, analysis/porting-wave16/impl/Server/author.py); "pair" becomes the partner door's NPC id. World validates them.
+    const Ordered portal_data = [] { std::ifstream in(IKV_PORTALS); if (!in) throw std::runtime_error("cannot read " IKV_PORTALS); return Ordered::parse(in); }();
+    const auto door_of = [&](unsigned uid) -> Ordered& {
+        for (auto& n : npcs) if (n.at("kind") == "door" && n.at("source_uid") == uid) return n;
+        throw std::runtime_error("portal door not placed: " + std::to_string(uid));
+    };
+    for (const auto& [uid, p] : portal_data.at("portals").items())
+        door_of(unsigned(std::stoul(uid)))["door"]["portal"] = {{"pair", door_of(p.at("pair").get<unsigned>()).at("id")}, {"threshold", p.at("threshold")}, {"floor", p.at("floor")}, {"height", p.at("height")}, {"apron", p.at("apron")}};
     Ordered defaults = config.at("defaults"); defaults["zone"] = "eminonu"; defaults["x"] = wire(spawns.at("eminonu").first); defaults["y"] = wire(spawns.at("eminonu").second);
     defaults["inventory"] = Ordered::array({Ordered{{"item", "p253"}, {"quantity", 3}}});
     Ordered used = Ordered::object();

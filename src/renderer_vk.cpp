@@ -16,6 +16,7 @@
 #include <exception>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -49,8 +50,9 @@ struct MemoryPool {
 struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;};
-static_assert(sizeof(Frame)==480 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464);
+// clip/to_primary/clip_or: wave-16 portal views only (frame.glsl).
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;std::array<std::array<float,4>,5> clip;Matrix4 to_primary;std::array<float,4> clip_or;};
+static_assert(sizeof(Frame)==640 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464 && offsetof(Frame,clip)==480 && offsetof(Frame,to_primary)==560 && offsetof(Frame,clip_or)==624);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
@@ -66,16 +68,18 @@ class VulkanRenderer final:public Renderer {
  VkSwapchainKHR swapchain_=VK_NULL_HANDLE;VkFormat swap_format_=VK_FORMAT_UNDEFINED;VkExtent2D extent_{},render_extent_{};std::vector<VkImage> swap_images_;std::vector<VkSemaphore> present_semaphores_;VkCommandPool pool_=VK_NULL_HANDLE;
  FrameSlot slots_[2];VkCommandBuffer command_=VK_NULL_HANDLE; // command_: the current slot's buffer while render() records
  // post_sets_/temporal_sets_ [i] read history hdr_[i]; written with the scene descriptors, never while a frame is pending.
- VkSampler sampler_=VK_NULL_HANDLE,shadow_sampler_=VK_NULL_HANDLE,linear_clamp_=VK_NULL_HANDLE;VkDescriptorSetLayout set_layout_=VK_NULL_HANDLE,rt_layout_=VK_NULL_HANDLE;VkPipelineLayout pipeline_layout_=VK_NULL_HANDLE;VkDescriptorPool descriptor_pool_=VK_NULL_HANDLE;VkDescriptorSet post_sets_[2]{},rt_set_=VK_NULL_HANDLE,temporal_sets_[2]{};
+ VkSampler sampler_=VK_NULL_HANDLE,shadow_sampler_=VK_NULL_HANDLE,linear_clamp_=VK_NULL_HANDLE;VkDescriptorSetLayout set_layout_=VK_NULL_HANDLE,rt_layout_=VK_NULL_HANDLE;VkPipelineLayout pipeline_layout_=VK_NULL_HANDLE;VkDescriptorPool descriptor_pool_=VK_NULL_HANDLE;VkDescriptorSet post_sets_[2]{},temporal_sets_[2]{};
  VkRenderPass scene_pass_=VK_NULL_HANDLE,shadow_pass_=VK_NULL_HANDLE,post_pass_=VK_NULL_HANDLE,temporal_pass_=VK_NULL_HANDLE,after_pass_=VK_NULL_HANDLE;VkFramebuffer scene_fb_[2]{},temporal_fb_[2]{},after_fb_[2]{},shadow_fb_=VK_NULL_HANDLE,post_fb_=VK_NULL_HANDLE;VkPipeline opaque_=VK_NULL_HANDLE,alpha_=VK_NULL_HANDLE,shadow_pipeline_=VK_NULL_HANDLE,post_pipeline_=VK_NULL_HANDLE,overlay_pipeline_=VK_NULL_HANDLE,temporal_pipeline_=VK_NULL_HANDLE,contour_pipeline_=VK_NULL_HANDLE;VkPipelineCache cache_=VK_NULL_HANDLE;
  VkPipeline opaque_double_=VK_NULL_HANDLE,alpha_double_=VK_NULL_HANDLE,shadow_double_=VK_NULL_HANDLE;
+ VkSampler shadow_compare_=VK_NULL_HANDLE; // binding 5 sampler2DShadow: bilinear depth compare (hardware PCF) when supported
+ bool depth_clamp_=false; // shadow pipelines: casters sunward of the light near plane clamp to depth 0 and still cast
  VkPipeline sky_pipeline_[4]{},particle_pipeline_[5]{},after_particle_pipeline_[5]{};
  // particle_drawn_[i]: serial of the last frame that drew particle_buffer_[i].
  VkDescriptorPool particle_pool_=VK_NULL_HANDLE;std::vector<Image> particle_images_;std::vector<VkDescriptorSet> particle_sets_;Buffer particle_buffer_[2];unsigned particle_slot_=0;std::uint64_t particle_drawn_[2]{};std::vector<ParticleBatch> particle_batches_;
  // Original fake HDR (0046fdb0, original appearance only): 128x128 X8R8G8B8 targets bb38/bb3c (00466e40) = glow_chain_[0]/[1].
  // glow_sets_: [0]/[1] half_intensity from hdr_[0]/hdr_[1] with bb38, [2] reads bb3c, [3] reads bb38.
  VkRenderPass glow_pass_=VK_NULL_HANDLE;VkFramebuffer glow_fb_[2]{};VkPipeline glow_pipeline_=VK_NULL_HANDLE,glow_composite_pipeline_=VK_NULL_HANDLE;VkDescriptorSet glow_sets_[4]{};
- Image hdr_[2],raw_hdr_,guide_[2],depth_,shadow_,output_,overlay_,white_,flat_normal_,glow_chain_[2];std::vector<Image> textures_;std::unordered_map<std::string,std::size_t> texture_lookup_;std::vector<Geometry> geometry_;std::vector<VkDescriptorSet> material_sets_;
+ Image hdr_[2],raw_hdr_,guide_[2],depth_,shadow_,output_,overlay_,white_,flat_normal_,glow_chain_[2];
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
  // 2 motion (RG16F previousUV-UV, FSR or RT denoise), 3/4 RT illumination/reflection history, 5 FSR reactive (R8).
  std::vector<VkFormat> scene_colors_,after_colors_,temporal_colors_{VK_FORMAT_R16G16B16A16_SFLOAT};
@@ -93,31 +97,65 @@ class VulkanRenderer final:public Renderer {
 Image rt_diffuse_,rt_reflection_,diffuse_history_[2],reflection_history_[2],atrous_[4];
 VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot][A/B target], [slot][iteration]
  std::uint64_t jitter_frame_=0;std::chrono::steady_clock::time_point last_render_{};bool fsr_reset_=true; // reset: new targets/scene
- // Frame uniforms: one aligned region per slot behind the dynamic binding 0 of every set (uniform_offset_ while recording).
+ std::array<float,2> previous_jitter_{}; // the last frame's jitter (every view of a frame shares it)
+ // IKV_GPU_TIMING: per slot 4 timestamps (scene pass begin, after source sky, after portal views+seals, scene pass end);
+ // averages logged every 30 frames. timed_[slot]: that slot's last frame wrote them.
+ VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};double timing_sum_[2]{};unsigned timing_count_=0,timing_portals_=0;
+ // Frame uniforms: per slot, one aligned region per view (primary, then portal views) behind the dynamic binding 0 of
+ // every set (uniform_offset_ while recording).
+ static constexpr unsigned max_portals=2,view_slots=1+max_portals;
  Buffer uniform_;std::uint32_t uniform_stride_=0,uniform_offset_=0;
  struct ViewsLess {bool operator()(const std::array<VkImageView,5>& a,const std::array<VkImageView,5>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
- std::map<std::array<VkImageView,5>,VkDescriptorSet,ViewsLess> material_cache_;std::vector<VkDescriptorPool> material_pools_; // see material_set()
  struct ContourItem {std::uint32_t mesh,material;Matrix4 model;std::array<float,3> color;};
  std::vector<ContourItem> contours_;
- std::vector<std::uint8_t> material_usage_;
- std::vector<Matrix4> history_instance_models_;
- std::unique_ptr<VulkanRtScene> rt_;
- const Scene* scene_=nullptr;
- std::size_t instance_count_=0;
- std::vector<DrawItem> draws_;
- SourceScrollState source_scroll_;
+ // NONCANONICAL wave-16 resident scene set: everything one Scene uploads, its RT scene and its temporal history, keyed
+ // by Scene address. sets_ holds the primary and at most max_portals more (portal destinations, instant-door targets).
+ struct SceneSet {
+     const Scene* scene=nullptr;
+     std::vector<Image> textures;std::unordered_map<std::string,std::size_t> texture_lookup;std::vector<Geometry> geometry;
+     std::vector<VkDescriptorSet> material_sets;
+     std::map<std::array<VkImageView,5>,VkDescriptorSet,ViewsLess> material_cache;std::vector<VkDescriptorPool> material_pools; // see material_set()
+     std::vector<std::uint8_t> material_usage;
+     std::vector<Matrix4> history_instance_models;
+     std::unique_ptr<VulkanRtScene> rt;VkDescriptorPool rt_pool=VK_NULL_HANDLE;VkDescriptorSet rt_set=VK_NULL_HANDLE;
+     bool rt_stale=false; // a retained reload left the RT scene for render() to update in-frame
+     SourceScrollState source_scroll;
+     // History: the Frame of this set's last view (primary or portal) at serial `drawn`; frame = consecutive views.
+     Frame previous_frame{};std::uint32_t frame=0;std::uint64_t drawn=UINT64_MAX;
+     std::uint64_t transform_hash=0,color_resource_hash=0,geometry_revision=0;
+     std::vector<std::uint64_t> mesh_keys; // Scene mesh keys as last loaded; actor attach/detach remaps geometry by them.
+     std::uint64_t mesh_key=0; // Scene::mesh_key as last loaded: any actor (re)assembly since then reloads.
+     std::size_t instance_count=0;
+     bool loaded=false; // usable (load() or a completed stream)
+     // make_resident streaming: destinations sub-allocate `pool`; cursors over the textures and the unkeyed zone prefix.
+     bool streaming=false,raster_streamed=false;MemoryPool pool;std::vector<std::uint8_t> used;
+     std::size_t prefix=0,texture_cursor=0,mesh_cursor=0,stream_frames=0;VkDeviceSize stream_bytes=0;double stream_max_ms=0;
+     std::uint64_t touched=0; // LRU serial
+     std::vector<DrawItem> draws;
+ };
+ std::vector<std::unique_ptr<SceneSet>> sets_;SceneSet* primary_=nullptr;
+ std::vector<std::pair<std::uint64_t,std::unique_ptr<SceneSet>>> retired_sets_; // freed once that frame completed
+ // Completed retired sets are destroyed off the render thread (thousands of buffers/images/BLAS: ~1.5 ms raster,
+ // 5-9 ms RT measured inline); only device-level calls on objects no frame uses. Joined before device destruction.
+ std::vector<std::future<void>> reapers_;
+ // Per frame slot: in-frame upload staging (streaming steps and retained reloads share stream_ring_used_ within a
+ // frame), reused once the slot's previous frame completed.
+ Buffer stream_ring_[2];VkDeviceSize stream_ring_used_=0;
+ Buffer& frame_ring() {
+     auto& ring=stream_ring_[total_frames_&1u];
+     if(!ring.handle)ring=buffer(2*stream_budget_,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+     return ring;
+ }
+ VkDeviceSize stream_budget_=8ull<<20; // bytes per frame (IKV_STREAM_MB)
+ bool portals_supported_=false; // shaderClipDistance
+ VkPipeline portal_pipelines_[8]{},seal_pipeline_=VK_NULL_HANDLE; // scene_portal.vert: opaque, alpha, double x2, sky[4]
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
  float fade_=0; // NONCANONICAL seamless door fade (post.frag frame.fade.x)
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
  // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance,
  // or any appearance with faithful RT (RtStyle). Enhanced appearance keeps its sampling/FSR either way.
  bool original_lighting_=true;
- Frame previous_frame_{};
  std::uint64_t history_eligible_frames_=0,history_reset_events_=0,history_retained_dirty_frames_=0;
- std::uint32_t frame_=0;
- std::uint64_t transform_hash_=0,color_resource_hash_=0,geometry_revision_=0;
- std::vector<std::uint64_t> mesh_keys_; // Scene mesh keys as last loaded; actor attach/detach remaps geometry_ by them.
- std::uint64_t mesh_key_=0; // Scene::mesh_key as last loaded: any actor (re)assembly since then reloads.
  std::uint64_t total_frames_=0;
  std::filesystem::path cache_path_;
  // Host-written per-frame resources are indexed by the frame slot (total_frames_&1), so HUD/particle/skin uploads wait only
@@ -148,9 +186,38 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  std::uint64_t present_id_=0;float pacing_lead_ms_=2;
  std::chrono::steady_clock::time_point log_time_{};std::uint64_t log_frame_=0; // frame log: average rendered period
  // Buffers the frames up to serial `first` may still use (released retained-reload geometry, in-frame upload staging):
- // destroyed once that frame completed. rt_stale_: a retained reload left the RT scene for render() to update in-frame.
- std::vector<std::pair<std::uint64_t,Buffer>> retired_;bool rt_stale_=false;
+ // destroyed once that frame completed.
+ std::vector<std::pair<std::uint64_t,Buffer>> retired_;
  void retire(Buffer& b){if(b.handle)retired_.emplace_back(total_frames_,std::exchange(b,Buffer{}));}
+ void destroy_set(SceneSet& set) {
+     clear_material_sets(set);
+     if(set.rt_pool)vkDestroyDescriptorPool(device_,set.rt_pool,nullptr);
+     set.rt_pool=VK_NULL_HANDLE;set.rt.reset();
+     for(auto& g:set.geometry)destroy(g);
+     for(auto& t:set.textures)destroy(t);
+     set.geometry.clear();set.textures.clear();
+ }
+ // Frames up to this serial may still bind the set (evict(), release_scene(), LRU, abandoned stream).
+ void retire_set(SceneSet& set) {
+     if(primary_==&set)primary_=nullptr;
+     const auto found=std::find_if(sets_.begin(),sets_.end(),[&](const auto& s){return s.get()==&set;});
+     retired_sets_.emplace_back(total_frames_,std::move(*found));sets_.erase(found);
+ }
+ SceneSet* find_set(const Scene& scene)const {
+     for(const auto& set:sets_)if(set->scene==&scene)return set.get();
+     return nullptr;
+ }
+ // Cap: the primary and max_portals more; the least recently used other set gives way.
+ SceneSet& set_for(const Scene& scene) {
+     if(auto* found=find_set(scene)){found->touched=total_frames_;return *found;}
+     while(sets_.size()>max_portals) {
+         auto lru=std::min_element(sets_.begin(),sets_.end(),[](const auto& a,const auto& b){return a->touched<b->touched;});
+         retire_set(**lru);
+     }
+     auto& set=*sets_.emplace_back(std::make_unique<SceneSet>());
+     set.scene=&scene;set.touched=total_frames_;
+     return set;
+ }
  void progress()const {if(options_.progress)options_.progress();}
  void wait_fence(VkFence fence,const char* operation)const {
      for(;;) {
@@ -173,6 +240,10 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      wait_fence(s.fence,operation);s.pending=false;
      // A fence signal also covers every earlier submission, so all frames up to this serial completed.
      std::erase_if(retired_,[&](auto& entry){if(entry.first>s.serial)return false;destroy(entry.second);return true;});
+     std::erase_if(reapers_,[](auto& reaper){return reaper.wait_for(std::chrono::seconds(0))==std::future_status::ready;});
+     for(auto& entry:retired_sets_)if(entry.first<=s.serial)
+         reapers_.push_back(std::async(std::launch::async,[this,set=std::move(entry.second)]{destroy_set(*set);}));
+     std::erase_if(retired_sets_,[](const auto& entry){return !entry.second;});
  }
  void wait_serial(std::uint64_t serial,const char* operation) {
      if(slots_[serial&1u].serial==serial)wait_slot(serial&1u,operation);
@@ -521,9 +592,10 @@ void destroy(Image& i){if(i.view)vkDestroyImageView(device_,i.view,nullptr);if(i
      }
      vkDestroyFence(device_,f,nullptr);vkFreeCommandBuffers(device_,pool_,1,&c);
  }
-// frame: record into the caller's frame command buffer (retained reloads, no submit or wait); staging is retired until
-// that frame completed. Otherwise own submissions, each waited, staged through one reusable buffer (`ring`); `pool`
-// (full scene loads) sub-allocates the destinations.
+// frame: record into the caller's frame command buffer (retained reloads, streaming; no submit or wait); staging goes to
+// `frame_ring` (frame_ring(), cursor stream_ring_used_) while it has room, otherwise it is retired until that frame completed.
+// Otherwise own submissions, each waited, staged through one reusable buffer (`ring`); `pool` (full scene loads,
+// streaming) sub-allocates the destinations.
 struct Staged {VkBuffer handle=VK_NULL_HANDLE;VkDeviceSize offset=0;};
 struct UploadBatch {
     VulkanRenderer& renderer;
@@ -531,12 +603,12 @@ struct UploadBatch {
     VkCommandBuffer command=VK_NULL_HANDLE;
     VkFence fence=VK_NULL_HANDLE;
     std::vector<Buffer> staging;
-    Buffer ring;
+    Buffer ring;Buffer* frame_ring=nullptr;
     VkDeviceSize bytes=0,total_bytes=0;
     std::size_t submissions=0;
     bool recording=false,pending=false,frame=false;
-    explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE,MemoryPool* destinations=nullptr)
-        :renderer(r),pool(destinations),command(into),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
+    explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE,MemoryPool* destinations=nullptr,Buffer* frame_staging=nullptr)
+        :renderer(r),pool(destinations),command(into),frame_ring(frame_staging),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
     ~UploadBatch() {
         if(frame){for(auto& stage:staging)renderer.retire(stage);return;}
         if(pending)renderer.drain_fence(fence);
@@ -569,6 +641,14 @@ struct UploadBatch {
         // Bound aggregate staging to one eighth of the asset cap; a larger single asset runs alone. Offsets stay 16-byte
         // aligned (BC block and texel copy offsets).
         renderer.progress();
+        if(frame_ring) {
+            auto& used=renderer.stream_ring_used_;const VkDeviceSize offset=(used+15)&~VkDeviceSize(15);
+            if(offset<=frame_ring->bytes&&size<=frame_ring->bytes-offset) {
+                renderer.copy_staging(static_cast<std::byte*>(frame_ring->mapped)+offset,data,static_cast<std::size_t>(size));
+                used=offset+size;total_bytes+=size;
+                return {frame_ring->handle,offset};
+            }
+        }
         constexpr VkDeviceSize chunk_bytes=assets::max_entry_bytes/8;
         if(bytes&&(size>chunk_bytes||((bytes+15)&~VkDeviceSize(15))>chunk_bytes-size))flush();
         if(!command) {
@@ -687,7 +767,7 @@ Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usag
  VkShaderModule shader(const char* name){auto words=shader_bytes(name);VkShaderModuleCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;c.codeSize=words.size()*4;c.pCode=words.data();VkShaderModule module;checked(vkCreateShaderModule(device_,&c,nullptr,&module),"create shader module");return module;}
 VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mesh,bool alpha,
                     bool depth,bool shadow,bool double_sided=false,bool depth_write=true,std::optional<ParticleBlend> particle={},
-                    bool contour=false,bool glow_composite=false) {
+                    bool contour=false,bool glow_composite=false,bool seal=false) {
      progress();
      VkShaderModule v=shader(vert),f=VK_NULL_HANDLE;VkPipeline result=VK_NULL_HANDLE;
      try {
@@ -695,8 +775,8 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          for(auto& s:stages)s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
          stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=v;stages[0].pName="main";
          stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=f;stages[1].pName="main";
-        // scene.vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
-        const bool previous_pose=std::strcmp(vert,"scene.vert")==0;
+        // scene(_portal).vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
+        const bool previous_pose=std::strncmp(vert,"scene",5)==0;
         const VkVertexInputBindingDescription bindings[2]{{0,static_cast<std::uint32_t>(particle?sizeof(ParticleVertex):sizeof(Vertex)),VK_VERTEX_INPUT_RATE_VERTEX},
             {1,sizeof(Vertex),VK_VERTEX_INPUT_RATE_VERTEX}};
         VkVertexInputAttributeDescription attributes[8]{{0,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,x)},{1,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,nx)},{2,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,u)},{3,0,VK_FORMAT_R32G32B32A32_SFLOAT,offsetof(Vertex,ambient)},{4,0,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,tangent)},{5,0,VK_FORMAT_R32G32_SFLOAT,offsetof(Vertex,uv1)},{6,0,VK_FORMAT_R32G32B32A32_SFLOAT,offsetof(Vertex,color)},{7,1,VK_FORMAT_R32G32B32_SFLOAT,offsetof(Vertex,x)}};
@@ -715,11 +795,11 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          raster.polygonMode=VK_POLYGON_MODE_FILL;raster.cullMode=contour?VK_CULL_MODE_FRONT_BIT:mesh&&!double_sided?VK_CULL_MODE_BACK_BIT:VK_CULL_MODE_NONE;
          // Source ADF triangles keep D3D clockwise front faces; the shared Y-flipped projection preserves GL's choice.
          raster.frontFace=VK_FRONT_FACE_CLOCKWISE;raster.lineWidth=1;raster.depthBiasEnable=shadow;
-         raster.depthBiasConstantFactor=shadow?1.25f:0;raster.depthBiasSlopeFactor=shadow?1.75f:0;
+         raster.depthBiasConstantFactor=shadow?1.25f:0;raster.depthBiasSlopeFactor=shadow?1.75f:0;raster.depthClampEnable=shadow&&depth_clamp_;
          VkPipelineMultisampleStateCreateInfo samples{};samples.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
          samples.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
          VkPipelineDepthStencilStateCreateInfo ds{};ds.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-         ds.depthTestEnable=depth;ds.depthWriteEnable=depth&&!alpha&&depth_write;ds.depthCompareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
+         ds.depthTestEnable=depth;ds.depthWriteEnable=depth&&!alpha&&depth_write;ds.depthCompareOp=seal?VK_COMPARE_OP_ALWAYS:VK_COMPARE_OP_LESS_OR_EQUAL;
          VkPipelineColorBlendAttachmentState blend{};
          blend.colorWriteMask=0xf;blend.blendEnable=alpha;
          blend.srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;blend.dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -753,6 +833,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
         }
         // Without independentBlend (enabled only for denoise/FSR) every location past 0 is VK_ATTACHMENT_UNUSED.
         if(!(denoise_enabled_||fsr_supported_))std::fill(blends.begin()+1,blends.end(),blends[0]);
+        if(seal)for(auto& b:blends)b.colorWriteMask=0; // wave-16 portal seal: depth only
          VkPipelineColorBlendStateCreateInfo blending{};blending.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
          blending.attachmentCount=shadow?0:static_cast<std::uint32_t>(colors_of(pass).size());
          blending.pAttachments=shadow?nullptr:blends.data();
@@ -965,6 +1046,10 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      enabled.samplerAnisotropy=available.samplerAnisotropy;
      const float anisotropy=available.samplerAnisotropy?std::min(16.f,props.limits.maxSamplerAnisotropy):1.f;
      if(fsr_supported_)Fsr3Upscaler::enable_features(physical_,enabled);
+     // Wave-16 portal views clip the destination with gl_ClipDistance; without it resident() stays false (fade doors).
+     portals_supported_=available.shaderClipDistance;enabled.shaderClipDistance=available.shaderClipDistance;
+     depth_clamp_=available.depthClamp;enabled.depthClamp=available.depthClamp;
+     if(!portals_supported_)std::cerr<<"Vulkan shaderClipDistance unavailable: no portal views or resident scene sets\n";
      dc.pEnabledFeatures=&enabled;
      checked(vkCreateDevice(physical_,&dc,nullptr,&device_),"create Vulkan device");
      vkGetDeviceQueue(device_,family_,0,&queue_);
@@ -999,6 +1084,14 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          const float value=std::strtof(lead,nullptr);
          if(std::isfinite(value)&&value>=0&&value<=20)pacing_lead_ms_=value;
      }
+     if(const char* mb=SDL_getenv("IKV_STREAM_MB")) { // calibration knob: make_resident upload bytes per frame
+         const float value=std::strtof(mb,nullptr);
+         if(std::isfinite(value)&&value>=1&&value<=256)stream_budget_=VkDeviceSize(value*1048576);
+     }
+     if(SDL_getenv("IKV_GPU_TIMING")&&props.limits.timestampComputeAndGraphics) {
+         VkQueryPoolCreateInfo q{};q.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=8;
+         checked(vkCreateQueryPool(device_,&q,nullptr,&timing_pool_),"timestamp query pool");timestamp_period_=props.limits.timestampPeriod;
+     }
      VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
      // GL parity: original appearance keeps the source's nearest mip (LINEAR_MIPMAP_NEAREST), enhanced blends mips
      // (LINEAR_MIPMAP_LINEAR); hard mip switches popped alpha-tested foliage coverage with distance.
@@ -1012,6 +1105,11 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      checked(vkCreateSampler(device_,&sampler,nullptr,&linear_clamp_),"linear clamp sampler");
      sampler.magFilter=sampler.minFilter=VK_FILTER_NEAREST;sampler.mipmapMode=VK_SAMPLER_MIPMAP_MODE_NEAREST;
      checked(vkCreateSampler(device_,&sampler,nullptr,&shadow_sampler_),"shadow sampler");
+     // lighting.glsl shadowVisibility: each tap a bilinear 2x2 depth test, so 3x3 PCF edges stop stair-stepping across actors.
+     VkFormatProperties depth_features{};vkGetPhysicalDeviceFormatProperties(physical_,VK_FORMAT_D32_SFLOAT,&depth_features);
+     if(depth_features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
+     sampler.compareEnable=VK_TRUE;sampler.compareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
+     checked(vkCreateSampler(device_,&sampler,nullptr,&shadow_compare_),"shadow compare sampler");
      std::array<VkDescriptorSetLayoutBinding,12> bindings{};
      bindings[0]={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
      const std::uint32_t binding_count=denoise_enabled_?12:10;
@@ -1027,7 +1125,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
              {2,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,rt_alpha_texture_slots,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr}};
          lc.bindingCount=3;lc.pBindings=rbindings;
          checked(vkCreateDescriptorSetLayout(device_,&lc,nullptr,&rt_layout_),"RT descriptor layout");
-         layouts[1]=rt_layout_;rt_=std::make_unique<VulkanRtScene>(physical_,device_,queue_,family_,options_.progress);
+         layouts[1]=rt_layout_;
      }
      VkPushConstantRange push{VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(Draw)};
      VkPipelineLayoutCreateInfo pl{};pl.sType=VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1035,7 +1133,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      checked(vkCreatePipelineLayout(device_,&pl,nullptr,&pipeline_layout_),"pipeline layout");
      const auto align=std::max<VkDeviceSize>(1,props.limits.minUniformBufferOffsetAlignment);
      uniform_stride_=static_cast<std::uint32_t>((sizeof(Frame)+align-1)/align*align);
-     uniform_=buffer(2*VkDeviceSize(uniform_stride_),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+     uniform_=buffer(2*view_slots*VkDeviceSize(uniform_stride_),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
      const std::uint8_t white[4]{255,255,255,255},normal[4]{128,128,255,255},clear[4]{};
      white_=upload(1,1,white);flat_normal_=upload(1,1,normal);overlay_=upload(1,1,clear);
@@ -1068,6 +1166,9 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
     for(auto& p:sky_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:after_particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
+    for(auto& p:portal_pipelines_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
+    if(seal_pipeline_)vkDestroyPipeline(device_,seal_pipeline_,nullptr);
+    seal_pipeline_=VK_NULL_HANDLE;
      for(auto& f:scene_fb_){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
      for(auto& f:temporal_fb_){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
      for(auto& slot:atrous_fb_)for(auto& f:slot){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
@@ -1200,7 +1301,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          fsr_output_=image(extent_.width,extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      }
      depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
-     shadow_=image(2048,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
+     shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // primary | portal view
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      output_=image(extent_.width,extent_.height,swap_format_,display_usage|(generating_?VkImageUsageFlags{VK_IMAGE_USAGE_SAMPLED_BIT}:0u));
@@ -1239,7 +1340,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          after_views.push_back(depth_.view);
          after_fb_[i]=framebuffer(after_pass_,after_views,render_extent_);
      }
-     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{2048,2048});
+     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,2048});
      std::array post_views{output_.view};post_fb_=framebuffer(post_pass_,post_views,extent_);
      const char* scene_shader=denoise_enabled_?"scene_rt_guided.frag":rt_enabled_?"scene_rt.frag":"scene.frag";
      opaque_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false);
@@ -1253,6 +1354,11 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
     for(unsigned i=0;i<5;++i)after_particle_pipeline_[i]=pipeline("particle.vert","particle.frag",after_pass_,true,true,true,false,true,false,ParticleBlend(i));
     // Hilite state (0046ccf0 tail): CULLMODE CW = back-face shell, SRCALPHA/INVSRCALPHA, ZWRITE off, Z test on.
     contour_pipeline_=pipeline("contour.vert","contour.frag",scene_pass_,true,true,true,false,false,false,{},true);
+    if(portals_supported_) { // wave-16 portal views: the scene pipelines with gl_ClipDistance, and the depth-only seal
+        for(unsigned i=0;i<4;++i)portal_pipelines_[i]=pipeline("scene_portal.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0);
+        for(unsigned i=0;i<4;++i)portal_pipelines_[4+i]=pipeline("scene_portal.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0,false);
+        seal_pipeline_=pipeline("seal.vert","contour.frag",scene_pass_,false,false,true,false,false,true,{},false,false,true);
+    }
      post_pipeline_=pipeline("fullscreen.vert","post.frag",post_pass_,false,false,false,false);
      overlay_pipeline_=pipeline("fullscreen.vert","overlay.frag",post_pass_,false,true,false,false);
      if(hud_pass_)hud_pipeline_=pipeline("fullscreen.vert","overlay.frag",hud_pass_,false,true,false,false);
@@ -1272,23 +1378,23 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
              barrier(c,i->handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
          }
      });
-    dirty_=false;rendered_=false;frame_=0;clear_material_sets();if(scene_)descriptors(); // material sets bind shadow_/depth_
+    dirty_=false;rendered_=false;
+    frame_descriptors();
+    for(auto& set:sets_){set->frame=0;if(set->loaded){clear_material_sets(*set);descriptors(*set);}} // material sets bind shadow_/depth_
     for(std::size_t i=0;i<particle_sets_.size();++i)write_set(particle_sets_[i],nullptr,0,false,false,&particle_images_[i]);
     return true;
  }
- const Image& texture(const std::string& name,const Image& fallback)const{if(name.empty())return fallback;auto found=texture_lookup_.find(name);if(found==texture_lookup_.end())throw std::runtime_error("scene references missing decoded texture: "+name);return textures_[found->second];}
+ const Image& texture(const SceneSet& set,const std::string& name,const Image& fallback)const{if(name.empty())return fallback;auto found=set.texture_lookup.find(name);if(found==set.texture_lookup.end())throw std::runtime_error("scene references missing decoded texture: "+name);return set.textures[found->second];}
 VkDescriptorSet allocate_set(VkDescriptorSetLayout layout,VkDescriptorPool pool=VK_NULL_HANDLE){VkDescriptorSetAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;a.descriptorPool=pool?pool:descriptor_pool_;a.descriptorSetCount=1;a.pSetLayouts=&layout;VkDescriptorSet result;checked(vkAllocateDescriptorSets(device_,&a,&result),"allocate descriptor set");return result;}
 // temporal: input_diffuse/input_reflection replace the previous history at 6/8 (a-trous iterations read the last pass).
-void write_set(VkDescriptorSet set,const Material* mat,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
+// bound: a material's five scene maps (material_maps); null for frame-target sets.
+void write_set(VkDescriptorSet set,const std::array<const Image*,5>* bound,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
                const Image* input_diffuse=nullptr,const Image* input_reflection=nullptr) {
      VkDescriptorBufferInfo buffer_info{uniform_.handle,0,sizeof(Frame)};
      std::array<VkDescriptorImageInfo,11> images{};
      const Image* maps[11]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_};
      if(post)maps[0]=&hdr_[history];
-     else if(mat) {
-         const auto bound=material_maps(*mat);
-         maps[0]=bound[0];maps[1]=bound[1];maps[2]=bound[2];maps[3]=bound[3];maps[8]=bound[4];
-     }
+     else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];}
     if(diffuse)maps[0]=diffuse;
     if(second)maps[1]=second;
     // temporal.frag bindings: 1 raw, 2/3 current diffuse/reflection, 4 motion, 6/8 previous diffuse/reflection history,
@@ -1302,7 +1408,7 @@ void write_set(VkDescriptorSet set,const Material* mat,unsigned history,bool pos
      writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
      writes[0].pBufferInfo=&buffer_info;
      for(unsigned i=0;i<image_count;++i) {
-         images[i]={i==4||i==6||i>=9?shadow_sampler_:i==5||i==7||(post&&i<2)?linear_clamp_:sampler_,
+         images[i]={i==4?shadow_compare_:i==6||i>=9?shadow_sampler_:i==5||i==7||(post&&i<2)?linear_clamp_:sampler_,
              maps[i]->view,i==4||i==6?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
          writes[i+1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i+1].dstSet=set;writes[i+1].dstBinding=i+1;
          writes[i+1].descriptorCount=1;writes[i+1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1310,69 +1416,88 @@ void write_set(VkDescriptorSet set,const Material* mat,unsigned history,bool pos
      }
      vkUpdateDescriptorSets(device_,image_count+1,writes.data(),0,nullptr);
  }
-std::array<const Image*,5> material_maps(const Material& m)const {
-     return {&texture(m.diffuse,white_),&texture(m.normal,flat_normal_),
-         &texture(!m.environment.empty()?m.environment:!m.luminance.empty()?m.luminance:m.lightmap,white_),
-         &texture(m.luminance,white_),&texture(m.lightmap,white_)};
+std::array<const Image*,5> material_maps(const SceneSet& set,const Material& m)const {
+     return {&texture(set,m.diffuse,white_),&texture(set,m.normal,flat_normal_),
+         &texture(set,!m.environment.empty()?m.environment:!m.luminance.empty()?m.luminance:m.lightmap,white_),
+         &texture(set,m.luminance,white_),&texture(set,m.lightmap,white_)};
 }
 // A material set depends only on its five bound views (the rest are frame targets), so retained-scene reloads (actor AOI
 // churn) reuse cached sets instead of rewriting thousands. Cleared whenever textures or render targets are destroyed.
-VkDescriptorSet material_set(const Material& m) {
-     const auto bound=material_maps(m);
+VkDescriptorSet material_set(SceneSet& set,const Material& m) {
+     const auto bound=material_maps(set,m);
      const std::array<VkImageView,5> key{bound[0]->view,bound[1]->view,bound[2]->view,bound[3]->view,bound[4]->view};
-     const auto [found,inserted]=material_cache_.try_emplace(key,VK_NULL_HANDLE);
+     const auto [found,inserted]=set.material_cache.try_emplace(key,VK_NULL_HANDLE);
      if(!inserted)return found->second;
      try {
          VkResult result=VK_ERROR_OUT_OF_POOL_MEMORY;
-         if(!material_pools_.empty()) {
+         if(!set.material_pools.empty()) {
              VkDescriptorSetAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-             a.descriptorPool=material_pools_.back();a.descriptorSetCount=1;a.pSetLayouts=&set_layout_;
+             a.descriptorPool=set.material_pools.back();a.descriptorSetCount=1;a.pSetLayouts=&set_layout_;
              result=vkAllocateDescriptorSets(device_,&a,&found->second);
          }
          if(result==VK_ERROR_OUT_OF_POOL_MEMORY||result==VK_ERROR_FRAGMENTED_POOL) {
              constexpr std::uint32_t chunk=1024;
              const VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,chunk},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,chunk*(denoise_enabled_?11u:9u)}};
              VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;p.maxSets=chunk;p.poolSizeCount=2;p.pPoolSizes=sizes;
-             material_pools_.push_back(VK_NULL_HANDLE);
-             checked(vkCreateDescriptorPool(device_,&p,nullptr,&material_pools_.back()),"material descriptor pool");
-             found->second=allocate_set(set_layout_,material_pools_.back());
+             set.material_pools.push_back(VK_NULL_HANDLE);
+             checked(vkCreateDescriptorPool(device_,&p,nullptr,&set.material_pools.back()),"material descriptor pool");
+             found->second=allocate_set(set_layout_,set.material_pools.back());
          } else checked(result,"allocate material descriptor set");
-         write_set(found->second,&m,0,false);
-     } catch(...) {material_cache_.erase(found);throw;}
+         write_set(found->second,&bound,0,false);
+     } catch(...) {set.material_cache.erase(found);throw;}
      return found->second;
 }
-void clear_material_sets() {
-     for(auto pool:material_pools_)if(pool)vkDestroyDescriptorPool(device_,pool,nullptr);
-     material_pools_.clear();material_cache_.clear();material_sets_.clear();
+void clear_material_sets(SceneSet& set) {
+     for(auto pool:set.material_pools)if(pool)vkDestroyDescriptorPool(device_,pool,nullptr);
+     set.material_pools.clear();set.material_cache.clear();set.material_sets.clear();
 }
- void write_rt(){if(!rt_enabled_)return;VkAccelerationStructureKHR as=rt_->acceleration_structure();if(!as)throw std::runtime_error("RT scene has no acceleration structure");VkWriteDescriptorSetAccelerationStructureKHR acceleration{};acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&as;VkDescriptorBufferInfo triangles{rt_->triangles(),0,rt_->triangle_bytes()};VkWriteDescriptorSet writes[3]{};writes[0] = {};writes[0].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[0].pNext=&acceleration;writes[0].dstSet=rt_set_;writes[0].dstBinding=0;writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;writes[1] = {};writes[1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[1].dstSet=rt_set_;writes[1].dstBinding=1;writes[1].descriptorCount=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[1].pBufferInfo=&triangles;
+ void write_rt(SceneSet& set) {
+     if(!rt_enabled_)return;
+     if(!set.rt_pool) { // one RT set per scene set: its own TLAS, triangle records and alpha-tested textures
+         const VkDescriptorPoolSize sizes[3]{{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,rt_alpha_texture_slots}};
+         VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;p.maxSets=1;p.poolSizeCount=3;p.pPoolSizes=sizes;
+         checked(vkCreateDescriptorPool(device_,&p,nullptr,&set.rt_pool),"RT descriptor pool");
+         set.rt_set=allocate_set(rt_layout_,set.rt_pool);
+     }
+     VkAccelerationStructureKHR as=set.rt->acceleration_structure();if(!as)throw std::runtime_error("RT scene has no acceleration structure");
+     VkWriteDescriptorSetAccelerationStructureKHR acceleration{};acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&as;
+     VkDescriptorBufferInfo triangles{set.rt->triangles(),0,set.rt->triangle_bytes()};VkWriteDescriptorSet writes[3]{};
+     writes[0].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[0].pNext=&acceleration;writes[0].dstSet=set.rt_set;writes[0].dstBinding=0;writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+     writes[1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[1].dstSet=set.rt_set;writes[1].dstBinding=1;writes[1].descriptorCount=1;writes[1].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;writes[1].pBufferInfo=&triangles;
      // Alpha-tested ray hits sample their diffuse alpha by slot (vulkan_rt.cpp alpha_slot); unused slots stay white.
      std::array<VkDescriptorImageInfo,rt_alpha_texture_slots> alpha;alpha.fill({sampler_,white_.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
-     const auto names=rt_->alpha_textures();for(std::size_t i=0;i<names.size()&&i<alpha.size();++i)alpha[i].imageView=texture(names[i],white_).view;
-     writes[2] = {};writes[2].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[2].dstSet=rt_set_;writes[2].dstBinding=2;writes[2].descriptorCount=rt_alpha_texture_slots;writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=alpha.data();
-     vkUpdateDescriptorSets(device_,3,writes,0,nullptr);}
- // retained: actor attach/detach keeps every frame-target set (in-flight frames bind them) and only adds material sets.
- void descriptors(bool retained=false) {
+     const auto names=set.rt->alpha_textures();for(std::size_t i=0;i<names.size()&&i<alpha.size();++i)alpha[i].imageView=texture(set,names[i],white_).view;
+     writes[2].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[2].dstSet=set.rt_set;writes[2].dstBinding=2;writes[2].descriptorCount=rt_alpha_texture_slots;writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=alpha.data();
+     vkUpdateDescriptorSets(device_,3,writes,0,nullptr);
+ }
+ // Material sets of a scene set's used materials; retained (actor attach/detach) keeps the zone's sets (materials below
+ // every actor assembly, which attach/detach never moves), resolves the rest through the cache and keeps the RT set
+ // (in-flight frames bind it).
+ void descriptors(SceneSet& set,bool retained=false) {
      progress();
-     material_usage_=scene_material_usage(*scene_);
+     const Scene& scene=*set.scene;
+     set.material_usage=scene_material_usage(scene);
      progress();
-     if(!retained) {
-         if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
-         descriptor_pool_=VK_NULL_HANDLE;
-     }
-     const std::uint32_t materials=static_cast<std::uint32_t>(std::max<std::size_t>(1,scene_->materials.size()));
-     material_sets_.assign(materials,VK_NULL_HANDLE); // dormant materials are never bound (draw_scene rejects them)
+     const std::uint32_t materials=static_cast<std::uint32_t>(std::max<std::size_t>(1,scene.materials.size()));
+     std::size_t kept=0;
+     if(retained){kept=std::min(set.material_sets.size(),scene.materials.size());for(const auto& a:scene.actor_assemblies)kept=std::min(kept,a.begin[1]);}
+     set.material_sets.resize(kept);set.material_sets.resize(materials,VK_NULL_HANDLE); // dormant materials are never bound (draw_scene rejects them)
      const Material none;
-     for(std::uint32_t i=0;i<materials;++i) {
+     for(std::uint32_t i=static_cast<std::uint32_t>(kept);i<materials;++i) {
          if(i%1024==0)progress();
-         if(!scene_->materials.empty()&&!material_usage_[i])continue;
-         material_sets_[i]=material_set(i<scene_->materials.size()?scene_->materials[i]:none);
+         if(!scene.materials.empty()&&!set.material_usage[i])continue;
+         set.material_sets[i]=material_set(set,i<scene.materials.size()?scene.materials[i]:none);
      }
-     if(retained)return;
-     const std::uint32_t sets=2+(rt_enabled_?1:0)+(denoise_enabled_?8:0)+(glow_pass_?4:0);
-     VkDescriptorPoolSize sizes[4]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*(denoise_enabled_?11u:9u)+(rt_enabled_?rt_alpha_texture_slots:0u)},{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1}};
+     if(!retained)write_rt(set);
+ }
+ // Scene-independent frame-target sets (post, temporal/a-trous, glow), rebuilt with the targets.
+ void frame_descriptors() {
+     if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
+     descriptor_pool_=VK_NULL_HANDLE;
+     const std::uint32_t sets=2+(denoise_enabled_?8:0)+(glow_pass_?4:0);
+     VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*(denoise_enabled_?11u:9u)}};
      VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-     p.maxSets=sets;p.poolSizeCount=rt_enabled_?4:2;p.pPoolSizes=sizes;
+     p.maxSets=sets;p.poolSizeCount=2;p.pPoolSizes=sizes;
      checked(vkCreateDescriptorPool(device_,&p,nullptr,&descriptor_pool_),"descriptor pool");
      for(unsigned i=0;i<2;++i) {
          // With FSR the post pass tonemaps the upscaled output instead of the render-resolution history.
@@ -1388,7 +1513,6 @@ void clear_material_sets() {
          glow_sets_[i]=allocate_set(set_layout_);
          write_set(glow_sets_[i],nullptr,i<2?i:0,true,false,i<2?nullptr:&glow_chain_[i==2?1:0],i<2?&glow_chain_[0]:nullptr);
      }
-     if(rt_enabled_){rt_set_=allocate_set(rt_layout_);write_rt();}
  }
  std::uint64_t scene_hash(const Scene& s,std::span<const RenderEntity> entities,std::uint64_t* color_hash=nullptr)const {
      std::uint64_t h=1469598103934665603ull,color=1469598103934665603ull;
@@ -1426,105 +1550,113 @@ void clear_material_sets() {
      h=(h^std::bit_cast<std::uint32_t>(s.lighting.fog_end))*1099511628211ull;
      return h;
  }
- // A new Scene waits for the device and reloads everything. An actor attach/detach (same Scene) keeps every other mesh's
- // buffers (moved by key) and never waits: new uploads are recorded into this frame (command_, already begun), released
- // buffers retire until the frames using them completed, frame-target descriptor sets stay, and render() updates RT
- // in-frame (rt_stale_).
- void load(const Scene& s,std::span<const RenderEntity> entities) {
-     const auto started=std::chrono::steady_clock::now();
-     const bool retain=scene_==&s&&s.textures.size()>=textures_.size();
-     if(!retain)wait_idle("scene upload wait");
-     if(!retain) {
-         if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
-         descriptor_pool_=VK_NULL_HANDLE;post_sets_[0]=post_sets_[1]=rt_set_=VK_NULL_HANDLE;
-         clear_material_sets();
-         for(auto& g:geometry_){progress();destroy(g);}
-         geometry_.clear();
-         for(auto& t:textures_){progress();destroy(t);}
-         textures_.clear();texture_lookup_.clear();
+ // Residency per mesh: 2 = colour-drawn (uploaded), 1 = referenced only (validated), 0 = unused. meshes: the prefix to plan.
+ static std::vector<std::uint8_t> mesh_residency(const Scene& s,std::size_t meshes) {
+     std::vector<std::uint8_t> used(meshes,0);
+     if(s.instances.empty()) {
+         for(std::uint32_t mesh=0;mesh<meshes;++mesh)used[mesh]=scene_source_color_draw(s,mesh)?2:1;
+     } else for(const auto& instance:s.instances) {
+         if(instance.mesh>=s.meshes.size())throw std::runtime_error("original instance mesh index out of range");
+         if(instance.occlusion_proxy||instance.mesh>=meshes)continue;
+         const std::uint8_t residency=scene_source_color_draw(s,instance.mesh,instance.material,instance.source_ordinary_color_participates)?2:1;
+         used[instance.mesh]=std::max(used[instance.mesh],residency);
      }
-     scene_=nullptr;
+     return used;
+ }
+ // Validates and (residency 2) uploads one mesh into its geometry slot; false when already uploaded or not drawn.
+ bool upload_mesh(Geometry& g,const Mesh& mesh,std::uint8_t residency,UploadBatch& batch) {
+     if(!residency||g.vertices.handle)return false; // Retained: validated when uploaded; skins update through update_geometry.
+     if(mesh.vertices.empty()||mesh.indices.empty()||mesh.indices.size()%3)
+         throw std::runtime_error("invalid original indexed mesh");
+     if(mesh.vertices.size()>assets::max_entry_bytes/sizeof(Vertex)||
+        mesh.indices.size()>assets::max_entry_bytes/sizeof(std::uint32_t)||
+        mesh.indices.size()>UINT32_MAX)
+         throw std::runtime_error("original indexed mesh exceeds upload limit");
+     for(std::size_t index=0;index<mesh.indices.size();++index) {
+         if(index%4096==0)progress();
+         if(mesh.indices[index]>=mesh.vertices.size())
+             throw std::runtime_error("original mesh index out of range");
+     }
+     if(residency!=2)return false;
+     // Indexed slots own destinations even if a later upload fails; batch staging outlives submitted work.
+     const bool skinned=!mesh.influences.empty();
+     g.vertices=upload_buffer(mesh.vertices.data(),mesh.vertices.size()*sizeof(Vertex),
+         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|(skinned?VkBufferUsageFlags{VK_BUFFER_USAGE_TRANSFER_SRC_BIT}:0u),batch);
+     g.indices=upload_buffer(mesh.indices.data(),mesh.indices.size()*sizeof(std::uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT,batch);
+     if(skinned) {
+         for(auto& stage:g.staging)
+             stage=buffer(g.vertices.bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,batch.pool);
+         // Motion vectors' previous pose starts equal to the bind pose; record_geometry_uploads swaps it with
+         // vertices, so both carry the same usage.
+         g.previous=upload_buffer(mesh.vertices.data(),g.vertices.bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,batch);
+     }
+     g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);
+     return true;
+ }
+ std::size_t upload_textures(SceneSet& set,UploadBatch& batch,VkDeviceSize budget=~VkDeviceSize(0)) {
+     const Scene& s=*set.scene;
+     if(s.textures.size()<set.textures.size())throw std::runtime_error("resident scene lost textures without evict");
+     set.textures.resize(s.textures.size());
+     std::size_t bytes=0;
+     for(;set.texture_cursor<s.textures.size()&&batch.total_bytes<budget;++set.texture_cursor) {
+         progress();
+         const auto& t=s.textures[set.texture_cursor];
+         if(!set.texture_lookup.emplace(t.name,set.texture_cursor).second)throw std::runtime_error("duplicate original texture name");
+         set.textures[set.texture_cursor]=upload_texture(t,&batch);bytes+=t.data.size();
+     }
+     return bytes;
+ }
+ // A Scene new to its set uploads everything in own waited submissions (no device wait: in-flight frames never bound
+ // this set). An actor attach/detach (set already loaded) keeps every other mesh's buffers (moved by key) and never
+ // waits: new uploads are recorded into this frame (command_, already begun), released buffers retire until the frames
+ // using them completed, the RT set stays, and render() updates RT in-frame (rt_stale).
+ void load(SceneSet& set,std::span<const RenderEntity> entities) {
+     const auto started=std::chrono::steady_clock::now();
+     const Scene& s=*set.scene;
+     const bool retain=set.loaded&&s.textures.size()>=set.textures.size();
+     if(!retain&&set.loaded) { // content replaced at the same address without evict()
+         wait_idle("scene upload wait");
+         destroy_set(set);set.texture_lookup.clear();set.texture_cursor=0;set.loaded=false;
+     }
      std::size_t released_meshes=0;
      if(retain) {
-         const auto remap=scene_mesh_remap(mesh_keys_,s);
+         const auto remap=scene_mesh_remap(set.mesh_keys,s);
          std::vector<Geometry> kept(s.meshes.size());
-         for(std::size_t i=0;i<remap.size();++i)if(remap[i]!=SIZE_MAX)kept[i]=std::exchange(geometry_[remap[i]],Geometry{});
-         for(auto& g:geometry_)if(g.vertices.handle||g.indices.handle||g.staging[0].handle) {
+         for(std::size_t i=0;i<remap.size();++i)if(remap[i]!=SIZE_MAX&&remap[i]<set.geometry.size())kept[i]=std::exchange(set.geometry[remap[i]],Geometry{});
+         for(auto& g:set.geometry)if(g.vertices.handle||g.indices.handle||g.staging[0].handle) {
              retire(g.vertices);retire(g.indices);for(auto& b:g.staging)retire(b);retire(g.previous);++released_meshes;
          }
-         geometry_=std::move(kept);
+         set.geometry=std::move(kept);
      }
-     const auto retained_meshes=std::count_if(geometry_.begin(),geometry_.end(),
+     const auto retained_meshes=std::count_if(set.geometry.begin(),set.geometry.end(),
          [](const Geometry& g){return g.vertices.handle!=VK_NULL_HANDLE;});
-     const auto retained_textures=textures_.size();
+     const auto retained_textures=set.texture_cursor;
      std::size_t new_meshes=0,submissions=0,memory_blocks=0,texture_bytes=0;
      VkDeviceSize upload_bytes=0;
-     try {
-         std::vector<std::uint8_t> used(s.meshes.size(),0);
-         if(s.instances.empty()) {
-             for(std::uint32_t mesh=0;mesh<s.meshes.size();++mesh) {
-                 if(mesh%4096==0)progress();
-                 used[mesh]=scene_source_color_draw(s,mesh)?2:1;
-             }
-         } else for(const auto& instance:s.instances) {
-             if((&instance-s.instances.data())%1024==0)progress(); // per-item network pumps cost ~4 ms per actor-churn reload
-             if(instance.mesh>=s.meshes.size())throw std::runtime_error("original instance mesh index out of range");
-             if(instance.occlusion_proxy)continue;
-             const std::uint8_t residency=scene_source_color_draw(s,instance.mesh,instance.material,instance.source_ordinary_color_participates)?2:1;
-             used[instance.mesh]=std::max(used[instance.mesh],residency);
-         }
-         geometry_.resize(s.meshes.size());
-         textures_.resize(s.textures.size());
-         MemoryPool pool; // full loads only: retained reloads (actor churn) allocate and retire per resource
-         UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
-         for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
-             if(mesh_index%1024==0)progress(); // uploads pump on their own
-             if(!used[mesh_index])continue;
-             auto& g=geometry_[mesh_index];
-             if(g.vertices.handle)continue; // Retained: validated when uploaded; skins update through update_geometry.
-             const auto& mesh=s.meshes[mesh_index];
-             if(mesh.vertices.empty()||mesh.indices.empty()||mesh.indices.size()%3)
-                 throw std::runtime_error("invalid original indexed mesh");
-             if(mesh.vertices.size()>assets::max_entry_bytes/sizeof(Vertex)||
-                mesh.indices.size()>assets::max_entry_bytes/sizeof(std::uint32_t)||
-                mesh.indices.size()>UINT32_MAX)
-                 throw std::runtime_error("original indexed mesh exceeds upload limit");
-             for(std::size_t index=0;index<mesh.indices.size();++index) {
-                 if(index%4096==0)progress();
-                 if(mesh.indices[index]>=mesh.vertices.size())
-                     throw std::runtime_error("original mesh index out of range");
-             }
-             if(used[mesh_index]!=2)continue;
-             // Indexed slots own destinations even if a later upload fails; batch staging outlives submitted work.
-             const bool skinned=!mesh.influences.empty();
-             g.vertices=upload_buffer(mesh.vertices.data(),mesh.vertices.size()*sizeof(Vertex),
-                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|(skinned?VkBufferUsageFlags{VK_BUFFER_USAGE_TRANSFER_SRC_BIT}:0u),batch);
-             g.indices=upload_buffer(mesh.indices.data(),mesh.indices.size()*sizeof(std::uint32_t),VK_BUFFER_USAGE_INDEX_BUFFER_BIT,batch);
-             if(skinned) {
-                 for(auto& stage:g.staging)
-                     stage=buffer(g.vertices.bytes,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,batch.pool);
-                 // Motion vectors' previous pose starts equal to the bind pose; record_geometry_uploads swaps it with
-                 // vertices, so both carry the same usage.
-                 g.previous=upload_buffer(mesh.vertices.data(),g.vertices.bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,batch);
-             }
-             g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);++new_meshes;
-         }
-         for(std::size_t i=retained_textures;i<s.textures.size();++i) {
-             progress();
-             const auto& t=s.textures[i];
-             if(!texture_lookup_.emplace(t.name,i).second)throw std::runtime_error("duplicate original texture name");
-             textures_[i]=upload_texture(t,&batch);texture_bytes+=t.data.size();
-         }
-         batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;memory_blocks=pool.allocations;
-         // Appending must not conceal pending revisions of already-retained animated meshes.
-         update_geometry(s);geometry_revision_=s.geometry_revision;
-         mesh_keys_.resize(s.meshes.size());for(std::size_t i=0;i<s.meshes.size();++i)mesh_keys_[i]=s.meshes[i].key;mesh_key_=s.mesh_key;
-         if(rt_enabled_&&!retain){std::scoped_lock lock(queue_mutex_);rt_->rebuild(s,entities);} // RT builds submit to queue_
-         rt_stale_=rt_enabled_&&retain;
-         history_instance_models_.resize(s.instances.size());
-         scene_=&s;transform_hash_=scene_hash(s,entities,&color_resource_hash_);instance_count_=s.instances.size();frame_=0;fsr_reset_=fsr_reset_||!retain;descriptors(retain);
-     } catch(...) {scene_=nullptr;throw;}
+     set.loaded=false;
+     const auto used=mesh_residency(s,s.meshes.size());
+     set.geometry.resize(s.meshes.size());
+     // Full loads sub-allocate the set's pool; retained reloads (actor churn) stage through this frame's stream ring
+     // and allocate/retire destinations per resource.
+     UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&set.pool,retain?&frame_ring():nullptr);
+     for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
+         if(mesh_index%1024==0)progress(); // uploads pump on their own
+         new_meshes+=upload_mesh(set.geometry[mesh_index],s.meshes[mesh_index],used[mesh_index],batch);
+     }
+     texture_bytes=upload_textures(set,batch);
+     batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;memory_blocks=set.pool.allocations;
+     // Appending must not conceal pending revisions of already-retained animated meshes.
+     update_geometry(set);set.geometry_revision=s.geometry_revision;
+     set.mesh_keys.resize(s.meshes.size());for(std::size_t i=0;i<s.meshes.size();++i)set.mesh_keys[i]=s.meshes[i].key;set.mesh_key=s.mesh_key;
+     if(rt_enabled_&&!retain) { // RT builds submit to queue_
+         set.rt=std::make_unique<VulkanRtScene>(physical_,device_,queue_,family_,options_.progress);
+         std::scoped_lock lock(queue_mutex_);set.rt->rebuild(s,entities);
+     }
+     set.rt_stale=rt_enabled_&&retain;
+     set.history_instance_models.resize(s.instances.size());
+     set.transform_hash=scene_hash(s,entities,&set.color_resource_hash);set.instance_count=s.instances.size();set.frame=0;
+     fsr_reset_=fsr_reset_||!retain;descriptors(set,retain);set.loaded=true;
      const auto elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
      std::cerr<<"Vulkan scene resources mode="<<(retain?"retain":"full")
          <<" meshesNew="<<new_meshes<<" meshesRetained="<<retained_meshes<<" meshesReleased="<<released_meshes
@@ -1532,8 +1664,45 @@ void clear_material_sets() {
          <<" uploadBatches="<<submissions<<" uploadBytes="<<upload_bytes<<" textureBytes="<<texture_bytes
          <<" textureBC="<<(bc_supported_?1:0)<<" memoryBlocks="<<memory_blocks<<" elapsedMs="<<elapsed<<'\n';
  }
+ // NONCANONICAL wave-16 make_resident streaming: one budgeted step per frame, recorded into this frame (command_)
+ // through the slot's stream ring. Textures, then the unkeyed zone prefix (actor attach/detach never moves it), then
+ // the RT scene in chunks; the last step builds the material/RT descriptor sets. Keyed actor meshes are uploaded by the
+ // retained reload of the set's first use (mesh_key differs on purpose).
+ void stream(SceneSet& set,unsigned slot) {
+     const auto started=std::chrono::steady_clock::now();
+     const Scene& s=*set.scene;
+     if(!set.streaming) {
+         while(set.prefix<s.meshes.size()&&!s.meshes[set.prefix].key)++set.prefix;
+         set.used=mesh_residency(s,set.prefix);set.geometry.resize(set.prefix);
+         if(rt_enabled_)set.rt=std::make_unique<VulkanRtScene>(physical_,device_,queue_,family_,options_.progress);
+         set.streaming=true;
+     }
+     UploadBatch batch(*this,command_,&set.pool,&frame_ring());
+     if(!set.raster_streamed) {
+         upload_textures(set,batch,stream_budget_);
+         for(;set.mesh_cursor<set.prefix&&batch.total_bytes<stream_budget_;++set.mesh_cursor)
+             upload_mesh(set.geometry[set.mesh_cursor],s.meshes[set.mesh_cursor],set.used[set.mesh_cursor],batch);
+         set.raster_streamed=set.mesh_cursor==set.prefix&&set.texture_cursor==s.textures.size();
+     } else if(rt_enabled_)set.rt->stream(s,command_,slot,stream_budget_);
+     const bool done=set.raster_streamed&&(!rt_enabled_||set.rt->acceleration_structure());
+     if(done) {
+         upload_textures(set,batch); // textures added meanwhile (actor installs)
+         set.mesh_keys.assign(set.prefix,0);set.mesh_key=~s.mesh_key; // the first use reconciles actors (retained load)
+         set.geometry_revision=~s.geometry_revision;set.history_instance_models.resize(s.instances.size());
+         set.instance_count=s.instances.size();set.transform_hash=0;set.color_resource_hash=0;set.frame=0;
+         descriptors(set);set.loaded=true;set.streaming=false;set.used.clear();
+     }
+     batch.flush();
+     const VkDeviceSize bytes=batch.total_bytes;
+     const auto ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+     ++set.stream_frames;set.stream_bytes+=bytes;set.stream_max_ms=std::max(set.stream_max_ms,ms);
+     if(done)std::cerr<<"Vulkan scene set resident source_registry_id="<<(s.source_registry_id?int(*s.source_registry_id):-1)
+         <<" streamFrames="<<set.stream_frames<<" streamBytes="<<set.stream_bytes<<" maxStepMs="<<set.stream_max_ms
+         <<" budgetBytes="<<stream_budget_<<" rt="<<rt_enabled_<<'\n';
+ }
 // Stages changed skins in the current slot; record_geometry_uploads copies them in this frame's command buffer.
-void update_geometry(const Scene& scene) {
+void update_geometry(SceneSet& set) {
+    const Scene& scene=*set.scene;auto& geometry_=set.geometry;
     if(scene.meshes.size()!=geometry_.size())throw std::runtime_error("scene topology changed without scene reload");
     for(std::size_t i=0;i<scene.meshes.size();++i) {
         if(i%4096==0)progress();
@@ -1546,7 +1715,8 @@ void update_geometry(const Scene& scene) {
     }
     for(std::size_t i=0;i<scene.meshes.size();++i)geometry_[i].revision=scene.meshes[i].revision;
 }
-void record_geometry_uploads() {
+void record_geometry_uploads(SceneSet& set) {
+    auto& geometry_=set.geometry;
     bool any=false;
     const auto begin=[&] { // earlier frames' vertex fetches and copies of the shared buffers finish before they're reused
         if(any)return;
@@ -1580,19 +1750,22 @@ void record_geometry_uploads() {
     b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
- void draw_scene(VkCommandBuffer c,bool shadow) {
-     if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&rt_set_,0,nullptr);
-     // draws_ is sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
+ // items: a slice of set.draws. clip: the portal pipelines (scene_portal.vert, frame.clip) for a destination view or the
+ // source half-space split.
+ void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,bool clip=false) {
+     const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
+     if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
+     // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
-     for(const auto& item:draws_) {
+     for(const auto& item:items) {
          if(shadow?item.sky:!item.visible)continue;
-         if(!scene_->materials.empty()) {
-             if(item.material>=scene_->materials.size()||item.material>=material_usage_.size())
+         if(!scene.materials.empty()) {
+             if(item.material>=scene.materials.size()||item.material>=material_usage_.size())
                  throw std::runtime_error("scene draw material index out of range");
              if(!material_usage_[item.material])
                  throw std::runtime_error("scene draw references an unbound dormant material: "+std::to_string(item.material));
          }
-         const Material* material=item.material<scene_->materials.size()?&scene_->materials[item.material]:nullptr;
+         const Material* material=item.material<scene.materials.size()?&scene.materials[item.material]:nullptr;
          Draw draw;draw.model=item.model;
          draw.color=material?material->color:std::array<float,4>{1,1,1,1};
          draw.flags={material&&!material->normal.empty()?1.f:0.f,material&&(!material->environment.empty()||(item.sky&&(!material->luminance.empty()||!material->lightmap.empty())))?1.f:0.f,
@@ -1602,14 +1775,15 @@ void record_geometry_uploads() {
             (item.alpha?1.f:0.f)+(item.dynamic?.5f:0.f)+(material&&material->source_ocean?2.f:0.f)};
          draw.scroll=item.scroll;draw.previous_model=item.previous;
          bool double_sided=material&&material->double_sided;
+         const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
          auto selected=shadow?(double_sided?shadow_double_:shadow_pipeline_):
-             item.sky?sky_pipeline_[(double_sided?2:0)+(item.alpha?1:0)]:
+             clip?portal_pipelines_[(item.sky?4:0)+variant]:item.sky?sky_pipeline_[variant]:
              item.alpha?(double_sided?alpha_double_:alpha_):(double_sided?opaque_double_:opaque_);
          if(selected!=bound_pipeline){vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,selected);bound_pipeline=selected;}
-         const auto set=material_sets_[item.material<material_sets_.size()?item.material:0];
-         if(set!=bound_set){vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&set,1,&uniform_offset_);bound_set=set;}
+         const auto descriptor=material_sets_[item.material<material_sets_.size()?item.material:0];
+         if(descriptor!=bound_set){vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&descriptor,1,&uniform_offset_);bound_set=descriptor;}
          vkCmdPushConstants(c,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(draw),&draw);
-         auto& g=geometry_[item.mesh];
+         auto& g=set.geometry[item.mesh];
          if(item.mesh!=bound_mesh) {
              // Binding 1 = the previous pose motion vectors compare against (skins only, once motion is rendered).
              const VkBuffer buffers[2]{g.vertices.handle,motion_vectors_&&g.previous.handle?g.previous.handle:g.vertices.handle};
@@ -1656,13 +1830,15 @@ void record_geometry_uploads() {
                  }
              }
          } catch(...) {} // Cache persistence is optional; GPU lifetime cleanup is not.
+         for(auto& reaper:reapers_)reaper.wait();
+         reapers_.clear();
          destroy_targets();
          if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
-         clear_material_sets();
-         rt_.reset();
-         for(auto& g:geometry_)destroy(g);
+         for(auto& set:sets_)destroy_set(*set);
+         for(auto& entry:retired_sets_)destroy_set(*entry.second);
+         sets_.clear();retired_sets_.clear();primary_=nullptr;
          for(auto& entry:retired_)destroy(entry.second);
-         for(auto& t:textures_)destroy(t);
+         for(auto& b:stream_ring_)destroy(b);
         destroy(overlay_);for(auto& b:overlay_staging_)destroy(b);destroy(white_);destroy(flat_normal_);destroy(uniform_);
         for(auto& image:particle_images_)destroy(image);
         for(auto& b:particle_buffer_)destroy(b);
@@ -1673,6 +1849,7 @@ void record_geometry_uploads() {
          if(rt_layout_)vkDestroyDescriptorSetLayout(device_,rt_layout_,nullptr);
          if(sampler_)vkDestroySampler(device_,sampler_,nullptr);
          if(shadow_sampler_)vkDestroySampler(device_,shadow_sampler_,nullptr);
+         if(shadow_compare_)vkDestroySampler(device_,shadow_compare_,nullptr);
          if(linear_clamp_)vkDestroySampler(device_,linear_clamp_,nullptr);
          for(auto& slot:slots_) {
              if(slot.fence)vkDestroyFence(device_,slot.fence,nullptr);
@@ -1683,6 +1860,7 @@ void record_geometry_uploads() {
              if(present_acquire_[i])vkDestroySemaphore(device_,present_acquire_[i],nullptr);
          }
          if(present_pool_)vkDestroyCommandPool(device_,present_pool_,nullptr);
+         if(timing_pool_)vkDestroyQueryPool(device_,timing_pool_,nullptr);
          if(pool_)vkDestroyCommandPool(device_,pool_,nullptr);
          vkDestroyDevice(device_,nullptr);
      }
@@ -1755,15 +1933,16 @@ public:
              write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&info;
              vkUpdateDescriptorSets(device_,1,&write,0,nullptr);
          };
-         for(const auto& [views,set]:material_cache_)update(set);
+         for(const auto& scene_set:sets_)for(const auto& entry:scene_set->material_cache)update(entry.second);
         // Temporal sets bind reflection history at 8, not the overlay.
         for(unsigned i=0;i<2;++i)update(post_sets_[i]);
      }
  }
 void set_grayscale(bool on)override { grayscale_=on; }
 void set_fade(float black)override { fade_=std::clamp(black,0.f,1.f); }
-// load() sees a different Scene and takes its full path (wait_idle, release, upload, full RT rebuild, fsr_reset_).
-void release_scene()override { scene_=nullptr; if(rt_)rt_->forget_scene(); }
+// The primary's set retires (freed once in-flight frames completed); the next render() fully loads the Scene. Other
+// resident sets stay.
+void release_scene()override { if(primary_)retire_set(*primary_); }
 void set_upscaling(Upscaler upscaler,FsrQuality quality,float sharpness,bool frame_generation)override {
     if(!std::isfinite(sharpness)||sharpness<0||sharpness>1)throw std::invalid_argument("FSR sharpness requires [0,1]");
     // Render extent, targets, or the frame-generation contexts/swapchain owner change.
@@ -1808,9 +1987,249 @@ void set_particles(const ParticleFrame& frame)override {
     if(bytes)std::memcpy(vertices.mapped,frame.vertices.data(),static_cast<std::size_t>(bytes));
     particle_batches_=frame.batches;
 }
- void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float)override {
+ // Wave-16 residency (renderer.hpp): sets live until evict(), release_scene() (primary) or the LRU cap.
+ void make_resident(const Scene& scene)override{if(portals_supported_)set_for(scene);}
+ bool resident(const Scene& scene)const override{const auto* set=find_set(scene);return portals_supported_&&set&&set->loaded;}
+ void evict(const Scene& scene)override{if(auto* set=find_set(scene))retire_set(*set);}
+ // Brings a set that is drawn this frame up to its Scene: (re)load, skins, transforms and RT, recorded into this frame.
+ // Returns whether transforms or skins changed.
+ bool sync(SceneSet& set,std::span<const RenderEntity> entities,unsigned slot) {
+     const Scene& scene=*set.scene;
+     using clock=std::chrono::steady_clock;
+     const auto t0=clock::now();
+     if(!set.loaded||set.mesh_key!=scene.mesh_key||set.geometry.size()!=scene.meshes.size()||set.textures.size()!=scene.textures.size()||
+        set.material_usage.size()!=scene.materials.size()||set.instance_count!=scene.instances.size())
+         load(set,entities);
+     std::uint64_t color_hash=0;
+     const auto hash=scene_hash(scene,entities,&color_hash);
+     if(color_hash!=set.color_resource_hash)load(set,entities);
+     const auto t1=clock::now();
+     const bool geometry_changed=set.geometry_revision!=scene.geometry_revision;
+     if(geometry_changed){update_geometry(set);set.geometry_revision=scene.geometry_revision;}
+     const bool changed=hash!=set.transform_hash||geometry_changed;
+     record_geometry_uploads(set);
+     const auto t2=clock::now();
+     bool rebuilt=false;
+     if(changed||set.rt_stale) {
+         // Skin/transform changes and actor attach/detach update the BLAS/TLAS inside this frame, ordered after earlier
+         // frames' ray queries. Anything else rebuilds and rebinds once every frame in flight completed (no frame sees a
+         // retired AS).
+         if(rt_enabled_&&!set.rt->record_refresh(scene,entities,command_,slot)) {
+             wait_frame("RT rebuild wait");
+             {std::scoped_lock lock(queue_mutex_);set.rt->rebuild(scene,entities);}
+             write_rt(set);rebuilt=true;
+         }
+         set.transform_hash=hash;set.rt_stale=false;
+     }
+     const auto ms=[](clock::time_point a,clock::time_point b){return std::chrono::duration<double,std::milli>(b-a).count();};
+     const auto t3=clock::now();
+     if(ms(t0,t3)>2||rebuilt)std::cerr<<"Vulkan scene set sync source_registry_id="<<(scene.source_registry_id?int(*scene.source_registry_id):-1)
+         <<" loadMs="<<ms(t0,t1)<<" skinMs="<<ms(t1,t2)<<" rtMs="<<ms(t2,t3)<<" rtRebuild="<<rebuilt<<'\n';
+     return changed;
+ }
+ // One view's draw list in set.draws (sky, then opaque nearest-first, then alpha farthest-first). Frustum culling marks
+ // draws instead of dropping them, so the sort orders exactly the unculled list. Sky, source ocean (vertex-displaced)
+ // and skinned (per-frame world-space) meshes always draw; enhanced raster keeps every draw for the shadow pass (!cull).
+ void build_draws(SceneSet& set,std::span<const RenderEntity> entities,const std::array<float,3>& eye,const FrustumPlanes& planes,bool cull,
+                  std::vector<ContourItem>* contours) {
+     const Scene& scene=*set.scene;auto& draws=set.draws;draws.clear();
+     // previous: last frame's model matrix (motion vectors); null = unmoved.
+     auto add=[&](std::uint32_t mesh,const Matrix4& matrix,std::uint32_t override_material=UINT32_MAX,
+                  bool sky=false,bool fog=false,bool dynamic=false,std::array<float,4> scroll={},bool visible=true,const Matrix4* previous=nullptr) {
+         auto material=override_material==UINT32_MAX?scene.meshes[mesh].material:override_material;
+         bool alpha=material<scene.materials.size()&&(scene.materials[material].alpha||scene.materials[material].color[3]<.99f);
+         float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
+         draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix});
+     };
+     if(scene.instances.empty()) {
+         for(std::uint32_t i=0;i<scene.meshes.size();++i)
+             if(scene_source_color_draw(scene,i))add(i,Transform{}.matrix);
+     } else {
+         for(const auto& instance:scene.instances) {
+             if(instance.occlusion_proxy)continue;
+             const auto scroll=(instance.ocean&&instance.source_ordinary_color_participates)?
+                 advance_source_scroll(set.source_scroll,static_cast<std::uint32_t>(SDL_GetTicks())):std::array<float,4>{};
+             if(!scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates))continue;
+             auto matrix=instance.transform.matrix;
+             const RenderEntity* entity=nullptr;
+             if(instance.entity_id) {
+                 const auto p=std::find_if(entities.begin(),entities.end(),[&](const auto& value){return value.id==instance.entity_id;});
+                 if(p==entities.end())continue;
+                 entity=&*p;
+                 matrix=entity_instance_transform(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw).matrix;
+             }
+             bool moved=false;Matrix4 previous_matrix=matrix;
+             if(!instance.sky) {
+                 auto& previous_model=set.history_instance_models[std::size_t(&instance-scene.instances.data())];
+                 if(set.frame!=0)previous_matrix=previous_model;
+                 moved=denoise_enabled_&&set.frame!=0&&previous_model!=matrix;
+                 previous_model=matrix;
+             }
+             std::array<float,3> center{};
+             const bool test_fog=scene.lighting.fog_enabled&&!instance.sky;
+             if(test_fog) {
+                 if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog instance node index out of range");
+                 center=entity?
+                     entity_source_bounds_center(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw):
+                     scene.nodes[instance.node].source_bounds_center;
+             }
+             if(instance.sky) {
+                 const float c=std::cos(scene.lighting.sky_rotation),s=std::sin(scene.lighting.sky_rotation);
+                 matrix={c,0,-s,0,0,1,0,0,s,0,c,0,eye[0],eye[1],eye[2],1};
+                 const auto& last=set.frame!=0?set.previous_frame.eye:std::array<float,4>{eye[0],eye[1],eye[2],1};
+                 previous_matrix={c,0,-s,0,0,1,0,0,s,0,c,0,last[0],last[1],last[2],1}; // follows last frame's eye
+             }
+             const auto material=instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material;
+             const bool visible=!cull||instance.sky||instance.ocean||!scene.meshes[instance.mesh].influences.empty()||
+                 (material<scene.materials.size()&&scene.materials[material].source_ocean)||
+                 sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds);
+             const bool fog=visible&&test_fog&&source_fog_enabled(instance.source_half_extents,center,matrix,eye,scene.lighting.fog_start);
+             add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
+             if(!visible||!contours)continue;
+             if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
+                 for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
+                 contours->push_back({instance.mesh,instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material,matrix,entity->contour});
+             }
+         }
+     }
+     // In-place sorting avoids stable_sort's temporary allocation every frame.
+     std::sort(draws.begin(),draws.end(),[](const auto& a,const auto& b) {
+         if(a.sky!=b.sky)return a.sky;
+         if(a.alpha!=b.alpha)return !a.alpha;
+         // Opaque nearest-first: early Z rejects hidden fragments before their ray queries (-13% scene pass,
+         // analysis/porting-wave12/Perf/report.md). Equal distances (meshes of one placement) fall back to material/mesh,
+         // so coplanar opaque parts never swap draw order between frames.
+         if(a.alpha)return a.distance>b.distance;
+         if(a.distance!=b.distance)return a.distance<b.distance;
+         return a.material!=b.material?a.material<b.material:a.mesh<b.mesh;
+     });
+ }
+ static void set_lighting(Frame& f,const SceneLighting& lighting) {
+     const auto sun=enhanced_sun(lighting);
+     f.sun={sun[0],sun[1],sun[2],lighting.source_values?1.f:0.f};
+     f.ambient={lighting.ambient_multiplier[0],lighting.ambient_multiplier[1],lighting.ambient_multiplier[2],0};
+     f.diffuse={lighting.diffuse_multiplier[0],lighting.diffuse_multiplier[1],lighting.diffuse_multiplier[2],0};
+     f.fog_color={lighting.fog_color[0],lighting.fog_color[1],lighting.fog_color[2],lighting.fog_enabled?1.f:0.f};
+     f.fog={lighting.fog_start,lighting.fog_end,lighting.lightmap_strength,lighting.sky_blend};
+     f.sky_b={lighting.sky_b[0],lighting.sky_b[1],lighting.sky_b[2],0};
+     f.sky_c={lighting.sky_c[0],lighting.sky_c[1],lighting.sky_c[2],0};
+ }
+ // NONCANONICAL wave-16 portal view: the destination set drawn with its own Frame (virtual camera vp·M), clipped to the
+ // eye→seal pyramid and beyond the seal plane; seal: the doorway quad pulled seal_pull towards the eye, depth only, so
+ // source door walls/porches within that distance of the threshold plane are hidden. split: the eye is within the near
+ // band inside the aperture, so the pyramid degenerates: no seal, destination and source split at the seal plane.
+ // Same rules as renderer_gl.cpp.
+ static constexpr float seal_pull=.7f;
+struct PortalDraw {SceneSet* set;Frame frame;std::array<Matrix4,2> seal;bool split;}; // seal: strip, then the pulled rest
+// shadows: this view gets the portal half of the enhanced-raster shadow atlas (the first portal view of a frame).
+// source_clip/source_or: the primary Frame's clip planes, set by the first split view.
+std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,const std::array<float,3>& eye,const FrustumPlanes& planes,
+                                      std::array<std::array<float,4>,5>& source_clip,std::array<float,4>& source_or,bool shadows) {
+     using V=std::array<float,3>;
+     const auto sub=[](const V& a,const V& b){return V{a[0]-b[0],a[1]-b[1],a[2]-b[2]};};
+     const auto dot=[](const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];};
+     const auto cross=[](const V& a,const V& b){return V{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};};
+     const auto unit=[&](V v){const float l=std::sqrt(dot(v,v));if(!(l>0))throw std::invalid_argument("degenerate portal quad");for(auto& x:v)x/=l;return v;};
+     for(const auto& corner:portal.quad)for(float v:corner)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal quad");
+     for(float v:portal.to_primary)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal transform");
+     const auto& q=portal.quad;
+     const V n=unit(cross(sub(q[1],q[0]),sub(q[3],q[0]))); // into the destination
+     const float d0=dot(n,q[0]),s=dot(n,eye)-d0,band=std::max({.25f,2*options_.camera.near_plane,seal_pull+.25f});
+     V centre{};for(const auto& c:q)for(unsigned i=0;i<3;++i)centre[i]+=c[i]/4;
+     bool inside=true;
+     for(unsigned i=0;i<4;++i) {
+         auto m=unit(cross(n,sub(q[(i+1)&3],q[i])));
+         if(dot(m,sub(centre,q[i]))<0)for(auto& x:m)x=-x;
+         inside=inside&&dot(m,sub(eye,q[i]))>=-band;
+     }
+     const bool split=std::abs(s)<band&&inside;
+     if(s>0&&!split)return {}; // the eye is past the doorway: the caller has made the destination primary
+     auto* set=find_set(*portal.scene);
+     if(!set||!set->loaded||set==primary_||set->drawn==total_frames_)return {}; // one view per destination per frame
+     using P=std::array<float,4>;
+     // Normal mode cuts the destination at the seal plane (n·x >= n·q0 - seal_pull): the source's own door wall/porch
+     // stays on its side. Split (as GL): destination n·x >= n·q0 - .02; source n·x <= n·q0 - .02 AND (n·x <= n·q0 - P OR
+     // up·(x-q0) <= S): far-side fillers within P of the plane never cover the screen, the coplanar closed wall is dropped,
+     // and the floor strip below S stays the source's.
+     std::array<P,5> clip{P{0,0,0,1},P{0,0,0,1},P{0,0,0,1},P{0,0,0,1},P{n[0],n[1],n[2],(split?.02f:seal_pull)-d0}};
+     std::array<Matrix4,2> seal{};
+     FrustumPlanes cull=planes; // split: the camera frustum with the doorway plane for its near plane
+     const V up=unit(sub(q[3],q[0]));
+     const float height=std::sqrt(dot(sub(q[3],q[0]),sub(q[3],q[0]))),strip=std::min(seal_pull,height);
+     if(!split) {
+         // Two-part seal (as GL): a floor strip up to S = min(P, height) pulled only 0.02, so floor rays that cross the
+         // destination clip before the plane still land on the source floor, then the rest pulled P. Corners 0-3 strip,
+         // 4-7 rest; each pyramid side takes the candidate edge that keeps all 8 corners inside.
+         const auto at=[&](const V& c,float rise,float pull){return V{c[0]+up[0]*rise-n[0]*pull,c[1]+up[1]*rise-n[1]*pull,c[2]+up[2]*rise-n[2]*pull};};
+         const std::array<V,8> c{at(q[0],0,.02f),at(q[1],0,.02f),at(q[1],strip,.02f),at(q[0],strip,.02f),
+                                 at(q[0],strip,seal_pull),at(q[1],strip,seal_pull),at(q[2],0,seal_pull),at(q[3],0,seal_pull)};
+         for(unsigned part=0;part<2;++part)for(unsigned i=0;i<4;++i){for(unsigned k=0;k<3;++k)seal[part][i*4+k]=c[part*4+i][k];seal[part][i*4+3]=1;}
+         if(s<-2*seal_pull) {
+             V mid{};for(const auto& v:c)for(unsigned i=0;i<3;++i)mid[i]+=v[i]/8;
+             constexpr unsigned edges[4][2][2]{{{0,1},{4,5}},{{1,2},{5,6}},{{6,7},{6,7}},{{3,0},{7,4}}};
+             for(unsigned side=0;side<4;++side)for(const auto& e:edges[side]) {
+                 auto m=unit(cross(sub(c[e[0]],eye),sub(c[e[1]],eye)));
+                 if(dot(m,sub(mid,eye))<0)for(auto& x:m)x=-x;
+                 clip[side]={m[0],m[1],m[2],-dot(m,eye)+.01f};
+                 if(std::all_of(c.begin(),c.end(),[&](const V& v){return dot(m,sub(v,eye))>=-1e-4f;}))break;
+             }
+         } else for(unsigned i=0;i<4;++i) { // pyramid sides through the eye and the quad, 0.01 outward slack
+             auto m=unit(cross(sub(q[i],eye),sub(q[(i+1)&3],eye)));
+             if(dot(m,sub(centre,eye))<0)for(auto& x:m)x=-x;
+             clip[i]={m[0],m[1],m[2],-dot(m,eye)+.01f};
+         }
+         for(unsigned i=0;i<4;++i)cull[i]=clip[i];
+     } else if(source_clip[0]==P{0,0,0,1}) {
+         source_clip[0]={-n[0],-n[1],-n[2],d0-.02f};source_clip[1]={-n[0],-n[1],-n[2],d0-seal_pull};
+         source_or={-up[0],-up[1],-up[2],dot(up,q[0])+strip}; // scene.vert: ClipDistance[1] = max(clip[1], clipOr)
+     }
+     cull[4]=clip[4];
+     // Primary-space planes to destination space: P_dest = P·M.
+     const auto& M=portal.to_primary;
+     const auto to_dest=[&](const P& p){P r{};for(unsigned c=0;c<4;++c)for(unsigned k=0;k<4;++k)r[c]+=p[k]*M[c*4+k];return r;};
+     PortalDraw view{set,f,seal,split};
+     auto& fp=view.frame;
+     for(unsigned i=0;i<5;++i)fp.clip[i]=to_dest(clip[i]);
+     for(auto& p:cull)p=to_dest(p);
+     fp.to_primary=M;fp.clip_or={0,0,0,-1e9f};
+     fp.vp=multiply_matrix(f.vp,M);fp.previous_vp=multiply_matrix(f.previous_vp,M);
+     // Rigid inverse: Mᵀ rotation, -Rᵀt.
+     Matrix4 inverse{M[0],M[4],M[8],0,M[1],M[5],M[9],0,M[2],M[6],M[10],0,0,0,0,1};
+     for(unsigned r=0;r<3;++r)inverse[12+r]=-(inverse[r]*M[12]+inverse[4+r]*M[13]+inverse[8+r]*M[14]);
+     const auto point=[&](const std::array<float,4>& v){std::array<float,4> r{0,0,0,v[3]};for(unsigned i=0;i<3;++i)r[i]=inverse[i]*v[0]+inverse[4+i]*v[1]+inverse[8+i]*v[2]+inverse[12+i];return r;};
+     const auto direction=[&](const std::array<float,4>& v){std::array<float,4> r{0,0,0,v[3]};for(unsigned i=0;i<3;++i)r[i]=inverse[i]*v[0]+inverse[4+i]*v[1]+inverse[8+i]*v[2];return r;};
+     fp.eye=point(f.eye);fp.previous_eye=point(f.previous_eye);
+     fp.camera_right=direction(f.camera_right);fp.camera_up=direction(f.camera_up);fp.camera_forward=direction(f.camera_forward);
+     fp.previous_forward=direction(f.previous_forward);
+     fp.light={};fp.light[14]=2;fp.light[15]=1; // no shadow map for this view: shadowVisibility = 1
+     if(shadows&&!options_.original_appearance&&!rt_enabled_) { // enhanced raster: its own atlas half around the virtual camera
+         Camera virtual_camera=options_.camera;
+         const auto target=point({options_.camera.target[0],options_.camera.target[1],options_.camera.target[2],1});
+         virtual_camera.target={target[0],target[1],target[2]};
+         virtual_camera.yaw=std::atan2(-fp.camera_forward[0],-fp.camera_forward[2]); // M is a yaw + translation
+         fp.light=shadow_light_matrix(virtual_camera,enhanced_sun(portal.scene->lighting));fp.fade[1]=.5f;
+     }
+     set_lighting(fp,portal.scene->lighting);
+     set->touched=total_frames_;
+     if(set->drawn+1!=total_frames_)set->frame=0;
+     build_draws(*set,portal.entities,{fp.eye[0],fp.eye[1],fp.eye[2]},cull,true,nullptr);
+     return view;
+ }
+ void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float,std::span<const PortalView> portals)override {
      const unsigned slot=total_frames_&1u;
      wait_slot(slot,"frame wait"); // frame total_frames_-2: its command buffer, uniforms and staging are reusable
+     stream_ring_used_=0;
+     if(timing_pool_&&std::exchange(timed_[slot],false)) {
+         std::uint64_t t[4]{};
+         if(vkGetQueryPoolResults(device_,timing_pool_,slot*4,4,sizeof(t),t,sizeof(t[0]),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
+             timing_sum_[0]+=double(t[3]-t[0])*timestamp_period_*1e-6;timing_sum_[1]+=double(t[2]-t[1])*timestamp_period_*1e-6;
+             if(++timing_count_==30) {
+                 std::cerr<<"Vulkan gpu timing frames=30 scenePassMs="<<timing_sum_[0]/30<<" portalViewsMs="<<timing_sum_[1]/30
+                     <<" framesWithPortal="<<timing_portals_<<'\n';
+                 timing_sum_[0]=timing_sum_[1]=0;timing_count_=timing_portals_=0;
+             }
+         }
+     }
      if(present_stale_.exchange(false))dirty_=true; // the present thread saw an out-of-date swapchain
      if(dirty_&&!create_targets())return;
      // Acquire before any scene/history state changes, so an out-of-date swapchain skips the frame without partial updates.
@@ -1831,110 +2250,27 @@ void set_particles(const ParticleFrame& frame)override {
      VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
      begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
      checked(vkBeginCommandBuffer(command_,&begin),"begin frame");
-     if(scene_!=&scene || mesh_key_!=scene.mesh_key || geometry_.size()!=scene.meshes.size() || textures_.size()!=scene.textures.size() || material_usage_.size()!=scene.materials.size() || instance_count_!=scene.instances.size()) {
-         load(scene,entities);
-     }
-     std::uint64_t color_hash=0;
-     auto hash=scene_hash(scene,entities,&color_hash);
-     if(color_hash!=color_resource_hash_)load(scene,entities);
-     bool geometry_changed=geometry_revision_!=scene.geometry_revision;
-     if(geometry_changed) {
-         update_geometry(scene);
-         geometry_revision_=scene.geometry_revision;
-     }
-     const bool scene_changed=hash!=transform_hash_||geometry_changed;
      if(overlay_upload_)record_overlay_upload(command_);
-     record_geometry_uploads();
-     if(scene_changed||rt_stale_) {
-         // Skin/transform changes and actor attach/detach update the BLAS/TLAS inside this frame, ordered after earlier
-         // frames' ray queries. Anything else rebuilds and rebinds once every frame in flight completed (no frame sees a
-         // retired AS).
-         if(rt_enabled_&&!rt_->record_refresh(scene,entities,command_,slot)) {
-             wait_frame("RT rebuild wait");
-             {std::scoped_lock lock(queue_mutex_);rt_->rebuild(scene,entities);}
-             write_rt();
-         }
-         transform_hash_=hash;rt_stale_=false;
+     // A resident set becomes primary without a load; an unfinished stream is dropped for today's full load (fade path).
+     if(auto* found=find_set(scene);found&&found->streaming)retire_set(*found);
+     auto& primary=set_for(scene);
+     // Eye crossing: last frame's portal destination keeps FSR/motion history; any other switch is a camera cut.
+     const bool continued=primary.drawn+1==total_frames_;
+     if(primary_!=&primary) {
+         if(!continued)fsr_reset_=true;
+         if(primary_)std::cerr<<"Vulkan primary scene switch source_registry_id="<<(scene.source_registry_id?int(*scene.source_registry_id):-1)
+             <<" history="<<(continued?"continued":"reset")<<" frame="<<total_frames_<<'\n';
+         primary_=&primary;
      }
+     const bool scene_changed=sync(primary,entities,slot);
+     if(!continued)primary.frame=0;
      const auto basis=camera_basis(options_.camera);
      auto eye=basis.eye;
      const auto source_ticks=static_cast<std::uint32_t>(SDL_GetTicks());
-     draws_.clear();contours_.clear();
-     // Frustum culling marks draws instead of dropping them, so the sort below orders exactly the unculled list. Sky,
-     // source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw; enhanced raster keeps every
-     // draw for the shadow pass.
+     contours_.clear();
      const bool cull=options_.original_appearance||rt_enabled_;
      const auto planes=frustum_planes(camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true));
-     // previous: last frame's model matrix (motion vectors); null = unmoved.
-     auto add=[&](std::uint32_t mesh,const Matrix4& matrix,std::uint32_t override_material=UINT32_MAX,
-                  bool sky=false,bool fog=false,bool dynamic=false,std::array<float,4> scroll={},bool visible=true,const Matrix4* previous=nullptr) {
-         auto material=override_material==UINT32_MAX?scene.meshes[mesh].material:override_material;
-         bool alpha=material<scene.materials.size()&&(scene.materials[material].alpha||scene.materials[material].color[3]<.99f);
-         float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
-         draws_.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix});
-     };
-     if(scene.instances.empty()) {
-         for(std::uint32_t i=0;i<scene.meshes.size();++i)
-             if(scene_source_color_draw(scene,i))add(i,Transform{}.matrix);
-     } else {
-         for(const auto& instance:scene.instances) {
-             if(instance.occlusion_proxy)continue;
-             const auto scroll=(instance.ocean&&instance.source_ordinary_color_participates)?
-                 advance_source_scroll(source_scroll_,static_cast<std::uint32_t>(SDL_GetTicks())):std::array<float,4>{};
-             if(!scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates))continue;
-             auto matrix=instance.transform.matrix;
-             const RenderEntity* entity=nullptr;
-             if(instance.entity_id) {
-                 const auto p=std::find_if(entities.begin(),entities.end(),[&](const auto& value){return value.id==instance.entity_id;});
-                 if(p==entities.end())continue;
-                 entity=&*p;
-                 matrix=entity_instance_transform(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw).matrix;
-             }
-             bool moved=false;Matrix4 previous_matrix=matrix;
-             if(!instance.sky) {
-                 auto& previous_model=history_instance_models_[std::size_t(&instance-scene.instances.data())];
-                 if(frame_!=0)previous_matrix=previous_model;
-                 moved=denoise_enabled_&&frame_!=0&&previous_model!=matrix;
-                 previous_model=matrix;
-             }
-             std::array<float,3> center{};
-             const bool test_fog=scene.lighting.fog_enabled&&!instance.sky;
-             if(test_fog) {
-                 if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog instance node index out of range");
-                 center=entity?
-                     entity_source_bounds_center(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw):
-                     scene.nodes[instance.node].source_bounds_center;
-             }
-             if(instance.sky) {
-                 const float c=std::cos(scene.lighting.sky_rotation),s=std::sin(scene.lighting.sky_rotation);
-                 matrix={c,0,-s,0,0,1,0,0,s,0,c,0,eye[0],eye[1],eye[2],1};
-                 const auto& last=frame_!=0?previous_frame_.eye:std::array<float,4>{eye[0],eye[1],eye[2],1};
-                 previous_matrix={c,0,-s,0,0,1,0,0,s,0,c,0,last[0],last[1],last[2],1}; // follows last frame's eye
-             }
-             const auto material=instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material;
-             const bool visible=!cull||instance.sky||instance.ocean||!scene.meshes[instance.mesh].influences.empty()||
-                 (material<scene.materials.size()&&scene.materials[material].source_ocean)||
-                 sphere_visible(planes,matrix,geometry_[instance.mesh].bounds);
-             const bool fog=visible&&test_fog&&source_fog_enabled(instance.source_half_extents,center,matrix,eye,scene.lighting.fog_start);
-             add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
-             if(!visible)continue;
-             if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
-                 for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
-                 contours_.push_back({instance.mesh,instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material,matrix,entity->contour});
-             }
-         }
-     }
-     // In-place sorting avoids stable_sort's temporary allocation every frame.
-     std::sort(draws_.begin(),draws_.end(),[](const auto& a,const auto& b) {
-         if(a.sky!=b.sky)return a.sky;
-         if(a.alpha!=b.alpha)return !a.alpha;
-         // Opaque nearest-first: early Z rejects hidden fragments before their ray queries (-13% scene pass,
-         // analysis/porting-wave12/Perf/report.md). Equal distances (meshes of one placement) fall back to material/mesh,
-         // so coplanar opaque parts never swap draw order between frames.
-         if(a.alpha)return a.distance>b.distance;
-         if(a.distance!=b.distance)return a.distance<b.distance;
-         return a.material!=b.material?a.material<b.material:a.mesh<b.mesh;
-     });
+     build_draws(primary,entities,eye,planes,cull,&contours_);
      Frame f{};
      f.vp=camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true);
      std::array<float,2> fsr_jitter{};
@@ -1946,52 +2282,92 @@ void set_particles(const ParticleFrame& frame)override {
          // No negative texture mip bias (AMD suggests log2(render/display)-1): measured, it raised FSR leaf and ground
          // flicker in motion (analysis/porting-wave11/Foliage/report.md).
      }
-     f.jitter[2]=previous_frame_.jitter[0];f.jitter[3]=previous_frame_.jitter[1];
+     // A set not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
+     f.jitter[2]=continued?previous_jitter_[0]:f.jitter[0];f.jitter[3]=continued?previous_jitter_[1]:f.jitter[1];
      f.light=shadow_light_matrix(options_.camera,enhanced_sun(scene.lighting));f.eye={eye[0],eye[1],eye[2],1};
-     const auto& lighting=scene.lighting;
-     const auto sun=enhanced_sun(lighting);
-     f.sun={sun[0],sun[1],sun[2],lighting.source_values?1.f:0.f};
-     f.ambient={lighting.ambient_multiplier[0],lighting.ambient_multiplier[1],lighting.ambient_multiplier[2],0};
-     f.diffuse={lighting.diffuse_multiplier[0],lighting.diffuse_multiplier[1],lighting.diffuse_multiplier[2],0};
-     f.fog_color={lighting.fog_color[0],lighting.fog_color[1],lighting.fog_color[2],lighting.fog_enabled?1.f:0.f};
-     f.fog={lighting.fog_start,lighting.fog_end,lighting.lightmap_strength,lighting.sky_blend};
-     f.sky_b={lighting.sky_b[0],lighting.sky_b[1],lighting.sky_b[2],0};
-     f.sky_c={lighting.sky_c[0],lighting.sky_c[1],lighting.sky_c[2],0};
+     set_lighting(f,scene.lighting);
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
     // seconds, so gradual drift (2% per frame) is left to the resolve's variance clip and the deterministic Sun ray.
+    // Per set: an eye crossing compares against the destination's own last (portal) view.
     const auto jumped=[](const std::array<float,4>& a,const std::array<float,4>& b) {
         for(std::size_t i=0;i<4;++i)if(std::abs(a[i]-b[i])>.02f*std::max({1.f,std::abs(a[i]),std::abs(b[i])}))return true;
         return false;
     };
-    if(frame_&&(jumped(f.sun,previous_frame_.sun)||jumped(f.ambient,previous_frame_.ambient)||
-       jumped(f.diffuse,previous_frame_.diffuse)||jumped(f.fog_color,previous_frame_.fog_color)||
-       jumped(f.fog,previous_frame_.fog)||jumped(f.sky_b,previous_frame_.sky_b)||jumped(f.sky_c,previous_frame_.sky_c)))
-        frame_=0;
+    const auto& last=primary.previous_frame;
+    if(primary.frame&&(jumped(f.sun,last.sun)||jumped(f.ambient,last.ambient)||jumped(f.diffuse,last.diffuse)||
+       jumped(f.fog_color,last.fog_color)||jumped(f.fog,last.fog)||jumped(f.sky_b,last.sky_b)||jumped(f.sky_c,last.sky_c)))
+        primary.frame=0;
      f.params={original_lighting_?0.f:1.f,options_.exposure,
-         denoise_enabled_&&frame_>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
+         denoise_enabled_&&primary.frame>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
      f.viewport={float(render_extent_.width),float(render_extent_.height),float(total_frames_%16777216u),denoise_enabled_?1.f:0.f};
      const float tangent=std::tan(options_.camera.fov*.008726646259971648f);
      f.camera_right={basis.right[0],basis.right[1],basis.right[2],tangent*float(extent_.width)/float(extent_.height)};
      f.camera_up={basis.up[0],basis.up[1],basis.up[2],tangent};
      f.camera_forward={basis.forward[0],basis.forward[1],basis.forward[2],0};
-     f.previous_vp=previous_frame_.vp;f.previous_eye=previous_frame_.eye;
-     f.previous_forward=previous_frame_.camera_forward;
+     f.previous_vp=continued?last.vp:f.vp;f.previous_eye=continued?last.eye:f.eye;
+     f.previous_forward=continued?last.camera_forward:f.camera_forward;
      // w: original fullscreen gamma ramp 0x467030(1,1,1.2) (post.frag/overlay.frag); D3D9 SetGammaRamp is fullscreen-only.
      f.source_time={float(source_ticks),float(source_ticks)*.001f,grayscale_?1.f:0.f,
          (SDL_GetWindowFlags(window_)&SDL_WINDOW_FULLSCREEN)?1.f:0.f};
      f.fade={fade_,0,0,0};
-     uniform_offset_=slot*uniform_stride_;
-     std::memcpy(static_cast<std::byte*>(uniform_.mapped)+uniform_offset_,&f,sizeof(f));
-     unsigned current=frame_&1u;
+     f.clip.fill({0,0,0,1});f.to_primary=Transform{}.matrix;f.clip_or={0,0,0,-1e9f};
+     std::array<std::optional<PortalDraw>,max_portals> views{};unsigned view_count=0;
+     if(portals_supported_)for(const auto& portal:portals) {
+         if(view_count==max_portals)break;
+         if(!portal.scene)throw std::invalid_argument("portal without destination scene");
+         if(portal.scene==&scene||!find_set(*portal.scene)||!find_set(*portal.scene)->loaded)continue;
+         // Before the view: the destination's actor/skin changes upload into this frame.
+         sync(*find_set(*portal.scene),portal.entities,slot);
+         if((views[view_count]=portal_view(portal,f,eye,planes,f.clip,f.clip_or,view_count==0)))views[view_count++]->set->drawn=total_frames_;
+     }
+     // Background residency: one budgeted step of one set per frame (never the primary or a set drawn this frame).
+     if(portals_supported_)for(auto& set:sets_)if(!set->loaded){stream(*set,slot);break;}
+     const auto view_offset=[&](unsigned view){return (slot*view_slots+view)*uniform_stride_;};
+     std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(0),&f,sizeof(f));
+     for(unsigned i=0;i<view_count;++i)std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(1+i),&views[i]->frame,sizeof(Frame));
+     uniform_offset_=view_offset(0);
+     // Screen-space history ping-pong: alternates every frame whichever set is primary (frame 0 ignores history).
+     const unsigned current=total_frames_&1u;
      // Replacement shadows share color visibility; this is not evidence of original source shadow behavior.
-     begin_pass(command_,shadow_pass_,shadow_fb_,{2048,2048},true);
+     // Enhanced raster: one 4096x2048 atlas, the primary's map in the left half, the first portal view's (around its
+     // virtual camera, destination casters) in the right half (lighting.glsl shadowVisibility, frame.fade.y).
+     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
      // Only enhanced raster lighting samples the shadow map (lighting.glsl shadowVisibility); original appearance and
      // the RT shaders never read it, so the pass only clears it.
-     if(!options_.original_appearance&&!rt_enabled_)draw_scene(command_,true);
+     if(!options_.original_appearance&&!rt_enabled_) {
+         const auto half=[&](float x){VkViewport v{x,0,2048,2048,0,1};VkRect2D r{{std::int32_t(x),0},{2048,2048}};vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);};
+         half(0);draw_scene(command_,true,primary,primary.draws);
+         if(view_count&&views[0]->frame.fade[1]>0) {
+             half(2048);uniform_offset_=view_offset(1);
+             draw_scene(command_,true,*views[0]->set,views[0]->set->draws);
+             uniform_offset_=view_offset(0);
+         }
+     }
      vkCmdEndRenderPass(command_);
+     if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*4,4);timed_[slot]=true;timing_portals_+=view_count>0;}
      begin_pass(command_,scene_pass_,scene_fb_[current],render_extent_,true);
-    draw_scene(command_,false);
+     if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timing_pool_,slot*4);
+    // Source sky, portal views (destination, then its seal), then the rest of the source: source geometry in front of a
+    // doorway covers it, source geometry behind it fails against the seal.
+    const std::span<const DrawItem> source{primary.draws};
+    const auto sky_end=std::size_t(std::find_if(source.begin(),source.end(),[](const DrawItem& d){return !d.sky;})-source.begin());
+    draw_scene(command_,false,primary,source.first(sky_end));
+    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+1);
+    for(unsigned i=0;i<view_count;++i) {
+        uniform_offset_=view_offset(1+i);
+        draw_scene(command_,false,*views[i]->set,views[i]->set->draws,true);
+        uniform_offset_=view_offset(0);
+        if(views[i]->split)continue;
+        vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,seal_pipeline_);
+        for(const auto& quad:views[i]->seal) { // floor strip, then the pulled rest
+            const auto clip_corners=multiply_matrix(f.vp,quad); // seal.vert takes clip-space corners
+            vkCmdPushConstants(command_,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(Matrix4),&clip_corners);
+            vkCmdDraw(command_,6,1,0,0);
+        }
+    }
+    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+2);
+    draw_scene(command_,false,primary,source.subspan(sky_end),f.clip[0]!=std::array<float,4>{0,0,0,1});
     // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input), then the hilite; 0046cbe0 draws
     // AfterHDR particles after the glow composite (0046fdb0 @470aed/@47183f).
     const auto draw_particles=[&](bool after_hdr) {
@@ -2015,15 +2391,16 @@ void set_particles(const ParticleFrame& frame)override {
         for(int shell=3;shell>=1;--shell)for(const auto& item:contours_) {
             Draw draw{};draw.model=item.model;draw.color={item.color[0],item.color[1],item.color[2],pulse+float(shell)*.02f};
             // Same frame-uniform set as the instance's own scene draw; contour shaders read no images.
-            bind_set(material_sets_[item.material<material_sets_.size()?item.material:0]);
+            bind_set(primary.material_sets[item.material<primary.material_sets.size()?item.material:0]);
             vkCmdPushConstants(command_,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(draw),&draw);
-            auto& g=geometry_[item.mesh];VkDeviceSize offset=0;
+            auto& g=primary.geometry[item.mesh];VkDeviceSize offset=0;
             vkCmdBindVertexBuffers(command_,0,1,&g.vertices.handle,&offset);
             vkCmdBindIndexBuffer(command_,g.indices.handle,0,VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(command_,g.count,1,0,0,0);
         }
     }
     vkCmdEndRenderPass(command_);
+    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+3);
      if(denoise_enabled_) {
          // Temporal accumulation (stride 0), then a-trous strides 1/2/4: history -> A -> B -> A.
          vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,temporal_pipeline_);
@@ -2150,7 +2527,9 @@ void set_particles(const ParticleFrame& frame)override {
          if(f.params[2]>0){++history_eligible_frames_;if(scene_changed)++history_retained_dirty_frames_;}
          else ++history_reset_events_;
      }
-     previous_frame_=f;rendered_=true;++frame_;
+     primary.previous_frame=f;++primary.frame;primary.drawn=total_frames_;
+     for(unsigned i=0;i<view_count;++i){auto& set=*views[i]->set;set.previous_frame=views[i]->frame;++set.frame;}
+     previous_jitter_={f.jitter[0],f.jitter[1]};rendered_=true;
      ++total_frames_;
      if(total_frames_<=2||total_frames_%300==0) {
          const bool active=rt_enabled_&&!original_lighting_;
@@ -2161,7 +2540,8 @@ void set_particles(const ParticleFrame& frame)override {
          std::cerr<<"Vulkan submitted frame="<<total_frames_<<" provider=vulkan appearance="
             <<(options_.original_appearance?"original":"enhanced")<<" rtStyle="<<(options_.rt_style==RtStyle::faithful?"faithful":"physical")
             <<" lighting="<<(original_lighting_?"original":"physical")<<" hardwareRayQueries="<<rt_enabled_
-            <<" accelerationStructure="<<(rt_enabled_&&rt_->acceleration_structure()!=VK_NULL_HANDLE)
+            <<" accelerationStructure="<<(rt_enabled_&&primary.rt->acceleration_structure()!=VK_NULL_HANDLE)
+            <<" sceneSets="<<sets_.size()<<" portalViews="<<view_count
             <<" reflections="<<active<<" shadows="<<rt_enabled_<<" diffuseGI="<<active<<" renderedFrameMs="<<frame_ms_avg
              <<" historyEligible="<<int(f.params[2])<<" historyEligibleFrames="<<history_eligible_frames_
              <<" historyResetEvents="<<history_reset_events_<<" historyRetainedDirtyFrames="<<history_retained_dirty_frames_

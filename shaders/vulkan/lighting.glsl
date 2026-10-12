@@ -35,12 +35,13 @@ layout(set=0,binding=1) uniform sampler2D diffuseMap;
 layout(set=0,binding=2) uniform sampler2D normalMap;
 layout(set=0,binding=3) uniform sampler2D environmentMap;
 layout(set=0,binding=4) uniform sampler2D fadeMap;
-layout(set=0,binding=5) uniform sampler2D shadowMap;
+layout(set=0,binding=5) uniform sampler2DShadow shadowMap; // compare sampler (renderer_vk.cpp shadow_compare_): bilinear PCF taps
 layout(set=0,binding=9) uniform sampler2D originalLightmap;
 const float PI=3.14159265359;
 vec3 sky(vec3 direction) { return mix(vec3(.055,.07,.09),vec3(.32,.44,.62),clamp(direction.y*.5+.5,0,1)); }
 vec3 environment(vec3 direction) { if(draw.flags.y<.5)return sky(direction);return textureLod(environmentMap,vec2(atan(direction.z,direction.x)/(2*PI)+.5,acos(clamp(direction.y,-1,1))/PI),0).rgb; }
-float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=p.z-bias<=texture(shadowMap,uv+vec2(x,y)*t).r?1:0;return visible/9;}
+// Shadow atlas (4096x2048): each view's 2048^2 map is the half starting at u = frame.fade.y (0 primary, .5 portal view).
+float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;uv.x=uv.x*.5+frame.fade.y;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));vec2 lo=vec2(frame.fade.y+t.x*.5,0),hi=vec2(frame.fade.y+.5-t.x*.5,1);float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(uv+vec2(x,y)*t,lo,hi),p.z-bias));return visible/9;}
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
     if(draw.flags.x<.5)return n;
@@ -120,7 +121,8 @@ vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
 #ifdef IKV_RT_GUIDED
 // rtUnit: zero/NaN source normals (degenerate meshes) would put NaN in the guide, which history and the a-trous
 // passes then spread over the screen as a growing black block.
-vec3 guideNormal=rtUnit(worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
+// Portal views store primary-world normals, so the resolve treats them like the primary's own surfaces.
+vec3 guideNormal=rtUnit(mat3(frame.toPrimary)*worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
 float rtArtwork=0;
 #endif
 if(draw.extra.w>=2) {

@@ -13,6 +13,9 @@ namespace ikv {
 struct PendingMutation {
     unsigned source = 0;
     bool reset = false; // zone change: actors not listed are detached
+    // NONCANONICAL wave-16 walk-through (state "crossed"): the door id in the previous zone. A reset whose presentation
+    // carries on (no load, no fade): listed actors keep their models where they are installed.
+    std::uint32_t flip = 0;
     std::vector<std::shared_ptr<const nlohmann::json>> actors;
     std::vector<std::uint32_t> ticks; // per actors[i]: the state tick its row arrived with
     std::vector<std::uint32_t> removed;

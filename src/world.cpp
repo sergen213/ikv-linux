@@ -45,6 +45,8 @@ int32_t coordinate(const Json& state, const char* key) { return state.at(key).ge
 int64_t distance(int32_t x, int32_t y, int32_t ox, int32_t oy) {
     int64_t dx = int64_t(x) - ox, dy = int64_t(y) - oy; return dx * dx + dy * dy;
 }
+// Signed area of threshold a->b and a point: > 0 left of a->b (a see-through door's entering side), < 0 its approach side.
+template<class P> int64_t side(const P& p, int64_t x, int64_t y) { return (int64_t(p.bx) - p.ax) * (y - p.ay) - (int64_t(p.by) - p.ay) * (x - p.ax); }
 std::string new_uid() {
     std::array<unsigned char, 16> bytes{};
     if (RAND_bytes(bytes.data(), bytes.size()) != 1) throw std::runtime_error("item identifier generation failed");
@@ -540,6 +542,34 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 }
             }
         }
+        // NONCANONICAL see-through doorways (wave 16, tools/data/portals.json): "door.portal" {pair, threshold [[ax,ay],[bx,by]] (the
+        // door wall plane), floor, height, apron} pairs a door with its partner, whose portal points back; entering = moving to the left of a->b. M (through())
+        // maps this side onto the partner's zone: midpoint onto midpoint, a->b onto the partner's b->a, no scale, so the ends must
+        // land within a unit of the partner's. Copies keep their zone's thresholds; the partner in copy n is pair + n*65536
+        // (exit_door()). Walk-grid checks: set_source_zones().
+        const auto base_zone = [&](const Json& zone) { return config_.at("zones").at(zone.get<std::string>()).value("instance_of", zone.get<std::string>()); };
+        for (const auto& [id, n] : npcs_) {
+            const auto door = n.definition.find("door"); if (door == n.definition.end() || !door->contains("portal")) continue;
+            const auto& p = door->at("portal"); const auto& t = p.at("threshold"); const std::string zone = n.definition.at("zone");
+            const auto pair = target_id(p.at("pair")); const auto other = npcs_.find(pair);
+            require(other != npcs_.end() && !copy_index(other->second.definition.at("zone").get<std::string>()) && other->second.definition.at("kind") == "door" && other->second.definition.at("door").contains("portal") &&
+                    target_id(other->second.definition.at("door").at("portal").at("pair")) == id - copy_index(zone) * 65536u && base_zone(zone) != base_zone(door->at("to")) &&
+                    base_zone(other->second.definition.at("zone")) == base_zone(door->at("to")) && base_zone(other->second.definition.at("door").at("to")) == base_zone(zone), "config", "Portal pair must be a door pointing back");
+            require(t.is_array() && t.size() == 2 && t[0].is_array() && t[0].size() == 2 && t[1].is_array() && t[1].size() == 2, "config", "Portal threshold is [[ax,ay],[bx,by]]");
+            integer(p.at("floor"), -coordinate_limit, coordinate_limit); integer(p.at("height"), 1000, 100000);
+            Portal portal; portal.pair = pair; portal.apron = integer(p.at("apron"), 0, 20000);
+            portal.ax = integer(t[0][0], -coordinate_limit, coordinate_limit); portal.ay = integer(t[0][1], -coordinate_limit, coordinate_limit);
+            portal.bx = integer(t[1][0], -coordinate_limit, coordinate_limit); portal.by = integer(t[1][1], -coordinate_limit, coordinate_limit);
+            const double width = std::hypot(double(portal.bx - portal.ax), double(portal.by - portal.ay)); require(width >= 1000 && width <= 50000, "config", "Portal width invalid");
+            const auto& e = other->second.definition.at("door").at("portal").at("threshold"); const double ex = e[0][0].get<double>(), ey = e[0][1].get<double>(), fx = e[1][0].get<double>(), fy = e[1][1].get<double>();
+            const double theta = std::atan2(ey - fy, ex - fx) - std::atan2(double(portal.by - portal.ay), double(portal.bx - portal.ax));
+            portal.c = std::cos(theta); portal.s = std::sin(theta); portal.ox = (portal.ax + portal.bx) / 2.0; portal.oy = (portal.ay + portal.by) / 2.0; portal.tx = (ex + fx) / 2; portal.ty = (ey + fy) / 2;
+            portal.ux = (portal.bx - portal.ax) / width; portal.uy = (portal.by - portal.ay) / width; portal.half = width / 2;
+            const auto [bx, by] = through(portal, portal.bx, portal.by); const auto [ax, ay] = through(portal, portal.ax, portal.ay);
+            require(std::hypot(bx - ex, by - ey) <= 1000 && std::hypot(ax - fx, ay - fy) <= 1000, "config", "Portal thresholds differ in width");
+            portals_.emplace(id, portal); zone_portals_[zone].push_back(id);
+        }
+        check_portals();
         // Quests: giver (accept; not for auto quests) and turn_in (completion, default giver) must list the quest. Objectives:
         // kill an enemy template; collect items (in the bag at hand-in; with a target, its kills drop them while the quest is
         // active; "also": further items); talk (completes at turn_in); visit a spot (zone, x, y, radius: <loc> trigger, prop
@@ -643,7 +673,8 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                            {"class_id",3},{"x",-coordinate_limit},{"y",-coordinate_limit},{"hp",config_.at("resource_cap")},
                            {"max_hp",config_.at("resource_cap")},{"level",100},{"alive",false},{"equipment",Json::array()},
                            {"clan",15},{"kabadayi",false},{"guild",std::string(32,'"')},{"posture",255},
-                           {"debuffs",Json(std::vector<Json>(8,{{"id",std::string(32,'x')},{"expires",UINT32_MAX},{"skill_source",Json::array({2,15})}}))}};
+                           {"debuffs",Json(std::vector<Json>(8,{{"id",std::string(32,'x')},{"expires",UINT32_MAX},{"skill_source",Json::array({2,15})}}))},
+                           {"portal",UINT32_MAX}}; // wave 16: a group member seen through a see-through door
         std::map<std::string,Json> visual_slots;
         std::map<int,std::string> source_slots;
         int largest_prefix=0;for(const auto& [pid,p]:config_.at("prefixes").items()){(void)p;largest_prefix=std::max(largest_prefix,std::stoi(pid));}
@@ -694,6 +725,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         for(int notice=0;notice<31;++notice)event_bounds.push_back({{"type","error"},{"code","trade_persistence"},
             {"peer",INT32_MAX},{"revision",UINT64_MAX},{"message",std::string(160,'x')}});
         Json wire_bound={{"self",INT32_MAX},{"tick",UINT32_MAX},{"admin",true},{"zone",std::string(32,'"')},{"source_registry_id",70},{"xp_interval",10000000},{"xp_total",INT32_MAX},{"skill_points",1000000},
+            {"crossed",{{"door",UINT32_MAX}}},
             {"contacts_online",Json(std::vector<int64_t>(20,INT64_MAX))},
             {"stats",{{"attack",INT32_MAX},{"defense",INT32_MAX},{"attack_cooldown",10000},{"weapon_damage",Json::array({INT32_MAX,INT32_MAX})},{"armor",Json::array({1000,100})},{"charisma",1000},{"resistance_points",1000000},{"craft_points",1000000},
                       {"clan_rank",std::string(32,'"')},{"guild_rank",std::string(32,'"')},{"arena_power",1000},
@@ -753,7 +785,13 @@ void World::project_event(uint32_t entity,Json value) {
     const int range=config_.at("aoi");
     for(const auto& [observer,a]:actors_) {
         const auto& s=a.character.at("state");
-        if(s.at("zone")==zone && distance(x,y,s.at("x"),s.at("y"))<=int64_t(range)*range)emit(observer,value);
+        if(s.at("zone")==zone && distance(x,y,s.at("x"),s.at("y"))<=int64_t(range)*range){emit(observer,value);continue;}
+        // Wave 16: an observer who sees the point through an open see-through door (the in_view() rule).
+        if(const auto doors=zone_portals_.find(s.at("zone").get<std::string>());doors!=zone_portals_.end())for(const auto door:doors->second)
+            if(const auto to=window(observer,door);to && *to==zone) {
+                const auto& e=portals_.at(exit_door(door,zone));
+                if(side(e,x,y)<0 && distance(x,y,int32_t(std::lround(e.ox)),int32_t(std::lround(e.oy)))<=int64_t(range)*range){emit(observer,value);break;}
+            }
     }
 }
 Json World::visible_equipment(const Json& s) const {
@@ -790,14 +828,21 @@ bool World::passable(const std::string& zone, int32_t x, int32_t y) const {
     for (const auto& box : z.at("collision")) if (x >= box[0].get<int>() && y >= box[1].get<int>() && x <= box[2].get<int>() && y <= box[3].get<int>()) return false;
     if (!z.contains("source_registry_id")) return true;
     const auto grid=source_zones_.find(zone);
-    return grid==source_zones_.end() ? initializing_ : zone_height(*grid->second,float(x)/1000.0f,float(y)/1000.0f).has_value();
+    if (grid==source_zones_.end()) return initializing_;
+    if (zone_height(*grid->second,float(x)/1000.0f,float(y)/1000.0f).has_value()) return true;
+    // NONCANONICAL wave 16 apron: the approach to a see-through door on its wall plane, where the walk grid stops 1-4 units short.
+    if (const auto doors=zone_portals_.find(zone); doors!=zone_portals_.end()) for (const auto door : doors->second) {
+        const auto& p=portals_.at(door); const double dx=x-p.ox,dy=y-p.oy,ahead=p.ux*dy-p.uy*dx; // > 0: past the line
+        if (ahead<=0 && ahead>=-p.apron && std::abs(p.ux*dx+p.uy*dy)<=p.half) return true;
+    }
+    return false;
 }
 std::string World::instance(uint32_t id, const std::string& zone) const {
     const auto leader = group(id);
     if (!leader || !config_.at("zones").at(zone).contains("instances")) return zone;
     const auto copies = config_.at("zones").at(zone).at("instances").size();
     const auto occupant = [&](const std::string& name, bool member) {
-        for (const auto& [other, b] : actors_) if (other != id && b.character.at("state").at("zone") == name && (!member || group(other) == leader)) return true;
+        for (const auto& [other, b] : actors_) if (other != id && (b.character.at("state").at("zone") == name || std::any_of(b.peek.begin(), b.peek.end(), [&](const auto& p) { return p.second == name; })) && (!member || group(other) == leader)) return true; // wave 16: seen through a door counts
         return false;
     };
     // Wave 15 party rule: the leader's copy first, so a member who held another copy before joining follows the leader's.
@@ -812,8 +857,97 @@ void World::transfer(uint32_t id, const std::string& zone, int32_t x, int32_t y)
     require(a.admin || !disabled_zones_.contains(target_zone.value("instance_of",zone)),"zone_disabled","Bu bölge yönetici tarafından geçici olarak kapatıldı.");
     const auto old=current.at("zone").get<std::string>(); const auto ox=coordinate(current,"x"),oy=coordinate(current,"y");
     auto s=current; s["zone"]=zone; s["x"]=x; s["y"]=y; commit({{id,s}});
-    index(id,old,ox,oy,false); index(id,zone,x,y,true); cancel_trade(id); a.moving=false; a.route.clear(); a.dx=a.dy=0; a.engaged=0;
+    a.moving=false; a.route.clear(); a.dx=a.dy=0; a.beyond={}; move_zone(id,old,ox,oy); set_peek(id,{});
+}
+void World::move_zone(uint32_t id, const std::string& old, int32_t ox, int32_t oy) {
+    auto& a=actors_.at(id); const auto& s=a.character.at("state");
+    index(id,old,ox,oy,false); index(id,s.at("zone"),s.at("x"),s.at("y"),true); cancel_trade(id); a.engaged=0; a.looting=false; a.posture=0;
     vacated(old);
+}
+std::pair<int32_t,int32_t> World::through(const Portal& p, int32_t x, int32_t y) const {
+    const double dx=x-p.ox,dy=y-p.oy; return {int32_t(std::lround(p.tx+p.c*dx-p.s*dy)),int32_t(std::lround(p.ty+p.s*dx+p.c*dy))};
+}
+uint32_t World::copy_index(const std::string& zone) const {
+    const auto& z=config_.at("zones").at(zone); return z.contains("instance_of") ? uint32_t(std::stoul(zone.substr(z.at("instance_of").get_ref<const std::string&>().size()))) : 0;
+}
+uint32_t World::exit_door(uint32_t door, const std::string& to) const { return portals_.at(door).pair + copy_index(to)*65536u; }
+// The door checks of "interact" (wave 16: also every see-through door's open/closed state per player, and its crossing).
+std::optional<std::pair<std::string,std::string>> World::door_gate(uint32_t id, uint32_t t) const {
+    const auto& a=actors_.at(id); const auto& current=a.character.at("state"); const auto& n=npcs_.at(t); const auto& door=n.definition.at("door");
+    using Shut=std::pair<std::string,std::string>;
+    // classes.dat <loc> gmonly / requiredquestid. NONCANONICAL: the quest (config "source_quest_id") must be taken or done;
+    // ids no configured quest carries stay open (their chains were server data).
+    if(door.value("gmonly",false) && !a.admin)return Shut{"permission","Bu geçit yalnızca yöneticilere açıktır."};
+    // social.guild_zones (TopkapiPage.aspx: "Yalnızca loncaların girebildiği özel bir sayfiye alanı", "Ruh taşlarını sadece
+    // Lonca'ya mensup insanların kullanabileceğini"): entering needs a lonca; leaving stays open so nobody is stranded inside
+    // after leaving their lonca. NONCANONICAL refusal text.
+    for(const auto& zone:config_.at("social").value("guild_zones",Json::array()))
+        if(zone==door.at("to") && !(a.admin || (current.contains("guild") && current.at("guild").is_object())))return Shut{"guild","Lonca Merkezi'ne yalnızca bir loncaya üye olanlar girebilir."};
+    if(door.contains("required_quest")) {
+        const int q=door.at("required_quest"); bool open=true;
+        for(const auto& [key,quest]:config_.at("quests").items())
+            if(quest.value("source_quest_id",-1)==q && !(open=current.at("quests").contains(key) || quest_done(current,q)))break;
+        if(!open)return Shut{"quest","Bu geçidi kullanmak için gerekli görevi almış olmalısınız."};
+    }
+    // classes.dat requiredentitydeathid (Yaşam Merkezi doors 518/523, İstihbarat crystal 384). NONCANONICAL: the door stays
+    // shut while an NPC of that classid lives in the door's zone copy (the original kill rule was server data).
+    if(door.contains("required_death"))
+        for(const auto& [other_id,other]:npcs_)
+            if(other.hp>0 && other.definition.at("source_class")==door.at("required_death") && other.definition.at("zone")==n.definition.at("zone"))
+                return Shut{"door",other.definition.at("name").get<std::string>()+" yenilmeden bu geçit açılmaz."};
+    const std::string to=door.at("to");
+    // NONCANONICAL group-zone lockout (stamped by a Şef kill in a copy): the zone stays shut until it expires.
+    if(const auto until=current.value("lockouts",Json::object()).value(to,int64_t(0)); until>std::time(nullptr) && config_.at("zones").at(to).contains("instances"))
+        return Shut{"lockout","Bu grup bölgesinin şefini yakın zamanda yendiniz; "+std::to_string((until-std::time(nullptr)+59)/60)+" dakika sonra tekrar girebilirsiniz."};
+    if(!a.admin && disabled_zones_.contains(config_.at("zones").at(to).value("instance_of",to)))return Shut{"zone_disabled","Bu bölge yönetici tarafından geçici olarak kapatıldı."}; // transfer()'s closure, shown on a portal
+    return std::nullopt;
+}
+std::string World::linked(uint32_t id, uint32_t door) const {
+    const auto& a=actors_.at(id); if(const auto p=a.peek.find(door);p!=a.peek.end())return p->second;
+    const std::string to=npcs_.at(door).definition.at("door").at("to");
+    return a.character.at("state").at("zone")==to ? to : instance(id,to);
+}
+std::optional<std::string> World::window(uint32_t id, uint32_t door) const {
+    if(!close(id,door,config_.at("aoi")) || door_gate(id,door))return std::nullopt;
+    auto to=linked(id,door); if(!npcs_.contains(exit_door(door,to)))return std::nullopt; return to;
+}
+// Own zone, then each open see-through door's linked zone within aoi of its exit midpoint and on the visible side (left of the
+// exit pair.b->pair.a); linked door entities are skipped (no nested portals) and nobody is listed twice.
+std::vector<std::tuple<uint32_t,uint32_t,int64_t>> World::in_view(uint32_t id) const {
+    std::vector<std::tuple<uint32_t,uint32_t,int64_t>> seen; const int range=config_.at("aoi"); const auto& own=actors_.at(id).character.at("state");
+    const auto at=[&](uint32_t other) { if(const auto p=actors_.find(other);p!=actors_.end())return std::pair{coordinate(p->second.character.at("state"),"x"),coordinate(p->second.character.at("state"),"y")}; const auto& n=npcs_.at(other); return std::pair{n.x,n.y}; };
+    const auto from=[&](std::pair<int32_t,int32_t> p){return distance(coordinate(own,"x"),coordinate(own,"y"),p.first,p.second);};
+    for(const auto other:nearby(id,range))if(other!=id)seen.push_back({other,0,from(at(other))});
+    const auto doors=zone_portals_.find(own.at("zone").get<std::string>()); if(doors==zone_portals_.end())return seen;
+    for(const auto door:doors->second) {
+        const auto to=window(id,door); if(!to)continue;
+        const auto& e=portals_.at(exit_door(door,*to));
+        for(const auto other:nearby_at(*to,int32_t(std::lround(e.ox)),int32_t(std::lround(e.oy)),range)) {
+            if(const auto n=npcs_.find(other);n!=npcs_.end() && n->second.definition.at("kind")=="door")continue;
+            const auto [x,y]=at(other);
+            if(side(e,x,y)<0 && std::none_of(seen.begin(),seen.end(),[&](const auto& v){return std::get<0>(v)==other;}))seen.push_back({other,door,from(through(e,x,y))}); // e's M: back into this frame
+        }
+    }
+    return seen;
+}
+// NONCANONICAL see-through doorway crossing (wave 16): the zone switches in place like a walking step (persisted by the periodic
+// save_all(), no commit), into the copy the player saw (peek); a closed or unsupported crossing stops with the gate's reason.
+void World::cross(uint32_t id, uint32_t door, int32_t nx, int32_t ny) {
+    auto& a=actors_.at(id); auto& s=a.character.at("state"); const std::string old=s.at("zone"); const auto x=coordinate(s,"x"),y=coordinate(s,"y");
+    const auto beyond=a.beyond; a.moving=false; a.route.clear(); a.dx=a.dy=0; a.beyond={};
+    const auto refuse=[&](std::string code,std::string message){reject(id,std::move(code),std::move(message));emit(id,{{"type","correction"},{"x",x},{"y",y},{"reason","portal"}});};
+    if(const auto shut=door_gate(id,door)){refuse(shut->first,shut->second);return;}
+    const auto to=linked(id,door); const auto exit=exit_door(door,to); const auto [mx,my]=through(portals_.at(door),nx,ny);
+    if(!npcs_.contains(exit) || !passable(to,mx,my)){refuse("movement","Bu geçitten şu anda geçilemiyor.");return;} // NONCANONICAL wording
+    s["zone"]=to; s["x"]=mx; s["y"]=my; set_peek(id,{{exit,old}}); move_zone(id,old,x,y); a.crossed=door; // peek first: the copy just left stays as seen (vacated() skips it)
+    if(beyond.door!=door)return;
+    if(auto points=route(to,mx,my,beyond.x,beyond.y);!points.empty()){a.route=std::move(points);a.waypoint=0;a.moving=true;}
+    else emit(id,{{"type","correction"},{"x",mx},{"y",my},{"reason","blocked_destination"}}); // the target behind the door is unreachable
+}
+// Replace a player's peek; an instance copy nobody peeks or stands in any more gets its vacated() reset (it was skipped while peeked).
+void World::set_peek(uint32_t id, std::map<uint32_t,std::string> next) {
+    auto& a=actors_.at(id); std::swap(a.peek,next);
+    for(const auto& [door,zone]:next)if(std::none_of(a.peek.begin(),a.peek.end(),[&](const auto& p){return p.second==zone;}))vacated(zone);
 }
 void World::set_source_zones(std::map<std::string,std::shared_ptr<const Zone>> zones) {
     if(!actors_.empty())throw std::invalid_argument("support grids must be installed before admission");
@@ -849,7 +983,29 @@ void World::set_source_zones(std::map<std::string,std::shared_ptr<const Zone>> z
                 if(route(name,x,y,n.x,n.y).empty())throw std::invalid_argument("configured NPC patrol cannot return to spawn");
             }
         }
+        check_portals();
     } catch (...) { source_zones_=std::move(previous);route_steps_.clear();throw; }
+}
+// Wave 16 see-through doorways on the walk grid: the threshold's approach (its apron, passable()) is reached on foot from the
+// partner's arrival in this zone, a step 600 past the line lands supported behind the partner door (in its apron), and no walkable
+// cell lies more than 750 behind the line beside the opening within 12 units (nobody steps around an opening end into the space
+// drawn as the other zone; grid zones only).
+void World::check_portals() const {
+    for(const auto& [id,p]:portals_) {
+        const auto& n=npcs_.at(id); const std::string zone=n.definition.at("zone"),to=n.definition.at("door").at("to");
+        if(copy_index(zone))continue; // copies share their zone's grid and thresholds
+        const auto at=[&](double along,double ahead){return std::pair{int32_t(std::lround(p.ox+p.ux*along-p.uy*ahead)),int32_t(std::lround(p.oy+p.uy*along+p.ux*ahead))};}; // ahead: entering direction
+        const auto [ax,ay]=at(0,-200); const auto [fx,fy]=at(0,-1000); const auto [lx,ly]=through(p,at(0,600).first,at(0,600).second);
+        const auto& arrive=npcs_.at(p.pair).definition.at("door").at("arrive");
+        if(!passable(zone,ax,ay) || route(zone,arrive[0],arrive[1],fx,fy).empty())throw std::invalid_argument("configured portal approach is not walkable up to its threshold");
+        if(!passable(to,lx,ly))throw std::invalid_argument("configured portal crossing lands outside supported grid cells");
+        if(!source_zones_.contains(zone))continue;
+        for(int gy=int(std::floor((p.oy-12000)/1500));gy<=int(std::ceil((p.oy+12000)/1500));++gy)for(int gx=int(std::floor((p.ox-12000)/1500));gx<=int(std::ceil((p.ox+12000)/1500));++gx) {
+            const double dx=gx*1500-p.ox,dy=gy*1500-p.oy;
+            if(std::hypot(dx,dy)<=12000 && p.ux*dy-p.uy*dx>750 && std::abs(p.ux*dx+p.uy*dy)>p.half && passable(zone,gx*1500,gy*1500))
+                throw std::invalid_argument("configured portal opening is walkable beside its ends");
+        }
+    }
 }
 bool World::clear_path(const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny) const {
     if (!passable(zone,nx,ny)) return false;
@@ -949,14 +1105,21 @@ bool World::close(uint32_t a, uint32_t b, int range) const {
     return s.at("zone") == zone && distance(coordinate(s,"x"),coordinate(s,"y"),x,y) <= int64_t(range)*range;
 }
 std::vector<uint32_t> World::nearby(uint32_t id, int range) const {
-    std::vector<uint32_t> result; const auto& s = actors_.at(id).character.at("state");
-    const auto [zone,cx,cy] = cell(s.at("zone"),coordinate(s,"x"),coordinate(s,"y"));
+    const auto& s = actors_.at(id).character.at("state"); return nearby_at(s.at("zone"),coordinate(s,"x"),coordinate(s,"y"),range);
+}
+std::vector<uint32_t> World::nearby_at(const std::string& zone, int32_t px, int32_t py, int range) const {
+    std::vector<uint32_t> result; const auto [z0,cx,cy] = cell(zone,px,py); (void)z0;
     const int cells = (range + config_.at("cell_size").get<int>() - 1) / config_.at("cell_size").get<int>();
     for (auto it=cells_.lower_bound({zone,cx-cells,INT32_MIN});it!=cells_.end();++it) {
         const auto& [z,x,y]=it->first;
         if(z!=zone || x>cx+cells)break;
         if(y<cy-cells || y>cy+cells)continue;
-        for (auto other : it->second) if (close(id,other,range)) result.push_back(other);
+        for (auto other : it->second) {
+            int32_t ox, oy;
+            if (const auto p = actors_.find(other); p != actors_.end()) { ox = coordinate(p->second.character.at("state"),"x"); oy = coordinate(p->second.character.at("state"),"y"); }
+            else if (const auto n = npcs_.find(other); n != npcs_.end()) { ox = n->second.x; oy = n->second.y; } else continue;
+            if (distance(px,py,ox,oy) <= int64_t(range)*range) result.push_back(other);
+        }
     }
     std::sort(result.begin(),result.end()); return result;
 }
@@ -1347,25 +1510,37 @@ void World::remove(uint32_t id) {
     persist_(std::span<const CharacterSave>(&save,1));
     cancel_trade(id); leave_group(id); invites_.erase(id); guild_invites_.erase(id);
     if (bots_.erase(id)) released_bots_.emplace_back(save.account_id,save.character_id);
-    const auto& s = a.character.at("state"); const auto zone = s.at("zone").get<std::string>(); index(id,zone,s.at("x"),s.at("y"),false); actors_.erase(found);
+    const auto& s = a.character.at("state"); const auto zone = s.at("zone").get<std::string>(); index(id,zone,s.at("x"),s.at("y"),false);
+    const auto peeked = std::move(found->second.peek); actors_.erase(found);
     for (auto& [npc_id,n] : npcs_) { (void)npc_id; n.threat.erase(id); if (n.owner == id) n.owner = 0; }
     for (auto& [name,match] : arenas_) if (const auto stake = match.stakes.extract(id)) match.stakes[0] += stake.mapped(); // a quitter's stake stays in the pot
-    vacated(zone);
+    vacated(zone); for (const auto& [door,seen] : peeked) vacated(seen);
 }
 void World::input(uint32_t id, int8_t dx, int8_t dy, uint32_t sequence) {
     if (!actors_.contains(id)) return;
     auto& a = actors_.at(id);
     if (a.kicked || sequence <= a.sequence) return;
     if (std::abs(int(dx))+std::abs(int(dy)) > 1) { reject(id,"movement","Geçersiz hareket."); return; }
-    a.sequence = sequence; a.dx = dx; a.dy = dy; a.moving = false;a.route.clear();
+    a.sequence = sequence; a.dx = dx; a.dy = dy; a.moving = false;a.route.clear();a.beyond = {};
     if (dx || dy) a.engaged = 0; // moving away ends auto-attack
 }
-void World::destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence) {
+void World::destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence, uint32_t portal) {
     if (!actors_.contains(id)) return;
     auto& a = actors_.at(id); if (a.kicked || sequence <= a.sequence) return;
-    a.sequence = sequence; const auto& s = a.character.at("state");
+    a.sequence = sequence; const auto& s = a.character.at("state"); a.beyond = {};
+    const auto blocked = [&] { a.moving = false; a.route.clear();a.dx = a.dy = 0; emit(id,{{"type","correction"},{"x",s.at("x")},{"y",s.at("y")},{"reason","blocked_destination"}}); };
+    if (portal) { // NONCANONICAL wave 16: (x,y) lies behind this see-through door; walk up to its threshold, cross (advance()), go on
+        const auto p = portals_.find(portal);
+        if (p == portals_.end() || npcs_.at(portal).definition.at("zone") != s.at("zone") || !close(id,portal,config_.at("aoi"))) { blocked(); return; }
+        if (const auto shut = door_gate(id,portal)) { reject(id,shut->first,shut->second); blocked(); return; }
+        const auto& d = p->second; const double w = std::hypot(double(d.bx-d.ax),double(d.by-d.ay)), nx = -(d.by-d.ay)/w, ny = (d.bx-d.ax)/w; // entering direction
+        auto points = route(s.at("zone"),s.at("x"),s.at("y"),int32_t(std::lround(d.ox-1000*nx)),int32_t(std::lround(d.oy-1000*ny)));
+        if (points.empty()) { blocked(); return; }
+        points.emplace_back(int32_t(std::lround(d.ox+1000*nx)),int32_t(std::lround(d.oy+1000*ny))); // past the line: the step over it crosses
+        a.route=std::move(points);a.waypoint=0; a.moving = true; a.dx = a.dy = 0; a.engaged = 0; a.beyond = {portal,x,y}; return;
+    }
     auto points=route(s.at("zone"),s.at("x"),s.at("y"),x,y);
-    if (points.empty()) { a.moving = false; a.route.clear();a.dx = a.dy = 0; emit(id,{{"type","correction"},{"x",s.at("x")},{"y",s.at("y")},{"reason","blocked_destination"}}); return; }
+    if (points.empty()) { blocked(); return; }
     a.route=std::move(points);a.waypoint=0; a.moving = true; a.dx = a.dy = 0; a.engaged = 0;
 }
 
@@ -1862,33 +2037,9 @@ void World::handle(uint32_t id, const Json& request) {
             emit(id,{{"type","reset_offer"},{"target",t},{"reset",n.definition.at("reset")},{"price",point_reset_price(config_,n.definition,current,a.plus)}}); return;
         }
         if (n.definition.at("kind") == "door") {
-            // classes.dat <loc> gmonly / requiredquestid. NONCANONICAL: the quest (config "source_quest_id") must be taken or done;
-            // ids no configured quest carries stay open (their chains were server data).
-            const auto& door = n.definition.at("door");
-            require(!door.value("gmonly",false) || a.admin,"permission","Bu geçit yalnızca yöneticilere açıktır.");
-            // social.guild_zones (TopkapiPage.aspx: "Yalnızca loncaların girebildiği özel bir sayfiye alanı", "Ruh taşlarını sadece
-            // Lonca'ya mensup insanların kullanabileceğini"): entering needs a lonca; leaving stays open so nobody is stranded inside
-            // after leaving their lonca. NONCANONICAL refusal text.
-            for (const auto& zone : config_.at("social").value("guild_zones",Json::array()))
-                if (zone == door.at("to"))
-                    require(a.admin || (current.contains("guild") && current.at("guild").is_object()),"guild","Lonca Merkezi'ne yalnızca bir loncaya üye olanlar girebilir.");
-            if (door.contains("required_quest")) {
-                const int q = door.at("required_quest"); bool open = true;
-                for (const auto& [key,quest] : config_.at("quests").items())
-                    if (quest.value("source_quest_id",-1) == q && !(open = current.at("quests").contains(key) || quest_done(current,q))) break;
-                require(open,"quest","Bu geçidi kullanmak için gerekli görevi almış olmalısınız.");
-            }
-            // classes.dat requiredentitydeathid (Yaşam Merkezi doors 518/523, İstihbarat crystal 384). NONCANONICAL: the door stays
-            // shut while an NPC of that classid lives in the door's zone copy (the original kill rule was server data).
-            if (door.contains("required_death"))
-                for (const auto& [other_id,other] : npcs_)
-                    if (other.hp > 0 && other.definition.at("source_class") == door.at("required_death") && other.definition.at("zone") == n.definition.at("zone"))
-                        throw Rejected{"door", other.definition.at("name").get<std::string>() + " yenilmeden bu geçit açılmaz."};
-            const std::string to = door.at("to");
-            // NONCANONICAL group-zone lockout (stamped by a Şef kill in a copy): the zone stays shut until it expires.
-            if (const auto until = current.value("lockouts",Json::object()).value(to,int64_t(0)); until > std::time(nullptr) && config_.at("zones").at(to).contains("instances"))
-                throw Rejected{"lockout", "Bu grup bölgesinin şefini yakın zamanda yendiniz; " + std::to_string((until - std::time(nullptr) + 59) / 60) + " dakika sonra tekrar girebilirsiniz."};
-            transfer(id,current.at("zone") == to ? to : instance(id,to),door.at("arrive")[0],door.at("arrive")[1]); ack(); return;
+            if (const auto shut = door_gate(id,t)) throw Rejected{shut->first,shut->second};
+            const auto& door = n.definition.at("door"); // the zone copy linked() names: a see-through door's peek, else as before
+            transfer(id,linked(id,t),door.at("arrive")[0],door.at("arrive")[1]); ack(); return;
         }
         // banker: the original Bankacı dialogue offers "Kasamı göster" (0x58ebfc), which opens the Banka window.
         emit(id,{{"type","dialogue"},{"target",t},{"text",n.definition.at("dialogue")},{"quests",quests_at(n,current)},{"shop",n.definition.at("shop")},{"bank",n.definition.value("banker",false)}}); return;
@@ -2568,6 +2719,16 @@ void World::advance() {
         else { nx += step*a.dx; ny += step*a.dy; }
         if (nx==x && ny==y) continue;
         const auto zone=s.at("zone").get<std::string>();
+        // NONCANONICAL see-through doorways (wave 16): a player's step from the approach side over a threshold (within a..b)
+        // walks into the linked zone; bots keep using the door (interact).
+        if (const auto doors=zone_portals_.find(zone); !a.bot && doors!=zone_portals_.end()) {
+            const auto over=[&](const Portal& p) {
+                if (!(side(p,x,y) <= 0 && side(p,nx,ny) > 0)) return false;
+                const auto turn=[&](int64_t px,int64_t py){return (int64_t(nx)-x)*(py-y)-(int64_t(ny)-y)*(px-x);}; // p->q against a, b
+                const auto ta=turn(p.ax,p.ay),tb=turn(p.bx,p.by); return (ta<=0) != (tb<=0) || !ta || !tb;
+            };
+            if (const auto door=std::find_if(doors->second.begin(),doors->second.end(),[&](uint32_t d){return over(portals_.at(d));}); door!=doors->second.end()) { cross(id,*door,nx,ny); continue; }
+        }
         // route() validated each source segment whole; re-sampling 800-unit steps of it picks different cell corners and
         // falsely collided mid-route, so routed steps only need a supported endpoint.
         bool clear=routed && source ? passable(zone,nx,ny) : clear_path(zone,x,y,nx,ny);
@@ -2703,7 +2864,7 @@ std::vector<Player> World::snapshot(uint32_t id) const {
     std::vector<Player> result;if(!actors_.contains(id))return result;
     const auto& own=actors_.at(id).character.at("state");const auto leader=group(id);
     std::vector<std::tuple<bool,int64_t,uint32_t>> players;
-    for(auto other:nearby(id,config_.at("aoi")))if(other!=id && actors_.contains(other)){const auto& s=actors_.at(other).character.at("state");players.push_back({!leader || group(other)!=leader,distance(coordinate(own,"x"),coordinate(own,"y"),s.at("x"),s.at("y")),other});}
+    for(const auto& [other,door,d]:in_view(id))if(actors_.contains(other))players.push_back({!leader || group(other)!=leader,d,other}); // wave 16: linked players too, raw coordinates
     std::sort(players.begin(),players.end());if(players.size()>31)players.resize(31);
     result.push_back({id,own.at("x"),own.at("y")});
     for(const auto& [stranger,d,other]:players){(void)stranger;(void)d;const auto& s=actors_.at(other).character.at("state");result.push_back({other,s.at("x"),s.at("y")});}
@@ -2778,13 +2939,20 @@ Json World::state(uint32_t id) {
             result["bank"]={{"items",std::move(shown)},{"currency",a.bank.at("currency")},{"slots",config_.at("economy").at("bank_slots")},{"tab",a.bank_tab},{"banker",a.banker}};
         }
     }
+    { // Wave 16: the zone copy each open see-through door in view shows, kept while it stays open and in view (the crossing enters it).
+      // ponytail: a group change while in view keeps the old copy; re-check against instance() if that matters.
+        std::map<uint32_t,std::string> peek;
+        if(const auto doors=zone_portals_.find(own.at("zone").get<std::string>());doors!=zone_portals_.end())for(const auto door:doors->second)if(auto to=window(id,door))peek[door]=std::move(*to);
+        set_peek(id,std::move(peek));
+    }
     std::vector<std::pair<int64_t,uint32_t>> visible;
     std::vector<std::tuple<bool,int64_t,uint32_t>> players; // (not a group member, distance, id)
+    std::map<uint32_t,uint32_t> portal_of; // linked entity -> the see-through door it is seen through
     const auto leader=group(id);
-    for(auto other:nearby(id,config_.at("aoi"))) {
-        if(other==id)continue;
-        if(auto p=actors_.find(other);p!=actors_.end()) { const auto& s=p->second.character.at("state");players.push_back({!leader || group(other)!=leader,distance(coordinate(own,"x"),coordinate(own,"y"),s.at("x"),s.at("y")),other}); }
-        else { const auto& n=npcs_.at(other);visible.push_back({distance(coordinate(own,"x"),coordinate(own,"y"),n.x,n.y),other}); }
+    for(const auto& [other,door,d]:in_view(id)) {
+        if(door)portal_of[other]=door;
+        // See-through doors in view sort before every other NPC, so the 96-entity cut never drops a door its linked rows name.
+        if(actors_.contains(other))players.push_back({!leader || group(other)!=leader,d,other}); else visible.push_back({a.peek.contains(other)?-1:d,other});
     }
     std::sort(players.begin(),players.end());
     if(players.size()>31)players.resize(31); // snapshot() lists the same 31 beside self
@@ -2798,6 +2966,7 @@ Json World::state(uint32_t id) {
         }
         result["party"]=std::move(party);
     }
+    if(a.crossed){result["crossed"]={{"door",a.crossed}};a.crossed=0;} // wave 16: the first state after a walk-through (door in the previous zone)
     size_t used=result.dump().size();
     // Events are delivered once (the queue is cleared below) while entities are resent every frame, so every queued event
     // (≤32 events, ≤32768 bytes) is reserved before optional entities. Players first: group members always (the
@@ -2812,6 +2981,7 @@ Json World::state(uint32_t id) {
         e["clan"]=s.value("clan",0);e["kabadayi"]=s.value("kabadayi",false);
         if(!s.at("buffs").empty())e["debuffs"]=shown_effects(s.at("buffs")); // the bearer's effect icons on its target/party frame
         if(s.contains("guild") && !s.at("guild").is_null())e["guild"]=s.at("guild").at("name");
+        if(const auto through=portal_of.find(other);through!=portal_of.end())e["portal"]=through->second; // wave 16: seen through this door, own zone frame
         const size_t bytes=e.dump().size()+1;
         if(stranger && used+bytes>65533)continue;
         used+=bytes;result["entities"].push_back(std::move(e));
@@ -2833,6 +3003,16 @@ Json World::state(uint32_t id) {
         if(!n.debuffs.empty())entity["debuffs"]=shown_effects(n.debuffs); // target frame icons
         // NONCANONICAL seamless doors (wave 15): the target zone's registry row, so the client can decode it before the jump.
         if(const auto door=n.definition.find("door");door!=n.definition.end())if(const auto& z=config_.at("zones").at(door->at("to").get<std::string>());z.contains("source_registry_id"))entity["destination"]=z.at("source_registry_id");
+        if(const auto through=portal_of.find(other);through!=portal_of.end())entity["portal"]=through->second;
+        else if(const auto p=portals_.find(other);p!=portals_.end()) { // wave 16 see-through door, oriented for this player (entering = left of a->b)
+            const auto& pd=n.definition.at("door").at("portal"); const Json threshold=Json::array({Json::array({p->second.ax,p->second.ay}),Json::array({p->second.bx,p->second.by})});
+            const auto to=a.peek.find(other); // peek: window() above (open, in view, partner present)
+            if(to==a.peek.end()){const auto shut=door_gate(id,other);entity["portal"]={{"open",false},{"reason",shut?shut->second:"Bu geçitten şu anda geçilemiyor."},{"threshold",threshold},{"floor",Json::array({pd.at("floor")})},{"height",pd.at("height")},{"apron",Json::array({p->second.apron})}};}
+            else { const auto exit=exit_door(other,to->second); const auto& e=portals_.at(exit);
+                entity["portal"]={{"open",true},{"zone",to->second},{"registry",config_.at("zones").at(to->second).value("source_registry_id",Json(nullptr))},{"threshold",threshold},
+                    {"exit",Json::array({Json::array({e.bx,e.by}),Json::array({e.ax,e.ay})})},{"floor",Json::array({pd.at("floor"),npcs_.at(exit).definition.at("door").at("portal").at("floor")})},{"height",pd.at("height")},
+                    {"apron",Json::array({p->second.apron,e.apron})}}; } // walkable approach depth before the threshold / the exit (no grid support there)
+        }
         Json added=Json::object();size_t bytes=entity.dump().size()+1;
         const auto add=[&](const std::string& item){if(catalog_items.contains(item) || added.contains(item))return;catalog(added,item);bytes+=Json(item).dump().size()+added.at(item).dump().size()+2;};
         for(const auto& item:n.definition.at("shop"))add(item.get<std::string>());
@@ -2843,6 +3023,11 @@ Json World::state(uint32_t id) {
         for(const auto& quest:offered){const auto& q=quest.get_ref<const std::string&>();if(catalog_quests.contains(q) || added_quests.contains(q))continue;const auto& definition=config_.at("quests").at(q);added_quests[q]=definition;bytes+=Json(q).dump().size()+definition.dump().size()+2;for(const auto& v:definition.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,own_class))add(v.at("item").get<std::string>());}
         if(used+bytes>65533)continue;
         used+=bytes;result["entities"].push_back(std::move(entity));catalog_items.update(added);catalog_quests.update(added_quests);
+    }
+    { // A linked row must name a door of this frame (client validate_state): drop rows whose door the byte budget cut.
+        auto& list=result["entities"]; std::set<uint32_t> doors;
+        for(const auto& e:list)if(e.contains("portal") && e.at("portal").is_object())doors.insert(e.at("id").get<uint32_t>());
+        list.erase(std::remove_if(list.begin(),list.end(),[&](const Json& e){return e.contains("portal") && e.at("portal").is_number() && !doors.contains(e.at("portal").get<uint32_t>());}),list.end());
     }
     const auto baseline=result.dump().size();
     if(baseline>65533)throw std::logic_error("validated state schema exceeds protocol envelope");
@@ -3233,7 +3418,7 @@ int World::arena_power(const Json& s) const {
 }
 void World::vacated(const std::string& zone, bool any) {
     if (!any && !config_.at("zones").at(zone).contains("instance_of")) return;
-    for (const auto& [id,b] : actors_) if (b.character.at("state").at("zone") == zone) return;
+    for (const auto& [id,b] : actors_) if (b.character.at("state").at("zone") == zone || std::any_of(b.peek.begin(), b.peek.end(), [&](const auto& p) { return p.second == zone; })) return; // wave 16: nor while seen through a door
     // The next group finds a fresh copy: every monster, Şef, banner and node back home at full health, corpses and loot gone.
     for (auto& [id,n] : npcs_) if (!n.master && n.definition.at("zone") == zone) {
         index(id,zone,n.x,n.y,false); n.x = n.definition.at("x"); n.y = n.definition.at("y"); index(id,zone,n.x,n.y,true);

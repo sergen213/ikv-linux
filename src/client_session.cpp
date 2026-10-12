@@ -316,6 +316,17 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
     array_limit(entities, 96);
     std::array<std::uint32_t, 96> entity_ids{};
     const auto entity_end = entity_ids.begin() + static_cast<std::ptrdiff_t>(entities.size());
+    // NONCANONICAL wave-16 doorways (world.cpp state()): a door's "portal" record, oriented for this observer, and the
+    // linked rows behind open ones, tagged with that door's id.
+    std::array<std::uint32_t, 96> open_doors{}, linked_tags{};
+    std::size_t open_count = 0, tag_count = 0;
+    const auto point = [](const Json& value) {
+        if (!value.is_array() || value.size() != 2) invalid();
+        return std::array{integer(value[0], -coordinate_limit, coordinate_limit), integer(value[1], -coordinate_limit, coordinate_limit)};
+    };
+    const auto segment = [&](const Json& value) {
+        if (!value.is_array() || value.size() != 2 || point(value[0]) == point(value[1])) invalid();
+    };
     for (std::size_t i = 0; i < entities.size(); ++i) {
         const auto& entity = entities[i];
         if (!entity.is_object()) invalid();
@@ -330,6 +341,27 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
             integer(entity.at("source_class"), 1, 65535); // classes.dat classid reaches 527
             if (entity.contains("destination")) { if (kind != "door") invalid(); integer(entity.at("destination"), 0, 70); } // NONCANONICAL seamless door target row
         } else invalid();
+        if (const auto portal = entity.find("portal"); portal != entity.end() && portal->is_object()) {
+            if (kind != "door") invalid();
+            const bool open = portal->at("open").get<bool>();
+            segment(portal->at("threshold"));
+            const auto& floor = portal->at("floor");
+            if (!floor.is_array() || floor.size() != (open ? 2U : 1U)) invalid();
+            for (const auto& y : floor) integer(y, -coordinate_limit, coordinate_limit);
+            integer(portal->at("height"), 1, 100000);
+            if (const auto apron = portal->find("apron"); apron != portal->end()) { // walkable strip depth before each threshold
+                if (!apron->is_array() || apron->size() != floor.size()) invalid();
+                for (const auto& depth : *apron) integer(depth, 0, 100000);
+            }
+            if (open) {
+                text(portal->at("zone"), 128); segment(portal->at("exit"));
+                if (const auto& registry = portal->at("registry"); !registry.is_null()) integer(registry, 0, 70); // null: no source scene
+                open_doors[open_count++] = entity_ids[i];
+            } else text(portal->at("reason"), 512);
+        } else if (portal != entity.end()) {
+            if (kind == "door" || entity.contains("destination")) invalid(); // linked doors are not sent; no nested portals
+            linked_tags[tag_count++] = static_cast<std::uint32_t>(integer(*portal, 1, UINT32_MAX));
+        }
         if (!valid_appearance(entity.at("appearance"))) invalid();
         visual_equipment(entity.at("equipment"));
         coordinates(entity, bounds);
@@ -337,6 +369,11 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         if (!entity.at("alive").is_boolean() ||
             entity.at("alive").get<bool>() != (entity.at("hp").get<std::int64_t>() > 0)) invalid();
     }
+    // A linked row must name an open portal door of the same state.
+    for (std::size_t i = 0; i < tag_count; ++i)
+        if (std::find(open_doors.begin(), open_doors.begin() + static_cast<std::ptrdiff_t>(open_count), linked_tags[i]) ==
+            open_doors.begin() + static_cast<std::ptrdiff_t>(open_count)) invalid();
+    if (body.contains("crossed")) { const auto& crossed = body.at("crossed"); if (!crossed.is_object()) invalid(); integer(crossed.at("door"), 1, UINT32_MAX); }
     std::sort(entity_ids.begin(), entity_end);
     if (std::adjacent_find(entity_ids.begin(), entity_end) != entity_end) invalid();
     if (body.contains("party")) { // NONCANONICAL connected party (world.cpp state()): the other group members, any zone
@@ -690,17 +727,21 @@ void ClientSession::pump(int wait_ms, const std::function<void(Type)>& on_messag
     }
 }
 
-void ClientSession::destination(std::int32_t x, std::int32_t y) {
+void ClientSession::destination(std::int32_t x, std::int32_t y, std::uint32_t door) {
     if (x < -coordinate_limit || x > coordinate_limit || y < -coordinate_limit || y > coordinate_limit)
         throw std::invalid_argument("invalid destination");
     if (self == 0 || !impl_->state_seen || eof || impl_->stopping) throw std::runtime_error("session is not ready");
     if (!contains(impl_->bounds, x, y)) throw std::invalid_argument("destination outside current zone");
     if (impl_->sequence == UINT32_MAX) throw std::runtime_error("input sequence exhausted");
+    if (door && std::none_of(state.at("entities").begin(), state.at("entities").end(), [&](const Json& e) {
+            return e.at("id") == door && e.contains("portal") && e.at("portal").is_object() && e.at("portal").at("open") == true; }))
+        throw std::invalid_argument("destination door is not an open portal");
     Message message{};
     message.type = Type::destination;
     message.sequence = impl_->sequence + 1;
     message.x = x;
     message.y = y;
+    message.id = door; // protocol: a nonzero id appends the u32 portal door (18-byte body)
     impl_->queue(message);
     ++impl_->sequence;
 }

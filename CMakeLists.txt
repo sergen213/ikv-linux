@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.5.0 LANGUAGES CXX)
+project(ikv_native VERSION 0.6.0 LANGUAGES CXX)
 
 if(NOT UNIX)
     message(FATAL_ERROR "The native implementation targets Linux/POSIX.")
@@ -67,12 +67,19 @@ if(IKV_BUILD_CLIENT)
         target_sources(ikv-renderers PRIVATE src/renderer_vk.cpp src/vulkan_rt.cpp)
         target_link_libraries(ikv-renderers PUBLIC Vulkan::Vulkan)
         target_compile_definitions(ikv-renderers PRIVATE IKV_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan")
-        set(ikv_vulkan_shaders scene.vert scene.frag scene_rt.frag scene_rt_guided.frag shadow.vert shadow.frag fullscreen.vert temporal.frag post.frag overlay.frag particle.vert particle.frag contour.vert contour.frag glow.frag)
+        set(ikv_vulkan_shaders scene.vert scene_portal.vert seal.vert scene.frag scene_rt.frag scene_rt_guided.frag shadow.vert shadow.frag fullscreen.vert temporal.frag post.frag overlay.frag particle.vert particle.frag contour.vert contour.frag glow.frag)
         set(ikv_spirv)
         foreach(shader IN LISTS ikv_vulkan_shaders)
             set(output "${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan/${shader}.spv")
             set(shader_includes)
-            if(shader MATCHES "^(scene|shadow|particle|contour)\\.vert$" OR shader MATCHES "^scene.*\\.frag$" OR
+            # Wave-16 portal view: scene.vert writing gl_ClipDistance[0..4] (needs shaderClipDistance).
+            set(source "${shader}")
+            set(defines)
+            if(shader STREQUAL "scene_portal.vert")
+                set(source scene.vert)
+                set(defines -DIKV_PORTAL_CLIP)
+            endif()
+            if(shader MATCHES "^(scene|scene_portal|shadow|particle|contour)\\.vert$" OR shader MATCHES "^scene.*\\.frag$" OR
                shader STREQUAL "post.frag" OR shader STREQUAL "overlay.frag" OR shader STREQUAL "temporal.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl")
             endif()
@@ -87,9 +94,9 @@ if(IKV_BUILD_CLIENT)
             endif()
             add_custom_command(OUTPUT "${output}"
                 COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan"
-                COMMAND "${IKV_GLSLC}" --target-env=vulkan1.2 -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/${shader}" -o "${output}"
-                DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/${shader}" ${shader_includes}
+                COMMAND "${IKV_GLSLC}" --target-env=vulkan1.2 ${defines} -I "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/${source}" -o "${output}"
+                DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/${source}" ${shader_includes}
                 VERBATIM)
             list(APPEND ikv_spirv "${output}")
         endforeach()
@@ -142,7 +149,8 @@ if(IKV_BUILD_ASSET_TOOLS)
     add_executable(ikv-content-generator tools/generate_content.cpp)
     target_link_libraries(ikv-content-generator PRIVATE ikv-world)
     target_compile_definitions(ikv-content-generator PRIVATE IKV_PLACEMENTS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/placements.json"
-                                                             IKV_QUESTS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/quests_original.json")
+                                                             IKV_QUESTS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/quests_original.json"
+                                                             IKV_PORTALS="${CMAKE_CURRENT_SOURCE_DIR}/tools/data/portals.json")
     list(APPEND ikv_targets ikv-content-generator)
 endif()
 if(IKV_BUILD_LAUNCHER)
@@ -205,8 +213,9 @@ if(BUILD_TESTING)
     target_link_libraries(world-test PRIVATE ikv-world)
     list(APPEND ikv_targets world-test)
     add_test(NAME world-state COMMAND world-test "${CMAKE_CURRENT_SOURCE_DIR}/config/gameplay.json" "${CMAKE_CURRENT_SOURCE_DIR}/tests/independent_content.json")
-    # Measured 2026-10-10: 4.8 s Debug, 21.8 s ASan/UBSan (bot, Şef, idle-walk and clan suites added); not a hang.
-    set_tests_properties(world-state PROPERTIES TIMEOUT 90)
+    # Measured 2026-10-10: 4.8 s Debug, 21.8 s ASan/UBSan (bot, Şef, idle-walk and clan suites added); not a hang. 2026-10-11 wave 16
+    # adds walks over the real config and original grids: 9.1 -> 14.1 s in build-full.
+    set_tests_properties(world-state PROPERTIES TIMEOUT 180)
     if(IKV_BUILD_ASSET_TOOLS)
         add_test(NAME asset-boundaries COMMAND ikv-assets --self-test)
         set_tests_properties(asset-boundaries PROPERTIES TIMEOUT 15)

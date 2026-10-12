@@ -257,8 +257,10 @@ struct Script {
             if (!e.is_object() || !e.contains("tick") || !e.at("tick").is_number_integer())
                 throw std::invalid_argument("command requires integer relative snapshot tick");
             const int tick=e.at("tick").get<int>();
-            if (tick<1 || tick<previous || e.contains("action")+e.contains("destination")+e.contains("effect")+e.contains("click")!=1)
-                throw std::invalid_argument("commands must be sorted and contain one action, destination, effect or click");
+            if (tick<1 || tick<previous || e.contains("action")+e.contains("destination")+e.contains("effect")+e.contains("click")+e.contains("screenshot")!=1)
+                throw std::invalid_argument("commands must be sorted and contain one action, destination, effect, click or screenshot");
+            if (e.contains("screenshot") && (!e.at("screenshot").is_string() || e.at("screenshot").get<std::string>().empty() || e.at("screenshot").get<std::string>().size()>1024))
+                throw std::invalid_argument("screenshot command requires an output path");
             if (e.contains("click") && (!e.at("click").is_array() || e.at("click").size()!=2 || !e.at("click")[0].is_number() || !e.at("click")[1].is_number()))
                 throw std::invalid_argument("click command requires [x, y] drawable pixels");
             if (e.contains("effect") && (!e.at("effect").is_string() || e.at("effect").get<std::string>().size()>64))
@@ -273,19 +275,24 @@ struct Script {
                     d.at("x").get<std::int64_t>() < -ikv::coordinate_limit || d.at("x").get<std::int64_t>() > ikv::coordinate_limit ||
                     d.at("y").get<std::int64_t>() < -ikv::coordinate_limit || d.at("y").get<std::int64_t>() > ikv::coordinate_limit)
                     throw std::invalid_argument("destination exceeds custom protocol coordinate limit");
+                if (d.contains("door") && (!d.at("door").is_number_unsigned() || d.at("door").get<std::uint64_t>()>UINT32_MAX))
+                    throw std::invalid_argument("destination door must be a portal door id");
             }
             previous=tick;
         }
     }
     // "effect": local visual test trigger on the player (original effects.xml/particle_systems.xml name);
-    // "click": a left click at drawable pixel [x, y] through the normal picking path.
-    template<class Effect,class Click> void run(int count,ikv::ClientSession& session,Effect&& effect,Click&& click) {
+    // "click": a left click at drawable pixel [x, y] through the normal picking path; "screenshot": the next rendered frame;
+    // a destination "door": walk through that open portal door (x, y in its linked zone).
+    template<class Effect,class Click,class Shot> void run(int count,ikv::ClientSession& session,Effect&& effect,Click&& click,Shot&& shot) {
         while (next<entries.size() && entries[next].at("tick").get<int>()<=count) {
             const auto& e=entries[next++];
             if (e.contains("action")) session.action(e.at("action"));
             else if (e.contains("effect")) effect(e.at("effect").get<std::string>());
             else if (e.contains("click")) click(e.at("click")[0].get<float>(),e.at("click")[1].get<float>());
-            else session.destination(e.at("destination").at("x").get<std::int32_t>(),e.at("destination").at("y").get<std::int32_t>());
+            else if (e.contains("screenshot")) shot(e.at("screenshot").get<std::string>());
+            else session.destination(e.at("destination").at("x").get<std::int32_t>(),e.at("destination").at("y").get<std::int32_t>(),
+                                     e.at("destination").value("door",0u));
         }
     }
 };
@@ -305,7 +312,7 @@ int headless(const Options& o,const Secret& secret) {
         session.pump(10,[&](ikv::Type type) {
             if (type==ikv::Type::snapshot) {
                 ++count; print_snapshot(session);
-                if (!finishing) script.run(count,session,[](const std::string&){},[](float,float){}); // headless: no visuals
+                if (!finishing) script.run(count,session,[](const std::string&){},[](float,float){},[](const std::string&){}); // headless: no visuals
                 if (o.ticks && count>=o.ticks && !finishing) { finishing=true; session.stop(); }
             } else if (type==ikv::Type::state) {
                 std::cout << Json{{"type","state"},{"state",session.state}}.dump() << '\n' << std::flush;
@@ -378,6 +385,54 @@ std::array<float,3> transform_point(const ikv::Transform& t,const ikv::Vertex& v
 std::array<float,3> subtract(const std::array<float,3>& a,const std::array<float,3>& b) { return {a[0]-b[0],a[1]-b[1],a[2]-b[2]}; }
 std::array<float,3> cross(const std::array<float,3>& a,const std::array<float,3>& b) { return {a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]}; }
 float dot(const std::array<float,3>& a,const std::array<float,3>& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+// NONCANONICAL wave-16 doorways: zones joined at a door share one rigid map (y rotation + translation, world units).
+std::array<float,3> move_point(const ikv::Matrix4& m,const std::array<float,3>& p) {
+    return {m[0]*p[0]+m[4]*p[1]+m[8]*p[2]+m[12],m[1]*p[0]+m[5]*p[1]+m[9]*p[2]+m[13],m[2]*p[0]+m[6]*p[1]+m[10]*p[2]+m[14]};
+}
+std::array<float,3> turn(const ikv::Matrix4& m,const std::array<float,3>& v) { return {m[0]*v[0]+m[8]*v[2],v[1],m[2]*v[0]+m[10]*v[2]}; }
+// The point-on-segment rule of world portal records: rotation theta (x' = c·x − s·z, z' = s·x + c·z) then translation.
+ikv::Matrix4 rigid_map(float theta,const std::array<float,3>& t) {
+    const float c=std::cos(theta),s=std::sin(theta);
+    return {c,0,s,0, 0,1,0,0, -s,0,c,0, t[0],t[1],t[2],1};
+}
+ikv::Matrix4 inverse_rigid(const ikv::Matrix4& m) {
+    ikv::Matrix4 r{m[0],0,m[8],0, 0,1,0,0, m[2],0,m[10],0, 0,0,0,1};
+    const auto t=turn(r,{m[12],0,m[14]});
+    r[12]=-t[0]; r[13]=-m[13]; r[14]=-t[2];
+    return r;
+}
+using Quad=std::array<std::array<float,3>,4>; // a, b, b+h, a+h: normal cross(b−a, h) points into the destination
+// Ray parameter where origin+t·ray passes through the quad (either direction), or nothing.
+std::optional<float> ray_quad(const Quad& q,const std::array<float,3>& origin,const std::array<float,3>& ray) {
+    const auto e1=subtract(q[1],q[0]),e3=subtract(q[3],q[0]),n=cross(e1,e3);
+    const float facing=dot(ray,n);
+    if (std::abs(facing)<1e-9f) return {};
+    const float t=dot(subtract(q[0],origin),n)/facing;
+    if (!(t>=0)) return {};
+    const std::array<float,3> p{origin[0]+ray[0]*t,origin[1]+ray[1]*t,origin[2]+ray[2]*t};
+    const auto d=subtract(p,q[0]);
+    const float u=dot(d,e1)/dot(e1,e1),v=dot(d,e3)/dot(e3,e3);
+    if (u<0 || u>1 || v<0 || v>1) return {};
+    return t;
+}
+// Behind the opening: past the quad plane, within its width (+10 %) and 15 units deep. An actor between two server ticks
+// (or a history just carried through the door) stands here; its ground and camera belong to the other zone.
+bool beyond_quad(const Quad& q,const std::array<float,3>& p) {
+    const auto e1=subtract(q[1],q[0]); auto n=cross(e1,subtract(q[3],q[0])); n[1]=0;
+    const float length=std::sqrt(dot(n,n)); if (length<=0) return false;
+    const auto d=subtract(p,q[0]);
+    const float depth=dot(d,n)/length,u=(d[0]*e1[0]+d[2]*e1[2])/(e1[0]*e1[0]+e1[2]*e1[2]);
+    return depth>0 && depth<15 && u>-.1f && u<1.1f;
+}
+// Server's walkable apron in front of a threshold (approach side, opening width × depth): its ground is the portal floor.
+bool on_apron(const Quad& q,float depth,const std::array<float,3>& p) {
+    if (depth<=0) return false;
+    const auto e1=subtract(q[1],q[0]); auto n=cross(e1,subtract(q[3],q[0])); n[1]=0;
+    const float length=std::sqrt(dot(n,n)); if (length<=0) return false;
+    const auto d=subtract(p,q[0]);
+    const float into=dot(d,n)/length,u=(d[0]*e1[0]+d[2]*e1[2])/(e1[0]*e1[0]+e1[2]*e1[2]);
+    return into<=.05f && into>=-depth-.05f && u>=-.02f && u<=1.02f;
+}
 // Nearest ray parameter against one recovered source collider class (walk set or 'nocamera' blockers).
 template<class Accept>
 std::optional<float> source_ray(const ikv::Scene& scene,bool support,const std::array<float,3>& origin,const std::array<float,3>& ray,Accept accept) {
@@ -444,7 +499,12 @@ float unoccluded_distance(const ikv::Scene& scene,const ikv::Camera& camera) {
 class Application {
     Options options_;
     const Secret& secret_;
-    ikv::Scene scene_;
+    // Zone Scenes at stable addresses (wave 16). scene_ is the gameplay zone, home of the own-zone actors; the others are
+    // portal destinations and the nearest instant door's (at most 2: the renderer keeps primary + 2 resident). retired_
+    // holds evicted ones for the renderer's next frames. Declared before renderer_, so the provider is destroyed first.
+    std::vector<std::unique_ptr<ikv::Scene>> scenes_;
+    ikv::Scene* scene_=nullptr;
+    std::vector<std::pair<std::unique_ptr<ikv::Scene>,int>> retired_;
     SDL_Window* window_=nullptr;
     std::unique_ptr<ikv::Renderer> renderer_;
     std::unique_ptr<ikv::ClientUI> ui_;
@@ -526,6 +586,8 @@ class Application {
     std::string trade_seen_phase_;
     bool trade_pending_present_=false;
     Json model_map_=Json::object(),sound_map_=Json::object();
+    // into: install target other than the actor's home (a mirror in a portal/instant-door destination).
+    struct AssemblyRequest { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::string member; ikv::SourceAppearance source; ikv::Scene* into=nullptr; };
     struct ActorState {
         struct Sample { std::uint32_t tick=0; std::int32_t x=0,z=0; };
         std::uint32_t id=0,source_class=0;
@@ -545,10 +607,15 @@ class Application {
         std::array<float,3> bounds{}; // classes.dat half extents; the hover/click ray box (entity_at)
         bool skin_offscreen=false; // hold_offscreen_skins: last frame's skin was held because the actor was out of view
         std::uint64_t assembly=0; // serial of the latest model request (attach_models); older worker results are dropped
+        // Wave 16: the Scene the actor's model is installed in (its zone: the gameplay zone or one behind an open portal)
+        // and that zone's registry id; positions/history are in that zone's frame.
+        ikv::Scene* home=nullptr; unsigned zone=0;
+        Clock::time_point gone{}; // left the view at (its model kept hidden for actor_grace); zero while in view
+        AssemblyRequest request; // the latest model request, re-sent (into) for each mirror
     };
+    static constexpr auto actor_grace=std::chrono::seconds(5); // ponytail: fixed; an NPC pacing the view edge slower than this still churns
     std::vector<ActorState> actors_;
-    struct AssemblyRequest { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::string member; ikv::SourceAppearance source; };
-    struct AssemblyResult { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::optional<ikv::PreparedActor> actor; std::string error; std::exception_ptr fatal; };
+    struct AssemblyResult { std::uint64_t serial=0; std::shared_ptr<const Json> data; std::optional<ikv::PreparedActor> actor; std::string error; std::exception_ptr fatal; ikv::Scene* into=nullptr; };
     struct AssemblyBatch { std::vector<AssemblyResult> results; std::vector<ikv::Texture> textures; }; // textures: decoded once per batch
     std::vector<AssemblyRequest> assembly_queue_;
     std::uint64_t assembly_serial_=0;
@@ -576,6 +643,7 @@ class Application {
     std::vector<std::pair<std::uint32_t,int>> floater_hp_; // last presented entity hp
     ikv::assets::DdsImage zone_map_{},eye_{};
     unsigned zone_map_zone_=UINT32_MAX;
+    std::future<ikv::assets::DdsImage> map_next_; unsigned map_next_zone_=UINT32_MAX; // wave 16: a held zone's map, decoded ahead
     bool map_open_=true,camera_locked_=false,cursors_loaded_=false,loading_=false,chat_filter_open_=false;
     int map_zoom_=1,cursor_=-1,chat_previous_=3;
     std::array<int,2> map_center_{};
@@ -585,9 +653,34 @@ class Application {
     struct LoadingArt { ikv::assets::DdsImage art{},logo{}; std::vector<ikv::assets::DdsImage> frames; } loading_art_;
     ikv::Scene loading_scene_; // empty scene: the renderer presents only the loading overlay
     float loading_progress_=0;
-    // NONCANONICAL seamless doors (wave 15): the nearest door's destination Scene is decoded ahead on a worker (one extra Scene
-    // at most), and a zone change during play swaps under a scene fade instead of loadingN.jpg (the first load keeps it).
-    std::future<ikv::Scene> prefetch_; unsigned prefetch_source_=0;
+    // NONCANONICAL doors (waves 15/16). The zones behind open portal doors in range and the nearest instant door's (40 m, kept
+    // to 80 m) decode on a worker, one at a time, into scenes_ and are made GPU-resident with a self mirror: a walk-through
+    // (state "crossed") flips the gameplay zone with no load, an instant door swaps in one frame. Any other zone change, or a
+    // destination not yet resident, fades (fade_out_..); the first load shows loadingN.jpg.
+    std::future<ikv::Scene> decoding_; unsigned decoding_source_=0;
+    // A portal door of the gameplay zone, from its state record, oriented for this player: to_linked maps gameplay-zone world
+    // coordinates into the linked zone's, quad is the opening (a, b, b+h, a+h) on this side, back the same opening seen from
+    // the linked side (in its coordinates). scene: the held linked Scene, resolved each frame; poses: its drawn actors.
+    // apron/apron_exit: Server's walkable strip (opening width × depth, world units) on the approach side of each threshold,
+    // ground = the portal floor (the walk grid has no support there).
+    struct Link { std::uint32_t door=0; unsigned registry=0; bool open=false; float theta=0,distance=0,apron=0,apron_exit=0; ikv::Matrix4 to_linked{},to_home{}; Quad quad{},back{}; ikv::Scene* scene=nullptr; std::vector<ikv::RenderEntity> poses; };
+    std::vector<Link> links_; unsigned links_zone_=0; // links_zone_: the zone whose state links_ came from
+    std::uint32_t view_door_=0; bool view_beyond_=false,shown_beyond_=false; // the open door the camera works through this frame; the eye stands beyond it
+    std::vector<ikv::PortalView> portals_;
+    // Copies of an actor's model in a held Scene other than its home (by model serial): the self in every held zone, another
+    // player within mirror_reach of an open door in the zone across it. A walk through the door promotes the mirror
+    // (attach_models), and a body straddling the opening is drawn on both sides of it.
+    struct Mirror { ikv::Scene* zone=nullptr; std::uint32_t id=0; std::uint64_t serial=0; };
+    std::vector<Mirror> mirrors_;
+    std::vector<ikv::RenderEntity> mirrored_,drawn_; // this frame's mirror poses in the gameplay zone; poses_ plus those
+    static constexpr float mirror_reach=30; // ponytail: fixed reach (~1.5 s of running); scale with speed if a sprinter outruns its assembly
+    bool attach_effects_=false; // zone particle emitters follow a swapped gameplay zone one frame later
+    std::optional<Clock::time_point> swap_at_; double swap_worst_ms_=0; const char* swap_kind_=""; // evidence of a no-fade swap
+    // Swap-window evidence: each frame's stages since the previous present (net+input, apply_pending, update_scenes, audio,
+    // drive_zones with the renderer's make_resident/evict, draw prep, render); the worst frame's split and the window
+    // median are logged with "Portal swap".
+    Clock::time_point stage_at_{}; std::array<float,7> stages_{},swap_stages_{}; std::vector<float> swap_frames_;
+    void stage(std::size_t i) { const auto t=Clock::now(); stages_[i]=std::chrono::duration<float,std::milli>(t-stage_at_).count(); stage_at_=t; }
     std::optional<Clock::time_point> fade_out_,fade_in_,zone_message_; // fade_out_: old scene fading, swap pending
     Clock::time_point last_present_{},black_since_{}; bool swapped_=false; const char* transition_prefetch_="";
     double transition_black_ms_=0,transition_first_ms_=0,transition_worst_ms_=0; // evidence log at the end of the fade-in
@@ -607,6 +700,7 @@ class Application {
     int quest_text_scroll_=0; // Görevler lower panel (description) scroll
 public:
     Application(Options options,const Secret& secret):options_(std::move(options)),secret_(secret),script_(options_.commands) {
+        scene_=scenes_.emplace_back(std::make_unique<ikv::Scene>()).get(); // empty until the first authoritative zone
         if (!SDL_Init(SDL_INIT_VIDEO|SDL_INIT_AUDIO)) throw std::runtime_error(std::string("SDL initialization failed: ")+SDL_GetError());
         try {
             if (!options_.model_map.empty()) model_map_=read_json(options_.model_map,65536);
@@ -657,16 +751,16 @@ public:
             if (reconnect_ && !quit_) { reconnect_=false; connect(); }
             if (session_ && !disconnected_) {
                 try {
-                    pump_network();
-                    apply_pending();
+                    pump_network(); stage(0);
+                    apply_pending(); stage(1);
                     if (session_->eof && !quit_) disconnect("Sunucu bağlantıyı kapattı. Yeniden bağlanabilir veya başlatıcıda giriş yapabilirsiniz.");
                 } catch (const std::exception& e) {
                     if (options_.ticks || !renderer_) throw;
                     disconnect(std::string("Bağlantı hatası: ")+e.what());
                 }
             }
-            ikv::update_scene(scene_,elapsed_);
-            audio_->update();
+            update_scenes(); stage(2);
+            audio_->update(); stage(3);
             try { draw(dt); }
             catch (const ProgressConnectionError& e) {
                 if (options_.ticks || !renderer_) throw;
@@ -693,14 +787,30 @@ private:
         const bool changed_source=!accepted_source_ || *accepted_source_!=source;
         const auto tick=state.at("tick").get<std::uint32_t>();
         PendingMutation mutation; mutation.source=source; mutation.reset=changed_source;
-        if (changed_source) { accepted_actors_.clear(); if (!zone_message_) zone_message_=Clock::now(); }
-        auto visit=[&](std::uint32_t id,const Json& given,const Json& status,bool pc) {
+        // Wave-16 walk-through: the zone behind the crossed door is held and resident, so presentation carries on in it. Its rows
+        // are complete like any zone change's (reset); actors still listed keep their models where they are installed.
+        if (const auto crossed=state.find("crossed"); changed_source && crossed!=state.end())
+            if (const auto* next=held(source); next && renderer_ && renderer_->resident(*next)) mutation.flip=crossed->at("door").get<std::uint32_t>();
+        if (changed_source) { accepted_actors_.clear(); if (!mutation.flip && !zone_message_) zone_message_=Clock::now(); }
+        // A row's zone: the state's, or for a row seen through an open portal door ("portal" tag) the zone behind it. A linked
+        // row waits (unaccepted, so it comes back as new) until that zone's Scene is held.
+        std::vector<std::uint32_t> waiting;
+        const auto zone_of=[&](const Json& entity)->std::optional<unsigned> {
+            const auto tag=entity.find("portal");
+            if (tag==entity.end() || tag->is_object()) return source;
+            for (const auto& door:state.at("entities")) if (door.at("id")==*tag) {
+                const auto& registry=door.at("portal").at("registry");
+                if (!registry.is_null() && held(registry.get<unsigned>())) return registry.get<unsigned>();
+            }
+            return {};
+        };
+        auto visit=[&](std::uint32_t id,const Json& given,const Json& status,bool pc,unsigned zone) {
             // Karakter Detay Mes. (0x5eabc0; 004a9614 -> 0043fd40, 0043fe40 in range): another PC farther than pref*170 scene
             // units wears the sex's default set (face/hair 0: K_BST_NIC/E_BST_MEL, SAC_001_SIY; Mavi Kot Pantolon 5211/5219,
             // İnce Deri Ayakkabı 5103/4100, generic body/hands) instead of its equipment. Single threshold: the in-range
             // restore factor [0x77c31c] has no static writer.
             Json simplified;
-            if (pc && id!=session_->self) {
+            if (pc && id!=session_->self && zone==source) {
                 const auto& own=character_state(state);
                 if (std::hypot(status.at("x").get<double>()-own.value("x",0.0),status.at("y").get<double>()-own.value("y",0.0))>options_.prefs[0]*170000.0) {
                     const bool male=given.at("appearance").value("sex",1u)==1;
@@ -716,27 +826,32 @@ private:
             bool changed=old==accepted_actors_.end();
             if (!changed) {
                 const auto& row=**old;
-                changed=row.at("hp")!=hp || row.at("alive")!=alive || row.at("pc")!=pc;
+                changed=row.at("hp")!=hp || row.at("alive")!=alive || row.at("pc")!=pc || row.at("zone")!=zone;
                 for (const auto* key:{"appearance","equipment","class_id","source_class","source_uid","kind","posture"})
                     if (row.contains(key)!=data.contains(key) ||
                         (data.contains(key) && row.at(key)!=data.at(key))) changed=true;
             }
             if (!changed) return;
             auto row=std::make_shared<Json>(Json{{"id",id},{"pc",pc},{"hp",hp},{"alive",alive},
-                {"x",status.at("x")},{"y",status.at("y")}});
+                {"x",status.at("x")},{"y",status.at("y")},{"zone",zone}});
             for (const auto* key:{"appearance","equipment","class_id","source_class","source_uid","kind","posture"})
                 if (data.contains(key)) (*row)[key]=data.at(key);
             mutation.actors.push_back(row); mutation.ticks.push_back(tick);
             if (old==accepted_actors_.end()) accepted_actors_.push_back(std::move(row));
             else *old=std::move(row);
         };
-        visit(session_->self,state.at("character"),character_state(state),true);
+        visit(session_->self,state.at("character"),character_state(state),true,source);
         const auto& visible=state.at("entities");
         for (const auto& entity:visible)
-            if (entity.at("id")!=session_->self) visit(entity.at("id").get<std::uint32_t>(),entity,entity,entity.at("kind")=="player");
+            if (entity.at("id")!=session_->self) {
+                const auto id=entity.at("id").get<std::uint32_t>();
+                if (const auto zone=zone_of(entity)) visit(id,entity,entity,entity.at("kind")=="player",*zone);
+                else waiting.push_back(id);
+            }
         std::erase_if(accepted_actors_,[&](const auto& row) {
             const auto id=row->at("id").template get<std::uint32_t>();
-            const bool removed=id!=session_->self && std::none_of(visible.begin(),visible.end(),[&](const auto& entity){return entity.at("id")==id;});
+            const bool removed=id!=session_->self && (std::find(waiting.begin(),waiting.end(),id)!=waiting.end() ||
+                std::none_of(visible.begin(),visible.end(),[&](const auto& entity){return entity.at("id")==id;}));
             if (removed) mutation.removed.push_back(id);
             return removed;
         });
@@ -772,7 +887,8 @@ private:
                 ++snapshot_revision_; ++count_;
                 if (!quit_) script_.run(count_,*session_,[&](const std::string& name){ if (scripted_effects_.size()<64) scripted_effects_.push_back(name); },
                                         // A scripted click takes the same path as a real left click: HUD first, then the world.
-                                        [&](float x,float y){ if (!hud_click(x,y) && scene_.source_registry_id && original_ui_cached_) pick(x,y); });
+                                        [&](float x,float y){ if (!hud_click(x,y) && scene_->source_registry_id && original_ui_cached_) pick(x,y); },
+                                        [&](const std::string& path){ screenshot_request_=path; });
                 if (options_.ticks && count_>=options_.ticks && !quit_) leave();
             }
         });
@@ -791,28 +907,40 @@ private:
         return state_pending_ || !pending_mutations_.empty() || snapshot_revision_!=painted_snapshot_revision_;
     }
     void apply_pending() {
+        // Zone particle emitters follow a no-fade swap one frame later (kept off the swap frame).
+        if (attach_effects_) { attach_effects_=false; if (effects_) effects_->attach_scene(*scene_); }
         while (!pending_mutations_.empty()) {
-            const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=pending_mutations_.front().source;
+            const auto& front=pending_mutations_.front();
+            const bool loading=!scene_->source_registry_id || *scene_->source_registry_id!=front.source;
+            // Wave 16: a walk-through always continues in the held zone behind its door; an instant door swaps when the
+            // destination is resident.
+            ikv::Scene* ready=nullptr;
+            if (loading && scene_->source_registry_id && !fade_out_)
+                if (auto* next=held(front.source); next && (front.flip || renderer_->resident(*next))) ready=next;
             // In play the old frame fades out first while the destination decodes; presentation stays frozen until black.
-            if (loading && scene_.source_registry_id) {
+            if (loading && scene_->source_registry_id && !ready) {
                 if (!fade_out_) {
-                    const auto source=pending_mutations_.front().source;
-                    const bool held=prefetch_.valid() && same_scene(prefetch_source_,source);
-                    transition_prefetch_=!held?"miss":prefetch_.wait_for(std::chrono::seconds(0))==std::future_status::ready?"hit":"decoding";
+                    const auto source=front.source;
+                    transition_prefetch_=held(source)?"held":!decoding_.valid() || !same_scene(decoding_source_,source)?"miss":
+                        decoding_.wait_for(std::chrono::seconds(0))==std::future_status::ready?"hit":"decoding";
                     // A jump during a fade-in continues from the shown level instead of flashing the new zone.
                     fade_out_=Clock::now()-std::chrono::duration_cast<Clock::duration>(std::chrono::duration<float>(transition_fade()*fade_seconds));
-                    fade_in_.reset(); swapped_=false; transition_worst_ms_=0; prefetch(source);
+                    fade_in_.reset(); swapped_=false; transition_worst_ms_=0;
+                    if (!held(source) && !(decoding_.valid() && same_scene(decoding_source_,source))) decode(source);
                 }
                 // Swap once a fully black frame (world labels hidden) is on screen; the timeout covers frames draw() skips.
                 if (shown_fade_<1 && Clock::now()-*fade_out_<std::chrono::duration<float>(2*fade_seconds)) return;
             }
             auto mutation=std::move(pending_mutations_.front());
             pending_mutations_.pop_front(); pending_bytes_-=mutation.bytes;
-            if (loading && !fade_out_) { begin_loading(); zone_message_.reset(); }
-            if (loading && fade_out_) black_since_=Clock::now();
-            load_authoritative_scene(mutation.source);
-            attach_models(mutation,loading);
-            if (loading) { loading_stage(1); loading_=false; } // the first real frame's GPU upload keeps this frame presented
+            if (ready) swap_zone(*ready,mutation);
+            if (!ready) {
+                if (loading && !fade_out_) { begin_loading(); zone_message_.reset(); }
+                if (loading && fade_out_) black_since_=Clock::now();
+                load_authoritative_scene(mutation.source);
+            }
+            attach_models(mutation,loading && !ready);
+            if (loading && !ready) { loading_stage(1); loading_=false; } // the first real frame's GPU upload keeps this frame presented
             if (loading && fade_out_) { fade_out_.reset(); swapped_=true; } // that upload happens under black (draw())
             for (std::size_t i=0;i<mutation.actors.size();++i) {
                 const auto& row=*mutation.actors[i];
@@ -826,7 +954,7 @@ private:
         const bool changed_state=state_pending_;
         if (changed_state) { state_=session_->state; state_pending_=false; }
         bool changed_snapshot=false;
-        if (snapshot_source_!=scene_.source_registry_id ||
+        if (snapshot_source_!=scene_->source_registry_id ||
             (!state_.empty() && session_->tick<state_.at("tick").get<std::uint32_t>())) {
             players_.clear();
             painted_snapshot_revision_=snapshot_revision_;
@@ -835,7 +963,7 @@ private:
             painted_snapshot_revision_=snapshot_revision_; has_snapshot_=session_->has_snapshot;
             changed_snapshot=true;
         }
-        if (changed_state) { state_changed(); prefetch_doors(); }
+        if (changed_state) state_changed();
         if (changed_snapshot) movement_changed();
     }
     // Instance copies (Er Meydanı 1-20, Migrat/Sığınaklar/Çemberlitaş copies) decode to identical Scenes.
@@ -843,28 +971,152 @@ private:
         const auto &x=ikv::source_scene_descriptor(a),&y=ikv::source_scene_descriptor(b);
         return x.support_id==y.support_id && x.members==y.members && x.environment_key==y.environment_key && x.minute==y.minute && x.lightmap==y.lightmap;
     }
-    // Starts decoding `source` unless its content is already held or decoding, dropping a finished unwanted Scene. Never
-    // blocks the frame: a running decode finishes first, so at most one extra Scene exists.
-    void prefetch(std::optional<unsigned> source) {
-        if (prefetch_.valid() && prefetch_.wait_for(std::chrono::seconds(0))!=std::future_status::ready) return;
-        if (source && prefetch_.valid() && same_scene(prefetch_source_,*source)) return;
-        prefetch_={};
-        if (!source) return;
-        prefetch_source_=*source;
-        prefetch_=std::async(std::launch::async,[root=options_.assets,id=*source]{return ikv::load_source_scene(root,id);});
+    // The held Scene with this content (the gameplay zone included), or nullptr.
+    ikv::Scene* held(unsigned source) const {
+        for (const auto& zone:scenes_) if (zone->source_registry_id && same_scene(*zone->source_registry_id,source)) return zone.get();
+        return nullptr;
     }
-    // The nearest door within 40 m leading to other content; kept until 80 m.
-    // ponytail: fixed radii; scale with run speed if a sprint reaches a door before its decode (~0.3 s) finishes.
-    void prefetch_doors() {
-        if (!scene_.source_registry_id || !state_.contains("entities")) return;
-        const auto& own=character_state(state_);
-        std::optional<unsigned> want; double nearest=80000;
-        for (const auto& e:state_.at("entities")) if (const auto to=e.find("destination"); to!=e.end()) {
-            const double d=std::hypot(e.at("x").get<double>()-own.value("x",0.0),e.at("y").get<double>()-own.value("y",0.0));
-            if (d<nearest && !same_scene(to->get<unsigned>(),*scene_.source_registry_id)) { nearest=d; want=to->get<unsigned>(); }
+    // One background zone decode at a time; take_scene joins it.
+    void decode(unsigned source) {
+        if (decoding_.valid()) return;
+        decoding_source_=source;
+        decoding_=std::async(std::launch::async,[root=options_.assets,source]{return ikv::load_source_scene(root,source);});
+    }
+    // thgf clock and record fog (004a4680 params 6/7, scaled by Görüş Mesafesi 0046b630/0046b660); true when the fog changed.
+    static bool apply_clock(ikv::Scene& zone,const Json& clock) {
+        std::array<std::uint8_t,11> record{};
+        for (std::size_t i=0;i<record.size();++i) record[i]=clock.at("environment")[i].get<std::uint8_t>();
+        ikv::set_scene_clock(zone,clock.at("hour").get<float>(),record);
+        const std::array<float,2> fog{clock.at("fog")[0].get<float>(),clock.at("fog")[1].get<float>()};
+        if (fog==zone.lighting.fog_record) return false;
+        zone.lighting.fog_record=fog; return true;
+    }
+    // Wave-16 residency, every frame: the zones behind open portal doors within 150 m (nearest first) and the nearest instant
+    // door's within 40 m (kept to 80 m), at most 2 besides the gameplay zone. A held Scene gets the clock/fog, a music and
+    // minimap preload, GPU residency and mirrors; one no longer wanted that homes no actor is evicted and destroyed two
+    // renders later. ponytail: fixed radii; scale with run speed if a sprint reaches a door before its decode (~0.3 s) ends.
+    void drive_zones() {
+        std::erase_if(retired_,[](auto& retired){return --retired.second<0;});
+        if (!session_ || !scene_->source_registry_id || !state_.contains("entities") || fade_out_) return;
+        const auto here=*scene_->source_registry_id;
+        // Models of rows out of view for actor_grace go now (with their mirrors).
+        const auto expired=[now=Clock::now()](const ActorState& a){return a.gone!=Clock::time_point{} && now-a.gone>actor_grace;};
+        for (const auto& a:actors_) if (expired(a)) {
+            ikv::detach_source_actor(a.home && held_scene(a.home)?*a.home:*scene_,a.id);
+            for (const auto& m:mirrors_) if (m.id==a.id) ikv::detach_source_actor(*m.zone,m.id);
+            std::erase_if(mirrors_,[&](const Mirror& m){return m.id==a.id;});
         }
-        if (want && nearest>=40000 && !(prefetch_.valid() && same_scene(prefetch_source_,*want))) want.reset();
-        prefetch(want);
+        std::erase_if(actors_,expired);
+        std::vector<unsigned> want;
+        const auto wanted=[&](unsigned source){return std::any_of(want.begin(),want.end(),[&](unsigned w){return same_scene(w,source);});};
+        const auto add=[&](unsigned source){ if (want.size()<2 && !same_scene(source,here) && !wanted(source)) want.push_back(source); };
+        for (const auto& link:links_) if (link.open && link.distance<150) add(link.registry);
+        const auto& own=character_state(state_);
+        std::optional<unsigned> door; double nearest=80000;
+        for (const auto& e:state_.at("entities")) if (const auto to=e.find("destination"); to!=e.end() && !e.contains("portal")) {
+            const double d=std::hypot(e.at("x").get<double>()-own.value("x",0.0),e.at("y").get<double>()-own.value("y",0.0));
+            if (d<nearest && !same_scene(to->get<unsigned>(),here)) { nearest=d; door=to->get<unsigned>(); }
+        }
+        if (door && (nearest<40000 || held(*door) || (decoding_.valid() && same_scene(decoding_source_,*door)))) add(*door);
+        if (decoding_.valid() && decoding_.wait_for(std::chrono::seconds(0))==std::future_status::ready) {
+            try {
+                auto zone=std::make_unique<ikv::Scene>(decoding_.get()); zone->source_registry_id=decoding_source_;
+                if (wanted(decoding_source_) && !held(decoding_source_) && scenes_.size()<3) {
+                    if (scene_->lighting.source_hour>=0) { zone->lighting.fog_record=scene_->lighting.fog_record; zone->lighting.fog_color=scene_->lighting.fog_color; }
+                    if (const auto clock=state_.find("clock"); clock!=state_.end()) apply_clock(*zone,*clock);
+                    ikv::set_scene_fog(zone->lighting,std::max(.1f,options_.prefs[1]));
+                    scenes_.push_back(std::move(zone));
+                }
+            } catch (const std::exception& error) { std::cerr<<"zone "<<decoding_source_<<" decode failed: "<<error.what()<<'\n'; }
+        }
+        for (auto zone=scenes_.begin();zone!=scenes_.end();) {
+            auto* s=zone->get(); const auto source=*s->source_registry_id;
+            if (s==scene_ || wanted(source) ||
+                std::any_of(pending_mutations_.begin(),pending_mutations_.end(),[&](const auto& m){return same_scene(m.source,source);}) ||
+                std::any_of(actors_.begin(),actors_.end(),[&](const auto& a){return a.home==s && a.id!=session_->self;})) { ++zone; continue; }
+            for (const auto& m:mirrors_) if (m.zone==s) ikv::detach_source_actor(*s,m.id);
+            std::erase_if(mirrors_,[&](const Mirror& m){return m.zone==s;});
+            renderer_->evict(*s); retired_.emplace_back(std::move(*zone),2); zone=scenes_.erase(zone);
+        }
+        if (!decoding_.valid()) for (const auto source:want) if (!held(source)) { if (scenes_.size()<3) decode(source); break; }
+        // The nearest wanted zone's music grids and minimap decode ahead (one slot each), so its swap frame reads nothing.
+        if (const auto* next=want.empty()?nullptr:held(want.front())) {
+            audio_->preload(next->source_support); preload_map(ikv::source_scene_descriptor(*next->source_registry_id).support_id);
+        }
+        for (const auto& zone:scenes_) if (zone.get()!=scene_) renderer_->make_resident(*zone);
+        // Mirrors: the self in every held zone but its home; another player near an open door in the zone across it (a kept
+        // one drops at 1.5× the reach, so a player at the edge does not churn models).
+        const auto want_mirror=[&](const ActorState& a,const ikv::Scene& zone,bool kept) {
+            if (&zone==a.home) return false;
+            if (a.id==session_->self) return true;
+            if (!is_pc(a) || !a.samples) return false;
+            const auto& s=a.history[a.samples-1];
+            for (const auto& link:links_) if (const auto* across=link.open?held(link.registry):nullptr; across && across!=scene_) {
+                if (!((a.home==scene_ && &zone==across) || (a.home==across && &zone==scene_))) continue;
+                auto p=std::array<float,3>{static_cast<float>(s.x)/1000.f,0,static_cast<float>(s.z)/1000.f};
+                if (a.home!=scene_) p=move_point(link.to_home,p);
+                const float mx=(link.quad[0][0]+link.quad[1][0])/2,mz=(link.quad[0][2]+link.quad[1][2])/2;
+                if (std::hypot(p[0]-mx,p[2]-mz)<(kept?1.5f:1.f)*mirror_reach) return true;
+            }
+            return false;
+        };
+        std::erase_if(mirrors_,[&](const Mirror& m) {
+            const auto* a=actor_state(m.id);
+            if (a && held_scene(m.zone) && want_mirror(*a,*m.zone,true)) return false;
+            if (held_scene(m.zone) && (!a || a->home!=m.zone)) ikv::detach_source_actor(*m.zone,m.id);
+            return true;
+        });
+        for (const auto& a:actors_) if (a.assembly && a.request.serial==a.assembly && held_scene(a.home)) for (const auto& zone:scenes_) {
+            auto mirror=std::find_if(mirrors_.begin(),mirrors_.end(),[&](const Mirror& m){return m.zone==zone.get() && m.id==a.id;});
+            if (mirror==mirrors_.end()) {
+                if (!want_mirror(a,*zone,false)) continue;
+                mirror=mirrors_.insert(mirrors_.end(),{zone.get(),a.id,0});
+            }
+            if (mirror->serial==a.assembly) continue;
+            mirror->serial=a.assembly;
+            auto request=a.request; request.into=zone.get(); assembly_queue_.push_back(std::move(request));
+        }
+    }
+    // The rigid map from zone a's frame into zone b's through one of links_ (doors of zone links_zone_), with its yaw turn.
+    std::optional<std::pair<ikv::Matrix4,float>> zone_map(unsigned a,unsigned b) const {
+        for (const auto& link:links_) if (link.open) {
+            if (a==links_zone_ && same_scene(b,link.registry)) return std::pair{link.to_linked,link.theta};
+            if (b==links_zone_ && same_scene(a,link.registry)) return std::pair{link.to_home,-link.theta};
+        }
+        return {};
+    }
+    // Re-expresses an actor's history (server units) and heading in another zone's frame (a walk through a door).
+    static void carry(ActorState& actor,const ikv::Matrix4& map,float theta) {
+        for (std::size_t i=0;i<actor.samples;++i) {
+            auto& sample=actor.history[i];
+            const auto p=move_point(map,{static_cast<float>(sample.x)/1000.f,0,static_cast<float>(sample.z)/1000.f});
+            sample.x=static_cast<std::int32_t>(std::lround(p[0]*1000)); sample.z=static_cast<std::int32_t>(std::lround(p[2]*1000));
+        }
+        actor.yaw-=theta; actor.shown_yaw-=theta;
+    }
+    // Wave 16: the gameplay zone becomes a held Scene without a load or fade. A walk-through carries the self history and the
+    // camera through the door; actors keep their models (attach_models moves only those whose zone changed). Every actor of an
+    // instant door's zone is new. The self model already waits there as a mirror; the old zone keeps one in turn.
+    void swap_zone(ikv::Scene& next,const PendingMutation& mutation) {
+        auto* old=scene_;
+        auto* self=actor_state(session_->self);
+        if (const auto map=mutation.flip && self?zone_map(self->zone,mutation.source):std::nullopt) {
+            carry(*self,map->first,map->second);
+            auto camera=renderer_->camera(); camera.target=move_point(map->first,camera.target); camera.yaw-=map->second; renderer_->set_camera(camera);
+        }
+        if (old->lighting.source_hour>=0) { next.lighting.fog_record=old->lighting.fog_record; next.lighting.fog_color=old->lighting.fog_color; }
+        scene_=&next; scene_->source_registry_id=mutation.source;
+        if (old!=&next) {
+            std::erase_if(mirrors_,[&](const Mirror& m){return m.zone==&next && m.id==session_->self;});
+            if (self) mirrors_.push_back({old,self->id,self->assembly});
+        }
+        if (self) { self->home=scene_; self->zone=mutation.source; if (!mutation.flip) self->samples=0; } // an instant door teleports
+        if (const auto* target=actor_state(target_); !target || target->home!=scene_) target_=0;
+        view_door_=0; view_beyond_=false; // links_ (still the old zone's doors, for attach_models) follow in state_changed
+        apply_view(*scene_); attach_effects_=true;
+        swap_at_=Clock::now(); swap_worst_ms_=0; swap_frames_.clear(); swap_kind_=mutation.flip?"walk-through":"instant";
+        zone_message_.reset();
+        std::cerr<<"Özgün sahne: "<<ikv::source_scene_descriptor(mutation.source).label<<" ("<<swap_kind_<<")\n";
     }
     // Scene fade: out while the swap is pending, black for the first new-zone frame (its upload), then in.
     float transition_fade() const {
@@ -918,37 +1170,53 @@ private:
         options_.character=*chosen; return true;
     }
     void load_authoritative_scene(unsigned source) {
-        if (scene_.source_registry_id && *scene_.source_registry_id==source) return;
+        if (scene_->source_registry_id && *scene_->source_registry_id==source) return;
         auto replacement=take_scene(source);
         // The record fog lives in the game state (004b43a0), not the zone: a received server fog survives the zone load.
-        if (scene_.lighting.source_hour>=0) { replacement.lighting.fog_record=scene_.lighting.fog_record; replacement.lighting.fog_color=scene_.lighting.fog_color; }
+        if (scene_->lighting.source_hour>=0) { replacement->lighting.fog_record=scene_->lighting.fog_record; replacement->lighting.fog_color=scene_->lighting.fog_color; }
         loading_stage(.5f);
-        // Providers borrow Scene resources: forget them before replacing the source scene at this stable address. A seamless
-        // swap keeps the renderer (device, pipelines, FSR, RT pipeline); the first load rebuilds it behind loadingN.jpg.
+        // Providers borrow Scene resources: release the primary before its Scene dies. A seamless swap keeps the renderer
+        // (device, pipelines, FSR, RT pipeline); the first load rebuilds it behind loadingN.jpg.
         // Keep yaw/pitch; options_.camera.distance stays the desired zoom, the renderer holds the occlusion-clamped one.
         const auto camera=renderer_->camera();
         if (fade_out_) renderer_->release_scene();
         else { renderer_.reset(); options_.camera.yaw=camera.yaw; options_.camera.pitch=camera.pitch; }
-        ui_.reset(); scene_=std::move(replacement); actors_.clear(); poses_.clear(); sacks_.clear();
+        // A load starts afresh (elapsed_ restarts the zone clock): every held Scene goes, the old gameplay zone too (with the eye
+        // beyond an opening the renderer's primary was a linked zone, so release_scene() left this one's set in place). Each is
+        // evicted and destroyed after the renderer's next frames; the residency driver brings back what the new zone wants.
+        for (auto& zone:scenes_) {
+            if (renderer_) renderer_->evict(*zone);
+            retired_.emplace_back(std::move(zone),renderer_?2:0);
+        }
+        scenes_.clear(); mirrors_.clear(); links_.clear(); view_door_=0; view_beyond_=false;
+        scene_=scenes_.emplace_back(std::move(replacement)).get();
+        // The HUD text face follows the new Scene's font now: this frame's state_changed() may already float stat texts (lh()).
+        if (ui_) ui_=std::make_unique<ikv::ClientUI>(scene_->font,ui_px_);
+        actors_.clear(); poses_.clear(); sacks_.clear();
         entities_.clear(); rendered_.clear(); players_.clear();
         target_=0; help_page_=0; help_book_.clear(); elapsed_=0;
         if (!renderer_) reset_renderer();
         init_original_ui(); loading_stage(.7f);
         effect_cues_.clear();
-        if (effects_) effects_->attach_scene(scene_); // zone *_particles.adf type-11 emitters
+        if (effects_) effects_->attach_scene(*scene_); // zone *_particles.adf type-11 emitters
         apply_prefs();
         // Scene diagnostics are developer evidence, not player HUD text.
-        for (const auto& message:scene_.diagnostics) std::cerr << message << '\n';
+        for (const auto& message:scene_->diagnostics) std::cerr << message << '\n';
         std::cerr << "Özgün sahne: " << ikv::source_scene_descriptor(source).label << '\n';
     }
-    // The prefetched Scene when its content matches (joined while the network pumps), else a fresh decode. An unmatched
-    // prefetch is released before that decode: one extra Scene at most.
-    ikv::Scene take_scene(unsigned source) {
-        if (prefetch_.valid()) {
-            auto ready=load_cpu([&]{return prefetch_.get();});
-            if (same_scene(prefetch_source_,source)) { ready.source_registry_id=source; return ready; }
+    // A held Scene with this content, else the background decode when it matches (joined while the network pumps), else a
+    // fresh decode. An unmatched decode is released before that: one decode at a time.
+    std::unique_ptr<ikv::Scene> take_scene(unsigned source) {
+        for (auto zone=scenes_.begin();zone!=scenes_.end();++zone)
+            if (zone->get()!=scene_ && (*zone)->source_registry_id && same_scene(*(*zone)->source_registry_id,source)) {
+                auto taken=std::move(*zone); scenes_.erase(zone);
+                taken->source_registry_id=source; return taken;
+            }
+        if (decoding_.valid()) {
+            auto ready=load_cpu([&]{return decoding_.get();});
+            if (same_scene(decoding_source_,source)) { ready.source_registry_id=source; return std::make_unique<ikv::Scene>(std::move(ready)); }
         }
-        return load_cpu([&]{return ikv::load_source_scene(options_.assets,source);});
+        return std::make_unique<ikv::Scene>(load_cpu([&]{return ikv::load_source_scene(options_.assets,source);}));
     }
     static ikv::assets::DdsImage read_ui_image(const std::filesystem::path& path) {
         const auto size=std::filesystem::file_size(path);
@@ -1327,11 +1595,11 @@ private:
         bool released=false;
         if (!renderer_ || width_<=0 || height_<=0) return released;
         const auto planes=ikv::frustum_planes(ikv::camera_view_projection(renderer_->camera(),width_,height_));
-        const auto& light=scene_.lighting;
+        const auto& light=scene_->lighting;
         const auto sun=light.source_values?light.sun_direction:std::array<float,3>{.48f,.78f,.4f};
         // The shadow of the box top lands h·(sun.xz/sun.y) away from the sun; low suns are capped at 80 units.
         const float horizontal=std::hypot(sun[0],sun[2]),run=sun[1]>0?horizontal/sun[1]:1e9f;
-        for (auto& assembly:scene_.actor_assemblies) {
+        for (auto& assembly:scene_->actor_assemblies) {
             auto* actor=actor_state(assembly.entity_id);
             const auto* p=actor?pose(assembly.entity_id):nullptr;
             bool visible=true; // no pose: not drawn this frame, keep its skin current for when it is
@@ -1422,7 +1690,8 @@ private:
     // Olma Süresi are read per frame (default outfit beyond pref·170 in queue_state; corpse hide in the body loop).
     void apply_prefs() {
         audio_->mixer.volume(options_.volume); audio_->music_volume(options_.music_volume);
-        apply_view(scene_);
+        apply_view(*scene_);
+        for (const auto& zone:scenes_) if (zone.get()!=scene_) ikv::set_scene_fog(zone->lighting,std::max(.1f,options_.prefs[1]));
     }
     // 00478586 also hides every emitter beyond sqrt(.5·k)·fog far (0x77c320 = far²).
     void apply_view(ikv::Scene& scene) {
@@ -1818,7 +2087,7 @@ private:
     }
     // helps.xml page range of the opened book (help_book_), or every page.
     std::pair<int,int> help_range() const {
-        const auto& pages=scene_.help;
+        const auto& pages=scene_->help;
         if (help_book_.empty()) return {0,static_cast<int>(pages.size())};
         const auto first=std::find_if(pages.begin(),pages.end(),[&](const auto& p){return p.book==help_book_;});
         const auto last=std::find_if(first,pages.end(),[&](const auto& p){return p.book!=help_book_;});
@@ -1826,7 +2095,7 @@ private:
     }
     // 00426c10: open the Yardım window on one helps.xml book.
     void open_help(const std::string& book) {
-        if (std::none_of(scene_.help.begin(),scene_.help.end(),[&](const auto& p){return p.book==book;})) return;
+        if (std::none_of(scene_->help.begin(),scene_->help.end(),[&](const auto& p){return p.book==book;})) return;
         help_book_=book; help_page_=help_range().first; scroll_[win_help]=0; toggle_window(win_help,true);
     }
     // Tutorial books while the own character is below level 2 (00477fd0 vs 0058d7bc = 2.0): entering the world opens Seviye1a
@@ -2588,10 +2857,10 @@ private:
             Flow f{left,text_right,left,y};
             flow(f,"‹ Önceki",nullptr,-1,"help-"); flow(f,"Sonraki ›",nullptr,-1,"help+");
             y=flow_end(f)+S(4);
-            if (scene_.help.empty()) paragraph(left,y,text_right-left,bottom,"Özgün yardım kaynağı yüklenemedi.");
+            if (scene_->help.empty()) paragraph(left,y,text_right-left,bottom,"Özgün yardım kaynağı yüklenemedi.");
             else {
                 const auto [first,last]=help_range();
-                const auto& page=scene_.help[static_cast<std::size_t>(help_page_)];
+                const auto& page=scene_->help[static_cast<std::size_t>(help_page_)];
                 // Book popup: header and page n/m of the opened book (VOD 16:30 "Nasıl Yürünür" 2/2); F1 lists every book.
                 const auto title=help_book_.empty()?page.book+" / "+page.header:page.header+"  "+std::to_string(help_page_-first+1)+"/"+std::to_string(last-first);
                 ui_->text(left,y,fit(title,text_right-left),gold_rgba); y+=lh()+S(4);
@@ -2638,7 +2907,7 @@ private:
     std::array<float,3> class_bounds(unsigned source_class) const {
         std::array<float,3> half{};
         const auto id=std::to_string(source_class);
-        for (const auto& r:scene_.actor_tables.source_records) if (r.class_id==id) {
+        for (const auto& r:scene_->actor_tables.source_records) if (r.class_id==id) {
             if (r.bound_x>0) half[0]=r.bound_x;
             if (r.bound_y>0) half[1]=r.bound_y;
             if (r.bound_z>0) half[2]=r.bound_z;
@@ -2736,19 +3005,26 @@ private:
     // 512 texels wide; zone art is the 180-degree-turned support grid. '(%d, %d)' prints those texels (0x596ed0),
     // ui\eye.dds is the view cone, '%d:%.2d' (004a4e2b) the clock. Frame: UI2 611,798 186x203, map hole 15,34 158x157. ----
     static constexpr float map_scale=2.f/3;
+    void preload_map(unsigned zone) {
+        if (zone==zone_map_zone_ || zone==map_next_zone_) return;
+        if (map_next_.valid() && map_next_.wait_for(std::chrono::seconds(0))!=std::future_status::ready) return; // one at a time
+        char name[16]; std::snprintf(name,sizeof(name),"zone%02u.dds",zone);
+        map_next_zone_=zone; map_next_=std::async(std::launch::async,[path=asset_base()/"ui"/name]{return read_ui_image(path);});
+    }
     void ensure_zone_map() {
-        const unsigned zone=ikv::source_scene_descriptor(*scene_.source_registry_id).support_id;
+        const unsigned zone=ikv::source_scene_descriptor(*scene_->source_registry_id).support_id;
         if (zone==zone_map_zone_) return;
         char name[16]; std::snprintf(name,sizeof(name),"zone%02u.dds",zone);
         const auto base=asset_base();
-        zone_map_=read_ui_image(base/"ui"/name); // 0041cb00 ui\zone%.2d.dds
+        if (zone==map_next_zone_ && map_next_.valid()) { zone_map_=map_next_.get(); map_next_zone_=UINT32_MAX; } // decoded ahead
+        else zone_map_=read_ui_image(base/"ui"/name); // 0041cb00 ui\zone%.2d.dds
         if (eye_.mips.empty()) eye_=read_ui_image(base/"ui/eye.dds");
         zone_map_zone_=zone;
     }
     void paint_minimap() {
         map_rect_={};
         const auto* self=session_?pose(session_->self):nullptr;
-        if (!map_open_ || !self || !scene_.source_registry_id) return;
+        if (!map_open_ || !self || !scene_->source_registry_id) return;
         ensure_zone_map();
         const float fx=static_cast<float>(width_)-188*s_,fy=static_cast<float>(height_)-205*s_;
         ui_atlas(original_ui2_,fx,fy,0,0,186,203,611,798,186,203);
@@ -2776,7 +3052,7 @@ private:
         label(left,static_cast<int>(iy)+S(3),"("+std::to_string(1024-static_cast<int>(self->x*map_scale))+", "+
             std::to_string(1024-static_cast<int>(self->z*map_scale))+")");
         // Original thgf hour drives the minimap clock text (004a4c90 "%d:%.2d"); before it arrives, the zone minute.
-        const float hour=scene_.lighting.source_hour>=0?scene_.lighting.source_hour:scene_.lighting.source_minute/60;
+        const float hour=scene_->lighting.source_hour>=0?scene_->lighting.source_hour:scene_->lighting.source_minute/60;
         char clock[16]; std::snprintf(clock,sizeof(clock),"%d:%.2d",static_cast<int>(hour),std::min(59,static_cast<int>(std::fmod(hour,1.f)*60)));
         label(left,static_cast<int>(iy+ih)-lh()-S(3),clock);
         const int x=static_cast<int>(fx),y=static_cast<int>(fy);
@@ -2895,6 +3171,7 @@ private:
         }
         renderer_->set_overlay(ui_->overlay());
         renderer_->render(loading_scene_,{},0,0);
+        last_present_=stage_at_=Clock::now(); // a fade right after login measures from the shown loading frame, not the epoch
         hud_dirty_=true;
     }
     // ---- Chat: original channel table 0040c3a0 (+0xec, stride 0x24) and helps.xml 'Mesaj Kanalları'. Klan ('/k') is the
@@ -2982,14 +3259,14 @@ private:
         atlas_image(original_ui1_,x,y,size,size,u,v,32,32,tint);
     }
     void cache_original_ui_state() {
-        if (!session_ || !scene_.actor_tables.loaded || !state_.contains("catalogs")) return;
+        if (!session_ || !scene_->actor_tables.loaded || !state_.contains("catalogs")) return;
         const auto& catalogs=state_.at("catalogs");
         if (!catalogs.contains("items")) return;
         for (const auto& item:catalogs.at("items")) {
             if (!item.contains("source_uid")) continue;
             const auto uid=item.at("source_uid").get<unsigned>();
             if (std::any_of(source_item_icons_.begin(),source_item_icons_.end(),[&](const auto& entry){return entry.first==uid;})) continue;
-            const auto& record=ikv::source_actor_record(scene_,uid);
+            const auto& record=ikv::source_actor_record(*scene_,uid);
             // Source potion icons depend on original instance effects, not native healing amounts.
             source_item_icons_.emplace_back(uid,record.object_type=="potion"?-1:record.icon);
             hud_dirty_=true;
@@ -3008,6 +3285,7 @@ private:
             std::shared_ptr<const Json> data;
             std::string member;
             ikv::SourceAppearance source;
+            ikv::Scene* home=nullptr; unsigned zone=0; // wave 16: the zone Scene the model belongs in
         };
         std::vector<ModelChange> changes;
         auto removed=mutation.removed;
@@ -3025,11 +3303,25 @@ private:
             if (member.empty() && appearance.contains("model_member")) member=appearance.at("model_member").get<std::string>();
             const auto source_class=pc?2*data.at("class_id").get<unsigned>()+appearance.value("sex",1u):data.at("source_class").get<unsigned>();
             const auto& equipment=data.at("equipment");
-            const auto* actor=actor_state(id);
-            if (actor && actor->binding.at("member")==member && actor->binding.at("appearance")==appearance &&
-                actor->binding.at("equipment")==equipment && actor->source_class==source_class &&
-                actor->binding.at("uid")==data.value("source_uid",0u)) continue;
+            const bool self=session_ && id==session_->self;
+            const auto zone=data.value("zone",mutation.source);
+            auto* home=self?scene_:held(zone);
+            if (!home) continue; // its linked zone was dropped meanwhile; the row returns as new once it is held again
+            auto* actor=actor_state(id);
+            if (actor) actor->gone={}; // back in view: a kept model is reused below when nothing changed
+            const bool same=actor && actor->binding.at("member")==member && actor->binding.at("appearance")==appearance &&
+                actor->binding.at("equipment")==equipment && actor->source_class==source_class && actor->binding.at("uid")==data.value("source_uid",0u);
+            if (same && actor->home==home && controller_in(*home,id)) { actor->zone=zone; continue; }
+            // A player walking through a door into the zone where its mirror waits: that copy becomes its model and the one it
+            // leaves behind its mirror, so no frame goes without a model.
+            if (const auto mirror=same?std::find_if(mirrors_.begin(),mirrors_.end(),[&](const Mirror& m){return m.zone==home && m.id==id && m.serial==actor->assembly;}):mirrors_.end();
+                mirror!=mirrors_.end() && controller_in(*home,id)) {
+                if (const auto map=zone_map(actor->zone,zone)) carry(*actor,map->first,map->second); else actor->samples=0;
+                mirror->zone=actor->home; actor->home=home; actor->zone=zone;
+                std::cerr<<"Portal actor id="<<id<<" zone="<<zone<<" model=mirror\n"; continue; // evidence: no frame without a model
+            }
             ModelChange change; change.data=row; change.member=std::move(member); change.source.source_class=source_class;
+            change.home=home; change.zone=zone;
             if (change.member.empty()) {
                 auto& source=change.source;
                 if (pc) {
@@ -3044,21 +3336,31 @@ private:
             changes.push_back(std::move(change));
         }
         if (changes.empty() && removed.empty()) return;
-        for (const auto id:removed) ikv::detach_source_actor(scene_,id);
-        std::erase_if(actors_,[&](const auto& actor){return std::find(removed.begin(),removed.end(),actor.id)!=removed.end();});
+        // A row that leaves the view keeps its model, hidden (no pose), for actor_grace: an NPC idling at the edge of the view
+        // (aoi, or a portal's linked range) does not churn assemblies and renderer reloads; drive_zones forgets it later.
+        for (const auto id:removed) if (auto* actor=actor_state(id); actor && actor->gone==Clock::time_point{}) { actor->gone=Clock::now(); actor->samples=0; }
         for (auto& change:changes) {
             const auto& data=*change.data;
             const auto id=data.at("id").get<std::uint32_t>();
             auto* actor=actor_state(id);
             if (!actor) { actors_.push_back({}); actor=&actors_.back(); actor->id=id; }
+            // An actor walking through a door moves to the other zone's Scene; its history follows through the door's map.
+            if (actor->home && actor->home!=change.home) {
+                ikv::detach_source_actor(*actor->home,id);
+                std::erase_if(mirrors_,[&](const Mirror& m){return m.zone==change.home && m.id==id;}); // the new model replaces it
+                if (const auto map=zone_map(actor->zone,change.zone)) carry(*actor,map->first,map->second); else actor->samples=0;
+                std::cerr<<"Portal actor id="<<id<<" zone="<<change.zone<<" model=rebuilt\n"; // evidence: assembled again in the new zone
+            }
+            actor->home=change.home; actor->zone=change.zone;
             actor->binding={{"member",change.member},{"appearance",data.at("appearance")},
                 {"equipment",data.at("equipment")},{"uid",data.value("source_uid",0u)}};
             actor->source_class=change.source.source_class; actor->assembly=++assembly_serial_;
             // Bounds, weapon and stance apply at once (labels, picking, locomotion); the shadow waits for the new model.
-            if (scene_.actor_tables.loaded) describe_actor(*actor,data,actor_controller(id)!=nullptr);
+            if (scene_->actor_tables.loaded) describe_actor(*actor,data,actor_controller(id)!=nullptr);
             assembly_queue_.push_back({actor->assembly,std::move(change.data),std::move(change.member),std::move(change.source)});
+            actor->request=assembly_queue_.back(); // drive_zones mirrors it into held zones
         }
-        if (!loading && scene_.actor_tables.loaded) return; // poll_assembly starts the worker
+        if (!loading && scene_->actor_tables.loaded) return; // poll_assembly starts the worker
         if (assembly_.valid()) install_models(load_cpu([&]{return assembly_.get();}));
         // ponytail: whole-cache reset at a zone entry past half the 4096-model budget; LRU if long sessions thrash it.
         if (actor_context_.model_resources.size()>2048) actor_context_.model_resources.clear();
@@ -3072,9 +3374,13 @@ private:
         assembly_=std::async(std::launch::async,[this,requests=std::move(assembly_queue_),resident=resident_textures()]{return assemble(requests,resident);});
         assembly_queue_.clear();
     }
-    ikv::Scene resident_textures() const { // names only: the worker decodes just what the scene lacks
-        ikv::Scene resident; resident.textures.resize(scene_.textures.size());
-        for (std::size_t i=0;i<scene_.textures.size();++i) resident.textures[i].name=scene_.textures[i].name;
+    // Names only: the worker decodes just what the Scenes lack. A model may be installed into any held zone, so a texture
+    // counts as resident only when every held Scene has it.
+    ikv::Scene resident_textures() const {
+        std::unordered_map<std::string_view,std::size_t> seen;
+        for (const auto& zone:scenes_) for (const auto& texture:zone->textures) ++seen[texture.name];
+        ikv::Scene resident;
+        for (const auto& texture:scene_->textures) if (seen[texture.name]>=scenes_.size()) resident.textures.emplace_back().name=texture.name;
         return resident;
     }
     // Worker side: touches actor_context_ and the requests only.
@@ -3082,7 +3388,7 @@ private:
         AssemblyBatch batch; batch.results.reserve(requests.size());
         const auto& root=options_.assets;
         for (const auto& request:requests) {
-            auto& result=batch.results.emplace_back(); result.serial=request.serial; result.data=request.data;
+            auto& result=batch.results.emplace_back(); result.serial=request.serial; result.data=request.data; result.into=request.into;
             const auto id=request.data->at("id").get<std::uint32_t>();
             const bool pc=request.data->at("pc").get<bool>();
             try {
@@ -3103,20 +3409,40 @@ private:
         return batch;
     }
     void install_models(AssemblyBatch batch) {
-        for (auto& message:actor_context_.diagnostics) scene_.diagnostics.push_back(std::move(message));
+        for (auto& message:actor_context_.diagnostics) scene_->diagnostics.push_back(std::move(message));
         actor_context_.diagnostics.clear();
-        if (!scene_.actor_tables.loaded && actor_context_.actor_tables.loaded) scene_.actor_tables=actor_context_.actor_tables;
+        if (!scene_->actor_tables.loaded && actor_context_.actor_tables.loaded) scene_->actor_tables=actor_context_.actor_tables;
         if (std::none_of(batch.results.begin(),batch.results.end(),[&](const auto& r){const auto* a=actor_state(r.data->at("id").template get<std::uint32_t>());return a && a->assembly==r.serial;})) return;
-        for (auto& texture:batch.textures)
-            if (std::none_of(scene_.textures.begin(),scene_.textures.end(),[&](const auto& old){return old.name==texture.name;})) scene_.textures.push_back(std::move(texture));
+        // Each result goes to its target zone (a self mirror's, else the actor's home), which receives the batch textures it lacks.
+        const auto target=[&](const AssemblyResult& result)->ikv::Scene* {
+            const auto* actor=actor_state(result.data->at("id").template get<std::uint32_t>());
+            auto* zone=result.into?result.into:actor && actor->home?actor->home:scene_;
+            return actor && actor->assembly==result.serial && held_scene(zone)?zone:nullptr;
+        };
+        std::vector<ikv::Scene*> zones;
+        for (const auto& result:batch.results) if (auto* zone=target(result); zone && std::find(zones.begin(),zones.end(),zone)==zones.end()) zones.push_back(zone);
+        for (std::size_t i=0;i<zones.size();++i) {
+            auto& zone=*zones[i];
+            if (!zone.actor_tables.loaded && actor_context_.actor_tables.loaded) zone.actor_tables=actor_context_.actor_tables;
+            for (auto& texture:batch.textures)
+                if (std::none_of(zone.textures.begin(),zone.textures.end(),[&](const auto& old){return old.name==texture.name;})) {
+                    if (i+1==zones.size()) zone.textures.push_back(std::move(texture)); else zone.textures.push_back(texture);
+                }
+        }
         for (auto& result:batch.results) {
             if (result.fatal) std::rethrow_exception(result.fatal);
             const auto& data=*result.data;
             const auto id=data.at("id").get<std::uint32_t>();
             auto* actor=actor_state(id);
-            if (!actor || actor->assembly!=result.serial) continue;
+            auto* zone=target(result);
+            if (!zone) continue;
+            if (result.into) { // mirror: posed by update_scenes; dropped if its entry went meanwhile
+                if (result.actor && zone!=actor->home && std::any_of(mirrors_.begin(),mirrors_.end(),[&](const Mirror& m){return m.zone==zone && m.id==id && m.serial==result.serial;}))
+                    ikv::install_actor(*zone,std::move(*result.actor));
+                continue;
+            }
             const bool fresh=!actor_controller(id);
-            if (result.actor) { ikv::install_actor(scene_,std::move(*result.actor)); if (!fresh) actor->locomotion_dirty=true; }
+            if (result.actor) { ikv::install_actor(*zone,std::move(*result.actor)); if (!fresh) actor->locomotion_dirty=true; }
             // An original record the source client could not assemble either (e.g. classes.dat uid 900/901 templates) leaves
             // only the entity's name label; it must not end the session.
             else { const bool pc=data.at("pc").get<bool>(); std::cerr<<"actor "<<id<<(pc?" class ":" source uid ")<<(pc?actor->source_class:data.value("source_uid",0u))<<" not rendered: "<<result.error<<'\n'; }
@@ -3145,17 +3471,17 @@ private:
         // 00473e69 copies the class record's shadowtype (absent = empty = no shadow; PC body roots carry none).
         actor.shadow.clear();
         if (const auto uid=data.value("source_uid",0u); uid && !data.at("pc").get<bool>() && assembled)
-            for (const auto& record:scene_.actor_tables.source_records) if (record.uid==uid && (record.tag=="npc" || record.tag=="monster")) { actor.shadow=record.shadow; break; }
+            for (const auto& record:scene_->actor_tables.source_records) if (record.uid==uid && (record.tag=="npc" || record.tag=="monster")) { actor.shadow=record.shadow; break; }
         actor.node=data.value("kind",std::string{})=="node";
         actor.weapon.clear(); actor.pose=2;
         for (const auto& item:data.at("equipment")) if (item.at("slot")==11)
-            for (const auto& record:scene_.actor_tables.source_records)
+            for (const auto& record:scene_->actor_tables.source_records)
                 if (record.tag=="object" && record.uid==item.at("source_uid").get<unsigned>()) { actor.weapon=record.object_type; actor.pose=record.pose>0?static_cast<unsigned>(record.pose):6; break; }
     }
     void actor_action(ActorState& actor,unsigned clip,bool restart=false,bool terminal=false) {
         if (!actor.binding.at("member").get_ref<const std::string&>().empty()) return; // Explicit inspection override has no canonical action policy.
         if (!actor_controller(actor.id)) return; // Unassembled actor (attach_models logged why): label only, nothing to animate.
-        ikv::set_actor_action(scene_,actor.id,clip,terminal?0.f:.25f,restart,terminal);
+        ikv::set_actor_action(home_of(actor),actor.id,clip,terminal?0.f:.25f,restart,terminal);
     }
     static bool is_pc(const ActorState& actor) { return actor.source_class>=2 && actor.source_class<=7; }
     void actor_life(std::uint32_t id,int hp,bool alive) {
@@ -3189,8 +3515,8 @@ private:
     // variant-th clip (wrapping) of the actor's own animation.dat cliplist that satisfies pred; UINT32_MAX if none.
     template<class Pred> std::uint32_t pick_clip(const ActorState& actor,Pred&& pred,unsigned variant=0) {
         const auto* controller=actor_controller(actor.id);
-        if (!controller || controller->library>=scene_.actor_tables.libraries.size()) return UINT32_MAX;
-        const auto& clips=scene_.actor_tables.libraries[controller->library].clips;
+        if (!controller || controller->library>=scene_->actor_tables.libraries.size()) return UINT32_MAX;
+        const auto& clips=scene_->actor_tables.libraries[controller->library].clips;
         const auto count=static_cast<unsigned>(std::count_if(clips.begin(),clips.end(),pred));
         if (!count) return UINT32_MAX;
         for (variant%=count; const auto& c:clips) if (pred(c) && !variant--) return c.id;
@@ -3206,9 +3532,9 @@ private:
     // and run (state 1) forwardspeed (×1000 = wire units/s) it walks, so a classes.dat idlewalktend stroll is not a sprint.
     std::uint32_t npc_gait(const ActorState& actor,float speed) {
         const auto* controller=actor_controller(actor.id);
-        if (!controller || controller->library>=scene_.actor_tables.libraries.size()) return UINT32_MAX;
+        if (!controller || controller->library>=scene_->actor_tables.libraries.size()) return UINT32_MAX;
         const ikv::ActorClip *walk=nullptr,*run=nullptr;
-        for (const auto& c:scene_.actor_tables.libraries[controller->library].clips) { if (c.state==2 && !walk) walk=&c; if (c.state==1 && !run) run=&c; }
+        for (const auto& c:scene_->actor_tables.libraries[controller->library].clips) { if (c.state==2 && !walk) walk=&c; if (c.state==1 && !run) run=&c; }
         if (!walk || !run) return run?run->id:walk?walk->id:UINT32_MAX;
         return speed<(walk->forward_speed+run->forward_speed)*500?walk->id:run->id;
     }
@@ -3248,14 +3574,28 @@ private:
         const auto clip=pick_clip(actor,[](const ikv::ActorClip& c){return c.id==0;})!=UINT32_MAX?0u:death_clip(actor);
         if (clip!=UINT32_MAX) actor_action(actor,clip,false,true);
     }
+    static ikv::ActorAnimation* controller_in(ikv::Scene& zone,std::uint32_t id) {
+        const auto assembly=std::find_if(zone.actor_assemblies.begin(),zone.actor_assemblies.end(),[id](const auto& value){return value.entity_id==id;});
+        if (assembly==zone.actor_assemblies.end() || assembly->controller>=zone.actors.size()) return nullptr;
+        return &zone.actors[assembly->controller];
+    }
+    // The zone Scene an actor's model lives in (wave 16: own zone or one behind an open portal).
+    ikv::Scene& home_of(const ActorState& actor) const { return actor.home && held_scene(actor.home)?*actor.home:*scene_; }
+    bool held_scene(const ikv::Scene* zone) const { return std::any_of(scenes_.begin(),scenes_.end(),[&](const auto& s){return s.get()==zone;}); }
     ikv::ActorAnimation* actor_controller(std::uint32_t id) {
-        const auto assembly=std::find_if(scene_.actor_assemblies.begin(),scene_.actor_assemblies.end(),[id](const auto& value){return value.entity_id==id;});
-        if (assembly==scene_.actor_assemblies.end() || assembly->controller>=scene_.actors.size()) return nullptr;
-        return &scene_.actors[assembly->controller];
+        const auto* actor=actor_state(id);
+        return controller_in(actor?home_of(*actor):*scene_,id);
+    }
+    // Every held zone animates (portal views draw them). Each mirror first copies its actor's home controller, so both
+    // copies advance alike; the zone clock (elapsed_) is shared.
+    void update_scenes() {
+        for (const auto& m:mirrors_) if (const auto* a=actor_state(m.id); a && held_scene(m.zone))
+            if (auto *from=controller_in(home_of(*a),m.id),*to=controller_in(*m.zone,m.id); from && to && from!=to) *to=*from;
+        for (const auto& zone:scenes_) ikv::update_scene(*zone,elapsed_);
     }
     const ikv::ActorClip* actor_clip(const ikv::ActorAnimation* controller) const {
-        if (!controller || controller->library>=scene_.actor_tables.libraries.size()) return nullptr;
-        const auto& clips=scene_.actor_tables.libraries[controller->library].clips;
+        if (!controller || controller->library>=scene_->actor_tables.libraries.size()) return nullptr;
+        const auto& clips=scene_->actor_tables.libraries[controller->library].clips;
         return controller->current_clip<clips.size()?&clips[controller->current_clip]:nullptr;
     }
     static constexpr auto tick_period=std::chrono::milliseconds(50); // World enforces 20 Hz.
@@ -3492,14 +3832,10 @@ private:
             chat_line(text,original_rgba(chat_channels[chat_system].argb)); notice(text);
         }
         if (state.contains("clock")) { // validated by ClientSession; original thgf consumer 004a4c90/004b6970
-            const auto& clock=state.at("clock"); std::array<std::uint8_t,11> record{};
-            for (std::size_t i=0;i<record.size();++i) record[i]=clock.at("environment")[i].get<std::uint8_t>();
-            ikv::set_scene_clock(scene_,clock.at("hour").get<float>(),record);
-            // thgf 004a4680 params 6/7: record fog start/end (+0xec/+0xf0), scaled by Görüş Mesafesi (0046b630/0046b660).
-            if (const std::array<float,2> fog{clock.at("fog")[0].get<float>(),clock.at("fog")[1].get<float>()}; fog!=scene_.lighting.fog_record) {
-                scene_.lighting.fog_record=fog; apply_view(scene_);
-            }
-            if (const int minute=static_cast<int>(scene_.lighting.source_hour*60); minute!=clock_minute_) { clock_minute_=minute; hud_dirty_=true; }
+            // Every held zone shares the clock and record fog (wave 16: a portal view shows the same hour).
+            for (const auto& zone:scenes_) if (zone.get()!=scene_ && apply_clock(*zone,state.at("clock"))) ikv::set_scene_fog(zone->lighting,std::max(.1f,options_.prefs[1]));
+            if (apply_clock(*scene_,state.at("clock"))) apply_view(*scene_);
+            if (const int minute=static_cast<int>(scene_->lighting.source_hour*60); minute!=clock_minute_) { clock_minute_=minute; hud_dirty_=true; }
         }
         for (const auto* key:{"hp","max_hp","mana","max_mana","xp","level","currency","inventory","equipment","quests","buffs"}) {
             if (cs.contains(key) && (!hud_values_.contains(key) || hud_values_.at(key)!=cs.at(key))) {
@@ -3548,6 +3884,36 @@ private:
         entities_.push_back({session_->self,cs.at("x").get<std::int32_t>(),cs.at("y").get<std::int32_t>()});
         cache_original_ui_state();
         for (const auto& position:entities_) if (std::none_of(players_.begin(),players_.end(),[&](const auto& p){return p.id==position.id;})) move_actor(position,state.at("tick").get<std::uint32_t>());
+        // Wave-16 portal doors of this zone, nearest first (world.cpp state(): threshold a→b and floor in this zone's frame,
+        // exit c→d and floor[1] in the linked zone's; entering = to the left of a→b). The map sends mid(a,b) to mid(c,d) and
+        // a→b onto c→d, scale 1, y by floor[1]−floor[0].
+        links_.clear(); links_zone_=*scene_->source_registry_id;
+        const float own_x=cs.at("x").get<float>()/1000,own_z=cs.at("y").get<float>()/1000;
+        for (const auto& e:state.at("entities")) if (const auto record=e.find("portal"); record!=e.end() && record->is_object()) {
+            const auto& p=*record;
+            const auto point=[](const Json& v){return std::array<float,2>{v[0].get<float>()/1000,v[1].get<float>()/1000};};
+            const auto a=point(p.at("threshold")[0]),b=point(p.at("threshold")[1]);
+            const float floor=p.at("floor")[0].get<float>()/1000,height=p.at("height").get<float>()/1000;
+            Link& link=links_.emplace_back();
+            link.door=e.at("id").get<std::uint32_t>(); link.open=p.at("open").get<bool>();
+            link.quad={{{a[0],floor,a[1]},{b[0],floor,b[1]},{b[0],floor+height,b[1]},{a[0],floor+height,a[1]}}};
+            link.distance=std::hypot((a[0]+b[0])/2-own_x,(a[1]+b[1])/2-own_z);
+            if (const auto apron=p.find("apron"); apron!=p.end()) {
+                link.apron=(*apron)[0].get<float>()/1000;
+                if (apron->size()>1) link.apron_exit=(*apron)[1].get<float>()/1000;
+            }
+            if (link.open && p.at("registry").is_null()) link.open=false; // a zone without a source scene: no view, door stays shut
+            if (!link.open) continue;
+            link.registry=p.at("registry").get<unsigned>();
+            const auto c=point(p.at("exit")[0]),d=point(p.at("exit")[1]);
+            link.theta=std::atan2(d[1]-c[1],d[0]-c[0])-std::atan2(b[1]-a[1],b[0]-a[0]);
+            const auto turned=turn(rigid_map(link.theta,{}),{(a[0]+b[0])/2,0,(a[1]+b[1])/2});
+            link.to_linked=rigid_map(link.theta,{(c[0]+d[0])/2-turned[0],p.at("floor")[1].get<float>()/1000-floor,(c[1]+d[1])/2-turned[2]});
+            link.to_home=inverse_rigid(link.to_linked);
+            const auto& q=link.quad; const auto& m=link.to_linked;
+            link.back={move_point(m,q[1]),move_point(m,q[0]),move_point(m,q[3]),move_point(m,q[2])};
+        }
+        std::sort(links_.begin(),links_.end(),[](const Link& x,const Link& y){return x.distance<y.distance;});
     }
     void handle_events(const Json& events) {
         for (const auto& event:events) {
@@ -3947,7 +4313,7 @@ private:
             skill_pending_.fill(0); // the ABILITY answer resets the window (004a4030 → 0044ce90); state carries the new ranks
         }
         else if (value=="skill-close") { toggle_window(win_skills); skill_slot_=-1; skill_pending_.fill(0); } // 0044d6e0 → 0044d3d0
-        else if ((value=="help+" || value=="help-") && !scene_.help.empty()) {
+        else if ((value=="help+" || value=="help-") && !scene_->help.empty()) {
             const auto [first,last]=help_range();
             help_page_=first+(help_page_-first+(value=="help+"?1:last-first-1))%(last-first); scroll_[win_help]=0;
         }
@@ -4115,7 +4481,8 @@ private:
     // (D3DXBoxBoundProbe). The original returns the first hit of its entity set; the nearest box entry is taken here.
     // Entities without a box (Ganimet sacks, unbound classes) keep the old ground-proximity rule. Never self.
     // ground receives the walkable ground hit when no box was hit.
-    std::uint32_t entity_at(float x,float y,std::optional<std::array<float,3>>& ground) {
+    // door: set when the ground hit lies behind an open door (its zone's frame), for destination(x,y,door).
+    std::uint32_t entity_at(float x,float y,std::optional<std::array<float,3>>& ground,std::uint32_t* door=nullptr) {
         if (width_<=0 || height_<=0) return 0;
         const auto [eye,ray]=camera_ray(renderer_->camera(),x,y,width_,height_);
         float nearest=INFINITY; std::uint32_t id=0;
@@ -4127,8 +4494,10 @@ private:
             if (t && *t<nearest) { nearest=*t; id=pose.id; }
         }
         if (id) return id;
-        ground=pick_scene(scene_,renderer_->camera(),x,y,width_,height_);
-        if (!ground) return 0;
+        std::uint32_t through=0;
+        ground=pick_world(x,y,through);
+        if (door) *door=through;
+        if (!ground || through) return 0; // actors behind a door are never targeted
         float best=.75f*.75f;
         for (const auto& pose:poses_) if (pose.id!=session_->self) {
             const float dx=(*ground)[0]-pose.x,dz=(*ground)[2]-pose.z;
@@ -4139,8 +4508,8 @@ private:
     void pick(float x,float y) {
         if (fade_out_) return; // the world on screen is no longer the authoritative zone
         if (const auto id=label_at(x,y); id && id!=session_->self) { click_entity(id); return; }
-        std::optional<std::array<float,3>> hit;
-        if (const auto id=entity_at(x,y,hit)) { click_entity(id); return; }
+        std::optional<std::array<float,3>> hit; std::uint32_t door=0;
+        if (const auto id=entity_at(x,y,hit,&door)) { click_entity(id); return; }
         // The original simply ignores a click that hits no walkable ground; no player-facing message.
         if (!hit) return;
         const double wx=std::round(static_cast<double>((*hit)[0])*1000),wy=std::round(static_cast<double>((*hit)[2])*1000);
@@ -4148,9 +4517,71 @@ private:
         if (wx<bounds[0].get<double>() || wy<bounds[1].get<double>() || wx>bounds[2].get<double>() || wy>bounds[3].get<double>()) {
             return;
         }
-        if (!ikv::zone_height(scene_.zone,static_cast<float>(wx/1000),static_cast<float>(wy/1000))) return;
-        session_->destination(static_cast<std::int32_t>(wx),static_cast<std::int32_t>(wy));
-        if (effects_) effects_->trigger_at("Click",*hit); // 004b6524: the original "Click" system marks the clicked ground point
+        const auto* link=door?link_of(door):nullptr;
+        if (door && !link) return;
+        if (!ground_at(link?*link->scene:*scene_,static_cast<float>(wx/1000),static_cast<float>(wy/1000))) return;
+        // Wave 16: a point seen through an open doorway walks there through that door (18-byte destination, linked frame).
+        session_->destination(static_cast<std::int32_t>(wx),static_cast<std::int32_t>(wy),door);
+        if (effects_) effects_->trigger_at("Click",link?move_point(link->to_home,*hit):*hit); // 004b6524: the original "Click" system marks the clicked ground point
+    }
+    const Link* link_of(std::uint32_t door) const {
+        for (const auto& link:links_) if (link.door==door && link.scene) return &link;
+        return nullptr;
+    }
+    // Wave-16 ground pick: the camera ray through the zone the eye stands in, continued past the opening of view_door_ into
+    // the other zone. door: the door when the hit lies in the linked zone (its frame), else 0 (gameplay-zone frame).
+    std::optional<std::array<float,3>> pick_world(float px,float py,std::uint32_t& door) {
+        door=0;
+        const auto* link=link_of(view_door_);
+        if (!link) return pick_scene(*scene_,renderer_->camera(),px,py,width_,height_);
+        const auto [eye,ray]=camera_ray(renderer_->camera(),px,py,width_,height_);
+        const auto through=ray_quad(link->quad,eye,ray);
+        const auto hit=[&](bool linked,float from,float to)->std::optional<std::array<float,3>> {
+            const auto& zone=linked?*link->scene:*scene_;
+            const auto origin=linked?move_point(link->to_linked,eye):eye; const auto dir=linked?turn(link->to_linked,ray):ray;
+            const auto t=source_ray(zone,true,origin,dir,[&](float d){return d>=from && d<to && ground_at(zone,origin[0]+dir[0]*d,origin[2]+dir[2]*d).has_value();});
+            if (!t) return {};
+            if (linked) door=link->door;
+            return std::array<float,3>{origin[0]+dir[0]**t,origin[1]+dir[1]**t,origin[2]+dir[2]**t};
+        };
+        const float split=through?*through:INFINITY;
+        if (auto first=hit(view_beyond_,0,split)) return first;
+        return through?hit(!view_beyond_,split,INFINITY):std::nullopt;
+    }
+    // Ground under (x,z) of a held zone's frame. Just behind an open opening (an actor between ticks, or a history carried
+    // through the door) it is the other zone's ground through the door's map; else the zone's own grid.
+    std::optional<float> ground_at(const ikv::Scene& zone,float x,float z) const {
+        // One side's own ground: Server's door aprons (no grid support; the portal floor), else the zone's walk grid.
+        const auto own=[&](bool home,const ikv::Scene& side,const std::array<float,3>& p)->std::optional<float> {
+            for (const auto& link:links_) {
+                if (home && on_apron(link.quad,link.apron,p)) return link.quad[0][1];
+                if (!home && &side==link.scene && on_apron(link.back,link.apron_exit,p)) return link.back[0][1];
+            }
+            return ikv::zone_height(side.zone,p[0],p[2]);
+        };
+        const bool here=&zone==scene_;
+        for (const auto& link:links_) if (link.scene && (here || &zone==link.scene)) {
+            if (!beyond_quad(here?link.quad:link.back,{x,0,z})) continue;
+            const auto& map=here?link.to_linked:link.to_home;
+            if (const auto ground=own(!here,here?*link.scene:*scene_,move_point(map,{x,0,z}))) return *ground-map[13];
+        }
+        return own(here,zone,{x,0,z});
+    }
+    // Source 'nocamera' blockers from the camera target back to the eye, continued past the opening when the ray passes it.
+    float camera_distance(const ikv::Camera& camera,const Link* link) const {
+        if (!link) return unoccluded_distance(*scene_,camera);
+        const auto forward=ikv::camera_basis(camera).forward; const std::array<float,3> back{-forward[0],-forward[1],-forward[2]};
+        const auto trace=[&](bool linked,float from,float to) {
+            const auto accept=[&](float d){return d>=from && d<to;};
+            return linked?source_ray(*link->scene,false,move_point(link->to_linked,camera.target),turn(link->to_linked,back),accept):
+                source_ray(*scene_,false,camera.target,back,accept);
+        };
+        const bool beyond=beyond_quad(link->quad,camera.target);
+        const auto through=ray_quad(link->quad,camera.target,back);
+        const float split=through?std::min(*through,camera.distance):camera.distance;
+        auto hit=trace(beyond,0,split);
+        if (!hit && split<camera.distance) hit=trace(!beyond,split,camera.distance);
+        return hit?std::max(1.f,*hit-1):camera.distance;
     }
     // Money as 00436bd0 prints it: '.' between thousands.
     static std::string dotted(std::uint64_t value) {
@@ -4220,17 +4651,24 @@ private:
     }
     void draw(float dt) {
         // Before the first authoritative scene the loading screen stands in for the world (VOD 02:12).
-        if (!scene_.source_registry_id && session_ && !disconnected_ && !quit_) { begin_loading(); paint_loading(); }
-        if (!scene_.source_registry_id || !original_ui_cached_) return;
+        if (!scene_->source_registry_id && session_ && !disconnected_ && !quit_) { begin_loading(); paint_loading(); }
+        if (!scene_->source_registry_id || !original_ui_cached_) return;
         const int old_width=width_,old_height=height_;
         if (!SDL_GetWindowSizeInPixels(window_,&width_,&height_) || width_<=0 || height_<=0) return;
         if (width_!=old_width || height_!=old_height) { renderer_->resize(width_,height_); hud_dirty_=true; }
         // Original HUD is authored for 1080p; scale its atlas pixels and Verdana size with the drawable height.
         s_=std::clamp(static_cast<float>(height_)/1080.f,.6f,2.f);
         if (const int px=std::max(11,static_cast<int>(std::lround(16*s_))); !ui_ || px!=ui_px_) {
-            ui_=std::make_unique<ikv::ClientUI>(scene_.font,px); ui_px_=px; hud_dirty_=true;
+            ui_=std::make_unique<ikv::ClientUI>(scene_->font,px); ui_px_=px; hud_dirty_=true;
         }
         rendered_.clear();
+        // Wave 16: hold/evict the linked zones, then resolve each open door's held Scene for this frame. The nearest one within
+        // 60 m carries the camera, ground and picking through its opening.
+        drive_zones(); stage(4);
+        for (auto& link:links_) { link.poses.clear(); auto* zone=link.open?held(link.registry):nullptr; link.scene=zone!=scene_?zone:nullptr; }
+        const Link* view=nullptr;
+        for (const auto& link:links_) if (link.scene && link.distance<60) { view=&link; break; }
+        view_door_=view?view->door:0;
         const double render_tick=tick_epoch_?std::chrono::duration<double>(Clock::now()-*tick_epoch_).count()*20-interpolation_ticks:0;
         const auto place=[&](ikv::Player p) {
             if (auto* actor=actor_state(p.id); actor && actor->samples) {
@@ -4242,7 +4680,7 @@ private:
                 const double t=std::clamp((render_tick-a.tick)/span,0.0,1.0);
                 p.x=static_cast<std::int32_t>(std::lround(a.x+(b.x-a.x)*t)); p.y=static_cast<std::int32_t>(std::lround(a.z+(b.z-a.z)*t));
                 // Authority validated each sample, not every point between them (respawns within the teleport bound).
-                if (!ikv::zone_height(scene_.zone,static_cast<float>(p.x)/1000.f,static_cast<float>(p.y)/1000.f)) { p.x=b.x; p.y=b.z; }
+                if (!ground_at(home_of(*actor),static_cast<float>(p.x)/1000.f,static_cast<float>(p.y)/1000.f)) { p.x=b.x; p.y=b.z; }
                 const bool moving=(a.x!=b.x || a.z!=b.z) && render_tick<b.tick+late_gait_ticks;
                 float speed=0;
                 if (moving) {
@@ -4262,17 +4700,50 @@ private:
             place(p);
         }
         poses_.clear();
+        std::optional<ikv::RenderEntity> self_pose;
         for (const auto& position:rendered_) {
             auto* actor=actor_state(position.id);
             if (!actor) continue;
+            // NONCANONICAL: door leaves have no opening clip (animation.dat: idle kapi_Wait/Wait2 only), so an open portal door's
+            // leaves are hidden while the player is within 40 m (the doorway stands open) and shut again when away or closed.
+            if (std::any_of(links_.begin(),links_.end(),[&](const Link& l){return l.open && l.distance<40 && l.door==position.id;})) continue;
             const float x=static_cast<float>(position.x)/1000.f,z=static_cast<float>(position.y)/1000.f;
-            const auto ground=ikv::zone_height(scene_.zone,x,z);
-            if (!ground) throw std::runtime_error("authoritative visible entity has no source-grid support");
+            auto& zone=home_of(*actor);
+            const auto ground=ground_at(zone,x,z);
+            if (&zone!=scene_) { // an actor behind an open door: drawn through it in its own zone's frame, never hovered or targeted
+                for (auto& link:links_) if (link.scene==&zone && ground) { link.poses.push_back({position.id,x,*ground,z,actor->shown_yaw}); break; }
+                continue;
+            }
+            if (!ground) throw std::runtime_error("authoritative visible entity "+std::to_string(position.id)+" at "+std::to_string(position.x)+","+std::to_string(position.y)+" has no source-grid support");
             poses_.push_back({position.id,x,*ground,z,actor->shown_yaw});
             if (session_ && position.id==session_->self) {
+                self_pose=poses_.back();
                 auto camera=renderer_->camera(); camera.target={x,*ground+6,z};
-                camera.distance=options_.camera.distance; camera.distance=unoccluded_distance(scene_,camera); renderer_->set_camera(camera);
+                camera.distance=options_.camera.distance; camera.distance=camera_distance(camera,view); renderer_->set_camera(camera);
             }
+        }
+        // A mirror stands at its actor's place in the other zone's frame, so a body straddling an opening seams exactly.
+        mirrored_.clear(); // mirrors in the gameplay zone (their actors live behind an open door): drawn, never labelled or picked
+        for (const auto& m:mirrors_) if (const auto* a=actor_state(m.id); a && controller_in(*m.zone,m.id)) {
+            if (const auto* p=a->home==scene_?pose(m.id):nullptr) {
+                for (auto& link:links_) if (link.scene==m.zone) {
+                    const auto q=move_point(link.to_linked,{p->x,p->ground_y,p->z});
+                    link.poses.push_back({m.id,q[0],q[1],q[2],p->yaw-link.theta});
+                }
+            } else if (m.zone==scene_) for (const auto& link:links_) if (link.scene==a->home) {
+                const auto at=std::find_if(link.poses.begin(),link.poses.end(),[&](const auto& e){return e.id==m.id;});
+                if (at==link.poses.end()) continue;
+                const auto q=move_point(link.to_home,{at->x,at->ground_y,at->z});
+                mirrored_.push_back({m.id,q[0],q[1],q[2],at->yaw+link.theta}); break;
+            }
+        }
+        // The eye stands beyond the opening when exactly one of {the camera target, the target→eye segment} passes it; the
+        // linked zone is then the primary view (until a walk-through flips the gameplay zone, or the eye returns).
+        view_beyond_=false;
+        if (view && self_pose && renderer_->resident(*view->scene)) {
+            const auto& camera=renderer_->camera();
+            const auto crossing=ray_quad(view->quad,camera.target,subtract(ikv::camera_basis(camera).eye,camera.target));
+            view_beyond_=beyond_quad(view->quad,camera.target)!=(crossing && *crossing<=1);
         }
         // Ganimet sack (classes.dat object 90002 items\id_item_box.adf; VOD 16:30) beside each unlooted corpse.
         std::vector<std::uint32_t> sacks;
@@ -4282,13 +4753,13 @@ private:
             const auto* corpse=pose(id);
             if (!corpse || id<2*sack_offset) continue;
             const float x=corpse->x+1,z=corpse->z;
-            const auto ground=ikv::zone_height(scene_.zone,x,z);
+            const auto ground=ikv::zone_height(scene_->zone,x,z);
             sacks.push_back(id-sack_offset); poses_.push_back({id-sack_offset,x,ground.value_or(corpse->ground_y),z,0});
         }
         if (sacks!=sacks_) {
-            for (const auto id:sacks_) if (std::find(sacks.begin(),sacks.end(),id)==sacks.end()) ikv::detach_source_actor(scene_,id);
+            for (const auto id:sacks_) if (std::find(sacks.begin(),sacks.end(),id)==sacks.end()) ikv::detach_source_actor(*scene_,id);
             for (const auto id:sacks) if (std::find(sacks_.begin(),sacks_.end(),id)==sacks_.end())
-                ikv::attach_entity_model(scene_,options_.assets,ikv::source_object_member("items\\id_item_box.adf"),id);
+                ikv::attach_entity_model(*scene_,options_.assets,ikv::source_object_member("items\\id_item_box.adf"),id);
             sacks_=std::move(sacks);
         }
         // Ölü Yok Olma Süresi (0047d06f): an NPC body (classid >= 8) disappears pref*30 s + 3 s after its death unless the
@@ -4301,7 +4772,7 @@ private:
                 return actor && !actor->alive && !actor->node && !is_pc(*actor) && now-actor->died_at>limit;
             });
         }
-        audio_->frame(scene_,poses_,session_?session_->self:0,ikv::camera_basis(renderer_->camera()));
+        audio_->frame(*scene_,poses_,session_?session_->self:0,ikv::camera_basis(renderer_->camera()));
         shown_fade_=transition_fade();
         update_labels();
         hud_frame();
@@ -4349,13 +4820,18 @@ private:
                 auto [cue,inserted]=effect_cues_.try_emplace(pose.id,controller->audio_cue);
                 if (inserted || cue->second==controller->audio_cue) continue;
                 cue->second=controller->audio_cue;
-                if (controller->library>=scene_.actor_tables.libraries.size()) continue;
-                const auto& clips=scene_.actor_tables.libraries[controller->library].clips;
+                if (controller->library>=scene_->actor_tables.libraries.size()) continue;
+                const auto& clips=scene_->actor_tables.libraries[controller->library].clips;
                 if (controller->current_clip<clips.size() && !clips[controller->current_clip].visual_effect.empty() &&
                     clips[controller->current_clip].visual_effect!="none")
                     effects_->trigger(clips[controller->current_clip].visual_effect,pose.id);
             }
-            renderer_->set_particles(effects_->frame(renderer_->camera()));
+            const auto& particles=effects_->frame(renderer_->camera());
+            if (const auto* link=view_beyond_?link_of(view_door_):nullptr) { // drawn in the linked zone's frame this frame
+                auto moved=particles;
+                for (auto& v:moved.vertices) { const auto p=move_point(link->to_linked,{v.x,v.y,v.z}); v.x=p[0]; v.y=p[1]; v.z=p[2]; }
+                renderer_->set_particles(moved);
+            } else renderer_->set_particles(particles);
         }
         tutorial();
         renderer_->set_grayscale(dead()); // VOD 34:00: the dead player's world view is grayscale, HUD stays in colour
@@ -4371,8 +4847,45 @@ private:
             if (e && !(e->value("kind",std::string{})=="enemy" && !e->value("alive",true))) pose.contour={1,0,0};
         }
         // Next frame's update_scene skips actors out of view; one that came into view now is skinned before it is drawn.
-        if (hold_offscreen_skins()) ikv::update_scene(scene_,elapsed_);
-        renderer_->render(scene_,poses_,session_?session_->self:0,dt);
+        if (hold_offscreen_skins()) ikv::update_scene(*scene_,elapsed_);
+        // Wave 16: the primary is the zone containing the eye; the other side of the nearest opening is a portal view (every
+        // open door with a resident zone when the eye is home). Labels, picking and particles stay in the gameplay zone's frame.
+        portals_.clear(); stage(5);
+        const auto self=session_?session_->self:0;
+        if (!mirrored_.empty()) { drawn_.assign(poses_.begin(),poses_.end()); drawn_.insert(drawn_.end(),mirrored_.begin(),mirrored_.end()); }
+        const auto& drawn=mirrored_.empty()?poses_:drawn_;
+        if (const auto* link=view_beyond_?link_of(view_door_):nullptr) {
+            const auto home=renderer_->camera(); auto there=home;
+            there.target=move_point(link->to_linked,home.target); there.yaw-=link->theta;
+            portals_.push_back({scene_,link->to_linked,link->back,drawn});
+            renderer_->set_camera(there); renderer_->render(*link->scene,link->poses,self,dt,portals_); renderer_->set_camera(home);
+        } else {
+            for (const auto& open:links_) if (open.scene && renderer_->resident(*open.scene)) portals_.push_back({open.scene,open.to_home,open.quad,open.poses});
+            renderer_->render(*scene_,drawn,self,dt,portals_);
+        }
+        // Evidence: a no-fade zone swap (walk-through flip or instant door) and the eye crossing an opening start a 1.5 s window
+        // whose worst presented frame is logged (no "Seamless zone" fade line is involved).
+        stage(6);
+        if (const auto now=Clock::now(); view_beyond_!=shown_beyond_ || swap_at_) {
+            const auto ms=std::chrono::duration<double,std::milli>(now-last_present_).count();
+            if (view_beyond_!=shown_beyond_) {
+                std::cerr<<"Portal view door="<<view_door_<<" beyond="<<view_beyond_<<" frameMs="<<ms<<'\n';
+                shown_beyond_=view_beyond_; if (!swap_at_) { swap_at_=now; swap_worst_ms_=0; swap_kind_="eye"; swap_frames_.clear(); }
+            }
+            if (ms>swap_worst_ms_) { swap_worst_ms_=ms; swap_stages_=stages_; }
+            swap_frames_.push_back(static_cast<float>(ms));
+            if (now-*swap_at_>std::chrono::milliseconds(1500)) {
+                std::nth_element(swap_frames_.begin(),swap_frames_.begin()+swap_frames_.size()/2,swap_frames_.end());
+                auto line="Portal swap kind="+std::string(swap_kind_)+" source="+std::to_string(scene_->source_registry_id.value_or(0))+
+                    " worstFrameMs="+std::to_string(swap_worst_ms_)+" medianFrameMs="+std::to_string(swap_frames_[swap_frames_.size()/2])+
+                    " frames="+std::to_string(swap_frames_.size())+" worstStages=";
+                for (std::size_t i=0;i<swap_stages_.size();++i) line+=std::to_string(swap_stages_[i])+(i+1<swap_stages_.size()?'/':'\n');
+                std::cerr<<line<<std::flush; // one write: renderer threads log to stderr too
+                swap_at_.reset(); swap_frames_.clear();
+            }
+            static unsigned traced=0;
+            if (const char* trace=std::getenv("IKV_SEAMLESS_TRACE")) screenshot_request_=std::string(trace)+"/portal-"+std::to_string(++traced)+".ppm";
+        }
         if (const auto now=Clock::now(); swapped_ || fade_out_ || fade_in_) {
             const auto ms=[&](Clock::time_point since){return std::chrono::duration<double,std::milli>(now-since).count();};
             if (swapped_) { // first new-zone frame (its upload) presented under black
@@ -4381,7 +4894,7 @@ private:
             } else transition_worst_ms_=std::max(transition_worst_ms_,ms(last_present_));
             if (fade_in_ && transition_fade()==0) {
                 fade_in_.reset();
-                std::cerr<<"Seamless zone source="<<scene_.source_registry_id.value_or(0)<<" prefetch="<<transition_prefetch_
+                std::cerr<<"Seamless zone source="<<scene_->source_registry_id.value_or(0)<<" prefetch="<<transition_prefetch_
                          <<" zoneToFirstFrameMs="<<transition_first_ms_<<" blackMs="<<transition_black_ms_
                          <<" worstVisibleFrameMs="<<transition_worst_ms_<<'\n'<<std::flush;
             }
@@ -4389,7 +4902,7 @@ private:
             static unsigned traced=0;
             if (const char* trace=std::getenv("IKV_SEAMLESS_TRACE")) screenshot_request_=std::string(trace)+"/seamless-"+std::to_string(++traced)+".ppm";
         }
-        last_present_=Clock::now();
+        last_present_=stage_at_=Clock::now();
         if (trade_pending_present_) {
             if (trade_.active() && trade_.revision()==trade_painted_revision_) {
                 trade_seen_rows_|=trade_pending_rows_;
@@ -4404,6 +4917,7 @@ private:
             try { renderer_->screenshot(screenshot_request_); }
             catch (const std::exception& error) { std::cerr<<"screenshot "<<screenshot_request_<<" failed: "<<error.what()<<'\n'; }
             screenshot_request_.clear();
+            last_present_=stage_at_=Clock::now(); // the evidence readback is not a frame of play
         }
         if (quit_ && !captured_ && !options_.screenshot.empty() && session_ && has_snapshot_ &&
             session_->drained() && !pending_presentation()) {

@@ -2,6 +2,9 @@
 #include "ikv/scene.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <map>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -1197,10 +1200,155 @@ void progression_rules(ikv::Json config) {
         check(own(1).at("x")==3000 && own(1).at("y")==0,"resurrection at the nearest safe point (a Ruh Taşı arrival)");
     }
 }
+// Wave 16 see-through doorways. A point on the walkable apron of a door in view (the approach rectangle in front of its
+// threshold, "apron"[0] deep).
+bool on_apron(const ikv::Json& frame, double x, double y) {
+    for (const auto& e : frame.at("entities")) if (e.contains("portal") && e.at("portal").is_object()) {
+        const auto& p=e.at("portal"); const auto& t=p.at("threshold"); const double ax=t[0][0],ay=t[0][1],bx=t[1][0],by=t[1][1],w=std::hypot(bx-ax,by-ay);
+        const double ux=(bx-ax)/w,uy=(by-ay)/w,dx=x-(ax+bx)/2,dy=y-(ay+by)/2,ahead=ux*dy-uy*dx;
+        if (ahead<=0 && ahead>=-p.at("apron")[0].get<double>() && std::abs(ux*dx+uy*dy)<=w/2) return true;
+    }
+    return false;
+}
+// Rigid map of an open portal record: threshold midpoint onto exit midpoint, a->b onto exit c->d.
+std::pair<double,double> portal_map(const ikv::Json& p, double x, double y) {
+    const auto& t=p.at("threshold"); const auto& e=p.at("exit");
+    const double ax=t[0][0],ay=t[0][1],bx=t[1][0],by=t[1][1],cx=e[0][0],cy=e[0][1],dx=e[1][0],dy=e[1][1];
+    const double th=std::atan2(dy-cy,dx-cx)-std::atan2(by-ay,bx-ax),c=std::cos(th),s=std::sin(th),ux=x-(ax+bx)/2,uy=y-(ay+by)/2;
+    return {(cx+dx)/2+c*ux-s*uy,(cy+dy)/2+s*ux+c*uy};
+}
+// The real config and original walk grids (tools/data/portals.json): a routed walk through each authored pair, both ways, crosses
+// once, lands by the door's rigid map on supported cells and reaches its target; Umut Dergisi stays shut (no crossing, no linked
+// view, no events through it) until q282 is taken; linked players are tagged, in the snapshot and not party rows.
+void portal_walks(const ikv::Json& config, const std::filesystem::path& assets) {
+    if (!std::filesystem::exists(assets / "zone00.bin")) { std::cout << "portal_walks skipped: no original walk grids in " << assets << '\n'; return; }
+    std::map<std::string,std::shared_ptr<const ikv::Zone>> grids; std::map<unsigned,std::shared_ptr<const ikv::Zone>> support;
+    for (const auto& [name,zone] : config.at("zones").items()) if (zone.contains("source_registry_id")) {
+        const auto id=ikv::source_scene_descriptor(zone.at("source_registry_id").get<unsigned>()).support_id;
+        auto& grid=support[id]; if (!grid) grid=std::make_shared<const ikv::Zone>(ikv::load_zone(assets,id)); grids[name]=grid;
+    }
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){}); world.set_source_zones(grids);
+    const auto arrive=[&](uint32_t door) { for (const auto& n : config.at("npcs")) if (n.at("id")==door) return n.at("door").at("arrive"); throw std::runtime_error("door missing"); };
+    const auto admit=[&](uint32_t id, const char* zone, const ikv::Json& at, ikv::Json quests=ikv::Json::object()) {
+        auto r=record(int(id)); r["state"]={{"zone",zone},{"x",at[0]},{"y",at[1]},{"quests",quests}}; world.add(id,id,id,r);
+    };
+    const auto supported=[&](const std::string& zone, const ikv::Json& s) { return ikv::zone_height(*grids.at(zone),s.at("x").get<float>()/1000.0f,s.at("y").get<float>()/1000.0f).has_value(); };
+    uint32_t sequence=1;
+    // Walk `id` through `door` (in view) to 5-8 units behind its exit; the frame before the crossing step maps within one step.
+    const auto walk=[&](uint32_t id, uint32_t door, const std::string& to) {
+        auto frame=world.state(id); const std::string from=frame.at("zone"); const auto p=entity(frame,door).at("portal");
+        check(p.at("open")==true && p.at("zone")==to && p.at("floor").size()==2 && p.at("height").get<int>()>=1000,"open see-through door record names its linked zone");
+        const auto& e=p.at("exit"); const double cx=e[0][0],cy=e[0][1],dx=e[1][0],dy=e[1][1],w=std::hypot(dx-cx,dy-cy);
+        ikv::Json target;
+        for (const double depth : {8000.0,5000.0,3000.0}) { target={{"x",std::lround((cx+dx)/2-(dy-cy)/w*depth)},{"y",std::lround((cy+dy)/2+(dx-cx)/w*depth)}}; if (supported(to,target)) break; }
+        world.destination(id,target.at("x"),target.at("y"),++sequence,door);
+        int crossed=0; ikv::Json last=frame.at("character").at("state");
+        for (int tick=0;tick<600;++tick) {
+            world.advance(); frame=world.state(id); const auto& s=frame.at("character").at("state");
+            check(!event(frame,"correction") && !event(frame,"error"),"a portal walk never corrects");
+            if (frame.contains("crossed")) {
+                ++crossed; check(frame.at("crossed").at("door")==door && frame.at("zone")==to && last.at("zone")==from,"crossed names the door of the previous zone");
+                const auto [mx,my]=portal_map(p,last.at("x"),last.at("y"));
+                check(std::hypot(mx-s.at("x").get<double>(),my-s.at("y").get<double>())<=801 && (supported(to,s) || on_apron(frame,s.at("x"),s.at("y"))),"the crossing lands by the door's rigid map on a supported cell or a door apron");
+            }
+            last=s; if (s.at("zone")==to && s.at("x")==target.at("x") && s.at("y")==target.at("y")) break;
+        }
+        check(crossed==1 && last.at("zone")==to && last.at("x")==target.at("x") && last.at("y")==target.at("y"),"a routed portal walk crosses once and reaches its target behind the door");
+    };
+    // Antrepo 30005<->30006 and Mısır Balıkpazarı 30000<->30001, both ways.
+    admit(1,"eminonu",arrive(2147493938u)); walk(1,2147493937u,"antrepo"); walk(1,2147493938u,"eminonu");
+    admit(2,"eminonu",arrive(2147493934u)); walk(2,2147493933u,"misir"); walk(2,2147493934u,"eminonu");
+    // Linked view: player 3 inside the Antrepo is seen from Eminönü through the open door (raw antrepo coordinates, snapshot too).
+    admit(3,"antrepo",arrive(2147493937u)); world.state(1);
+    const auto seen=world.state(1); bool through_door=false; for (const auto& v : seen.at("entities")) through_door=through_door || (v.at("id")==3 && v.value("portal",0u)==2147493937u && v.at("x")==arrive(2147493937u)[0]);
+    const auto snap=world.snapshot(1); check(through_door && std::any_of(snap.begin(),snap.end(),[](const ikv::Player& v){return v.id==3;}),"a player behind an open see-through door is listed with its portal tag");
+    world.action(1,{{"action","group_invite"},{"target",3}}); world.action(3,{{"action","group_accept"}});
+    check(world.state(1).at("party").empty(),"a group member seen through a door is an entity, not a party row");
+    // Umut Dergisi 132061<->132178: quest 282 (q282) gates it.
+    const ikv::Json outside=arrive(2147493988u), inside=arrive(2147493987u);
+    admit(4,"karakoy",outside); admit(5,"karakoyic",{-774784,-38725}); // 5: in the room, 5 units behind the door
+    check(supported("karakoyic",world.state(5).at("character").at("state")),"room spot supported");
+    auto shut=world.state(4); const auto closed=entity(shut,2147493987u).at("portal");
+    check(closed.at("open")==false && closed.at("reason").get<std::string>().find("görevi")!=std::string::npos && !closed.contains("exit"),"a quest-gated see-through door is shut without the quest");
+    check(std::none_of(shut.at("entities").begin(),shut.at("entities").end(),[](const ikv::Json& v){return v.at("id")==5;}),"nothing is seen through a shut door");
+    world.destination(4,inside[0],inside[1],++sequence,2147493987u); shut=world.state(4);
+    check(event(shut,"error","quest") && event(shut,"correction") && shut.at("zone")=="karakoy","a shut see-through door refuses a walk with the gate's reason");
+    admit(6,"karakoy",outside,{{"q282",{{"progress",0}}}}); world.state(6);
+    world.action(5,{{"action","chat"},{"channel","local"},{"text","/otur"}});
+    check(event(world.state(6),"emote") && !event(world.state(4),"emote"),"events reach observers through an open door only");
+    check(entity(world.state(6),5).value("portal",0u)==2147493987u,"the taken quest opens Umut Dergisi");
+    walk(6,2147493987u,"karakoyic"); walk(6,2147493988u,"karakoy");
+}
+// Instance copies behind a see-through door (synthetic grid, NOT ORIGINAL): each group sees and enters its own copy, another
+// group's peeked copy counts as occupied, the copy's NPCs show through the door and the copy's door (pair + n*65536) leads back;
+// a copy left through the door keeps its state while peeked and resets once the last peek drops (vacated()); a crowded frame
+// never carries a linked row without its door (the 96-entity cut and the byte budget).
+void portal_copies(const ikv::Json& mechanics) {
+    auto grid=std::make_shared<ikv::Zone>(); grid->width=grid->height=2048; grid->source="SYNTHETIC NOT ORIGINAL"; grid->cell_size=1.5f;
+    grid->cells.assign(2048u*2048u,0); grid->heights.assign(grid->cells.size(),0.0f);
+    for (int y=-6;y<=6;++y) for (int x=0;x<=10;++x) grid->cells[size_t(y+1024)*2048+size_t(x+1024)]=255; // a room; doors in its east/west walls
+    for (int x=-100;x<0;++x) grid->cells[1024u*2048u+size_t(x+1024)]=255; // a corridor west, out of aoi of the Eminönü door
+    auto config=mechanics;
+    for (const auto& [key,value] : std::initializer_list<std::pair<const char*,int>>{{"movement_step",800},{"cell_size",20000},{"aoi",150000},{"interaction_range",15000}}) config[key]=value;
+    const ikv::Json bounds={-1536000,-1536000,1534500,1534500};
+    config["zones"]={{"eminonu",{{"source_registry_id",0},{"bounds",bounds},{"spawn",{0,0}},{"collision",ikv::Json::array()}}},
+                     {"migrat",{{"source_registry_id",36},{"instances",{27,28}},{"bounds",bounds},{"spawn",{3000,0}},{"collision",ikv::Json::array()}}},
+                     {"old_town",mechanics.at("zones").at("old_town")}};
+    const auto door=[](uint32_t id, const char* zone, int x, const char* to, int arrive, uint32_t pair, ikv::Json threshold) {
+        return ikv::Json{{"id",id},{"kind","door"},{"name","Kapı"},{"zone",zone},{"x",x},{"y",0},{"hp",100},{"dialogue","Kapı"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()},
+                         {"door",{{"to",to},{"arrive",{arrive,0}},{"portal",{{"pair",pair},{"threshold",threshold},{"floor",0},{"height",12000},{"apron",0}}}}}};
+    };
+    auto rat=mechanics.at("npcs")[2]; rat["zone"]="migrat"; rat["x"]=4500; rat["y"]=3000; rat["patrol"]=ikv::Json::array(); rat["hp"]=1; rat["respawn"]=72000; // dies at a hit, no respawn
+    config["npcs"]={door(2147493700u,"eminonu",15000,"migrat",1500,2147493701u,{{15750,2250},{15750,-2250}}),door(2147493701u,"migrat",0,"eminonu",13500,2147493700u,{{-750,-2250},{-750,2250}}),rat};
+    config["quests"]=ikv::Json::object(); config["defaults"]["zone"]="eminonu"; config["defaults"]["x"]=0; config["defaults"]["y"]=0;
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){}); world.set_source_zones({{"eminonu",grid},{"migrat",grid}});
+    for (uint32_t p=1;p<=5;++p) world.add(p,p,p,record(int(p),12000));
+    for (const auto& [leader,member] : {std::pair{1u,2u},{4u,5u}}) { world.action(leader,{{"action","group_invite"},{"target",member}}); world.action(member,{{"action","group_accept"}}); }
+    const auto shown=[&](uint32_t p){ return entity(world.state(p),2147493700u).at("portal"); };
+    check(shown(1).at("zone")=="migrat1" && shown(2).at("zone")=="migrat1" && shown(4).at("zone")=="migrat2" && shown(3).at("zone")=="migrat","each group sees its own copy through the door (another group's peek counts as occupied), solo players the shared zone");
+    check(shown(1).at("registry")==27 && entity(world.state(1),2147493651u+65536u).value("portal",0u)==2147493700u,"the copy's own NPCs show through the door");
+    world.destination(1,6000,0,1,2147493700u); bool crossed=false;
+    for (int tick=0;tick<40 && !crossed;++tick) { world.advance(); crossed=world.state(1).contains("crossed"); }
+    auto inside=world.state(1); check(crossed && inside.at("zone")=="migrat1","the walk enters the copy the door showed");
+    const auto back=entity(inside,2147493701u+65536u).at("portal");
+    check(back.at("open")==true && back.at("zone")=="eminonu" && entity(inside,2).value("portal",0u)==2147493701u+65536u,"the copy's door (pair + n*65536) shows the way back");
+    const uint32_t rat1=2147493651u+65536u; uint32_t sequence=1;
+    const auto until=[&](uint32_t p,auto done,int limit){ for (int tick=0;tick<limit;++tick) { world.advance(); world.state(2); if (done(world.state(p))) return; } throw std::runtime_error("portal copy step timed out"); };
+    world.action(1,{{"action","attack"},{"target",rat1}});
+    until(1,[&](const ikv::Json& f){ return !entity(f,rat1).at("alive").get<bool>(); },600);
+    world.destination(1,12000,0,++sequence,2147493701u+65536u);
+    until(1,[&](const ikv::Json& f){ return f.at("zone")=="eminonu" && f.at("character").at("state").at("x")==12000; },200);
+    check(!entity(world.state(1),rat1).at("alive").get<bool>(),"a copy left through the door keeps its state while it is peeked");
+    for (uint32_t p : {1u,2u}) world.destination(p,-138000,0,++sequence); // both peekers leave the door's aoi
+    until(1,[&](const ikv::Json& f){ return f.at("character").at("state").at("x")==-138000 && world.state(2).at("character").at("state").at("x")==-138000; },400);
+    world.destination(1,12000,0,++sequence);
+    until(1,[&](const ikv::Json& f){ return f.at("character").at("state").at("x")==12000; },400);
+    const auto again=world.state(1);
+    check(entity(again,2147493700u).at("portal").at("zone")=="migrat1" && entity(again,rat1).at("alive").get<bool>(),"a copy resets (vacated) once it drops out of every peek");
+    // Crowded frames: every row tagged with a door must have that door in the same frame (client validate_state).
+    const auto tags_ok=[](const ikv::Json& f){
+        const auto& list=f.at("entities");
+        return std::all_of(list.begin(),list.end(),[&](const ikv::Json& e){ return !e.contains("portal") || !e.at("portal").is_number() ||
+            std::any_of(list.begin(),list.end(),[&](const ikv::Json& d){ return d.at("id")==e.at("portal") && d.at("portal").is_object() && d.at("portal").at("open")==true; }); }); };
+    const auto crowd_frame=[&](const ikv::Json& crowd) {
+        ikv::World w(crowd,[](std::span<const ikv::CharacterSave>){}); w.set_source_zones({{"eminonu",grid},{"migrat",grid}});
+        w.add(1,1,1,record(1,12000)); auto inside_record=record(2,3000); inside_record["state"]["zone"]="migrat"; w.add(2,2,2,inside_record);
+        auto f=w.state(1); check(tags_ok(f),"no linked row without its door in a crowded frame"); return f;
+    };
+    auto crowd=config; // 100 props nearer than the door: the 96-entity cut must not take the door
+    for (uint32_t k=0;k<100;++k) crowd["npcs"].push_back({{"id",2147494000u+k},{"kind","prop"},{"name","Kasa"},{"zone","eminonu"},{"x",12000},{"y",1500},{"hp",1},{"dialogue","Kasa"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}});
+    auto frame=crowd_frame(crowd);
+    check(frame.at("entities").size()==96 && entity(frame,2147493700u).at("portal").at("open")==true && entity(frame,2).value("portal",0u)==2147493700u,"a see-through door survives the 96-entity cut ahead of nearer NPCs");
+    auto heavy=config; heavy["inventory_slots"]=2; // a door whose shop catalog alone exceeds the frame: its linked rows go too
+    for (int k=0;k<200;++k) { const auto id="big"+std::to_string(k); heavy["items"][id]={{"name","Büyük Sandık"},{"stack",1},{"price",1},{"level",1},{"detail",std::string(256,'x')}}; heavy["npcs"][0]["shop"].push_back(id); }
+    frame=crowd_frame(heavy);
+    check(std::none_of(frame.at("entities").begin(),frame.at("entities").end(),[](const ikv::Json& e){ return e.at("id")==2147493700u || e.at("id")==2; }),"rows linked through a door the byte budget cut are dropped with it");
+}
 int main(int argc, char** argv) {
     try {
         if (argc != 3) throw std::runtime_error("usage: world-test config/gameplay.json tests/independent_content.json");
         std::ifstream input(argv[1]); ikv::Json config; input >> config;
+        portal_walks(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
         std::ifstream fixture_input(argv[2]); ikv::Json fixture; fixture_input >> fixture;
         config=independent_mechanics(std::move(config),fixture);
         // Arbitrary synthetic visual item metadata, not a canonical weapon-slot mapping.
@@ -1229,6 +1377,7 @@ int main(int argc, char** argv) {
         quest_rules(config);
         quest_objectives(config);
         bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
+        portal_copies(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
         world.action(1, {{"action", "buy"}, {"target", 2147493650u}, {"item", "healing_tonic"}, {"quantity", 1}});
         check(event(world.state(1), "error", "range"), "merchant range");

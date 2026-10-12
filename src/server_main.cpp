@@ -322,7 +322,7 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     if (message.sequence <= peer.sequence) { disconnect(peer, "sequence"); return; }
                     peer.sequence = message.sequence;
                     if (message.type == ikv::Type::input) world.input(peer.id, message.dx, message.dy, message.sequence);
-                    else world.destination(peer.id, message.x, message.y, message.sequence);
+                    else world.destination(peer.id, message.x, message.y, message.sequence, message.id);
                 } else if (message.type == ikv::Type::action) {
                     const auto now = Clock::now();
                     if (now - peer.action_window >= std::chrono::seconds(1)) { peer.actions = 0; peer.action_window = now; }

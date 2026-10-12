@@ -3,6 +3,7 @@
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
@@ -40,6 +41,10 @@ uniform bool source_ocean;
 uniform vec4 source_time;
 uniform vec4 source_scroll;
 uniform mat4 light_view_projection;
+// Wave 16 portal view (NONCANONICAL): world-space clip planes; (0,0,0,1) always passes. Enabled only for portal draws.
+// clip_planes[5] widens plane 1 to a union (distance = max of both); (0,0,0,-1e9) leaves plane 1 alone.
+uniform vec4 clip_planes[6];
+out float gl_ClipDistance[5];
 out vec3 fragment_position;
 out vec4 shadow_position;
 out vec2 texcoord;
@@ -56,6 +61,8 @@ out float fade_blend;
 void main() {
     if(source_ocean) {
         vec4 world_position=object_matrix*vec4(position,1.0);
+        for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(clip_planes[i],world_position);
+        gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
         // v_ocean.vsh: EXPP.y is the fractional phase; retain its authored polynomial.
         float phase=fract((world_position.x/32.0+world_position.y/13.0+source_time.y)*0.15915494-0.25);
         vec3 squared=vec3(0.0,0.5,1.0)-phase;
@@ -81,8 +88,17 @@ void main() {
         return;
     }
     vec4 world_position=object_matrix*vec4(position,1.0);
+    for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(clip_planes[i],world_position);
+    gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
     gl_Position=view_projection*world_position;
     fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;
+    if(!original_appearance&&!sky) {
+        // Normal-offset receiver: push the lookup up to 2 shadow texels out along the normal as the surface turns from the
+        // sun, so curved actor skin stops self-shadowing against its own neighbouring shadow-map texels.
+        vec3 n=transpose(inverse(mat3(object_matrix)))*normal;float nl=length(n);
+        float texel=2.0/(2048.0*max(length(vec3(light_view_projection[0][0],light_view_projection[1][0],light_view_projection[2][0])),1e-6));
+        if(nl>0.00001){n/=nl;shadow_position+=light_view_projection*vec4(n*texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);}
+    }
     texcoord=uv;
     world_normal=normal;world_tangent=tangent;
     if(!original_appearance&&!sky) {
@@ -164,7 +180,7 @@ uniform bool source_ocean;
 uniform vec3 sun_direction;
 uniform float sky_blend;
 uniform bool grayscale; // original death view: 3D scene desaturated, HUD untouched
-uniform sampler2D shadow_map;
+uniform sampler2DShadow shadow_map; // GL_LINEAR + GL_COMPARE_REF_TO_TEXTURE: each tap is a bilinear 2x2 depth test
 uniform vec3 camera_position;
 in vec3 fragment_position;
 in vec4 shadow_position;
@@ -180,7 +196,7 @@ float shadow_visibility(vec3 n,vec3 l) {
     vec3 p=shadow_position.xyz/shadow_position.w;vec2 uv=p.xy*0.5+0.5;
     if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||p.z<0.0||p.z>1.0)return 1.0;
     float bias=max(0.0003,0.002*(1.0-dot(n,l)));vec2 texel=1.0/vec2(textureSize(shadow_map,0));float visible=0.0;
-    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=p.z-bias<=texture(shadow_map,uv+vec2(x,y)*texel).r?1.0:0.0;
+    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadow_map,vec3(uv+vec2(x,y)*texel,p.z-bias));
     return visible/9.0;
 }
 out vec4 output_color;
@@ -395,6 +411,20 @@ void main(){
     output_color=vec4(grayscale?vec3(dot(contour,vec3(0.299,0.587,0.114))):contour,0.2);
 }
 )GLSL";
+// Wave 16 portal seal (NONCANONICAL): the opening (two quads, corners 0-3 then 4-7; the later wins where they overlap)
+// writes its own depth over the destination view, colour masked, so source geometry behind it fails the depth test.
+constexpr const char* seal_vertex = R"GLSL(#version 330 core
+uniform mat4 view_projection;
+uniform vec3 corners[8];
+void main(){
+    const int order[12]=int[12](0,1,2,0,2,3,4,5,6,4,6,7);
+    gl_Position=view_projection*vec4(corners[order[gl_VertexID]],1.0);
+}
+)GLSL";
+constexpr const char* seal_fragment = R"GLSL(#version 330 core
+out vec4 output_color;
+void main(){output_color=vec4(0.0);}
+)GLSL";
 
 class GlRenderer final : public Renderer {
 #define GL_ENTRY(type, name) type name##_ = nullptr
@@ -463,8 +493,9 @@ class GlRenderer final : public Renderer {
     std::vector<ContourDraw> contours_;
     GLuint framebuffer_=0,color_=0,depth_=0;
     GLuint glow_program_=0,glow_textures_[2]{},glow_framebuffers_[2]{}; // [0]=bb38, [1]=bb3c
-    // Enhanced appearance only: 2048^2 sun depth map (Vulkan shadow pass parity).
-    GLuint shadow_program_=0,shadow_texture_=0,shadow_framebuffer_=0;
+    // Enhanced appearance only: 2048^2 sun depth maps (Vulkan shadow pass parity); [1]: portal destination view.
+    GLuint shadow_program_=0,shadow_textures_[2]{},shadow_framebuffers_[2]{};
+    std::array<Matrix4,2> shadow_lights_{};
     GLint light_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
     GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
     GLint glow_mode_location_=-1,glow_step_location_=-1;
@@ -476,21 +507,35 @@ class GlRenderer final : public Renderer {
     GLint sky_b_location_=-1,sky_c_location_=-1,lightmap_strength_location_=-1;
     GLint sky_location_=-1,sky_blend_location_=-1;
     GLint fade_location_=-1;
-    GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1;
-    SourceScrollState source_scroll_;
+    GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1,clip_location_=-1;
+    GLuint seal_program_=0;
+    GLint seal_vp_location_=-1,seal_corners_location_=-1;
     bool overlay_present_=false,rendered_=false,grayscale_=false;
     float fade_=0;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
     bool source_presented_=false;
-    const Scene* scene_=nullptr;
-    std::uint64_t geometry_revision_=0;
-    std::vector<std::uint64_t> mesh_keys_; // Scene mesh keys as last uploaded; actor attach/detach remaps meshes_ by them.
-    std::uint64_t mesh_key_=0; // Scene::mesh_key as last uploaded: any actor (re)assembly since then re-runs upload().
-    std::vector<GpuMesh> meshes_;
-    std::vector<GpuMaterial> materials_;
-    std::vector<GLuint> textures_;
-    std::vector<Draw> sky_,opaque_,alpha_;
-    std::unordered_map<std::string,GLuint> texture_names_;
+    // Wave 16 (NONCANONICAL): one GPU resource set per Scene address: the primary plus up to 2 resident portal/instant-door
+    // destinations (LRU). Switching primary to a ready set loads nothing.
+    struct GlSet {
+        const Scene* key=nullptr;
+        std::uint64_t used=0; // frame_ of last use (LRU)
+        bool planned=false,ready=false; // ready: fully uploaded once for this Scene address
+        std::uint64_t geometry_revision=0;
+        std::vector<std::uint64_t> mesh_keys; // Scene mesh keys as last planned; actor attach/detach remaps meshes by them.
+        std::uint64_t mesh_key=0; // Scene::mesh_key as last planned: any actor (re)assembly since then re-plans.
+        std::vector<GpuMesh> meshes;
+        std::vector<GpuMaterial> materials;
+        std::vector<GLuint> textures;
+        std::unordered_map<std::string,GLuint> texture_names;
+        std::vector<std::uint8_t> material_usage,mesh_plan; // mesh_plan 0: dormant/proxy, 1: referenced no-color, 2: upload
+        std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
+        SourceScrollState scroll;
+    };
+    struct View { std::vector<Draw> sky,opaque,alpha; };
+    std::vector<std::unique_ptr<GlSet>> sets_,retired_; // retired_: evicted, freed by retire()
+    GlSet* primary_=nullptr; // set of the last render()'s primary Scene
+    std::uint64_t frame_=0;
+    View view_,portal_view_;
 public:
     GlRenderer(SDL_Window* window, const RendererOptions& options) : window_(window), options_(options) {
         if (!window_) throw std::invalid_argument("OpenGL requires an SDL window");
@@ -549,6 +594,9 @@ public:
             fade_location_=uniform(program_,"has_fade_map");
             ocean_location_=uniform(program_,"source_ocean");time_location_=uniform(program_,"source_time");
             scroll_location_=uniform(program_,"source_scroll");
+            clip_location_=uniform(program_,"clip_planes");
+            seal_program_=link(seal_vertex,seal_fragment);
+            seal_vp_location_=uniform(seal_program_,"view_projection");seal_corners_location_=uniform(seal_program_,"corners");
             glUseProgram_(program_); glUniform1i_(uniform(program_,"diffuse_map"),0);
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
@@ -592,14 +640,20 @@ public:
                 shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
                 shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
-                glGenTextures(1,&shadow_texture_);glBindTexture(GL_TEXTURE_2D,shadow_texture_);
-                glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
-                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
-                glGenFramebuffers_(1,&shadow_framebuffer_);glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffer_);
-                glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadow_texture_,0);
-                glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
-                if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL shadow framebuffer incomplete");
+                glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
+                for(int i=0;i<2;++i) {
+                    glBindTexture(GL_TEXTURE_2D,shadow_textures_[i]);
+                    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+                    // Bilinear comparison (hardware PCF): without it the 3x3 kernel's hard texel steps show as jagged
+                    // stripes across actors, which GL (no FXAA, unlike Vulkan post.frag) leaves fully aliased.
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_COMPARE_MODE,GL_COMPARE_REF_TO_TEXTURE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_COMPARE_FUNC,GL_LEQUAL);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                    glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[i]);
+                    glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadow_textures_[i],0);
+                    glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+                    if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL shadow framebuffer incomplete");
+                }
                 glBindFramebuffer_(GL_FRAMEBUFFER,0);check("allocating shadow map");
             }
             glGenFramebuffers_(1,&framebuffer_); glGenTextures(1,&color_); glGenRenderbuffers_(1,&depth_);
@@ -677,28 +731,23 @@ public:
         particle_batches_=frame.batches;
         check("uploading particles");
     }
-    void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t self,float dt) override {
+    void make_resident(const Scene& scene) override { current(); acquire(scene); }
+    // GL 3.3 core always has 8 clip distances, so every ready set can be drawn as a portal.
+    bool resident(const Scene& scene) const override { const auto* set=find(scene); return set&&set->ready; }
+    void evict(const Scene& scene) override { if(auto* set=find(scene)){current();drop(*set);} }
+    void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t self,float dt,std::span<const PortalView> portals) override {
         (void)self;
         if(!std::isfinite(dt) || dt<0) throw std::invalid_argument("invalid render delta");
         current();
-        if(scene_!=&scene || mesh_key_!=scene.mesh_key || meshes_.size()!=scene.meshes.size() || textures_.size()!=scene.textures.size() || materials_.size()!=scene.materials.size())upload(scene);
-        if(geometry_revision_!=scene.geometry_revision) {
-            for(std::size_t i=0;i<meshes_.size();++i) {
-                if((i&1023U)==0)progress();
-                const auto& mesh=scene.meshes[i];auto& gpu=meshes_[i];
-                if(!gpu.vao)continue;
-                if(mesh.vertices.size()!=gpu.vertex_count)throw std::runtime_error("animated mesh topology changed without a new scene");
-                if(mesh.revision==gpu.revision)continue;
-                validate_vertices(mesh);
-                progress();
-                glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
-                glBufferSubData_(GL_ARRAY_BUFFER,0,static_cast<GLsizeiptr>(mesh.vertices.size()*sizeof(Vertex)),mesh.vertices.data());
-                gpu.revision=mesh.revision;
-                if(mesh.influences.empty())gpu.bounds=mesh_bounds(mesh);
-                progress();
-            }
-            check("uploading recovered skeletal animation");geometry_revision_=scene.geometry_revision;
-        }
+        ++frame_;
+        for(const auto& portal:portals)if(portal.scene)if(auto* set=find(*portal.scene))set->used=frame_;
+        auto& set=acquire(scene);primary_=&set;
+        stream(set,scene,never); // a Scene that is not resident loads in full here (fade fallback)
+        // ponytail: fixed 2 ms/frame upload budget shared by the incomplete other sets; ready ones only sync actor deltas.
+        const auto budget=std::chrono::steady_clock::now()+std::chrono::milliseconds(2);
+        for(const auto& other:sets_)if(other.get()!=&set)stream(*other,*other->key,other->ready?never:budget);
+        retire(std::chrono::steady_clock::now()+std::chrono::milliseconds(1));
+        refresh(set,scene);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
         glDisable(GL_SCISSOR_TEST);glDisable(GL_CULL_FACE);glDisable(GL_BLEND);glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LESS);glDepthMask(GL_TRUE);
         // Source ADF triangles keep D3D clockwise front faces; Vulkan's signed-area sign and projection Y flip cancel, so both use CW.
@@ -706,109 +755,44 @@ public:
         glClearColor(0.045f,0.065f,0.085f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glUseProgram_(program_);
         const auto vp=camera_view_projection(options_.camera,width_,height_);
-        glUniformMatrix4fv_(vp_location_,1,GL_FALSE,vp.data());
         glUniform1i_(original_location_,options_.original_appearance?1:0);glUniform1f_(exposure_location_,options_.exposure);
         glUniform1i_(uniform(program_,"grayscale"),grayscale_?1:0);
         const auto& light=scene.lighting;
-        for(const auto* values:{&light.sun_direction,&light.ambient_multiplier,&light.diffuse_multiplier,&light.sky_b,&light.sky_c,&light.fog_color})
-            for(float value:*values)if(!std::isfinite(value))throw std::invalid_argument("non-finite scene lighting");
-        if(light.fog_enabled&&(!std::isfinite(light.fog_start)||!std::isfinite(light.fog_end)||light.fog_end<=light.fog_start))
-            throw std::invalid_argument("invalid source fog interval");
-        if(!std::isfinite(light.lightmap_strength))throw std::invalid_argument("non-finite source lightmap multiplier");
-        if(!std::isfinite(light.sky_blend)||!std::isfinite(light.sky_rotation))throw std::invalid_argument("non-finite source sky parameters");
-        // Enhanced lighting needs a sun even without source constants; original paths only read it with them.
-        const auto sun=enhanced_sun(light);
-        glUniform1i_(source_light_location_,light.source_values?1:0);glUniform3fv_(sun_location_,1,sun.data());
-        glUniform3fv_(ambient_location_,1,light.ambient_multiplier.data());glUniform3fv_(diffuse_location_,1,light.diffuse_multiplier.data());
-        glUniform3fv_(fog_color_location_,1,light.fog_color.data());
-        glUniform1f_(fog_start_location_,light.fog_start);glUniform1f_(fog_end_location_,light.fog_end);
-        glUniform3fv_(sky_b_location_,1,light.sky_b.data());glUniform3fv_(sky_c_location_,1,light.sky_c.data());
-        glUniform1f_(lightmap_strength_location_,light.lightmap_strength);
-        glUniform1f_(sky_blend_location_,light.sky_blend);
+        validate_lighting(light);
         const auto ticks=static_cast<std::uint32_t>(SDL_GetTicks());
         const std::array<float,4> source_time{static_cast<float>(ticks),static_cast<float>(ticks)*0.001f,0.0f,0.0f};
         glUniform4fv_(time_location_,1,source_time.data());
-        sky_.clear();opaque_.clear();alpha_.clear();contours_.clear();
-        const auto planes=frustum_planes(vp);
+        contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
-        glUniform3fv_(camera_location_,1,eye.data());
-        const float sky_cosine=std::cos(light.sky_rotation),sky_sine=std::sin(light.sky_rotation);
-        for(const auto& instance:scene.instances) {
-            if(instance.mesh>=meshes_.size()) throw std::runtime_error("scene instance has invalid mesh index");
-            if(instance.occlusion_proxy)continue; // Source class render slot is ret 4, not visible geometry.
-            Matrix4 matrix=instance.transform.matrix;
-            const RenderEntity* entity=nullptr;
-            if(instance.entity_id!=0) {
-                const auto p=std::find_if(entities.begin(),entities.end(),[&](const RenderEntity& value){return value.id==instance.entity_id;});
-                if(p==entities.end()) continue;
-                entity=&*p;
-                matrix=entity_instance_transform(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw).matrix;
-            }
-            for(float v:matrix) if(!std::isfinite(v)) throw std::runtime_error("non-finite scene instance transform");
-            const auto& mesh=scene.meshes[instance.mesh];
-            const auto material=instance.material==UINT32_MAX?mesh.material:instance.material;
-            if(material>=scene.materials.size())throw std::runtime_error("scene instance has invalid material index");
-            std::array<float,4> scroll{};
-            if(instance.ocean&&instance.source_ordinary_color_participates)scroll=advance_source_scroll(source_scroll_,static_cast<std::uint32_t>(SDL_GetTicks()));
-            if(!scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates))continue;
-            if(!materials_[material].referenced)upload_material(scene,material);
-            if(!meshes_[instance.mesh].vao)upload_mesh(scene,instance.mesh);
-            if(scene.materials[material].diffuse.empty()&&!mesh.texture.empty()&&!meshes_[instance.mesh].texture)
-                meshes_[instance.mesh].texture=find_texture(mesh.texture);
-            if(instance.sky) {
-                if(!light.source_values)throw std::runtime_error("original sky class requires source lighting constants");
-                matrix={sky_cosine,0,-sky_sine,0,0,1,0,0,sky_sine,0,sky_cosine,0,eye[0],eye[1],eye[2],1};
-                if(!materials_[material].diffuse&&!meshes_[instance.mesh].texture)continue;
-            }
-            // Frustum culling: sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
-            // Culled alpha draws stay in alpha_ so its distance sort sees the unculled list.
-            const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
-                sphere_visible(planes,matrix,meshes_[instance.mesh].bounds);
-            // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
-            if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
-            bool fog=false;
-            if(visible&&(options_.original_appearance||scene.materials[material].source_ocean)&&light.fog_enabled&&!instance.sky) {
-                if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog requires original model bounds");
-                const auto center=entity?
-                    entity_source_bounds_center(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw):
-                    scene.nodes[instance.node].source_bounds_center;
-                fog=source_fog_enabled(instance.source_half_extents,center,matrix,eye,light.fog_start);
-            }
-            const float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
-            Draw draw{&instance,matrix,dx*dx+dy*dy+dz*dz,material,fog,scroll,visible};
-            (instance.sky?sky_:(scene.materials[material].alpha?alpha_:opaque_)).push_back(draw);
-            if(!visible)continue;
-            if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
-                for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
-                contours_.push_back({instance.mesh,matrix,entity->contour});
-            }
-        }
-        if(shadow_program_) {
-            const auto light_vp=shadow_light_matrix(options_.camera,sun);
-            glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffer_);glViewport(0,0,2048,2048);
-            // Vulkan shadow pipeline: back faces culled, depth bias 1.25 constant / 1.75 slope. The light matrix keeps
-            // Vulkan's Y flip, which reverses GL winding, so source CW front faces rasterise CCW here.
-            glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glFrontFace(GL_CCW);
-            glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1.75f,1.25f);
-            glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
-            for(const auto* list:{&opaque_,&alpha_})for(const auto& draw:*list)draw_shadow(scene,draw);
-            glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
-            glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
-            glUseProgram_(program_);glUniformMatrix4fv_(light_location_,1,GL_FALSE,light_vp.data());
-            glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_texture_);
-            check("drawing shadow map");
-        }
+        build(view_,set,scene,entities,vp,eye,nullptr,true);
+        if(shadow_program_)shadow_pass(0,set,scene,view_,shadow_light_matrix(options_.camera,enhanced_sun(light)));
+        Clip source_clip=no_clip;
+        view_uniforms(scene,vp,eye,source_clip);
         glDepthMask(GL_FALSE);
-        for(const auto& draw:sky_) {
+        for(const auto& draw:view_.sky) {
             if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
             else glDisable(GL_BLEND);
-            draw_instance(scene,draw);
+            draw_instance(set,scene,draw);
         }
+        // Wave 16 see-through doorways: each destination view and its seal go between the source sky and source geometry.
+        bool split=false;
+        for(const auto& portal:portals) {
+            if(!portal.scene||portal.scene==&scene)continue;
+            auto* destination=find(*portal.scene);
+            if(!destination||!destination->ready)continue; // not resident: the closed source wall shows
+            const auto open=opening(portal,eye,frustum_planes(vp));
+            if(!open)continue;
+            draw_portal(portal,*destination,*open,vp,eye);
+            if(open->split&&!split){source_clip=open->source;split=true;}
+        }
+        if(!portals.empty())view_uniforms(scene,vp,eye,source_clip);
+        clip_distances(split);
         glDisable(GL_BLEND);glDepthMask(GL_TRUE);
-        for(const auto& draw:opaque_) if(draw.visible) draw_instance(scene,draw);
-        std::sort(alpha_.begin(),alpha_.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
+        for(const auto& draw:view_.opaque) if(draw.visible) draw_instance(set,scene,draw);
+        std::sort(view_.alpha.begin(),view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
-        for(const auto& draw:alpha_) if(draw.visible) draw_instance(scene,draw);
+        for(const auto& draw:view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
+        clip_distances(false);
         // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input); 0046cbe0 draws AfterHDR ones after
         // the glow composite (0046fdb0 @470aed/@47183f, or straight after 0046ccf0 without glow @471977).
         const auto draw_particles=[&](bool after_hdr) {
@@ -847,7 +831,7 @@ public:
             for(int shell=3;shell>=1;--shell) {
                 glUniform1f_(contour_offset_location_,pulse+static_cast<float>(shell)*.02f);
                 for(const auto& contour:contours_) {
-                    const auto& gpu=meshes_[contour.mesh];
+                    const auto& gpu=set.meshes[contour.mesh];
                     glUniformMatrix4fv_(contour_object_location_,1,GL_FALSE,contour.matrix.data());
                     glUniform3fv_(contour_color_location_,1,contour.color.data());
                     glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
@@ -972,21 +956,21 @@ private:
         }
         progress();
     }
-    GLuint find_texture(const std::string& name) const {
+    static GLuint find_texture(const GlSet& set,const std::string& name) {
         if(name.empty())return GLuint{0};
-        const auto found=texture_names_.find(name);
-        if(found==texture_names_.end())throw std::runtime_error("missing original material texture: "+name);
+        const auto found=set.texture_names.find(name);
+        if(found==set.texture_names.end())throw std::runtime_error("missing original material texture: "+name);
         return found->second;
     }
     static void validate_material(const Material& material) {
         for(float value:material.color)if(!std::isfinite(value))throw std::invalid_argument("non-finite material color");
         if(!std::isfinite(material.alpha_cutoff)||material.alpha_cutoff<0||material.alpha_cutoff>1)throw std::invalid_argument("invalid material alpha cutoff");
     }
-    void upload_material(const Scene& scene,std::size_t index) {
+    void upload_material(GlSet& set,const Scene& scene,std::size_t index) {
         const auto& material=scene.materials[index];
         validate_material(material);
-        materials_[index]={find_texture(material.diffuse),find_texture(material.normal),
-            find_texture(material.environment),find_texture(material.lightmap),find_texture(material.luminance),true};
+        set.materials[index]={find_texture(set,material.diffuse),find_texture(set,material.normal),
+            find_texture(set,material.environment),find_texture(set,material.lightmap),find_texture(set,material.luminance),true};
         progress();
     }
     void validate_mesh(const Scene& scene,std::size_t index) const {
@@ -999,10 +983,10 @@ private:
         validate_vertices(mesh);
         if(mesh.material>=scene.materials.size())throw std::invalid_argument("mesh material out of range");
     }
-    void upload_mesh(const Scene& scene,std::size_t index) {
+    void upload_mesh(GlSet& set,const Scene& scene,std::size_t index) {
         progress();
         validate_mesh(scene,index);
-        const auto& source=scene.meshes[index];auto& gpu=meshes_[index];
+        const auto& source=scene.meshes[index];auto& gpu=set.meshes[index];
         gpu.texture=0; // Legacy texture residency is resolved lazily from the actual draw's material.
         gpu.count=static_cast<GLsizei>(source.indices.size());glGenVertexArrays_(1,&gpu.vao);glBindVertexArray_(gpu.vao);
         gpu.vertex_count=source.vertices.size();gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);
@@ -1027,73 +1011,363 @@ private:
         if(mesh.vao)glDeleteVertexArrays_(1,&mesh.vao);
         mesh={};
     }
-    void release_scene() noexcept override {
-        for(auto& mesh:meshes_)release(mesh);
-        if(!textures_.empty())glDeleteTextures(static_cast<GLsizei>(textures_.size()),textures_.data());
-        meshes_.clear();materials_.clear();textures_.clear();texture_names_.clear();scene_=nullptr;
+    void release(GlSet& set) noexcept {
+        for(auto& mesh:set.meshes)release(mesh);
+        if(!set.textures.empty())glDeleteTextures(static_cast<GLsizei>(set.textures.size()),set.textures.data());
+        GlSet empty;empty.key=set.key;empty.used=set.used;set=std::move(empty);
     }
-    void upload(const Scene& scene){
-        progress();
-        // Actor attach/detach/replacement keeps every other mesh (moved by key) and every texture; only a new Scene reloads all.
-        if(scene_!=&scene || textures_.size()>scene.textures.size())release_scene();
-        else {
-            const auto remap=scene_mesh_remap(mesh_keys_,scene);
-            std::vector<GpuMesh> kept(scene.meshes.size());
-            for(std::size_t i=0;i<remap.size();++i)if(remap[i]!=SIZE_MAX)kept[i]=std::exchange(meshes_[remap[i]],GpuMesh{});
-            for(auto& mesh:meshes_)release(mesh);
-            meshes_=std::move(kept);scene_=nullptr;
+    // Evicted sets are freed a slice per frame by retire(), starting 3 frames later: deleting a whole zone's ~9k GL objects
+    // at once took 7.4 ms, and the driver's deferred buffer frees land in the next swap (~4 ms per ~200 MB measured).
+    void drop(GlSet& set) noexcept {
+        if(primary_==&set)primary_=nullptr;
+        set.used=frame_;
+        const auto p=std::find_if(sets_.begin(),sets_.end(),[&](const auto& s){return s.get()==&set;});
+        retired_.push_back(std::move(*p));sets_.erase(p);
+    }
+    // ponytail: fixed 1 ms / 32 MB of meshes / 16 textures per frame; tune if a bigger zone still hitches.
+    void retire(std::chrono::steady_clock::time_point deadline) noexcept {
+        std::size_t bytes=0;
+        while(!retired_.empty()&&retired_.front()->used+3<=frame_&&bytes<(32U<<20)&&std::chrono::steady_clock::now()<deadline) {
+            auto& set=*retired_.front();
+            if(!set.meshes.empty()) {
+                const auto& mesh=set.meshes.back();bytes+=mesh.vertex_count*sizeof(Vertex)+static_cast<std::size_t>(mesh.count)*4;
+                release(set.meshes.back());set.meshes.pop_back();continue;
+            }
+            if(const auto n=std::min<std::size_t>(set.textures.size(),16)) {
+                glDeleteTextures(static_cast<GLsizei>(n),set.textures.data()+set.textures.size()-n);
+                set.textures.resize(set.textures.size()-n);break;
+            }
+            retired_.erase(retired_.begin());
         }
-        try {
-            progress();
-            const auto material_usage=scene_material_usage(scene);
-            progress();
-            if(scene.textures.size()>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()))
-                throw std::invalid_argument("too many scene textures");
-            const auto retained_textures=textures_.size();
-            textures_.resize(scene.textures.size());
-            for(std::size_t i=retained_textures;i<scene.textures.size();++i){
-                progress();
-                upload_texture(scene.textures[i],textures_[i]);
-                if(!texture_names_.emplace(scene.textures[i].name,textures_[i]).second)throw std::invalid_argument("duplicate scene texture name");
-                progress();
-            }
-            materials_.assign(scene.materials.size(),GpuMaterial{});
-            for(std::size_t i=0;i<scene.materials.size();++i) {
-                progress();
-                if(!material_usage[i]){validate_material(scene.materials[i]);continue;}
-                upload_material(scene,i);
-            }
-            meshes_.resize(scene.meshes.size());
-            // 0: dormant/proxy, 1: referenced no-color, 2: visible GPU residency.
-            std::vector<std::uint8_t> visible_meshes(scene.meshes.size(),0);
-            if(scene.instances.empty()) {
-                for(std::uint32_t i=0;i<scene.meshes.size();++i) {
-                    if((i&1023U)==0)progress();
-                    visible_meshes[i]=scene_source_color_draw(scene,i)?2:1;
-                }
-            }
-            std::size_t sky_count=0;
-            for(std::size_t i=0;i<scene.instances.size();++i) {
+    }
+    void release_scene() noexcept override { if(primary_)drop(*primary_); }
+    GlSet* find(const Scene& scene) const {
+        for(const auto& set:sets_)if(set->key==&scene)return set.get();
+        return nullptr;
+    }
+    // Resident cap: primary + 2; the least recently used other set is freed first.
+    GlSet& acquire(const Scene& scene) {
+        auto* set=find(scene);
+        if(!set){sets_.push_back(std::make_unique<GlSet>());set=sets_.back().get();set->key=&scene;}
+        set->used=frame_;
+        while(sets_.size()>3) {
+            GlSet* oldest=nullptr;
+            for(const auto& other:sets_)if(other.get()!=set&&other.get()!=primary_&&(!oldest||other->used<oldest->used))oldest=other.get();
+            drop(*oldest);
+        }
+        return *set;
+    }
+    // Upload plan for the Scene's current structure. Actor attach/detach/replacement keeps every other mesh (moved by key)
+    // and every texture; only a shrunk texture table reloads the set.
+    void plan(GlSet& set,const Scene& scene) {
+        progress();
+        if(set.textures.size()>scene.textures.size())release(set);
+        else if(set.planned) {
+            const auto remap=scene_mesh_remap(set.mesh_keys,scene);
+            std::vector<GpuMesh> kept(scene.meshes.size());
+            for(std::size_t i=0;i<remap.size();++i)if(remap[i]!=SIZE_MAX)kept[i]=std::exchange(set.meshes[remap[i]],GpuMesh{});
+            for(auto& mesh:set.meshes)release(mesh);
+            set.meshes=std::move(kept);
+        }
+        if(scene.textures.size()>static_cast<std::size_t>(std::numeric_limits<GLsizei>::max()))
+            throw std::invalid_argument("too many scene textures");
+        set.material_usage=scene_material_usage(scene);
+        progress();
+        set.textures.resize(scene.textures.size()); // names stay 0 from next_texture on until streamed
+        set.materials.assign(scene.materials.size(),GpuMaterial{});set.next_material=0;
+        set.meshes.resize(scene.meshes.size());
+        set.mesh_plan.assign(scene.meshes.size(),0);set.next_mesh=0;
+        if(scene.instances.empty()) {
+            for(std::uint32_t i=0;i<scene.meshes.size();++i) {
                 if((i&1023U)==0)progress();
-                const auto& instance=scene.instances[i];
-                if(instance.sky)++sky_count;
-                const bool color_draw=scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates);
-                if(!instance.occlusion_proxy)visible_meshes[instance.mesh]=std::max<std::uint8_t>(visible_meshes[instance.mesh],color_draw?2:1);
+                set.mesh_plan[i]=scene_source_color_draw(scene,i)?2:1;
             }
-            for(std::size_t i=0;i<scene.meshes.size();++i) {
+        }
+        for(std::size_t i=0;i<scene.instances.size();++i) {
+            if((i&1023U)==0)progress();
+            const auto& instance=scene.instances[i];
+            if(instance.mesh>=scene.meshes.size())throw std::runtime_error("scene instance has invalid mesh index");
+            const bool color_draw=scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates);
+            if(!instance.occlusion_proxy)set.mesh_plan[instance.mesh]=std::max<std::uint8_t>(set.mesh_plan[instance.mesh],color_draw?2:1);
+        }
+        // geometry_revision stays: refresh() then updates retained skins whose revision moved since their upload.
+        set.mesh_keys.resize(scene.meshes.size());for(std::size_t i=0;i<scene.meshes.size();++i)set.mesh_keys[i]=scene.meshes[i].key;
+        set.mesh_key=scene.mesh_key;set.planned=true;
+    }
+    static constexpr auto never=std::chrono::steady_clock::time_point::max();
+    // Uploads textures, then materials, then meshes until deadline (never: to completion). The item that crosses the
+    // deadline still finishes, so one item bounds the hitch. True when the set is complete.
+    bool stream(GlSet& set,const Scene& scene,std::chrono::steady_clock::time_point deadline) {
+        try {
+            if(!set.planned||set.mesh_key!=scene.mesh_key||set.meshes.size()!=scene.meshes.size()||
+               set.textures.size()!=scene.textures.size()||set.materials.size()!=scene.materials.size())plan(set,scene);
+            const auto due=[&]{
+                if(deadline==never||std::chrono::steady_clock::now()<deadline)return false;
+                glBindVertexArray_(0);check("streaming original asset scene");return true;
+            };
+            for(;set.next_texture<set.textures.size();++set.next_texture) {
+                if(due())return false;
+                const auto i=set.next_texture;
+                upload_texture(scene.textures[i],set.textures[i]);
+                if(!set.texture_names.emplace(scene.textures[i].name,set.textures[i]).second)throw std::invalid_argument("duplicate scene texture name");
                 progress();
-                if(!visible_meshes[i]||meshes_[i].vao)continue; // Retained meshes were validated on upload.
-                if(visible_meshes[i]==1){validate_mesh(scene,i);continue;}
-                upload_mesh(scene,i);
             }
-            glBindVertexArray_(0);check("uploading original asset scene");scene_=&scene;
-            // geometry_revision_ stays: render() then refreshes retained skins whose revision moved since their upload.
-            mesh_keys_.resize(scene.meshes.size());for(std::size_t i=0;i<scene.meshes.size();++i)mesh_keys_[i]=scene.meshes[i].key;
-            mesh_key_=scene.mesh_key;
-            opaque_.reserve(scene.instances.size());alpha_.reserve(scene.instances.size());
-            sky_.reserve(sky_count);
+            for(;set.next_material<set.materials.size();++set.next_material) {
+                const auto i=set.next_material;
+                if(!set.material_usage[i]){validate_material(scene.materials[i]);continue;}
+                if(due())return false;
+                upload_material(set,scene,i);
+            }
+            for(;set.next_mesh<set.meshes.size();++set.next_mesh) {
+                const auto i=set.next_mesh;
+                if(!set.mesh_plan[i]||set.meshes[i].vao)continue; // Retained meshes were validated on upload.
+                if(due())return false;
+                if(set.mesh_plan[i]==1)validate_mesh(scene,i);else upload_mesh(set,scene,i);
+            }
+            glBindVertexArray_(0);check("uploading original asset scene");
+            set.ready=true;return true;
+        }catch(...){release(set);throw;}
+    }
+    // Skinned meshes whose vertices moved since their upload (Scene::geometry_revision).
+    void refresh(GlSet& set,const Scene& scene) {
+        if(set.geometry_revision==scene.geometry_revision)return;
+        for(std::size_t i=0;i<set.meshes.size();++i) {
+            if((i&1023U)==0)progress();
+            const auto& mesh=scene.meshes[i];auto& gpu=set.meshes[i];
+            if(!gpu.vao)continue;
+            if(mesh.vertices.size()!=gpu.vertex_count)throw std::runtime_error("animated mesh topology changed without a new scene");
+            if(mesh.revision==gpu.revision)continue;
+            validate_vertices(mesh);
             progress();
-        }catch(...){release_scene();throw;}
+            glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
+            glBufferSubData_(GL_ARRAY_BUFFER,0,static_cast<GLsizeiptr>(mesh.vertices.size()*sizeof(Vertex)),mesh.vertices.data());
+            gpu.revision=mesh.revision;
+            if(mesh.influences.empty())gpu.bounds=mesh_bounds(mesh);
+            progress();
+        }
+        check("uploading recovered skeletal animation");set.geometry_revision=scene.geometry_revision;
+    }
+    static void validate_lighting(const SceneLighting& light) {
+        for(const auto* values:{&light.sun_direction,&light.ambient_multiplier,&light.diffuse_multiplier,&light.sky_b,&light.sky_c,&light.fog_color})
+            for(float value:*values)if(!std::isfinite(value))throw std::invalid_argument("non-finite scene lighting");
+        if(light.fog_enabled&&(!std::isfinite(light.fog_start)||!std::isfinite(light.fog_end)||light.fog_end<=light.fog_start))
+            throw std::invalid_argument("invalid source fog interval");
+        if(!std::isfinite(light.lightmap_strength))throw std::invalid_argument("non-finite source lightmap multiplier");
+        if(!std::isfinite(light.sky_blend)||!std::isfinite(light.sky_rotation))throw std::invalid_argument("non-finite source sky parameters");
+    }
+    using Clip=std::array<std::array<float,4>,6>;
+    static constexpr Clip no_clip{{{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,-1e9f}}};
+    // Per-view scene uniforms (program_ bound): camera, the Scene's own lighting/fog/sky constants and clip planes.
+    void view_uniforms(const Scene& scene,const Matrix4& vp,const std::array<float,3>& eye,const Clip& clip) {
+        const auto& light=scene.lighting;
+        // Enhanced lighting needs a sun even without source constants; original paths only read it with them.
+        const auto sun=enhanced_sun(light);
+        glUniformMatrix4fv_(vp_location_,1,GL_FALSE,vp.data());
+        glUniform1i_(source_light_location_,light.source_values?1:0);glUniform3fv_(sun_location_,1,sun.data());
+        glUniform3fv_(ambient_location_,1,light.ambient_multiplier.data());glUniform3fv_(diffuse_location_,1,light.diffuse_multiplier.data());
+        glUniform3fv_(fog_color_location_,1,light.fog_color.data());
+        glUniform1f_(fog_start_location_,light.fog_start);glUniform1f_(fog_end_location_,light.fog_end);
+        glUniform3fv_(sky_b_location_,1,light.sky_b.data());glUniform3fv_(sky_c_location_,1,light.sky_c.data());
+        glUniform1f_(lightmap_strength_location_,light.lightmap_strength);
+        glUniform1f_(sky_blend_location_,light.sky_blend);
+        glUniform3fv_(camera_location_,1,eye.data());
+        glUniform4fv_(clip_location_,6,clip[0].data());
+    }
+    static void clip_distances(bool on) { for(GLenum i=0;i<5;++i)(on?glEnable:glDisable)(GL_CLIP_DISTANCE0+i); }
+    // Draw lists of one view. source: the primary view (hover contours). Enhanced keeps off-screen opaque draws for the
+    // shadow map. clip: extra culling planes (portal pyramid in this Scene's coordinates).
+    void build(View& view,GlSet& set,const Scene& scene,std::span<const RenderEntity> entities,const Matrix4& vp,
+               const std::array<float,3>& eye,const FrustumPlanes* clip,bool source) {
+        view.sky.clear();view.opaque.clear();view.alpha.clear();
+        view.opaque.reserve(scene.instances.size());view.alpha.reserve(scene.instances.size());
+        const auto& light=scene.lighting;
+        const auto planes=frustum_planes(vp);
+        const float sky_cosine=std::cos(light.sky_rotation),sky_sine=std::sin(light.sky_rotation);
+        for(const auto& instance:scene.instances) {
+            if(instance.mesh>=set.meshes.size()) throw std::runtime_error("scene instance has invalid mesh index");
+            if(instance.occlusion_proxy)continue; // Source class render slot is ret 4, not visible geometry.
+            Matrix4 matrix=instance.transform.matrix;
+            const RenderEntity* entity=nullptr;
+            if(instance.entity_id!=0) {
+                const auto p=std::find_if(entities.begin(),entities.end(),[&](const RenderEntity& value){return value.id==instance.entity_id;});
+                if(p==entities.end()) continue;
+                entity=&*p;
+                matrix=entity_instance_transform(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw).matrix;
+            }
+            for(float v:matrix) if(!std::isfinite(v)) throw std::runtime_error("non-finite scene instance transform");
+            const auto& mesh=scene.meshes[instance.mesh];
+            const auto material=instance.material==UINT32_MAX?mesh.material:instance.material;
+            if(material>=scene.materials.size())throw std::runtime_error("scene instance has invalid material index");
+            std::array<float,4> scroll{};
+            if(instance.ocean&&instance.source_ordinary_color_participates)scroll=advance_source_scroll(set.scroll,static_cast<std::uint32_t>(SDL_GetTicks()));
+            if(!scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates))continue;
+            if(!set.materials[material].referenced)upload_material(set,scene,material);
+            if(!set.meshes[instance.mesh].vao)upload_mesh(set,scene,instance.mesh);
+            if(scene.materials[material].diffuse.empty()&&!mesh.texture.empty()&&!set.meshes[instance.mesh].texture)
+                set.meshes[instance.mesh].texture=find_texture(set,mesh.texture);
+            if(instance.sky) {
+                if(!light.source_values)throw std::runtime_error("original sky class requires source lighting constants");
+                matrix={sky_cosine,0,-sky_sine,0,0,1,0,0,sky_sine,0,sky_cosine,0,eye[0],eye[1],eye[2],1};
+                if(!set.materials[material].diffuse&&!set.meshes[instance.mesh].texture)continue;
+            }
+            // Frustum culling: sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
+            // Culled alpha draws stay in alpha so its distance sort sees the unculled list.
+            const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
+                (sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds)&&(!clip||sphere_visible(*clip,matrix,set.meshes[instance.mesh].bounds)));
+            // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
+            if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
+            bool fog=false;
+            if(visible&&(options_.original_appearance||scene.materials[material].source_ocean)&&light.fog_enabled&&!instance.sky) {
+                if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog requires original model bounds");
+                const auto center=entity?
+                    entity_source_bounds_center(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw):
+                    scene.nodes[instance.node].source_bounds_center;
+                fog=source_fog_enabled(instance.source_half_extents,center,matrix,eye,light.fog_start);
+            }
+            const float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
+            Draw draw{&instance,matrix,dx*dx+dy*dy+dz*dz,material,fog,scroll,visible};
+            (instance.sky?view.sky:(scene.materials[material].alpha?view.alpha:view.opaque)).push_back(draw);
+            if(!visible||!source)continue;
+            if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
+                for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
+                contours_.push_back({instance.mesh,matrix,entity->contour});
+            }
+        }
+    }
+    struct Opening { Clip clip; std::array<std::array<float,3>,8> seal; Clip source; bool split=false; };
+    // Wave 16 doorway seen from eye (primary world). Quad normal cross(q1-q0,q3-q0) points into the destination.
+    // seal: the quad pulled `pull` toward the eye; it hides source geometry near the threshold plane (Doorways: gate
+    // porch/arch/posters lie at -0.58..+0.04 u) and the door wall behind it.
+    // clip: the 4 pyramid sides eye→seal edges plus the seal plane, so the destination floor meets the source floor with
+    // no gap; the destination's own door wall sits there too but faces away (back-face culled).
+    // Eye within max(.25, 2·near, pull+.25) of the plane and inside the opening: half-space split (the pyramid
+    // degenerates), no seal. The scenes meet exactly at the plane (floors continuous); the source also drops its
+    // geometry within `pull` of the plane above the floor strip (the clutter the seal hides otherwise). Destination
+    // geometry on the source side of the plane is dropped: it sits at the eye (Umut Dergisi's karakoy door filler 0.49 u
+    // inside the room covered the whole screen). nullopt: eye beyond the plane, or the quad is off-screen.
+    std::optional<Opening> opening(const PortalView& portal,const std::array<float,3>& eye,const FrustumPlanes& frustum) const {
+        using V=std::array<float,3>;
+        const auto& q=portal.quad;
+        for(const auto& c:q)for(float v:c)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal quad");
+        for(float v:portal.to_primary)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal transform");
+        const auto sub=[](const V& a,const V& b){return V{a[0]-b[0],a[1]-b[1],a[2]-b[2]};};
+        const auto cross=[](const V& a,const V& b){return V{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};};
+        const auto dot=[](const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];};
+        const auto unit=[&](V v){const float l=std::sqrt(dot(v,v));if(!(l>1e-6f))return V{};for(auto& x:v)x/=l;return v;};
+        const auto n=unit(cross(sub(q[1],q[0]),sub(q[3],q[0])));
+        if(n==V{})throw std::invalid_argument("degenerate portal quad");
+        for(const auto& p:frustum)
+            if(std::all_of(q.begin(),q.end(),[&](const V& c){return p[0]*c[0]+p[1]*c[1]+p[2]*c[2]+p[3]<0;}))return {};
+        constexpr float pull=.7f; // same constant in renderer_vk.cpp
+        const float s=dot(n,sub(eye,q[0])),band=std::max({.25f,2*options_.camera.near_plane,pull+.25f});
+        bool inside=true;
+        for(unsigned i=0;i<4;++i)inside=inside&&dot(cross(sub(q[(i+1)%4],q[i]),sub(eye,q[i])),n)>=0;
+        Opening o{no_clip,{},no_clip};
+        o.clip[4]={n[0],n[1],n[2],-dot(n,q[0])+pull};
+        // Two-part seal: the bottom `pull` strip stays on the plane (0.02 toward the eye), so floor rays that would cross
+        // the destination clip short of the plane still meet the source floor in front of it (the destination often has no
+        // floor there: reverse Balıkpazarı showed a 4-px sky band); the rest is pulled the full `pull`.
+        const auto up=unit(sub(q[3],q[0]));const float strip=std::min(pull,std::sqrt(dot(sub(q[3],q[0]),sub(q[3],q[0]))));
+        const auto at=[&](const V& p,float rise,float back){return V{p[0]+up[0]*rise-n[0]*back,p[1]+up[1]*rise-n[1]*back,p[2]+up[2]*rise-n[2]*back};};
+        o.seal={at(q[0],0,.02f),at(q[1],0,.02f),at(q[1],strip,.02f),at(q[0],strip,.02f),at(q[0],strip,pull),at(q[1],strip,pull),at(q[2],0,pull),at(q[3],0,pull)};
+        if(inside&&std::abs(s)<band) {
+            // Both meet at n·q0 - 0.02 (the strip seal's plane): the source wall coplanar with the opening (no authored
+            // hole) is dropped, floors stay continuous. Source: n·x <= n·q0 - .02 and (n·x <= n·q0 - pull or
+            // height <= strip), the union being plane pair 1/5.
+            o.split=true;o.clip[4][3]=.02f-dot(n,q[0]);
+            o.source[0]={-n[0],-n[1],-n[2],dot(n,q[0])-.02f};o.source[1]={-n[0],-n[1],-n[2],dot(n,q[0])-pull};
+            o.source[5]={-up[0],-up[1],-up[2],dot(up,q[0])+strip};
+            return o;
+        }
+        if(s>=0)return {};
+        const V centre{(q[0][0]+q[1][0]+q[2][0]+q[3][0])/4,(q[0][1]+q[1][1]+q[2][1]+q[3][1])/4,(q[0][2]+q[1][2]+q[2][2]+q[3][2])/4};
+        // Sides through the seal's outline (its screen footprint) with 0.01 outward slack, so no seal pixel lacks the
+        // destination; source geometry covers any slack outside the seal. Each side takes whichever of its strip/pulled
+        // edges keeps all 8 seal corners inside. Near the seal (s >= -2·pull) the plain quad edges are used.
+        static constexpr std::array<std::array<unsigned,4>,4> sides{{{0,1,4,5},{1,2,5,6},{6,7,6,7},{3,0,7,4}}};
+        for(unsigned i=0;i<4;++i) {
+            float best=-INFINITY;
+            for(unsigned c=0;c<4;c+=2) {
+                const auto& p0=s<-2*pull?o.seal[sides[i][c]]:q[i];const auto& p1=s<-2*pull?o.seal[sides[i][c+1]]:q[(i+1)%4];
+                auto side=unit(cross(sub(p0,eye),sub(p1,eye)));
+                if(dot(side,sub(centre,eye))<0)for(auto& x:side)x=-x;
+                float worst=INFINITY;
+                for(const auto& corner:o.seal)worst=std::min(worst,dot(side,sub(corner,eye)));
+                if(worst>best){best=worst;o.clip[i]={side[0],side[1],side[2],.01f-dot(side,eye)};}
+            }
+        }
+        return o;
+    }
+    // Destination view through one doorway: its own coordinates, virtual camera vp·M (eye M⁻¹·eye), its own lighting/fog/
+    // sky and (enhanced) its own shadow map around the virtual camera. Then the seal: the quad's depth over the opening,
+    // colour masked.
+    void draw_portal(const PortalView& portal,GlSet& set,const Opening& open,const Matrix4& vp,const std::array<float,3>& eye) {
+        const auto& scene=*portal.scene;const auto& m=portal.to_primary;
+        validate_lighting(scene.lighting);
+        const auto portal_vp=multiply_matrix(vp,m);
+        const auto inverse=[&](const std::array<float,3>& p){ // rigid M: Rᵀ(p − t)
+            std::array<float,3> r{};
+            for(unsigned i=0;i<3;++i)for(unsigned k=0;k<3;++k)r[i]+=m[i*4+k]*(p[k]-m[12+k]);
+            return r;
+        };
+        const auto portal_eye=inverse(eye);
+        Clip clip{};FrustumPlanes cull{}; // planes·M: primary-world planes in destination coordinates
+        for(unsigned i=0;i<6;++i)for(unsigned c=0;c<4;++c)for(unsigned r=0;r<4;++r)clip[i][c]+=open.clip[i][r]*m[c*4+r];
+        for(unsigned i=0;i<5;++i)cull[i]=clip[i];
+        cull[5]=cull[4];
+        refresh(set,scene);
+        build(portal_view_,set,scene,portal.entities,portal_vp,portal_eye,&cull,false);
+        if(shadow_program_) {
+            Camera virtual_camera=options_.camera;virtual_camera.target=inverse(options_.camera.target);
+            shadow_pass(1,set,scene,portal_view_,shadow_light_matrix(virtual_camera,enhanced_sun(scene.lighting)));
+        }
+        view_uniforms(scene,portal_vp,portal_eye,clip);
+        clip_distances(true);
+        glDepthMask(GL_FALSE);
+        for(const auto& draw:portal_view_.sky) {
+            if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
+            else glDisable(GL_BLEND);
+            draw_instance(set,scene,draw);
+        }
+        glDisable(GL_BLEND);glDepthMask(GL_TRUE);
+        for(const auto& draw:portal_view_.opaque) if(draw.visible) draw_instance(set,scene,draw);
+        std::sort(portal_view_.alpha.begin(),portal_view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
+        glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
+        for(const auto& draw:portal_view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
+        clip_distances(false);glDisable(GL_BLEND);glDepthMask(GL_TRUE);
+        if(shadow_program_)shadow_bind(0);
+        if(open.split){check("drawing portal view");return;}
+        // Seal: depth ALWAYS (plus a slope/units pull toward the eye against coplanar source wall faces at range).
+        glUseProgram_(seal_program_);glUniformMatrix4fv_(seal_vp_location_,1,GL_FALSE,vp.data());
+        glUniform3fv_(seal_corners_location_,8,open.seal[0].data());
+        glDisable(GL_CULL_FACE);glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthFunc(GL_ALWAYS);
+        glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1.f,-4.f);
+        glBindVertexArray_(overlay_vao_);glDrawArrays(GL_TRIANGLES,0,12);
+        glDisable(GL_POLYGON_OFFSET_FILL);glDepthFunc(GL_LESS);glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
+        glUseProgram_(program_);
+        check("drawing portal view");
+    }
+    // Enhanced sun shadow map slot (0: primary view, 1: portal destination view); leaves it bound for program_.
+    void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp) {
+        shadow_lights_[static_cast<std::size_t>(slot)]=light_vp;
+        glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glViewport(0,0,2048,2048);
+        // Vulkan shadow pipeline: back faces culled, depth bias 1.25 constant / 1.75 slope. The light matrix keeps
+        // Vulkan's Y flip, which reverses GL winding, so source CW front faces rasterise CCW here.
+        glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glFrontFace(GL_CCW);
+        glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1.75f,1.25f);
+        // Casters sunward of the light's near plane (light distance only max(50,3·zoom)) clamp to depth 0 and still cast:
+        // clipped, a building's long low-sun shadow came and went with the camera zoom.
+        glEnable(GL_DEPTH_CLAMP);
+        glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
+        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)draw_shadow(set,scene,draw);
+        glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
+        glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
+        glUseProgram_(program_);shadow_bind(slot);
+        check("drawing shadow map");
+    }
+    void shadow_bind(int slot) {
+        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(slot)].data());
+        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[slot]);
     }
     void upload_texture(const Texture& source,GLuint& name) {
         if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
@@ -1138,12 +1412,12 @@ private:
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
         if(anisotropy_>1)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAX_ANISOTROPY_EXT,anisotropy_);
     }
-    void draw_shadow(const Scene& scene,const Draw& draw){
+    void draw_shadow(const GlSet& set,const Scene& scene,const Draw& draw){
         const auto& material=scene.materials[draw.material];
         // ponytail: no wave displacement here, so source ocean casts no shadow; port sourceOceanPosition if water must.
         if(material.source_ocean)return;
         if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
-        const auto& gpu=meshes_[draw.instance->mesh];const auto& maps=materials_[draw.material];
+        const auto& gpu=set.meshes[draw.instance->mesh];const auto& maps=set.materials[draw.material];
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
         glUniformMatrix4fv_(shadow_object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(shadow_color_location_,1,material.color.data());
         glUniform1f_(shadow_cutoff_location_,material.alpha_cutoff);glUniform1i_(shadow_texture_location_,diffuse?1:0);
@@ -1152,8 +1426,8 @@ private:
         glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);
         glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
     }
-    void draw_instance(const Scene& scene,const Draw& draw){
-        const auto& gpu=meshes_[draw.instance->mesh];const auto& material=scene.materials[draw.material];const auto& maps=materials_[draw.material];
+    void draw_instance(const GlSet& set,const Scene& scene,const Draw& draw){
+        const auto& gpu=set.meshes[draw.instance->mesh];const auto& material=scene.materials[draw.material];const auto& maps=set.materials[draw.material];
         if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
         glUniform1i_(sky_location_,draw.instance->sky?1:0);
         glUniform1i_(ocean_location_,material.source_ocean?1:0);
@@ -1176,8 +1450,9 @@ private:
         if(!context_)return;
         if(SDL_GL_MakeCurrent(window_,context_)){
             // Before entry points are loaded the context itself owns all remaining allocations.
-            if(glDeleteBuffers_ && glDeleteVertexArrays_)release_scene();
+            if(glDeleteBuffers_ && glDeleteVertexArrays_){for(auto* list:{&sets_,&retired_})for(auto& set:*list)release(*set);sets_.clear();retired_.clear();primary_=nullptr;}
             if(program_ && glDeleteProgram_)glDeleteProgram_(program_);
+            if(seal_program_ && glDeleteProgram_)glDeleteProgram_(seal_program_);
             if(overlay_program_ && glDeleteProgram_)glDeleteProgram_(overlay_program_);
             if(particle_program_ && glDeleteProgram_)glDeleteProgram_(particle_program_);
             if(contour_program_ && glDeleteProgram_)glDeleteProgram_(contour_program_);
@@ -1193,8 +1468,8 @@ private:
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
             if(shadow_program_ && glDeleteProgram_)glDeleteProgram_(shadow_program_);
-            if(shadow_texture_)glDeleteTextures(1,&shadow_texture_);
-            if(shadow_framebuffer_ && glDeleteFramebuffers_)glDeleteFramebuffers_(1,&shadow_framebuffer_);
+            if(shadow_textures_[0])glDeleteTextures(2,shadow_textures_);
+            if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,shadow_framebuffers_);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;
     }

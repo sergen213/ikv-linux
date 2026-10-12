@@ -121,8 +121,9 @@ Audio::Pcm Audio::decode(std::vector<std::uint8_t> ogg) {
     if (::lseek(input.fd, 0, SEEK_SET) == -1) system_error("rewinding Ogg input");
     const int errors = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
     if (errors == -1) system_error("opening decoder diagnostic sink");
-    // All arguments and limits are prepared before fork: no shell, allocation or
-    // C++ runtime work in the child while SDL's audio thread is running.
+    // All arguments and limits are prepared before vfork: the child only makes async-signal-safe syscalls until exec.
+    // fork() would copy this multi-GiB client's page tables and make every later parent write a COW fault: a 10 ms
+    // stall of the frame thread on each zone-music change.
     const char* const argv[] = {
         "/usr/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
         "-threads", "1", "-protocol_whitelist", "pipe", "-f", "ogg",
@@ -135,7 +136,7 @@ Audio::Pcm Audio::decode(std::vector<std::uint8_t> ogg) {
     const rlimit memory_bound{1024ULL * 1024 * 1024, 1024ULL * 1024 * 1024};
     const rlimit cpu_bound{12, 12};
     const rlimit core_bound{0, 0};
-    const pid_t pid = ::fork();
+    const pid_t pid = ::vfork();
     if (pid == 0) {
         if (::dup2(input.fd, STDIN_FILENO) == -1 ||
             ::dup2(output.fd, STDOUT_FILENO) == -1 ||
@@ -303,11 +304,14 @@ void Audio::start(std::size_t slot, Pcm pcm, const SDL_AudioSpec& format, bool l
     sdl_check(bound, "binding SDL audio stream");
     voices_[slot].emplace(std::move(voice));
 }
-void Audio::bed(Bed bed, std::vector<std::uint8_t> ogg, bool loop) {
-    if (ogg.size() < 27 || ogg.size() > input_limit || std::memcmp(ogg.data(), "OggS", 4) != 0 || ogg[4] != 0)
-        throw std::invalid_argument("audio requires an original OggS payload between 27 bytes and 32 MiB");
-    // Decoding long original music takes ffmpeg up to seconds; the frame loop must not wait.
-    pending_.push_back({bed, ++tickets_[bed], loop, std::async(std::launch::async, decode, std::move(ogg))});
+void Audio::bed(Bed bed, std::filesystem::path ogg, bool loop) {
+    // Reading and decoding long original music take up to seconds; the frame loop (a zone swap's frame) must not wait.
+    pending_.push_back({bed, ++tickets_[bed], loop, std::async(std::launch::async, [path = std::move(ogg)] {
+        auto bytes = read_file(path, input_limit);
+        if (bytes.size() < 27 || std::memcmp(bytes.data(), "OggS", 4) != 0 || bytes[4] != 0)
+            throw std::invalid_argument("audio requires an original OggS payload between 27 bytes and 32 MiB");
+        return decode(std::move(bytes));
+    })});
 }
 void Audio::stop(Bed bed) {
     ++tickets_[bed];
@@ -331,8 +335,11 @@ void Audio::update() {
         if (it->pcm.wait_for(std::chrono::seconds(0)) != std::future_status::ready) { ++it; continue; }
         auto ready = std::move(*it);
         it = pending_.erase(it);
-        auto pcm = ready.pcm.get(); // Rethrows a decoder failure to the caller.
-        if (ready.ticket == tickets_[ready.bed]) start(ready.bed, std::move(pcm), pcm_format, ready.loop, std::nullopt);
+        const bool current = ready.ticket == tickets_[ready.bed];
+        Pcm pcm;
+        try { pcm = ready.pcm.get(); } // Rethrows a read/decoder failure to the caller.
+        catch (...) { if (current) voices_[ready.bed].reset(); throw; } // 00455eb0: "couldn't load background music" leaves no stream.
+        if (current) start(ready.bed, std::move(pcm), pcm_format, ready.loop, std::nullopt);
     }
     for (std::size_t slot = 0; slot < voices_.size(); ++slot) {
         if (!voices_[slot]) continue;
@@ -412,7 +419,8 @@ void GameAudio::update() {
     catch (const std::exception& error) { trace("failed", "bed", error.what()); }
 }
 void GameAudio::music_override(const std::filesystem::path& ogg) {
-    mixer.bed(Audio::music, read_file(ogg, input_limit), true);
+    if (!std::filesystem::is_regular_file(ogg)) throw std::runtime_error("--audio is not a file: " + ogg.string()); // explicit input fails fast
+    mixer.bed(Audio::music, ogg, true);
     override_ = true;
     trace("music", "override", ogg.string());
 }
@@ -459,13 +467,8 @@ void GameAudio::select_bed(Audio::Bed bed, std::size_t index) {
         return trace(what, std::to_string(index), "nothing");
     }
     const auto path = original_audio_path(list[index]);
-    try {
-        mixer.bed(bed, read_file(base_ / "audio" / path, input_limit), bed == Audio::ambient);
-        trace(what, std::to_string(index), path);
-    } catch (const std::exception& error) {
-        mixer.stop(bed); // 00455eb0: "couldn't load background music" leaves no stream.
-        trace("failed", what, path + ": " + error.what());
-    }
+    mixer.bed(bed, base_ / "audio" / path, bed == Audio::ambient);
+    trace(what, std::to_string(index), path);
 }
 // 004573e0: 0 (or MusicVolume <= 0.01) stops, 255 keeps, otherwise a playlist index.
 // Music changes only when the index changes and plays once; ambient restarts while silent.
@@ -488,6 +491,24 @@ void GameAudio::frontend(bool credits) {
     // 004573e0 with DAT_005ea950 == 0: 8 while the credits window 0x77d604 (built by 004afed0) is visible (+0xd4), else 2.
     if (!override_) choose(credits ? 8 : 2, 0);
 }
+// 00419a40: musicNN.raw / soundNN.raw are 2048x2048 byte grids; a missing file is all zero.
+static std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> read_grids(const std::filesystem::path& base, unsigned support) {
+    std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> grids;
+    for (auto [grid, name] : {std::pair{&grids.first, "music"}, std::pair{&grids.second, "sound"}}) {
+        char file[32];
+        std::snprintf(file, sizeof file, "%s%02u.raw", name, support);
+        grid->assign(grid_bytes, 0);
+        std::ifstream input(base / file, std::ios::binary);
+        if (input) input.read(reinterpret_cast<char*>(grid->data()), static_cast<std::streamsize>(grid_bytes));
+    }
+    return grids;
+}
+void GameAudio::preload(unsigned support) {
+    if (support >= 18 || support == grid_zone_ || support == next_zone_) return;
+    if (next_grids_.valid() && next_grids_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    next_zone_ = support;
+    next_grids_ = std::async(std::launch::async, read_grids, base_, support);
+}
 void GameAudio::frame(const Scene& scene, std::span<const RenderEntity> poses, std::uint32_t self,
                       const CameraBasis& listener) {
     mixer.listener(listener.eye, listener.right);
@@ -498,14 +519,9 @@ void GameAudio::frame(const Scene& scene, std::span<const RenderEntity> poses, s
     const auto* player = pose(self);
     if (!override_ && player && scene.source_support < 18) {
         if (grid_zone_ != scene.source_support) {
-            // 00419a40: musicNN.raw / soundNN.raw are 2048x2048 byte grids; a missing file is all zero.
-            for (auto [grid, name] : {std::pair{&music_grid_, "music"}, std::pair{&sound_grid_, "sound"}}) {
-                char file[32];
-                std::snprintf(file, sizeof file, "%s%02u.raw", name, scene.source_support);
-                grid->assign(grid_bytes, 0);
-                std::ifstream input(base_ / file, std::ios::binary);
-                if (input) input.read(reinterpret_cast<char*>(grid->data()), static_cast<std::streamsize>(grid_bytes));
-            }
+            auto grids = next_zone_ == scene.source_support && next_grids_.valid() ? next_grids_.get() : read_grids(base_, scene.source_support);
+            if (next_zone_ == scene.source_support) next_zone_ = UINT32_MAX;
+            music_grid_ = std::move(grids.first); sound_grid_ = std::move(grids.second);
             grid_zone_ = scene.source_support;
             trace("zone", std::to_string(grid_zone_), "music/sound grids");
         }
