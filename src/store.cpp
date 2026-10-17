@@ -398,8 +398,8 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
             if(!PQntuples(result.get())||cell(result,0,2).size()!=hash.size()||CRYPTO_memcmp(cell(result,0,2).data(),hash.data(),hash.size())!=0||boolean(result,0,3))throw ApiError(401,"unauthorized","Kullanıcı isminiz ya da şifreniz onaylanmadı ya da hesabınız bloklanmış.");
             const auto id=integer(result,0,0);auto token=random_hex(32);
             sql(connection,"DELETE FROM sessions WHERE account_id=$1::bigint AND (expires_at<=now() OR revoked_at IS NOT NULL)",{std::to_string(id)});
-            auto count=sql(connection,"SELECT count(*) FROM sessions WHERE account_id=$1::bigint AND revoked_at IS NULL AND expires_at>now()",{std::to_string(id)});
-            if(integer(count,0,0)>=8)throw ApiError(409,"session_limit","Açık oturum sınırına ulaşıldı; önce bir oturumu kapatın.");
+            // At the cap the oldest sessions give way: the launcher forgets its token on exit, so refusing would lock the account out for 12 hours.
+            sql(connection,"DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE account_id=$1::bigint ORDER BY created_at DESC,token_hash OFFSET 7)",{std::to_string(id)});
             auto expires=sql(connection,"INSERT INTO sessions(token_hash,account_id,expires_at) VALUES($1,$2::bigint,now()+interval '12 hours') RETURNING to_char(expires_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')",{token_hash(token),std::to_string(id)});
             audit(connection,"session.login",id,id);transaction.commit();return {{"session",token},{"expires_at",cell(expires,0,0)}};
         }

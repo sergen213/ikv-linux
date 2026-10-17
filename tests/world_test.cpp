@@ -36,6 +36,13 @@ ikv::Json terms(const ikv::Json& state) {
     for(const auto& value:state.at("events"))if(value.at("type")=="trade")result=value;
     check(!result.is_null(),"authoritative trade terms missing");return result;
 }
+// A frame as the client sees it: the Type::catalog parts (recipe_book/bank_view) folded in, as client_session.cpp does.
+ikv::Json folded(ikv::World& world, uint32_t id) {
+    auto frame=world.state(id); const auto bank=world.bank_view(id);
+    frame["catalogs"]["recipes"]=world.recipe_book(id).at("recipes");
+    if(!bank.at("bank").is_null())frame["bank"]=bank.at("bank");
+    return frame;
+}
 ikv::Json independent_mechanics(ikv::Json config, const ikv::Json& fixture) {
     // Independently authored narrow mechanics content (tests/independent_content.json): no original support assets required.
     config["provenance"] = "NONCANONICAL independently authored mechanics test fixture";
@@ -92,7 +99,7 @@ void economy_mechanics(ikv::Json config) {
     world.action(1,{{"action","craft"},{"recipe","test_scroll"}});check(event(world.state(1),"error","recipe"),"unlearned recipe cannot be crafted");
     world.action(1,{{"action","use"},{"uid",scroll_uid}});
     check(own().at("recipes")==ikv::Json::array({"test_scroll"}) && count(own().at("inventory"),"test_scroll")==0 &&
-          world.state(1).at("catalogs").at("recipes").contains("test_scroll"),"using a recipe scroll memorises it");
+          folded(world,1).at("catalogs").at("recipes").contains("test_scroll"),"using a recipe scroll memorises it");
     world.action(1,{{"action","craft"},{"recipe","test_scroll"}});
     {const auto crafted=world.state(1);const auto& bag=crafted.at("character").at("state").at("inventory");
      check(count(bag,"test_ingot")==1 && count(bag,"test_ore")==1 && event(crafted,"craft"),"craft consumes inputs and yields product");}
@@ -103,43 +110,43 @@ void economy_mechanics(ikv::Json config) {
     world.action(1,{{"action","bank_open"},{"target",banker}});
     world.action(1,{{"action","bank_deposit"},{"uid",ingot},{"quantity",1}});
     world.action(1,{{"action","bank_deposit"},{"uid",ingot},{"quantity",1}}); // duplicate request in the same tick
-    auto frame=world.state(1);
+    auto frame=folded(world,1);
     check(event(frame,"error","ownership") && frame.at("bank").at("items").size()==1 && count(frame.at("bank").at("items"),"test_ingot")==1 &&
           count(frame.at("character").at("state").at("inventory"),"test_ingot")==0 && saved.back().bank==ikv::Json({{"items",frame.at("bank").at("items")},{"currency",0}}),
           "duplicate deposit rejected; bank and state committed together");
     const auto banked=frame.at("bank").at("items")[0].at("uid").get<std::string>();
     fail=true;world.action(1,{{"action","bank_withdraw"},{"uid",banked},{"quantity",1}});fail=false;
-    frame=world.state(1);
+    frame=folded(world,1);
     check(event(frame,"error","persistence") && count(frame.at("bank").at("items"),"test_ingot")==1 && count(frame.at("character").at("state").at("inventory"),"test_ingot")==0,
           "failed withdraw commit leaves both bank and bag unchanged");
     world.action(1,{{"action","bank_withdraw"},{"uid",banked},{"quantity",1}});world.action(1,{{"action","bank_withdraw"},{"uid",banked},{"quantity",1}});
-    frame=world.state(1);
+    frame=folded(world,1);
     check(event(frame,"error","ownership") && frame.at("bank").at("items").empty() && count(frame.at("character").at("state").at("inventory"),"test_ingot")==1,
           "duplicate withdraw rejected; exactly one ingot exists");
     world.action(1,{{"action","bank_currency"},{"amount",60}});world.action(1,{{"action","bank_currency"},{"amount",-61}});
     fail=true;world.action(1,{{"action","bank_currency"},{"amount",-10}});fail=false;
-    frame=world.state(1);
+    frame=folded(world,1);
     check(frame.at("bank").at("currency")==60 && frame.at("character").at("state").at("currency")==40,"currency moves are bounded and atomic");
     {std::string ore;const auto bag=own();for(const auto& e:bag.at("inventory"))if(e.at("item")=="test_ore")ore=e.at("uid");
      world.action(1,{{"action","bank_deposit"},{"uid",ore},{"quantity",1}});}
     // Relog: the persisted row (state + bank) restores the same bank.
     const auto bank=saved.back().bank;world.remove(1);
     auto again=record(1);again["state"]=saved.back().state;again["bank"]=bank;world.add(1,1,1,again);
-    check(!world.state(1).contains("bank"),"bank contents stay private until a banker session opens");
+    check(!folded(world,1).contains("bank"),"bank contents stay private until a banker session opens");
     world.action(1,{{"action","bank_open"},{"target",banker}});
-    check(world.state(1).at("bank").at("items")==bank.at("items") && world.state(1).at("bank").at("currency")==60 && !bank.at("items").empty(),"bank persists across relog");
+    check(folded(world,1).at("bank").at("items")==bank.at("items") && folded(world,1).at("bank").at("currency")==60 && !bank.at("items").empty(),"bank persists across relog");
     // Banka tabs ("Kasanız iki sekmeden oluşmaktadır"; 00440110/004401d0 page 0..1, 0043f330 cells page·64..): bank_slots cells per
     // tab, the state carries only the shown tab, entries keep their tab across relog; Kasa Erişimi opens the own bank anywhere.
     {const std::string a(32,'a'),b(32,'b'),c(32,'c'),d(32,'d');
      auto tabbed=record(1);tabbed["state"]=saved.back().state;
      tabbed["bank"]={{"items",{{{"uid",a},{"item","test_scroll"},{"quantity",1}},{{"uid",c},{"item","test_ore"},{"quantity",1}},{{"uid",b},{"item","test_scroll"},{"quantity",1},{"tab",1}}}},{"currency",60}};
      world.remove(1);world.add(1,1,1,tabbed);world.action(1,{{"action","bank_open"},{"target",banker}});
-     frame=world.state(1);
+     frame=folded(world,1);
      check(frame.at("bank").at("tab")==0 && frame.at("bank").at("items").size()==2 && !frame.at("bank").at("items")[1].contains("tab"),"the first tab shows only its cells");
      world.action(1,{{"action","bank_deposit"},{"uid",uid(frame,"test_ingot")},{"quantity",1}});
      check(event(world.state(1),"error","bank"),"a full tab refuses a new cell (Banka dolu)");
      world.action(1,{{"action","bank_deposit"},{"uid",uid(frame,"test_ingot")},{"quantity",1},{"tab",1}});world.action(1,{{"action","bank_tab"},{"tab",1}});
-     frame=world.state(1);
+     frame=folded(world,1);
      check(frame.at("bank").at("tab")==1 && frame.at("bank").at("items").size()==2 && count(frame.at("bank").at("items"),"test_ingot")==1 &&
            std::all_of(frame.at("bank").at("items").begin(),frame.at("bank").at("items").end(),[](const ikv::Json& e){return e.value("tab",0)==1;}) &&
            saved.back().bank.at("items").size()==4 && count(frame.at("character").at("state").at("inventory"),"test_ingot")==0,"a deposit lands on the requested second tab and persists");
@@ -147,10 +154,10 @@ void economy_mechanics(ikv::Json config) {
      world.action(1,{{"action","bank_tab"},{"tab",2}});check(event(world.state(1),"error","quantity"),"only two tabs exist");
      const auto stored=saved.back().bank;world.remove(1);auto back=record(1);back["state"]=saved.back().state;back["bank"]=stored;world.add(1,1,1,back);
      world.action(1,{{"action","bank_open"},{"target",banker}});world.action(1,{{"action","bank_tab"},{"tab",1}});
-     frame=world.state(1);
+     frame=folded(world,1);
      check(count(frame.at("bank").at("items"),"test_ingot")==1 && frame.at("bank").at("items").size()==2,"tabs persist across relog");
      for(const auto& e:frame.at("bank").at("items"))if(e.at("item")=="test_ingot")world.action(1,{{"action","bank_withdraw"},{"uid",e.at("uid")},{"quantity",1}});
-     frame=world.state(1);
+     frame=folded(world,1);
      check(count(frame.at("character").at("state").at("inventory"),"test_ingot")==1 && frame.at("bank").at("items").size()==1,"a second-tab cell withdraws into the bag");
      auto over=record(3);over["bank"]={{"items",{{{"uid",a},{"item","test_scroll"},{"quantity",1}},{{"uid",c},{"item","test_ore"},{"quantity",1}},{{"uid",d},{"item","test_rare"},{"quantity",1}}}},{"currency",0}};
      bool refused=false;try{world.add(3,3,3,over);}catch(...){refused=true;}check(refused,"a stored tab over its cell limit is refused at load");
@@ -158,10 +165,10 @@ void economy_mechanics(ikv::Json config) {
      refused=false;try{world.add(3,3,3,wrong);}catch(...){refused=true;}check(refused,"a stored third tab is refused at load");
      // Kasa Erişimi (guide l.875-878): "Kasamı Göster" on the own panel; without the product it is refused, a revoke closes it.
      world.action(1,{{"action","bank_close"}});world.action(1,{{"action","bank_open"},{"target",1}});
-     frame=world.state(1);check(event(frame,"error","kasa") && !frame.contains("bank"),"own Kasamı Göster needs Kasa Erişimi");
+     frame=folded(world,1);check(event(frame,"error","kasa") && !frame.contains("bank"),"own Kasamı Göster needs Kasa Erişimi");
      world.entitlement(1,false,true);world.action(1,{{"action","bank_open"},{"target",1}});
-     frame=world.state(1);check(frame.contains("bank") && frame.at("bank").at("banker")==1,"Kasa Erişimi opens the own bank without a banker");
-     world.entitlement(1,false,false);check(!world.state(1).contains("bank"),"revoking Kasa Erişimi closes the remote bank");}
+     frame=folded(world,1);check(frame.contains("bank") && frame.at("bank").at("banker")==1,"Kasa Erişimi opens the own bank without a banker");
+     world.entitlement(1,false,false);check(!folded(world,1).contains("bank"),"revoking Kasa Erişimi closes the remote bank");}
     world.action(1,{{"action","recipe_forget"},{"recipe","test_scroll"}});check(own().at("recipes").empty(),"Seçili reçeteyi hafızamdan sil forgets the recipe");
 }
 // Eşyalar drag/split/destroy refusals (004344b0, 0042f690), vendor itemflag order, bound trade items and the Plus Paket entitlement.
@@ -214,7 +221,7 @@ void item_rules(ikv::Json config) {
     world.action(1,{{"action","bank_open"},{"target",banker}});world.action(1,{{"action","bank_deposit"},{"uid",blade},{"quantity",1}});
     check(refused("equipped","Giyilen bir eşyayı çıkarmadan bankaya koyamazsınız!"),"worn items cannot be banked (0x591a8c)");
     world.action(1,{{"action","bank_deposit"},{"uid",bound},{"quantity",1}});world.action(1,{{"action","bank_destroy"},{"uid",bound}});
-    check(world.state(1).at("bank").at("items").empty(),"bank cells can be destroyed");
+    check(folded(world,1).at("bank").at("items").empty(),"bank cells can be destroyed");
     // Split ('mtes'): bag full (0x590ca0), refused during an exchange (0x590db0); bound items never enter an offer (0x591bbc).
     auto full=own();full["inventory"]={{{"uid",gem},{"item","test_gem"},{"quantity",5}}};for(int i=0;i<6;++i)full["inventory"].push_back({{"uid",std::string(31,'f')+char('0'+i)},{"item","test_bound"},{"quantity",1}});
     full["equipment"]=ikv::Json::object();world.remove(1);auto again=record(1);again["state"]=full;world.add(1,1,1,again);
@@ -406,6 +413,29 @@ void synthetic_support_navigation(const ikv::Json& mechanics) {
     bad=config;bad["npcs"]={door};bad["npcs"][0]["door"]={{"to","eminonu"},{"arrive",{1500,0}}};rejected_provider(bad);
     bad=config;bad["zones"]["eminonu"]["bounds"]={-10000,-10000,10000,10000};rejected_provider(bad);
     bad=config;bad["zones"]["eminonu"]["source_registry_id"]=71;rejected_provider(bad);
+}
+// A player's click beyond the NPC-step A* budget: SYNTHETIC NOT ORIGINAL field (cells −60..60) split by a wall (x = 5, |y| ≤ 40)
+// whose detour pops ~2900 nodes (Eminönü spawn: Teşkilat Hattı 4047, the Fare 6.5k). An NPC behind the wall is walked to and
+// talked to; a ground click at an unreachable walkable cell walks toward it instead of not moving at all.
+void click_routes(const ikv::Json& mechanics) {
+    auto grid=std::make_shared<ikv::Zone>();grid->width=grid->height=2048;
+    grid->source="SYNTHETIC NOT ORIGINAL";grid->cell_size=1.5f;
+    grid->cells.assign(2048u*2048u,0);grid->heights.assign(grid->cells.size(),0.0f);
+    for(int y=-60;y<=60;++y)for(int x=-60;x<=60;++x)if(x!=5 || std::abs(y)>40)grid->cells[size_t(y+1024)*2048+size_t(x+1024)]=255;
+    grid->cells[1024u*2048u+1124u]=255; // an unconnected walkable cell at (150000,0)
+    auto config=mechanics;config["aoi"]=200000;config["movement_step"]=800;
+    config["zones"]={{"eminonu",{{"source_registry_id",0},{"bounds",{-1536000,-1536000,1534500,1534500}},{"spawn",{0,0}},{"collision",ikv::Json::array()}}}};
+    config["zones"]["old_town"]=mechanics.at("zones").at("old_town");config["quests"]=ikv::Json::object();
+    auto giver=mechanics.at("npcs")[0];giver["x"]=15000;giver["y"]=0;giver["quests"]=ikv::Json::array();config["npcs"]={giver};
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){});world.set_source_zones({{"eminonu",grid}});
+    world.add(1,1,1,record(1));world.state(1);
+    world.action(1,{{"action","interact"},{"target",giver.at("id")}});
+    bool talked=false,refused=false;
+    for(int tick=0;tick<600 && !talked && !refused;++tick){world.advance();const auto frame=world.state(1);talked=event(frame,"dialogue");refused=event(frame,"error","range");}
+    check(talked && !refused,"a click on an NPC behind a long detour walks there and talks");
+    world.remove(1);world.add(1,1,1,record(1));world.state(1);
+    world.destination(1,150000,0,1);ticks(world,40);const auto frame=world.state(1);
+    check(!event(frame,"correction") && frame.at("character").at("state").at("x").get<int>()>0,"a ground click at an unreachable cell walks toward it");
 }
 // <loc> door gates: requiredquestid (NONCANONICAL: the quest taken or done) and gmonly.
 void door_rules(ikv::Json config) {
@@ -800,10 +830,11 @@ void quest_objectives(ikv::Json config) {
     config["quests"]["r1"]={{"name","Çifte"},{"giver",giver},{"level",1},{"requires","v1"},{"requires_also",{"u1"}},{"objective",{{"kind","talk"}}},{"reward",none}};
     config["quests"]["b1"]={{"name","Çanta"},{"giver",giver},{"level",1},{"objective",{{"kind","collect"},{"item","healing_tonic"},{"count",5},{"also",{{{"item","training_blade"},{"count",1}}}}}},{"reward",none}};
     config["quests"]["w1"]={{"name","Takas"},{"giver",giver},{"level",1},{"class",2},{"objective",{{"kind","talk"}}},{"reward",none}};
+    config["quests"]["l1"]={{"name","Tecrübe"},{"giver",giver},{"level",1},{"objective",{{"kind","talk"}}},{"reward",{{"xp",1500},{"currency",0},{"items",ikv::Json::array()}}}};
     const uint32_t cin1=2147493672u, cin2=2147493673u;
     config["quests"]["u2"]={{"name","Kurtarıcımız"},{"giver",giver},{"level",1},{"objective",{{"kind","use"},{"targets",{cin1}},{"count",2}}},{"reward",none}};
     config["quests"]["u3"]={{"name","Kadim İşçilik"},{"giver",giver},{"level",1},{"objective",{{"kind","use"},{"targets",{prop}},{"count",2},{"cooldown",1}}},{"reward",none}};
-    for(auto& n:config["npcs"])if(n.at("id")==giver)n["quests"]={"first_hunt","v1","u1","m1","r1","b1","w1","u2","u3"};
+    for(auto& n:config["npcs"])if(n.at("id")==giver)n["quests"]={"first_hunt","v1","u1","m1","r1","b1","w1","u2","u3","l1"};
     config["npcs"].push_back({{"id",prop},{"kind","prop"},{"interactable",true},{"name","Stok"},{"zone","eminonu"},{"x",300},{"y",100},{"hp",100},{"dialogue","Stok"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}});
     for(const auto& [cin,y]:{std::pair{cin1,50},{cin2,-50}})
         config["npcs"].push_back({{"id",cin},{"kind","prop"},{"interactable",true},{"rescue",true},{"respawn",40},{"source_uid",17096},{"source_class",394},{"name","Biçare Folklor Cini"},{"zone","eminonu"},{"x",300},{"y",y},{"hp",1},{"dialogue","Cin"},{"quests",ikv::Json::array()},{"shop",ikv::Json::array()}});
@@ -812,9 +843,19 @@ void quest_objectives(ikv::Json config) {
     const auto own=[&]{return world.state(1).at("character").at("state");};
     const auto stage=[](const ikv::Json& s,const char* quest,const char* name){for(const auto& e:s.at("events"))if(e.at("type")=="quest" && e.at("quest")==quest && e.at("stage")==name)return e;return ikv::Json();};
     int seq=1; const auto walk=[&](int x){world.destination(1,x,0,uint32_t(seq++));ticks(world,30);};
-    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","m1"}});check(event(world.state(1),"error","level"),"OFF-Q level requirement (min_level) refuses a lower level");
-    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","w1"}});check(event(world.state(1),"error","class"),"a class-limited quest refuses other classes");
+    // Konuş and the giver's state entity list only quests takeable now: an under-level (min_level), other-class or locked one
+    // stays hidden until "Seviye atladıkça, OOK'ler size daha önce yapmadığınız görevleri verebilirler" (dh_rehber l.402).
+    const auto offered=[&](const char* q){
+        world.action(1,{{"action","interact"},{"target",giver}});const auto f=world.state(1);int seen=0;
+        for(const auto& e:f.at("events"))if(e.at("type")=="dialogue" && std::ranges::find(e.at("quests"),ikv::Json(q))!=e.at("quests").end())++seen;
+        for(const auto& e:f.at("entities"))if(e.at("id")==giver && std::ranges::find(e.at("quests"),ikv::Json(q))!=e.at("quests").end())++seen;
+        return seen;};
+    check(offered("v1")==2 && !offered("m1") && !offered("w1") && !offered("r1"),"under-level, other-class and locked quests are not offered");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","m1"}});check(event(world.state(1),"error","quest"),"OFF-Q level requirement (min_level) refuses a lower level");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","w1"}});check(event(world.state(1),"error","quest"),"a class-limited quest refuses other classes");
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","r1"}});check(event(world.state(1),"error","quest"),"a quest waits for every prerequisite");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","l1"}});world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","l1"}});
+    check(own().at("level")==2 && offered("m1")==2,"reaching min_level offers the quest at once");
     // use: Kullan on the prop
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","u1"}});world.state(1);
     world.action(1,{{"action","interact"},{"target",prop}});auto s=world.state(1);
@@ -855,6 +896,35 @@ void quest_objectives(ikv::Json config) {
     walk(300);world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","b1"}});s=world.state(1);
     int blades=0;for(const auto& e:s.at("character").at("state").at("inventory"))blades+=e.at("item")=="training_blade";
     check(!stage(s,"b1","completed").is_null() && !holds(s,"healing_tonic") && blades==1,"collect: bag items handed over, the worn blade stays (\"çantanızdayken\")");
+}
+// NONCANONICAL creation kit (defaults.inventory; generate_content.cpp copies quest 1's gear lines): a new character gets each line
+// as its own class/sex variant and wears it, quest 1 hands no second piece while one is carried (a character created before the
+// kit still gets it there), and a relog keeps exactly one kit.
+void starter_kit(ikv::Json config) {
+    const uint32_t giver=2147493649u;
+    // Arbitrary synthetic visual metadata (as training_blade's in main), not a canonical armour mapping.
+    const ikv::Json armour={{"name","Test Ceketi"},{"stack",1},{"price",10},{"slot","body"},{"level",1},{"armor",5},{"sex",1},{"source_uid",4103},{"source_slot",2}};
+    config["items"]["armour_m"]=armour;config["items"]["armour_f"]=armour;config["items"]["armour_f"]["sex"]=0;
+    auto blade=config["items"]["training_blade"];blade["class"]=0;config["items"]["blade_s"]=blade;blade["class"]=1;config["items"]["blade_b"]=blade;
+    const ikv::Json kit={{{"item","armour_m"},{"quantity",1}},{{"item","blade_s"},{"quantity",1},{"classes",{1}}},{{"item","blade_b"},{"quantity",1},{"classes",{2}}}};
+    config["defaults"]["inventory"]={{{"item","healing_tonic"},{"quantity",3}}};for(const auto& line:kit)config["defaults"]["inventory"].push_back(line);
+    config["quests"]["k1"]={{"name","Teşkilat'a Katılış"},{"giver",giver},{"level",1},{"objective",{{"kind","talk"}}},{"reward",{{"xp",10},{"currency",0},{"items",kit}}}};
+    for(auto& n:config["npcs"])if(n.at("id")==giver)n["quests"].push_back("k1");
+    std::vector<ikv::CharacterSave> saved;
+    ikv::World world(config,[&](std::span<const ikv::CharacterSave> states){saved.assign(states.begin(),states.end());});
+    auto fresh=record(1,300);fresh["class_id"]=2;fresh["appearance"]={{"sex",0}};fresh["state"]={{"x",300},{"y",0}};world.add(1,1,1,fresh);
+    auto old=record(2,300);old["state"]["inventory"]=ikv::Json::array();world.add(2,2,2,old); // created before the kit: an empty bag
+    const auto count=[&](uint32_t id,const char* item){int n=0;const auto s=world.state(id);for(const auto& e:s.at("character").at("state").at("inventory"))if(e.at("item")==item)n+=e.at("quantity").get<int>();return n;};
+    const auto wears=[&](uint32_t id,const char* slot,const char* item){const auto s=world.state(id).at("character").at("state");bool on=false;
+        for(const auto& e:s.at("inventory"))on=on||(e.at("item")==item && s.at("equipment").value(slot,ikv::Json())==e.at("uid"));return on;};
+    check(count(1,"healing_tonic")==3 && count(1,"armour_f")==1 && count(1,"blade_b")==1 && !count(1,"armour_m") && !count(1,"blade_s"),
+          "a new character gets the kit as its own class/sex variant");
+    check(wears(1,"body","armour_f") && wears(1,"weapon","blade_b") && world.state(1).at("character").at("equipment").size()==2,"the kit is worn and visible");
+    for(uint32_t p:{1u,2u}){world.action(p,{{"action","quest_accept"},{"target",giver},{"quest","k1"}});world.action(p,{{"action","quest_complete"},{"target",giver},{"quest","k1"}});}
+    check(count(1,"armour_f")==1 && count(1,"blade_b")==1,"quest 1 hands no second kit piece while one is carried");
+    check(count(2,"armour_m")==1 && count(2,"blade_s")==1 && !count(2,"blade_b"),"a character without the kit still gets quest 1's gear");
+    world.remove(1);check(saved.size()==1,"logout saves");auto again=fresh;again["state"]=saved[0].state;world.add(1,1,1,again);
+    check(count(1,"armour_f")==1 && count(1,"blade_b")==1 && count(1,"healing_tonic")==3 && wears(1,"body","armour_f"),"a relog keeps exactly one kit");
 }
 // Server-side bots (NONCANONICAL): no player slot, only validated client actions (range, cooldowns, quest givers), deferred
 // persistence of bot-only progress, companion invitation/heal/door follow/assist/dismiss/leader logout, and a tick budget.
@@ -1279,6 +1349,44 @@ void portal_walks(const ikv::Json& config, const std::filesystem::path& assets) 
     check(entity(world.state(6),5).value("portal",0u)==2147493987u,"the taken quest opens Umut Dergisi");
     walk(6,2147493987u,"karakoyic"); walk(6,2147493988u,"karakoy");
 }
+// Real content: a crafter at economy.recipe_limit (the largest recipes) with a full bag of the largest items, at the
+// Eminönü banker with a full Banka tab of the largest items open. The recipes/bank travel as Type::catalog parts, each
+// within one frame, so the state frame fits and keeps the banker (an NPC) in view; before they rode the state and threw.
+void crafter_frame(const ikv::Json& config, const std::filesystem::path& assets) {
+    if (!std::filesystem::exists(assets / "zone00.bin")) { std::cout << "crafter_frame skipped: no original walk grids in " << assets << '\n'; return; }
+    std::map<std::string,std::shared_ptr<const ikv::Zone>> grids; std::map<unsigned,std::shared_ptr<const ikv::Zone>> support;
+    for (const auto& [name,zone] : config.at("zones").items()) if (zone.contains("source_registry_id")) {
+        const auto id=ikv::source_scene_descriptor(zone.at("source_registry_id").get<unsigned>()).support_id;
+        auto& grid=support[id]; if (!grid) grid=std::make_shared<const ikv::Zone>(ikv::load_zone(assets,id)); grids[name]=grid;
+    }
+    ikv::World world(config,[](std::span<const ikv::CharacterSave>){}); world.set_source_zones(grids);
+    const auto& items=config.at("items"); const auto size=[](const ikv::Json& v){return v.dump().size();};
+    std::vector<std::pair<size_t,std::string>> recipes,largest;
+    for (const auto& [id,r] : config.at("recipes").items()) {
+        size_t bytes=size({{id,r}})+size({{r.at("product").get<std::string>(),items.at(r.at("product").get<std::string>())}});
+        for (const auto& c : r.at("components")) bytes+=size({{c.at("item").get<std::string>(),items.at(c.at("item").get<std::string>())}});
+        recipes.push_back({bytes,id});
+    }
+    for (const auto& [id,item] : items.items()) largest.push_back({size({{id,item}}),id});
+    std::sort(recipes.rbegin(),recipes.rend()); std::sort(largest.rbegin(),largest.rend());
+    const auto limit=config.at("economy").at("recipe_limit").get<size_t>(), slots=config.at("economy").at("bank_slots").get<size_t>();
+    check(recipes.size()>=limit && largest.size()>=32+slots,"real content has enough recipes and items");
+    const auto hex=[](char lead,size_t n){std::string u(30,lead);const char* d="0123456789abcdef";return u+d[n/16]+d[n%16];};
+    ikv::Json known=ikv::Json::array(),bag=ikv::Json::array(),stored=ikv::Json::array();
+    for (size_t n=0;n<limit;++n) known.push_back(recipes[n].second);
+    for (size_t n=0;n<32;++n) bag.push_back({{"uid",hex('a',n)},{"item",largest[n].second},{"quantity",1}});
+    for (size_t n=0;n<slots;++n) stored.push_back({{"uid",hex('b',n)},{"item",largest[32+n].second},{"quantity",1}});
+    uint32_t banker=0; ikv::Json at;
+    for (const auto& n : config.at("npcs")) if (n.value("banker",false) && n.at("zone")=="eminonu") { banker=n.at("id"); at={n.at("x"),n.at("y").get<int>()+100}; break; }
+    check(banker,"real content has an Eminönü banker");
+    auto r=record(1); r["state"]={{"zone","eminonu"},{"x",at[0]},{"y",at[1]},{"recipes",known},{"inventory",bag}}; r["bank"]={{"items",stored},{"currency",0}};
+    world.add(1,1,1,r); world.action(1,{{"action","bank_open"},{"target",banker}});
+    const auto frame=world.state(1); const auto book=world.recipe_book(1), bank=world.bank_view(1);
+    check(frame.at("character").at("state").at("recipes").size()==limit && frame.at("character").at("state").at("inventory").size()==32 &&
+          !bank.at("bank").is_null() && bank.at("bank").at("items").size()==slots && book.at("recipes").size()==limit,"crafter at every configured limit");
+    check(size(frame)<=65533 && size(book)<=65533 && size(bank)<=65533,"state and each catalog part fit one frame");
+    check(std::any_of(frame.at("entities").begin(),frame.at("entities").end(),[&](const ikv::Json& e){return e.at("id")==banker;}),"the banker stays in view beside a full recipe memory and bank");
+}
 // Instance copies behind a see-through door (synthetic grid, NOT ORIGINAL): each group sees and enters its own copy, another
 // group's peeked copy counts as occupied, the copy's NPCs show through the door and the copy's door (pair + n*65536) leads back;
 // a copy left through the door keeps its state while peeked and resets once the last peek drops (vacated()); a crowded frame
@@ -1349,6 +1457,7 @@ int main(int argc, char** argv) {
         if (argc != 3) throw std::runtime_error("usage: world-test config/gameplay.json tests/independent_content.json");
         std::ifstream input(argv[1]); ikv::Json config; input >> config;
         portal_walks(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
+        crafter_frame(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
         std::ifstream fixture_input(argv[2]); ikv::Json fixture; fixture_input >> fixture;
         config=independent_mechanics(std::move(config),fixture);
         // Arbitrary synthetic visual item metadata, not a canonical weapon-slot mapping.
@@ -1376,6 +1485,7 @@ int main(int argc, char** argv) {
         point_reset_rules(config);
         quest_rules(config);
         quest_objectives(config);
+        starter_kit(config);
         bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
         portal_copies(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
@@ -1615,6 +1725,8 @@ int main(int argc, char** argv) {
         check(event(mechanics.state(12),"error","dead"),"dead cannot attack");
         mechanics.action(12,{{"action","resurrect"}});
         check(event(mechanics.state(12),"error","cooldown"),"Canlanma Süresi countdown blocks immediate resurrection");
+        mechanics.remove(12);mechanics.add(12,12,12,death.at("character"));mechanics.action(12,{{"action","resurrect"}});
+        check(event(mechanics.state(12),"error","cooldown"),"a relog while dead does not skip the Canlanma Süresi countdown");
         ticks(mechanics,20);
         mechanics.action(12,{{"action","resurrect"}});
         auto resurrection=mechanics.state(12);auto revived=resurrection.at("character").at("state");
@@ -1636,6 +1748,7 @@ int main(int argc, char** argv) {
         collision.add(1,1,1,record(1));collision.input(1,1,0,1);collision.advance();
         check(collision.state(1).at("character").at("state").at("x")==0,"thin wall cannot tunnel");
         synthetic_support_navigation(config);
+        click_routes(config);
         economy_mechanics(config);
         auto malformed=config;malformed["items"]["healing_tonic"]["stack"]=0;
         bool invalid=false;try{ikv::World rejected(malformed,[](std::span<const ikv::CharacterSave>){});}catch(const std::invalid_argument&){invalid=true;}

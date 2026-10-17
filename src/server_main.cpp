@@ -129,10 +129,16 @@ struct Peer {
     std::int64_t character_id = 0;
     std::string session;
     std::string catalogs; // last catalogs sent; states omit an unchanged copy (client keeps the previous one)
+    // Last Type::catalog parts sent (World::recipe_book/bank_view dumps); a new connection starts from the empty forms.
+    std::string recipes = R"({"items":{},"recipes":{}})", bank = R"({"bank":null,"items":{}})";
     std::vector<std::uint8_t> output;
     std::size_t sent = 0, write_size = 0;
     std::uint32_t actions = 0;
     Clock::time_point action_window = Clock::now();
+    // At most one ground-click route per tick: a destination arriving after this tick's routed one is held, the newest
+    // replacing an older held one, and routed at the next tick (each A* costs up to click_route_nodes, World::destination).
+    bool routed = false, route_held = false;
+    ikv::Message held_route{ikv::Type::destination};
 };
 void disconnect(Peer& peer, const char* reason) {
     if (peer.socket.get() < 0) return;
@@ -197,6 +203,11 @@ void flush(Peer& peer) {
         disconnect(peer, "tls_write"); return;
     }
     if (peer.socket.get() >= 0) { peer.output.clear(); peer.sent = 0; }
+}
+// Ends a session with a goodbye {"reason"} the client shows instead of a bare TLS close (NONCANONICAL).
+void refuse(Peer& peer, const char* reason, const std::string& text) {
+    ikv::Message bye{ikv::Type::goodbye}; bye.json = ikv::Json{{"reason", text}}.dump();
+    if (queue(peer, bye)) { begin_close(peer, reason); flush(peer); }
 }
 int read_tls(Peer& peer, int& error) {
     ERR_clear_error();
@@ -264,6 +275,14 @@ std::size_t joined(const std::list<Peer>& peers) {
 }
 void send_state(Peer& peer, ikv::World& world) {
     if (peer.closing || peer.socket.get() < 0) return;
+    // Recipe and Banka parts go first, on change only, so the state that follows already has them (client_session.cpp).
+    for (auto [part, sent] : {std::pair{world.recipe_book(peer.id), &peer.recipes}, std::pair{world.bank_view(peer.id), &peer.bank}}) {
+        auto dumped = part.dump();
+        if (dumped == *sent) continue;
+        ikv::Message message{ikv::Type::catalog}; message.json = dumped;
+        if (!queue(peer, message)) return;
+        *sent = std::move(dumped);
+    }
     auto state = world.state(peer.id);
     // Catalogs are ~21 KB of mostly static data. Resending them at 20 Hz filled the output_limit in a few
     // seconds whenever a healthy client paused reading (scene load, first GPU upload).
@@ -277,7 +296,7 @@ void send_state(Peer& peer, ikv::World& world) {
         for (const auto& event : state["events"]) if (event.value("type", "") == "kick") kicked = true;
     ikv::Message message{ikv::Type::state}; message.json = state.dump();
     if (!queue(peer, message)) return;
-    if (kicked) begin_close(peer, "admin_kick"); // The final event is queued before closing forbids new output.
+    if (kicked) refuse(peer, "admin_kick", "Bir yönetici sizi oyundan çıkardı."); // after the final state: closing forbids new output
     flush(peer);
 }
 void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& store,
@@ -322,7 +341,8 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     if (message.sequence <= peer.sequence) { disconnect(peer, "sequence"); return; }
                     peer.sequence = message.sequence;
                     if (message.type == ikv::Type::input) world.input(peer.id, message.dx, message.dy, message.sequence);
-                    else world.destination(peer.id, message.x, message.y, message.sequence, message.id);
+                    else if (peer.routed) { peer.held_route = message; peer.route_held = true; }
+                    else { peer.routed = true; peer.route_held = false; world.destination(peer.id, message.x, message.y, message.sequence, message.id); }
                 } else if (message.type == ikv::Type::action) {
                     const auto now = Clock::now();
                     if (now - peer.action_window >= std::chrono::seconds(1)) { peer.actions = 0; peer.action_window = now; }
@@ -333,7 +353,11 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     begin_close(peer, "goodbye"); return;
                 } else { disconnect(peer, "joined_state"); return; }
             }
-        } catch (const ikv::ApiError&) { disconnect(peer, "authentication_or_store"); return; }
+        } catch (const ikv::ApiError& e) {
+            refuse(peer, "authentication_or_store", e.code == "unauthorized" ? std::string(e.what()) :
+                   e.code == "character_unavailable" ? "Bu karakter şu anda oyunda ya da kullanılamıyor." : "Sunucu girişinizi reddetti; yeniden giriş yapın.");
+            return;
+        }
         catch (const std::invalid_argument&) { disconnect(peer, "protocol"); return; }
         catch (const ikv::Json::exception&) { disconnect(peer, "json"); return; }
         catch (const std::exception&) { disconnect(peer, "world_operation"); return; }
@@ -533,6 +557,8 @@ int run(const Options& opts) {
             for (auto& peer : peers) {
                 if (!peer.id || peer.closing || peer.socket.get() < 0) continue;
                 try {
+                    peer.routed = std::exchange(peer.route_held, false);
+                    if (peer.routed) world.destination(peer.id, peer.held_route.x, peer.held_route.y, peer.held_route.sequence, peer.held_route.id);
                     send_state(peer, world);
                     if (peer.closing || peer.socket.get() < 0) continue;
                     ikv::Message snapshot{ikv::Type::snapshot}; snapshot.tick = world.tick(); snapshot.players = world.snapshot(peer.id);
@@ -557,13 +583,13 @@ int run(const Options& opts) {
                     try {
                         const auto identity = store.authenticate(peer.session);
                         if (identity.account_id != peer.identity.account_id || identity.admin != peer.identity.admin) {
-                            disconnect(peer, "identity_changed");
+                            refuse(peer, "identity_changed", "Hesap yetkileriniz değişti; yeniden bağlanın.");
                         } else {
                             const auto record = store.character(identity.account_id, peer.character_id);
                             world.moderation(peer.id, record.value("moderation", ikv::Json::object()).value("muted", false));
                             world.entitlement(peer.id, identity.plus, identity.kasa); // an administrator's Plus/Kasa Erişimi grant/revoke applies within a second
                         }
-                    } catch (const std::exception&) { disconnect(peer, "session_revoked"); }
+                    } catch (const std::exception&) { refuse(peer, "session_revoked", "Oturumunuz sonlandırıldı; başlatıcıdan yeniden giriş yapın."); }
                 }
                 for (const auto& command : store.take_world_commands()) {
                     const auto name = command.at("command").get<std::string>();

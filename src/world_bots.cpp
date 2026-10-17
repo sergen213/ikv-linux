@@ -178,10 +178,12 @@ Json World::bot_character(int level) const {
     static constexpr std::array<std::pair<const char*,std::array<int,2>>,5> cosmetics{{{"face",{9,9}},{"hair",{20,17}},{"hair_color",{9,4}},{"beard",{24,14}},{"beard_color",{1,4}}}};
     Json appearance{{"sex",sex}};
     for (const auto& [key,maximum] : cosmetics) appearance[key] = sex == 0 && std::string_view(key).starts_with("beard") ? 0 : int(roll(uint32_t(maximum[size_t(sex)])+1));
-    // NONCANONICAL creation kit: the default bag and Lira scaled by level; add_bot's kit() adds the level's gear.
+    // NONCANONICAL creation kit: the default bag and Lira scaled by level; add_bot's kit() adds the level's gear (instead of the
+    // defaults' class/sex starter gear, which World::admit hands players).
     const auto cap = config_.at("resource_cap").get<int>();
     Json state{{"level",level},{"hp",cap},{"mana",cap},{"currency",int64_t(100)*level},{"inventory",Json::array()}};
-    for (const auto& item : config_.at("defaults").at("inventory")) state["inventory"].push_back({{"uid",uid()},{"item",item.at("item")},{"quantity",item.at("quantity")}});
+    for (const auto& item : config_.at("defaults").at("inventory")) if (!config_.at("items").at(item.at("item").get<std::string>()).contains("slot"))
+        state["inventory"].push_back({{"uid",uid()},{"item",item.at("item")},{"quantity",item.at("quantity")}});
     return {{"name",name},{"class_id",class_id},{"appearance",appearance},{"state",state}};
 }
 
@@ -440,10 +442,7 @@ bool World::bot_quests(uint32_t id, Actor& a, Bot& b) {
     const auto& done = s.at("quests_done");
     const auto doable = [&](const std::string& quest) {
         const auto& q = config_.at("quests").at(quest); const auto& o = q.at("objective");
-        const auto finished = [&](const Json& r) { return !r.is_string() || r.get<std::string>().empty() || std::binary_search(done.begin(),done.end(),r); };
-        const Json also = q.value("requires_also",Json::array());
-        if (q.value("min_level",q.at("level").get<int>()) > level || (q.contains("class") && q.at("class") != a.character.at("class_id")) || !finished(q.value("requires",Json())) ||
-            !std::all_of(also.begin(),also.end(),finished)) return false; // the Görev al rules (level, class, prerequisites)
+        if (!quest_eligible(q,s,a.character.at("class_id"))) return false; // the Görev al rules (level, class, prerequisites)
         if (o.at("kind") == "talk") return in_reach(q.value("turn_in",q.at("giver")).get<uint32_t>());
         if (o.at("kind") == "visit") return reachable.contains(base_zone(config_,o.at("zone").get<std::string>()));
         if (o.at("kind") == "use") return !props(o).empty();
@@ -487,7 +486,7 @@ bool World::bot_quests(uint32_t id, Actor& a, Bot& b) {
         for (auto giver : bot_npcs("quest",z)) {
             const auto& g = npcs_.at(giver); const auto away = z == zone ? distance2(at(s,"x"),at(s,"y"),g.x,g.y) : 0;
             if (b.blocked.contains(giver) || away >= closest) continue;
-            for (const auto& offered : quests_at(g,s)) {
+            for (const auto& offered : quests_at(g,s,a.character.at("class_id"))) {
                 const std::string quest = offered;
                 if (s.at("quests").contains(quest) || b.refused.contains(quest) || std::binary_search(done.begin(),done.end(),offered) || !doable(quest)) continue;
                 pick = giver; chosen = quest; closest = away; break;
@@ -687,7 +686,7 @@ void World::bot_social(uint32_t id, Actor& a, Bot& b) {
     guild_invites_.erase(id); // Lonca davetleri: bots stay out of guilds (the invitation lapses unanswered)
 }
 
-void World::bot_think(uint32_t id, Actor& a, Bot& b) {
+void World::bot_think(uint32_t bot_id, Actor& actor, Bot& bot) {
     using Run = bool (*)(World&, uint32_t, Actor&, Bot&);
     enum : unsigned { TOWN = 1, GRIND = 2, QUEST = 4, TRAVEL = 8, FOLLOW = 16, ROAM = TOWN|GRIND|QUEST|TRAVEL, ALL = ROAM|FOLLOW };
     struct Rule { const char* name; float relevance; unsigned modes; Run run; }; // relevance: mod-playerbots ACTION_* scale, sorted
@@ -793,6 +792,8 @@ void World::bot_think(uint32_t id, Actor& a, Bot& b) {
         {"hunt", 20, GRIND|QUEST, [](World& w, uint32_t id, Actor& a, Bot& b) { return w.bot_hunt(id,a,b); }},
         {"town", 10, ROAM, [](World& w, uint32_t id, Actor& a, Bot& b) { return w.bot_town(id,a,b); }},
     };
+    // The rule lambdas above take (id, a, b) themselves; the parameters get these names only after them (-Wshadow).
+    const uint32_t id = bot_id; Actor& a = actor; Bot& b = bot;
     const auto& s = a.character.at("state");
     ++b.thinks; b.zones.insert(s.at("zone").get<std::string>());
     if (b.unblock && tick_ >= b.unblock) { b.blocked.clear(); b.unblock = 0; }

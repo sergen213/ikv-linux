@@ -479,7 +479,7 @@ void generated_codec_properties() {
     std::vector<std::vector<std::uint8_t>> expected_frames;
     std::vector<std::uint8_t> stream;
     for (std::uint32_t iteration = 0; iteration < 1024; ++iteration) {
-        ikv::Message message{static_cast<ikv::Type>(iteration % 8 + 1)};
+        ikv::Message message{static_cast<ikv::Type>(iteration % 9 + 1)};
         switch (message.type) {
         case ikv::Type::hello:
             for (int i = 0; i < 64; ++i) message.session.push_back(hex[random() % 16]);
@@ -514,7 +514,8 @@ void generated_codec_properties() {
             message.y = coordinate();
             break;
         case ikv::Type::state:
-        case ikv::Type::action: {
+        case ikv::Type::action:
+        case ikv::Type::catalog: {
             const auto nesting = random() % 32;
             message.json = "{\"value\":" + std::string(nesting, '[') + std::to_string(random()) +
                            std::string(nesting, ']') + R"(,"text":"Türkçe \" [{}] \\","escaped":"\u0000"})";
@@ -545,7 +546,7 @@ void generated_codec_properties() {
         bad_body[0] = 1;
         rejects([&] { ikv::decode(bad_body); });
         bad_body[0] = 2;
-        bad_body[1] = static_cast<std::uint8_t>(random() % 247 + 9);
+        bad_body[1] = static_cast<std::uint8_t>(random() % 246 + 10);
         rejects([&] { ikv::decode(bad_body); });
         bad_body[1] = static_cast<std::uint8_t>(message.type);
         switch (message.type) {
@@ -556,7 +557,8 @@ void generated_codec_properties() {
         case ikv::Type::snapshot: bad_body[6] = 255; bad_body[7] = 255; break;
         case ikv::Type::goodbye:
         case ikv::Type::state:
-        case ikv::Type::action: bad_body.push_back(0); break;
+        case ikv::Type::action:
+        case ikv::Type::catalog: bad_body.push_back(0); break;
         }
         rejects([&] { ikv::decode(bad_body); });
         auto bad_frame = std::vector<std::uint8_t>(4, 0);

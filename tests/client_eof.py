@@ -114,7 +114,7 @@ class WorldProxy(AbstractContextManager):
                     record = bytes(pending[:4 + size])
                     del pending[:4 + size]
                     assert record[4] == 2, "unexpected actual world wire version"
-                    assert record[5] in (2, 4, 6), "unexpected actual world record type"
+                    assert record[5] in (2, 4, 5, 6), "unexpected actual world record type"
                     if not self.records:
                         assert record[5] == 2, "world did not welcome authenticated native client first"
                     if self.omit_initial_state and record[5] == 6:
@@ -309,6 +309,8 @@ def assert_real_prefix(proxy, child, character):
             assert isinstance(state["entities"], list) and isinstance(state["events"], list)
             assert_state_descriptor(state, character)
             expected_states.append(state)
+        elif record[5] == 5 and record is proxy.records[-1]:  # the world's final goodbye before close_notify (kick/refusal)
+            assert json.loads(record[6:])["reason"], "world goodbye without reason"
         else:
             raise AssertionError("unexpected record after real welcome")
     snapshots, states = accepted(child)
@@ -675,6 +677,8 @@ class ObservedPeer(WorldPeer):
             assert 0 <= current["mana"] <= current["max_mana"]
             assert isinstance(body["entities"], list) and isinstance(body["events"], list)
             assert_state_descriptor(body, self.character)
+        elif kind == 5:  # server goodbye before a close (admin kick, refusal) carries a Turkish reason
+            assert isinstance(body.get("reason"), str) and body["reason"], "goodbye without reason"
         else:
             assert kind == 4, "unexpected authoritative world record"
         return kind, body

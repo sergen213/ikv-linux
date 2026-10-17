@@ -30,6 +30,9 @@ public:
     uint32_t tick() const;
     std::vector<Player> snapshot(uint32_t id) const;
     Json state(uint32_t id);
+    // Type::catalog parts, each within one frame: {"recipes","items"} learned Üretim recipes; {"bank" (null unless open),"items"}.
+    Json recipe_book(uint32_t id) const;
+    Json bank_view(uint32_t id) const;
     Json status() const;
     // Private web administration command (announce/kick/teleport/summon/clock/respawn/settings); throws
     // std::invalid_argument with "code: message" when refused. NONCANONICAL operator tooling.
@@ -236,8 +239,9 @@ private:
     // Quests (world.cpp quest block). Character state keeps active quests in "quests" {id:{progress[,deadline]}} and
     // completed ids in the sorted array "quests_done"; events are queued by the helpers and emitted after the commit.
     bool quest_done(const Json& state, int source_quest_id) const; // <loc> requiredquestid gate
-    Json quests_at(const Npc& npc, const Json& state) const; // taken + open quests at this NPC (GB-Anı: re-takeable auto quests)
+    Json quests_at(const Npc& npc, const Json& state, int class_id) const; // taken + takeable quests at this NPC (GB-Anı: re-takeable auto quests)
     bool quest_open(const Json& quest, const Json& state) const; // every prerequisite (requires, requires_also) done
+    bool quest_eligible(const Json& quest, const Json& state, int class_id) const; // Görev al rules: level, class, prerequisites
     Json quest_event(const std::string& quest, const char* stage, int progress = 0) const;
     void quest_step(Json& state, const std::string& quest, int progress, Json& events) const; // progress + (n/m)/ready events
     void quest_kill(Json& state, const Json& enemy, Json& events);

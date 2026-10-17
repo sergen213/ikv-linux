@@ -62,13 +62,16 @@ void validate(const Message& message) {
         }
         break;
     }
-    case Type::goodbye: break;
+    case Type::goodbye: // NONCANONICAL: a server goodbye may carry {"reason": text} shown to the player
+        if (!message.json.empty()) { if (message.json.size() > 512) invalid(); validate_json(message.json); }
+        break;
     case Type::destination:
         if (message.sequence == 0 || message.x < -coordinate_limit || message.x > coordinate_limit ||
             message.y < -coordinate_limit || message.y > coordinate_limit) invalid();
         break;
     case Type::state:
     case Type::action:
+    case Type::catalog:
         validate_json(message.json);
         break;
     default: invalid();
@@ -154,10 +157,11 @@ std::vector<std::uint8_t> encode(const Message& message) {
     case Type::welcome: length += 8; break;
     case Type::input: length += 6; break;
     case Type::snapshot: length += 6 + static_cast<std::uint32_t>(message.players.size()) * 12; break;
-    case Type::goodbye: break;
+    case Type::goodbye: length += static_cast<std::uint32_t>(message.json.size()); break;
     case Type::destination: length += message.id ? 16 : 12; break; // wave 16: + u32 see-through door id (x,y in its linked zone)
     case Type::state:
-    case Type::action: length += static_cast<std::uint32_t>(message.json.size()); break;
+    case Type::action:
+    case Type::catalog: length += static_cast<std::uint32_t>(message.json.size()); break;
     }
     std::vector<std::uint8_t> bytes;
     bytes.reserve(length + 4);
@@ -188,7 +192,7 @@ std::vector<std::uint8_t> encode(const Message& message) {
             u32(bytes, std::bit_cast<std::uint32_t>(player.y));
         }
         break;
-    case Type::goodbye: break;
+    case Type::goodbye: bytes.insert(bytes.end(), message.json.begin(), message.json.end()); break;
     case Type::destination:
         u32(bytes, message.sequence);
         u32(bytes, std::bit_cast<std::uint32_t>(message.x));
@@ -197,6 +201,7 @@ std::vector<std::uint8_t> encode(const Message& message) {
         break;
     case Type::state:
     case Type::action:
+    case Type::catalog:
         bytes.insert(bytes.end(), message.json.begin(), message.json.end());
         break;
     }
@@ -235,7 +240,7 @@ Message decode(std::span<const std::uint8_t> body) {
         break;
     }
     case Type::goodbye:
-        if (body.size() != 2) invalid();
+        message.json.assign(reinterpret_cast<const char*>(body.data() + 2), body.size() - 2);
         break;
     case Type::destination:
         if (body.size() != 14 && body.size() != 18) invalid();
@@ -246,6 +251,7 @@ Message decode(std::span<const std::uint8_t> body) {
         break;
     case Type::state:
     case Type::action:
+    case Type::catalog:
         message.json.assign(reinterpret_cast<const char*>(body.data() + 2), body.size() - 2);
         break;
     default: invalid();

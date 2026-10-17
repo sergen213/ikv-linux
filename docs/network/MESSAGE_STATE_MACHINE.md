@@ -25,7 +25,7 @@ Successful `enter_character` immediately records the authenticated identity, cha
 | Closing | gameplay input/actions | Suppress gameplay processing and new snapshot/state output; retain joined capacity until actual detach |
 | Any | malformed/disallowed direction/type, truncated EOF, fatal TLS/transport error | Abort only the affected transport immediately; persistence/release failures fail-stop the server |
 
-A hello after joining cannot rename/reset identity or input sequence. Welcome, snapshot and state are server-only. An unjoined goodbye is not an alternate entry path. Application actions are limited to forty per second per connection; illegal state/range/resources/ownership receives a typed error event rather than client-selected outcomes.
+A hello after joining cannot rename/reset identity or input sequence. Welcome, snapshot, state and catalog are server-only. An unjoined goodbye is not an alternate entry path. Application actions are limited to forty per second per connection; illegal state/range/resources/ownership receives a typed error event rather than client-selected outcomes.
 
 ## Authority and output
 

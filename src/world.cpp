@@ -118,6 +118,10 @@ constexpr std::array<const char*,6> craft_stats{"silahtar","zirhci","kimyaci","m
 // Original crafttype index -> name table at 0x5d6150 (strings 0x58d424..0x58d3d4); classes.dat crafttype indexes it.
 constexpr std::array<const char*,6> craft_names{"Silahtar","Zırhçı","Kimyacı","Madenci","Sarraf","Lokman"};
 bool craft_stat(const std::string& stat) { return std::find(craft_stats.begin(),craft_stats.end(),std::string_view(stat)) != craft_stats.end(); }
+// NONCANONICAL A* budget for a player's click (ground, NPC, monster, portal); NPC steps and bots keep route()'s 1000. Eminönü
+// in-view NPC-to-NPC clicks routed: 1134 of 1363 at 1000 nodes, 1311 at 8000 (the spawn's quest NPCs and Fare need 2.6k-6.8k);
+// -O2 cold-grid worst case 5 ms at 1000, 35 ms at 8000 per click.
+constexpr int click_route_nodes = 8000;
 constexpr size_t quest_active_max = 16; // NONCANONICAL cap on accepted, unfinished quests (catalog bound and Görev al); 16 keeps the 16
                                          // largest original quests (texts + every reward item) inside the 64 KiB state envelope
 int quest_count(const Json& q) { const auto& o = q.at("objective"); return o.at("kind") == "talk" || o.at("kind") == "visit" ? 1 : o.at("count").get<int>(); }
@@ -131,6 +135,16 @@ bool other_class_reward(const Json& items, const Json& line, int class_id) {
     const auto& item = items.at(line.at("item").get<std::string>());
     if (line.contains("classes") && std::find(line.at("classes").begin(), line.at("classes").end(), Json(class_id)) == line.at("classes").end()) return true;
     return item.contains("class") && !item.contains("sex") && item.at("class").get<int>() + 1 != class_id;
+}
+// The catalog item a reward/kit line hands this class (0-based) and sex: the line item, else its same-name variant this character
+// can wear; empty for another class page's line or when no variant fits (W-REW lists one reward line per class).
+std::string reward_variant(const Json& catalog, const Json& line, int cls, int sex) {
+    if (line.contains("classes") && std::find(line.at("classes").begin(), line.at("classes").end(), Json(cls + 1)) == line.at("classes").end()) return {};
+    const auto fits = [&](const Json& d) { return (!d.contains("class") || d.at("class") == cls) && (!d.contains("sex") || d.at("sex") == sex); };
+    const std::string item = line.at("item"); const auto& definition = catalog.at(item);
+    if (fits(definition)) return item;
+    for (const auto& [other, d] : catalog.items()) if (d.contains("slot") && d.at("name") == definition.at("name") && fits(d)) return other;
+    return {};
 }
 // A clan's Sancak (banner NPC with "clan") can only be struck by a member of another clan.
 bool shielded(const Json& npc, const Json& s) { return npc.contains("clan") && (!s.value("clan",0) || s.value("clan",0) == npc.at("clan").get<int>()); }
@@ -439,7 +453,8 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         }
         const auto validate_items = [&](const Json& values) {
             require(values.is_array() && values.size() <= 16, "config", "Item list invalid");
-            for (const auto& v : values) { require(config_.at("items").contains(text(v.at("item"), 32)), "config", "Unknown item"); integer(v.at("quantity"), 1, 1000); }
+            for (const auto& v : values) { require(config_.at("items").contains(text(v.at("item"), 32)), "config", "Unknown item"); integer(v.at("quantity"), 1, 1000);
+                if (v.contains("classes")) { require(v.at("classes").is_array() && !v.at("classes").empty() && v.at("classes").size() <= 3,"config","Reward classes invalid"); for (const auto& c : v.at("classes")) integer(c,1,3); } }
         };
         require(config_.at("npcs").is_array() && config_.at("npcs").size() <= 2048, "config", "NPC limit");
         for (const auto& definition : config_.at("npcs")) {
@@ -611,7 +626,6 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             for (const auto& v : quest.at("reward").at("items")) {
                 if (v.contains("prefixes")) { require(v.at("prefixes").is_array() && v.at("prefixes").size() <= 2,"config","Item prefixes invalid");
                     for (const auto& p : v.at("prefixes")) require(config_.at("prefixes").contains(std::to_string(integer(p,1,999999))),"config","Item prefix missing"); }
-                if (v.contains("classes")) { require(v.at("classes").is_array() && !v.at("classes").empty() && v.at("classes").size() <= 3,"config","Reward classes invalid"); for (const auto& c : v.at("classes")) integer(c,1,3); }
             }
             if(quest.contains("requires") || automatic)require(config_.at("quests").contains(text(quest.at("requires"),32)) && quest.at("requires")!=id,"config","Quest prerequisite missing");
             if(quest.contains("time_limit"))integer(quest.at("time_limit"),1,86400);
@@ -738,13 +752,27 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             {"character",{{"name",std::string(32,'"')},{"class_id",3},{"equipment",player_bound.at("equipment")},
             {"appearance",std::move(appearance_bound)},{"state",{{"p",std::string(8184,'x')}}}}},
             {"entities",std::move(entity_bounds)},{"events",std::move(event_bounds)},{"party",Json::array()},
-            {"catalogs",{{"items",std::move(item_bound)},{"quests",std::move(quest_bound)},{"skills",std::move(skill_bound)}}}};
+            {"catalogs",{{"items",std::move(item_bound)},{"quests",std::move(quest_bound)},{"skills",std::move(skill_bound)},{"reach",200000}}}};
         require(trade_bound.dump().size()<=32768 && wire_bound.dump().size()<=65533,"config","Full supported trade/state schema exceeds protocol envelope");
         // A group member travels as a player entity when in view, else as a "party" row (state()), never both: five
         // player_bound entities above bound either form.
         const Json party_row={{"id",UINT32_MAX},{"name",std::string(32,'"')},{"level",INT32_MAX},{"class_id",3},{"hp",INT32_MAX},{"max_hp",INT32_MAX},{"mana",INT32_MAX},{"max_mana",INT32_MAX},
                               {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true}};
         require(party_row.dump().size()<=player_bound.dump().size(),"config","Party row exceeds the player entity bound");
+        { // Type::catalog parts (recipe_book(), bank_view()), each its own frame: recipe_limit largest recipes with every item
+          // a recipe names, and a full Banka tab of the largest stacks with the largest item definitions.
+            std::vector<size_t> recipe_sizes; std::set<std::string> named;
+            for(const auto& [id,recipe]:config_.at("recipes").items()){recipe_sizes.push_back(Json({{id,recipe}}).dump().size()+1);named.insert(recipe.at("product").get<std::string>());for(const auto& c:recipe.at("components"))named.insert(c.at("item").get<std::string>());}
+            std::sort(recipe_sizes.rbegin(),recipe_sizes.rend());
+            size_t book=Json({{"recipes",Json::object()},{"items",Json::object()}}).dump().size();
+            for(size_t n=0;n<std::min(recipe_sizes.size(),config_.at("economy").at("recipe_limit").get<size_t>());++n)book+=recipe_sizes[n];
+            for(const auto& item:named)book+=Json({{item,config_.at("items").at(item)}}).dump().size()+1;
+            const auto slots=config_.at("economy").at("bank_slots").get<size_t>();
+            const Json stack={{"uid",std::string(32,'f')},{"item",std::string(32,'"')},{"quantity",INT32_MAX},{"tab",1},{"prefixes",Json::array({999999,999999})},{"durability",10000}};
+            size_t vault=Json({{"bank",{{"items",Json(std::vector<Json>(slots,stack))},{"currency",INT64_MAX},{"slots",slots},{"tab",1},{"banker",UINT32_MAX}}},{"items",Json::object()}}).dump().size();
+            for(size_t n=0;n<std::min(slots,item_sizes.size());++n)vault+=item_sizes[n].first+1;
+            require(book<=65533 && vault<=65533,"config","Recipe memory or Banka tab exceeds protocol envelope");
+        }
         initializing_=false;
     } catch (const Rejected& e) { throw std::invalid_argument("gameplay config: " + e.message); }
       catch (const Json::exception& e) { throw std::invalid_argument(std::string("gameplay config: ") + e.what()); }
@@ -944,7 +972,7 @@ void World::cross(uint32_t id, uint32_t door, int32_t nx, int32_t ny) {
     if(!npcs_.contains(exit) || !passable(to,mx,my)){refuse("movement","Bu geçitten şu anda geçilemiyor.");return;} // NONCANONICAL wording
     s["zone"]=to; s["x"]=mx; s["y"]=my; set_peek(id,{{exit,old}}); move_zone(id,old,x,y); a.crossed=door; // peek first: the copy just left stays as seen (vacated() skips it)
     if(beyond.door!=door)return;
-    if(auto points=route(to,mx,my,beyond.x,beyond.y);!points.empty()){a.route=std::move(points);a.waypoint=0;a.moving=true;}
+    if(auto points=route(to,mx,my,beyond.x,beyond.y,click_route_nodes,true);!points.empty()){a.route=std::move(points);a.waypoint=0;a.moving=true;}
     else emit(id,{{"type","correction"},{"x",mx},{"y",my},{"reason","blocked_destination"}}); // the target behind the door is unreachable
 }
 // Replace a player's peek; an instance copy nobody peeks or stands in any more gets its vacated() reset (it was skipped while peeked).
@@ -1037,7 +1065,7 @@ bool World::clear_path(const std::string& zone,int32_t x,int32_t y,int32_t nx,in
 std::vector<std::pair<int32_t,int32_t>> World::route(const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny,int limit,bool partial) const {
     RouteSearch r;
     if(auto trivial=route_begin(r,zone,x,y,nx,ny))return *trivial;
-    route_step(r,limit); // Source-compatible 1000 popped-node ceiling for clicks; bots plan long walks in slices (bots_tick).
+    route_step(r,limit); // 1000 popped nodes for NPC steps, click_route_nodes for player clicks; bots plan long walks in slices (bots_tick).
     return route_finish(r,partial);
 }
 std::optional<std::vector<std::pair<int32_t,int32_t>>> World::route_begin(RouteSearch& r,const std::string& zone,int32_t x,int32_t y,int32_t nx,int32_t ny) const {
@@ -1377,7 +1405,10 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
         Json s = record.value("state",Json::object()); require(s.is_object(),"state","Character state must be object");
         s.erase("visual"); // persisted_visual: rebuilt on every save
         for (const auto& [key,v] : config_.at("defaults").items()) if (key != "inventory" && !s.contains(key)) s[key] = v;
-        if (!s.contains("inventory")) { s["inventory"] = Json::array(); for (const auto& item : config_.at("defaults").at("inventory")) give(s,item.at("item"),item.at("quantity")); }
+        if (!s.contains("inventory")) { // a new character: the default bag and creation kit, each line as this class/sex's variant
+            s["inventory"] = Json::array(); const int cls = a.character.at("class_id").get<int>() - 1, sex = appearance.value("sex", 1);
+            for (const auto& line : config_.at("defaults").at("inventory")) if (const auto item = reward_variant(config_.at("items"), line, cls, sex); !item.empty()) give(s,item,line.at("quantity"));
+        }
         if (!s.contains("equipment")) {
             s["equipment"] = Json::object();
             for (const auto& entry : s.at("inventory")) {
@@ -1491,6 +1522,7 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
             integer(g.value("level",Json(1)),1,100); integer(g.value("funds",Json(0)),0,999000000); // Lonca Parası (guild_donate)
         }
         s.erase("kabadayi"); // Kabadayı consent is per session
+        if (s.at("hp").get<int>() == 0) a.resurrect_ready = tick_ + config_.at("death_resurrect_delay").get<uint32_t>(); // a relog does not skip the death countdown (NONCANONICAL: it restarts in full)
         if (s.contains("clan")) require(config_.at("social").at("clans").contains(std::to_string(integer(s.at("clan"),1,15))),"state","Unknown clan");
         integer(s.value("san",Json(0)),0,1000000000); integer(s.value("clan_currency",Json(0)),0,999000000); integer(s.value("akce",Json(0)),0,999000000);
         const auto stamp = [](const Json& v) { require(v.is_number_integer() && v.get<int64_t>() >= 0, "state", "Time stamp invalid"); };
@@ -1537,12 +1569,14 @@ void World::destination(uint32_t id, int32_t x, int32_t y, uint32_t sequence, ui
         if (p == portals_.end() || npcs_.at(portal).definition.at("zone") != s.at("zone") || !close(id,portal,config_.at("aoi"))) { blocked(); return; }
         if (const auto shut = door_gate(id,portal)) { reject(id,shut->first,shut->second); blocked(); return; }
         const auto& d = p->second; const double w = std::hypot(double(d.bx-d.ax),double(d.by-d.ay)), nx = -(d.by-d.ay)/w, ny = (d.bx-d.ax)/w; // entering direction
-        auto points = route(s.at("zone"),s.at("x"),s.at("y"),int32_t(std::lround(d.ox-1000*nx)),int32_t(std::lround(d.oy-1000*ny)));
+        auto points = route(s.at("zone"),s.at("x"),s.at("y"),int32_t(std::lround(d.ox-1000*nx)),int32_t(std::lround(d.oy-1000*ny)),click_route_nodes);
         if (points.empty()) { blocked(); return; }
         points.emplace_back(int32_t(std::lround(d.ox+1000*nx)),int32_t(std::lround(d.oy+1000*ny))); // past the line: the step over it crosses
         a.route=std::move(points);a.waypoint=0; a.moving = true; a.dx = a.dy = 0; a.engaged = 0; a.beyond = {portal,x,y}; return;
     }
-    auto points=route(s.at("zone"),s.at("x"),s.at("y"),x,y);
+    // A point beyond the search budget still walks toward it: the route to the explored cell nearest the goal (a click that
+    // did not move the player at all read as a frozen character).
+    auto points=route(s.at("zone"),s.at("x"),s.at("y"),x,y,click_route_nodes,true);
     if (points.empty()) { blocked(); return; }
     a.route=std::move(points);a.waypoint=0; a.moving = true; a.dx = a.dy = 0; a.engaged = 0;
 }
@@ -1855,7 +1889,7 @@ void World::engage(uint32_t id, Actor& a) {
     if (!close(id,a.engaged,range)) {
         // Re-plan only when the target left the planned end point's reach (A* per tick is too costly).
         if (a.moving && !a.route.empty() && distance(a.route.back().first,a.route.back().second,tx,ty) <= int64_t(range/2)*(range/2)) return;
-        a.route = route(s.at("zone"),s.at("x"),s.at("y"),tx,ty); a.waypoint = 0; a.moving = !a.route.empty(); a.dx = a.dy = 0;
+        a.route = route(s.at("zone"),s.at("x"),s.at("y"),tx,ty,a.bot ? 1000 : click_route_nodes); a.waypoint = 0; a.moving = !a.route.empty(); a.dx = a.dy = 0;
         if (!a.moving) { a.engaged = 0; reject(id,"range","Hedefe ulaşılamıyor."); }
         return;
     }
@@ -2045,10 +2079,11 @@ void World::handle(uint32_t id, const Json& request) {
             transfer(id,linked(id,t),door.at("arrive")[0],door.at("arrive")[1]); ack(); return;
         }
         // banker: the original Bankacı dialogue offers "Kasamı göster" (0x58ebfc), which opens the Banka window.
-        emit(id,{{"type","dialogue"},{"target",t},{"text",n.definition.at("dialogue")},{"quests",quests_at(n,current)},{"shop",n.definition.at("shop")},{"bank",n.definition.value("banker",false)}}); return;
+        emit(id,{{"type","dialogue"},{"target",t},{"text",n.definition.at("dialogue")},{"quests",quests_at(n,current,a.character.at("class_id"))},{"shop",n.definition.at("shop")},{"bank",n.definition.value("banker",false)}}); return;
     }
     if (action == "quest_accept" || action == "quest_complete") {
-        auto t = target(); auto& n = npc(id,t); auto quest = text(request.at("quest"),32); const auto offered = quests_at(n,current);
+        // offered = quests_at: the Görev al rules (quest_eligible: level, class, prerequisites) are those of the Konuş list.
+        auto t = target(); auto& n = npc(id,t); auto quest = text(request.at("quest"),32); const auto offered = quests_at(n,current,a.character.at("class_id"));
         require(config_.at("quests").contains(quest) && std::find(offered.begin(),offered.end(),Json(quest)) != offered.end(),"quest","Bu görev burada verilmiyor.");
         const auto& q = config_.at("quests").at(quest); auto s = current; Json events = Json::array();
         // Instanced zone copies clone their NPCs at id + n*65536 (same source_uid): the copy serves the configured NPC's quests.
@@ -2056,9 +2091,6 @@ void World::handle(uint32_t id, const Json& request) {
         if (action == "quest_accept") {
             require(q.value("auto",false) ? n.definition.value("auto_quests",false) : is(q.at("giver")),"quest","Bu görevi bu kişi vermiyor.");
             require(!s.at("quests").contains(quest) && !quest_finished(s,quest),"quest","Bu görevi zaten aldınız.");
-            require(s.at("level").get<int>() >= q.value("min_level",q.at("level").get<int>()),"level","Bu görev için seviyeniz yetersiz."); // OFF-Q Seviye Gereksinimi
-            require(!q.contains("class") || q.at("class") == a.character.at("class_id"),"class","Bu görev sınıfınıza verilmiyor."); // W-AGL Silah Takası: "sadece Savaşçı"
-            require(quest_open(q,s),"quest","Önce bir önceki görevi tamamlamalısınız.");
             require(s.at("quests").size() < quest_active_max,"quest","Görev listeniz dolu.");
             Json p{{"progress",q.at("objective").at("kind") == "talk" ? 1 : 0}};
             if (q.contains("time_limit")) p["deadline"] = tick_ + 20 * q.at("time_limit").get<uint32_t>();
@@ -2888,7 +2920,8 @@ Json World::state(uint32_t id) {
     Json quests=Json::object();
     const int own_class=a.character.at("class_id");
     for(const auto& [quest_id,progress]:own.at("quests").items()){(void)progress;const auto& quest=config_.at("quests").at(quest_id);quests[quest_id]=quest;for(const auto& v:quest.at("reward").at("items"))if(!other_class_reward(config_.at("items"),v,own_class))catalog(items,v.at("item").get<std::string>());}
-    Json result{{"self",id},{"tick",tick_},{"character",a.character},{"entities",Json::array()},{"events",Json::array()},{"catalogs",{{"items",std::move(items)},{"quests",std::move(quests)},{"skills",std::move(skills)}}}};
+    // catalogs.reach: interaction_range, so the client closes NPC windows its player has walked away from (sent with the catalogs, not per tick).
+    Json result{{"self",id},{"tick",tick_},{"character",a.character},{"entities",Json::array()},{"events",Json::array()},{"catalogs",{{"items",std::move(items)},{"quests",std::move(quests)},{"skills",std::move(skills)},{"reach",config_.at("interaction_range")}}}};
     if(a.admin)result["admin"]=true; // original privilege%100 gates İsim Yansıt / Yanına Işınla menu items (0041a230)
     const auto& zone=config_.at("zones").at(a.character.at("state").at("zone").get<std::string>());
     result["zone"]=a.character.at("state").at("zone");result["bounds"]=zone.at("bounds");
@@ -2934,17 +2967,6 @@ Json World::state(uint32_t id) {
         if (own_state.contains("clan")) for (const auto& row : config_.at("social").at("clan_ranks")) if (own_state.value("san",int64_t(0)) >= row[0].get<int64_t>()) result["stats"]["clan_rank"]=row[1];
         if (own_state.contains("guild") && own_state.at("guild").is_object()) result["stats"]["guild_rank"]=own_state.at("guild").at("leader_character_id")==a.character_id?"Lonca Reisi":"Üye";
         if (const int power=arena_power(own_state)) result["stats"]["arena_power"]=power;
-    }
-    {
-        // Üretim: learned recipes with their product/input names; Banka: contents only while a banker session is open.
-        auto& listed=result["catalogs"]["items"]; Json recipes=Json::object();
-        for(const auto& r:own.at("recipes")){const auto& recipe=config_.at("recipes").at(r.get<std::string>());recipes[r.get<std::string>()]=recipe;catalog(listed,recipe.at("product").get<std::string>());for(const auto& c:recipe.at("components"))catalog(listed,c.at("item").get<std::string>());}
-        result["catalogs"]["recipes"]=std::move(recipes);
-        if(bank_reach(id,a)) { // only the shown tab's cells: both full tabs with their catalog entries would not fit one state frame
-            Json shown=Json::array();
-            for(const auto& entry:a.bank.at("items"))if(entry.value("tab",0)==a.bank_tab){catalog(listed,entry.at("item").get<std::string>());shown.push_back(entry);}
-            result["bank"]={{"items",std::move(shown)},{"currency",a.bank.at("currency")},{"slots",config_.at("economy").at("bank_slots")},{"tab",a.bank_tab},{"banker",a.banker}};
-        }
     }
     { // Wave 16: the zone copy each open see-through door in view shows, kept while it stays open and in view (the crossing enters it).
       // ponytail: a group change while in view keeps the old copy; re-check against instance() if that matters.
@@ -2999,7 +3021,7 @@ Json World::state(uint32_t id) {
         (void)d;if(result["entities"].size()>=96)break; // client snapshot entity limit (dense <loc> door/node areas)
         const auto& n=npcs_.at(other);
         if(n.definition.value("hidden",false) || (n.definition.value("rescue",false) && !n.hp))continue; // <loc> id_dummy markers stay server-side; a freed Cin has left
-        const Json offered=quests_at(n,own);
+        const Json offered=quests_at(n,own,own_class);
         Json entity={{"id",other},{"kind",n.definition.at("kind")},{"name",n.definition.at("name")},{"appearance",n.definition.value("appearance",Json::object())},{"equipment",n.definition.value("equipment",Json::array())},{"source_uid",n.definition.at("source_uid")},{"source_class",n.definition.at("source_class")},{"x",n.x},{"y",n.y},{"hp",n.hp},{"max_hp",n.definition.at("hp")},{"alive",n.hp>0},{"quests",offered},{"shop",n.definition.at("shop")},{"owner",n.owner},{"looted",n.looted}};
         if(n.definition.at("kind")=="prop")entity["interactable"]=n.definition.value("interactable",false); // <loc> entity type 3 cursor
         if(n.definition.contains("clan"))entity["clan"]=n.definition.at("clan"); // relation 00478090 clan bits (Klan OOK / Sancak)
@@ -3050,6 +3072,25 @@ Json World::state(uint32_t id) {
     }
     for(size_t index=0;index<a.events.size();++index)if(keep[index])result["events"].push_back(std::move(a.events[index]));
     a.events=Json::array();a.event_bytes=0;return result;
+}
+// NONCANONICAL Type::catalog parts, sent apart from state() and only when changed (server_main send_state): the learned
+// Üretim recipes, and the open Banka tab (only the shown tab's cells), each with the item definitions it names. The
+// constructor bounds each part to one frame, so neither competes with the state frame's NPC budget.
+Json World::recipe_book(uint32_t id) const {
+    Json recipes=Json::object(),items=Json::object();
+    const auto define=[&](const Json& item){items[item.get<std::string>()]=config_.at("items").at(item.get<std::string>());};
+    if(const auto a=actors_.find(id);a!=actors_.end())for(const auto& r:a->second.character.at("state").at("recipes")) {
+        const auto& recipe=config_.at("recipes").at(r.get<std::string>());recipes[r.get<std::string>()]=recipe;
+        define(recipe.at("product"));for(const auto& c:recipe.at("components"))define(c.at("item"));
+    }
+    return {{"recipes",std::move(recipes)},{"items",std::move(items)}};
+}
+Json World::bank_view(uint32_t id) const {
+    const auto a=actors_.find(id);
+    if(a==actors_.end() || !bank_reach(id,a->second))return {{"bank",nullptr},{"items",Json::object()}};
+    const auto& b=a->second; Json shown=Json::array(),items=Json::object();
+    for(const auto& entry:b.bank.at("items"))if(entry.value("tab",0)==b.bank_tab){items[entry.at("item").get<std::string>()]=config_.at("items").at(entry.at("item").get<std::string>());shown.push_back(entry);}
+    return {{"bank",{{"items",std::move(shown)},{"currency",b.bank.at("currency")},{"slots",config_.at("economy").at("bank_slots")},{"tab",b.bank_tab},{"banker",b.banker}}},{"items",std::move(items)}};
 }
 Json World::status() const {
     std::map<std::string,std::array<int,3>> counts; // zone: players, bots, living NPCs
@@ -3250,20 +3291,26 @@ bool World::quest_open(const Json& q, const Json& s) const { // every prerequisi
     if (q.contains("requires_also")) for (const auto& r : q.at("requires_also")) if (!quest_finished(s, r.get<std::string>())) return false;
     return true;
 }
-// Konuş lists the NPC's taken quests ("Alınmış görevler") and the ones whose prerequisites are done ("alınabilecek görevler",
-// guide l.1018-1037); the level and class rules answer at Görev al. GB-Anı lists the deleted auto quests.
-Json World::quests_at(const Npc& n, const Json& s) const {
+// Görev al rules, shared by the Konuş list, quest_accept (via quests_at) and the bots: level (OFF-Q "Seviye Gereksinimi",
+// min_level else level), class (W-AGL Silah Takası "sadece Savaşçı") and every prerequisite.
+bool World::quest_eligible(const Json& q, const Json& s, int class_id) const {
+    return s.at("level").get<int>() >= q.value("min_level", q.at("level").get<int>()) &&
+           (!q.contains("class") || q.at("class").get<int>() == class_id) && quest_open(q, s);
+}
+// Konuş lists the NPC's taken quests ("Alınmış görevler") and the ones the player can take now ("alınabilecek görevler",
+// guide l.1018-1037). An under-level quest stays hidden until the level is reached: "Seviye atladıkça, OOK'ler size daha
+// önce yapmadığınız görevleri verebilirler" (dh_rehber l.402). GB-Anı lists the deleted auto quests.
+Json World::quests_at(const Npc& n, const Json& s, int class_id) const {
     Json list = Json::array();
     if (!n.definition.value("auto_quests", false)) {
         for (const auto& quest : n.definition.at("quests")) {
             const auto& id = quest.get_ref<const std::string&>(); const auto& q = config_.at("quests").at(id);
-            if (s.at("quests").contains(id) || (!q.value("auto", false) && !quest_finished(s, id) && quest_open(q, s))) list.push_back(quest);
+            if (s.at("quests").contains(id) || (!q.value("auto", false) && !quest_finished(s, id) && quest_eligible(q, s, class_id))) list.push_back(quest);
         }
         return list;
     }
     for (const auto& [id, q] : config_.at("quests").items())
-        if (q.value("auto", false) && !s.at("quests").contains(id) && !quest_finished(s, id) && quest_open(q, s) &&
-            q.at("level").get<int>() <= s.at("level").get<int>() && list.size() < 16) list.push_back(id);
+        if (q.value("auto", false) && !s.at("quests").contains(id) && !quest_finished(s, id) && quest_eligible(q, s, class_id) && list.size() < 16) list.push_back(id);
     return list;
 }
 Json World::quest_event(const std::string& quest, const char* stage, int progress) const {
@@ -3348,12 +3395,13 @@ void World::quest_finish(Json& s, const Json& character, const std::string& ques
     // W-REW lists one reward line per class: each item is handed out as the variant (same name) this character's class and sex
     // can wear, and a class-limited prefix moves to its same-name sibling; another class's weapon is not given.
     const int cls = character.at("class_id").get<int>() - 1, sex = character.value("appearance", Json::object()).value("sex", 1);
-    const auto& catalog = config_.at("items"); const auto fits = [&](const Json& d) { return (!d.contains("class") || d.at("class") == cls) && (!d.contains("sex") || d.at("sex") == sex); };
+    const auto& kit = config_.at("defaults").at("inventory");
     for (const auto& reward : q.at("reward").at("items")) {
-        if (reward.contains("classes") && std::find(reward.at("classes").begin(), reward.at("classes").end(), Json(cls + 1)) == reward.at("classes").end()) continue; // another class page's line
-        std::string item = reward.at("item");
-        if (!fits(catalog.at(item))) { item.clear(); for (const auto& [other, d] : catalog.items()) if (d.contains("slot") && d.at("name") == catalog.at(reward.at("item").get<std::string>()).at("name") && fits(d)) { item = other; break; } }
+        const auto item = reward_variant(config_.at("items"), reward, cls, sex);
         if (item.empty()) continue;
+        // A creation-kit line (generate_content.cpp copies quest 1's gear into defaults): no second piece while one is carried.
+        if (std::find(kit.begin(), kit.end(), reward) != kit.end() && config_.at("items").at(item).contains("slot") &&
+            std::any_of(s.at("inventory").begin(), s.at("inventory").end(), [&](const Json& e) { return e.at("item") == item; })) continue;
         Json instance = Json::object();
         if (reward.contains("prefixes")) {
             instance["prefixes"] = Json::array();

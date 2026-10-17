@@ -74,9 +74,9 @@ class WorldPeer(AbstractContextManager):
         del self.buffer[:length + 4]
         assert body[0] == 2, "unexpected wire version"
         kind, payload = body[1], body[2:]
-        if kind in (6, 8):
+        if kind in (6, 8) or (kind == 5 and payload):  # a server goodbye carries {"reason"} (server_main refuse())
             payload = json.loads(payload)
-            assert isinstance(payload, dict), "world state is not an object"
+            assert isinstance(payload, dict), "world record is not an object"
         elif kind == 2:
             assert len(payload) == 8
             self.id, tick = struct.unpack("!II", payload)

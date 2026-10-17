@@ -100,6 +100,11 @@ def authentication(services):
     reset["session"] = services.api("POST", "/v1/login", {"username": "test_reset", "password": NEW_PASSWORD})["session"]
     services.api("POST", "/v1/logout", {}, session=reset["session"])
     expect_error(services, "GET", "/v1/characters", session=reset["session"], status=401)
+    # Forgotten tokens (the launcher keeps its session only in memory) must not lock the account out at the cap: the oldest gives way.
+    logins = [services.api("POST", "/v1/login", {"username": "test_reset", "password": NEW_PASSWORD}, source_ip="127.0.0.6")["session"] for _ in range(9)]
+    expect_error(services, "GET", "/v1/characters", session=logins[0], status=401)
+    assert services.api("GET", "/v1/characters", session=logins[-1])["characters"] == []
+    assert services.sql(f"SELECT count(*) FROM sessions WHERE account_id={reset['id']}") == "8"
     banned = users["test_banned"]
     services.api("POST", f"/v1/admin/accounts/{banned['id']}/ban", {"reason": "synthetic moderation check", "duration_seconds": 0}, session=admin, admin=True)
     expect_error(services, "GET", "/v1/characters", session=banned["session"], status=401)
@@ -210,13 +215,19 @@ def saved(services, character):
 
 
 def rejected_peer(services, payload):
+    # Malformed peers get a bare close; an authenticated refusal gets exactly one goodbye {"reason"} (server_main refuse()).
     with services.connect(services.world_port) as connection:
         connection.sendall(payload)
         connection.settimeout(2)
+        received = bytearray()
         try:
-            assert not connection.recv(65536), "malformed or unauthorized peer received a record"
+            while chunk := connection.recv(65536):
+                received += chunk
         except (ConnectionResetError, ssl.SSLEOFError):
             pass
+        if received:
+            length = struct.unpack("!I", received[:4])[0]
+            assert len(received) == length + 4 and received[4:6] == bytes((2, 5)) and json.loads(received[6:])["reason"], "malformed or unauthorized peer received a record"
 
 
 def revoked_world_peer(peer, timeout=12):
@@ -418,6 +429,11 @@ def world(services, users, characters):
         collision = state(first)
         assert not (1000 <= collision["x"] <= 1200 and 300 <= collision["y"] <= 900), "authoritative movement entered configured solid collision"
         move(first, 0, 0, 7)
+        # A destination burst is coalesced to one route per tick (the newest held): the peer stays connected and ends at the last click.
+        first.connection.sendall(b"".join(frame(7, struct.pack("!Iii", sequence, 100 * (sequence % 3), 0)) for sequence in range(8, 407)) +
+                                 frame(7, struct.pack("!Iii", 407, 300, 0)))
+        state(first, lambda current: (current["x"], current["y"]) == (300, 0))
+        move(first, 0, 0, 408)
         first.action("zone", zone="old_town")
         event(first, "error", code="permission")
         first.action("interact", target=2147493652)  # tests/independent_content.json <loc> door eminonu -> old_town

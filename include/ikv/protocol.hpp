@@ -19,7 +19,8 @@ bool valid_appearance(const nlohmann::json& appearance);
 std::string original_character_name_error(std::string_view utf8);
 enum class Type : std::uint8_t {
     hello = 1, welcome = 2, input = 3, snapshot = 4, goodbye = 5,
-    state = 6, destination = 7, action = 8
+    state = 6, destination = 7, action = 8,
+    catalog = 9 // NONCANONICAL: learned recipes or the open bank tab with their item definitions, sent on change
 };
 struct Player {
     std::uint32_t id;
@@ -42,7 +43,7 @@ struct Message {
 };
 
 // Independent authenticated v2 protocol; encode includes framing, decode takes body only.
-// State/action carry one UTF-8 JSON object, nesting <= 32, with no raw NUL bytes.
+// State/action/catalog carry one UTF-8 JSON object, nesting <= 32, with no raw NUL bytes.
 // JSON escapes (including \u0000) are valid; all payload bytes must be consumed.
 std::vector<std::uint8_t> encode(const Message& message);
 Message decode(std::span<const std::uint8_t> body);

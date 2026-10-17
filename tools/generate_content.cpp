@@ -1134,7 +1134,11 @@ int main(int argc, char** argv) try {
     for (const auto& [uid, p] : portal_data.at("portals").items())
         door_of(unsigned(std::stoul(uid)))["door"]["portal"] = {{"pair", door_of(p.at("pair").get<unsigned>()).at("id")}, {"threshold", p.at("threshold")}, {"floor", p.at("floor")}, {"height", p.at("height")}, {"apron", p.at("apron")}};
     Ordered defaults = config.at("defaults"); defaults["zone"] = "eminonu"; defaults["x"] = wire(spawns.at("eminonu").first); defaults["y"] = wire(spawns.at("eminonu").second);
+    // NONCANONICAL creation kit: the original hands its starter gear only as the "Teşkilat'a Katılış" reward (source quest 1,
+    // VOD 09:20 "Bunlara ihtiyacın olabilir"); a new character here starts wearing it (World::admit picks the class/sex variant,
+    // and quest 1 skips a kit piece the character still owns).
     defaults["inventory"] = Ordered::array({Ordered{{"item", "p253"}, {"quantity", 3}}});
+    for (const auto& [id, q] : quests.items()) if (q.value("source_quest_id", 0) == 1) for (const auto& v : q.at("reward").at("items")) defaults["inventory"].push_back(v);
     Ordered used = Ordered::object();
     const auto use = [&](const std::string& id) { if (!items.contains(id)) throw std::runtime_error("unknown generated item " + id); used[id] = items.at(id); };
     for (const auto& n : npcs) { for (const auto& id : n.at("shop")) use(id); if (n.contains("drops")) for (const auto& id : n.at("drops")) use(id); }

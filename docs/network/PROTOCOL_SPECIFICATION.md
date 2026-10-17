@@ -77,6 +77,7 @@ Body sizes include the two-byte version/type prefix but exclude the four-byte fr
 | `state` | 6 | server → client | `2 + json_bytes` | raw UTF-8 JSON object |
 | `destination` | 7 | client → server | 14 | `sequence:u32`, `x:i32`, `y:i32` |
 | `action` | 8 | client → server | `2 + json_bytes` | raw UTF-8 JSON object |
+| `catalog` | 9 | server → client | `2 + json_bytes` | raw UTF-8 JSON object (NONCANONICAL recipe or Banka part, [CUSTOM_PROTOCOL.md](CUSTOM_PROTOCOL.md#message-types)) |
 
 `Message` exposes `session:string`, `character_id:uint64`, existing `id`, `tick`, `sequence`, `dx`, `dy`, `players`, plus `json:string` and destination `x`, `y`. `Message.name` no longer exists. Unused fields are not serialized; only the selected type's payload is encoded.
 

@@ -32,6 +32,7 @@ public:
     nlohmann::json state;
     bool has_snapshot = false;
     bool eof = false;
+    std::string farewell; // NONCANONICAL: the server goodbye's reason, shown when it ends the session
 
     void pump(int wait_ms, const std::function<void(Type)>& on_message = {});
     // door != 0: NONCANONICAL wave-16 walk through that open portal door, x/y in its linked zone's frame (18-byte body).

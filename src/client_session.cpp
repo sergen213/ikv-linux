@@ -42,6 +42,8 @@ constexpr auto io_timeout = std::chrono::seconds(5);
 constexpr std::size_t queue_limit = 262144;
 constexpr std::size_t pump_limit = 65536;
 [[noreturn]] void invalid() { throw std::runtime_error("invalid server message"); }
+// A close before welcome: the server's goodbye reason when it gave one.
+[[noreturn]] void refused(const std::string& farewell) { if (farewell.empty()) invalid(); throw std::runtime_error(farewell); }
 [[noreturn]] void transport_error() { throw std::runtime_error("secure connection failed"); }
 
 int remaining_ms(Clock::time_point deadline) {
@@ -212,6 +214,28 @@ void uid(const Json& value) {
         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     })) invalid();
 }
+// Type::catalog parts (world.cpp recipe_book()/bank_view()): the learned Üretim recipes, or the open Banka tab (null
+// when closed), each with the item definitions it names.
+void validate_catalog(const Json& part) {
+    if (!part.is_object() || part.size() != 2 || !part.at("items").is_object() || part.at("items").size() > 1024) invalid();
+    for (const auto& [id, item] : part.at("items").items()) if (id.empty() || id.size() > 128 || !item.is_object()) invalid();
+    if (part.contains("recipes")) {
+        const auto& recipes = part.at("recipes");
+        if (!recipes.is_object() || recipes.size() > 200) invalid();
+        for (const auto& [id, recipe] : recipes.items()) if (id.empty() || id.size() > 128 || !recipe.is_object()) invalid();
+        return;
+    }
+    const auto& bank = part.at("bank");
+    if (bank.is_null()) return;
+    if (!bank.is_object()) invalid();
+    integer(bank.at("currency"), 0, INT64_MAX); integer(bank.at("banker"), 1, UINT32_MAX); integer(bank.at("tab"), 0, 1); // shown tab (original page 0x611454)
+    const auto& stored = bank.at("items"); array_limit(stored, static_cast<std::size_t>(integer(bank.at("slots"), 1, 64))); // the shown tab's 8×8 cells
+    for (const auto& item : stored) {
+        if (!item.is_object()) invalid();
+        uid(item.at("uid")); text(item.at("item"), 128); integer(item.at("quantity"), 1, INT32_MAX);
+        if (item.contains("tab")) integer(item.at("tab"), 1, 1); // second Banka tab; absent = first
+    }
+}
 Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) {
     if (!body.is_object() || integer(body.at("self"), 1, UINT32_MAX) != self ||
         integer(body.at("tick"), 0, UINT32_MAX) < tick) invalid();
@@ -267,18 +291,8 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
     }
     std::sort(owned_ids.begin(), owned_end);
     if (std::adjacent_find(owned_ids.begin(), owned_end) != owned_end) invalid();
-    // Banka (open banker session only) and learned Üretim recipes (world.cpp economy()).
-    if (body.contains("bank")) {
-        const auto& bank = body.at("bank");
-        if (!bank.is_object()) invalid();
-        integer(bank.at("currency"), 0, INT64_MAX); integer(bank.at("banker"), 1, UINT32_MAX); integer(bank.at("tab"), 0, 1); // shown tab (original page 0x611454)
-        const auto& stored = bank.at("items"); array_limit(stored, static_cast<std::size_t>(integer(bank.at("slots"), 1, 64))); // the shown tab's 8×8 cells
-        for (const auto& item : stored) {
-            if (!item.is_object()) invalid();
-            uid(item.at("uid")); text(item.at("item"), 128); integer(item.at("quantity"), 1, INT32_MAX);
-            if (item.contains("tab")) integer(item.at("tab"), 1, 1); // second Banka tab; absent = first
-        }
-    }
+    // Banka and the learned recipes' definitions arrive as Type::catalog parts (validate_catalog), never in a state.
+    if (body.contains("bank")) invalid();
     if (state.contains("recipes")) { array_limit(state.at("recipes"), 200); for (const auto& recipe : state.at("recipes")) text(recipe, 128); }
     const auto& equipment = state.at("equipment");
     if (!equipment.is_object() || equipment.size() > 32) invalid();
@@ -490,6 +504,15 @@ struct ClientSession::Impl {
     int dy = 0;
     Clock::time_point read_deadline = Clock::now() + io_timeout;
     Clock::time_point stop_deadline{};
+    Json book, vault; // last Type::catalog parts: recipes / Banka (null until the world sends one)
+    // Fold the parts into a state: their item definitions join catalogs.items, the recipes become catalogs.recipes, the
+    // open Banka tab becomes "bank" (the shape the world's state carried before the parts left the state frame).
+    void fold(Json& body) const {
+        auto& catalogs = body["catalogs"];
+        for (const Json* part : {&book, &vault}) if (part->is_object()) for (const auto& [id, item] : part->at("items").items()) catalogs["items"].emplace(id, item);
+        if (book.is_object()) catalogs["recipes"] = book.at("recipes");
+        if (vault.is_object() && !vault.at("bank").is_null()) body["bank"] = vault.at("bank"); else body.erase("bank");
+    }
 
     ~Impl() {
         if (ssl) SSL_free(ssl);
@@ -633,6 +656,10 @@ ClientSession::~ClientSession() = default;
 
 void ClientSession::receive(Message message) {
     try {
+        if (message.type == Type::goodbye) { // the server ends the session; its reason precedes the close
+            if (!message.json.empty()) farewell = Json::parse(message.json).value("reason", std::string{});
+            return;
+        }
         if (self == 0) {
             if (message.type != Type::welcome || message.id == 0) invalid();
             self = message.id;
@@ -668,12 +695,21 @@ void ClientSession::receive(Message message) {
             // The world sends catalogs on admission and whenever they change; other states keep the last accepted copy.
             if (const auto catalogs = body.find("catalogs"); catalogs != body.end()) {
                 if (!catalogs->is_object()) invalid();
+                impl_->fold(body);
             } else if (!impl_->state_seen || !state.contains("catalogs")) invalid();
-            else body["catalogs"] = std::move(state["catalogs"]);
+            else {
+                body["catalogs"] = std::move(state["catalogs"]); // already folded
+                if (const auto bank = state.find("bank"); bank != state.end()) body["bank"] = std::move(*bank);
+            }
             impl_->state_tick = body_tick;
             impl_->state_seen = true;
             impl_->bounds = bounds;
             state = std::move(body);
+        } else if (message.type == Type::catalog) {
+            auto part = Json::parse(message.json);
+            validate_catalog(part);
+            (part.contains("recipes") ? impl_->book : impl_->vault) = std::move(part);
+            if (impl_->state_seen) impl_->fold(state);
         } else invalid();
         impl_->read_deadline = Clock::now() + io_timeout;
     } catch (const Json::exception&) { invalid(); }
@@ -709,7 +745,7 @@ void ClientSession::pump(int wait_ms, const std::function<void(Type)>& on_messag
             (!impl_->shutdown_sent || impl_->shutdown_retry) &&
             (available & (impl_->shutdown_want | POLLERR | POLLHUP))) {
             impl_->shutdown();
-            if (impl_->finished) { impl_->decoder.finish(); if (self == 0) invalid(); eof = true; return; }
+            if (impl_->finished) { impl_->decoder.finish(); if (self == 0) refused(farewell); eof = true; return; }
             if (impl_->shutdown_retry) return;
         }
         if (!impl_->read_closed && (SSL_pending(impl_->ssl) > 0 || (available & (impl_->read_want | POLLERR | POLLHUP)))) {
@@ -722,7 +758,7 @@ void ClientSession::pump(int wait_ms, const std::function<void(Type)>& on_messag
                     const int error = SSL_get_error(impl_->ssl, result);
                     if (error == SSL_ERROR_ZERO_RETURN) {
                         impl_->decoder.finish();
-                        if (self == 0) invalid();
+                        if (self == 0) refused(farewell);
                         impl_->read_closed = true;
                         impl_->read_want = POLLIN;
                         impl_->outgoing.clear();

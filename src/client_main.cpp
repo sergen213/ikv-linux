@@ -753,7 +753,7 @@ public:
                 try {
                     pump_network(); stage(0);
                     apply_pending(); stage(1);
-                    if (session_->eof && !quit_) disconnect("Sunucu bağlantıyı kapattı. Yeniden bağlanabilir veya başlatıcıda giriş yapabilirsiniz.");
+                    if (session_->eof && !quit_) disconnect(!session_->farewell.empty()?session_->farewell:"Sunucu bağlantıyı kapattı. Yeniden bağlanabilir veya başlatıcıda giriş yapabilirsiniz.");
                 } catch (const std::exception& e) {
                     if (options_.ticks || !renderer_) throw;
                     disconnect(std::string("Bağlantı hatası: ")+e.what());
@@ -1628,8 +1628,9 @@ private:
     // Original name tags (0046fdb0 loop 00471a00..00471c9b): only for another PC (classid +0x1a4 < 8, entity type
     // flags & 0xf == 1) whose root passed the frustum visibility test (+0xf4, 0047cf50/0047c820; the box occlusion
     // test 004754d4 is a debug toggle, off by default, so names show through walls as in VOD 10:00) and whose
-    // distance from the local player (00478150) is under 170 (0x595f8c). NPCs, monsters and the own character get
-    // no in-world name (VOD 10:00, 16:30, 25:00): they are targeted by body pick, cursor and the target frame.
+    // distance from the local player (00478150) is under 170 (0x595f8c). The original draws no NPC/monster name (VOD 10:00,
+    // 16:30, 25:00); NONCANONICAL (user request): living NPCs and monsters (not doors/props/nodes/anvils/traps/resets) get
+    // one under the same rules, coloured as the help-map dots. The own character gets none.
     // The loop's other gate, byte 0x610d07 (also gating the stat floaters at 004a5e45), has no writer anywhere in the
     // image (no direct, indexed or pointer reference besides the two reads), so it stays 0 and is not ported.
     void update_labels() {
@@ -1646,7 +1647,9 @@ private:
                 if (!head || !feet || !tag) continue;
                 const Json* e=entity(pose.id);
                 const float dx=pose.x-self->x,dy=pose.ground_y-self->ground_y,dz=pose.z-self->z;
-                const bool name=e && e->value("kind",std::string{})=="player" && dx*dx+dy*dy+dz*dz<170.f*170.f;
+                const auto kind=e?e->value("kind",std::string{}):std::string{};
+                const bool npc=kind=="questgiver" || kind=="merchant" || kind=="enemy" || kind=="summon";
+                const bool name=(kind=="player" || (npc && e->value("alive",true))) && dx*dx+dy*dy+dz*dz<170.f*170.f;
                 // 00471dfa: lift = boundy (root +0x128) · 0.3 · (1 − sz)·2997; the name line's top is 14 px above the lift.
                 const float lift=(actor?actor->bounds[1]:0.f)*.3f*(1-(*tag)[2])*2997.f;
                 next.push_back({pose.id,(*head)[0],(*head)[1],(*feet)[1],static_cast<int>((*tag)[0]),static_cast<int>((*tag)[1]-lift*s_),name});
@@ -1733,7 +1736,11 @@ private:
             // 00471e41 (relation 00478090): hostile 0xffaa22dd, same clan 0xff33cccc, otherwise white. Rect left = x − width/2;
             // the name's top is 14 px above the lifted anchor and a Lonca member's "<%s>" (0x595f7c) line starts at it.
             const int clan=character_state(state_).value("clan",0);
-            const Rgba color=original_rgba(relation(*e)==1?0xffaa22dd:clan && e->value("clan",0)==clan?0xff33cccc:0xffffffff);
+            // NONCANONICAL NPC/monster names (update_labels): help "Harita Penceresi" dot colours enemy FFFF3333, friendly
+            // NPC FF00FF00, neutral NPC FFFFFF00.
+            const int rel=relation(*e);
+            const Rgba color=original_rgba(e->value("kind",std::string{})!="player"?(rel==1?0xffff3333:rel==3?0xff00ff00:0xffffff00):
+                rel==1?0xffaa22dd:clan && e->value("clan",0)==clan?0xff33cccc:0xffffffff);
             const int w=ui_->text_width(name);
             label(l.tx-w/2,l.ty-S(14),name,color);
             if (e->contains("guild")) {
@@ -2880,10 +2887,11 @@ private:
                 f={ix,right,ix,top};
                 flow(f,"‹ Çizim",nullptr,-1,"help-image-"); flow(f,"Çizim ›",nullptr,-1,"help-image+");
                 const int iy=flow_end(f)+S(4);
-                const float scale=std::min(static_cast<float>(std::max(1,right-ix))/static_cast<float>(image.width),
-                                           static_cast<float>(std::max(1,bottom-iy))/static_cast<float>(image.height));
-                ui_->image(image,{static_cast<float>(ix),static_cast<float>(iy),static_cast<float>(image.width)*scale,
-                    static_cast<float>(image.height)*scale},{{{0,0},{1,0},{0,1},{1,1}}});
+                // The nine 1024² Help_*.dds hold a 940×660 picture; the rest of the texture is white padding.
+                const float cw=std::min(940.f,static_cast<float>(image.width)),ch=std::min(660.f,static_cast<float>(image.height));
+                const float u=cw/static_cast<float>(image.width),v=ch/static_cast<float>(image.height);
+                const float scale=std::min(static_cast<float>(std::max(1,right-ix))/cw,static_cast<float>(std::max(1,bottom-iy))/ch);
+                ui_->image(image,{static_cast<float>(ix),static_cast<float>(iy),cw*scale,ch*scale},{{{0,0},{u,0},{0,v},{u,v}}});
             }
         }
     }
@@ -2976,7 +2984,7 @@ private:
     // 00478710 runs in the name loop for every root that passed the frustum test (labels_; the own root is always
     // visible, 0047c820): line rect left = anchor x − width/2, top = anchor y − offset, at the unlifted 0047c530 anchor.
     void paint_floaters() {
-        if (shown_fade_>=1) return; // nor floating text
+        if (shown_fade_>=1 || !session_) return; // nor floating text; a disconnect resets session_ while floaters still live
         const auto now=Clock::now();
         for (const auto& f:floaters_) {
             const auto* p=pose(f.id);
@@ -3783,6 +3791,7 @@ private:
         try {
             session_=std::make_unique<ikv::ClientSession>(options_.host,options_.port,options_.ca,secret_.view(),options_.character);
             disconnected_=false; target_=0; notice("Güvenli bağlantı kuruldu; karakter doğrulanıyor.");
+            resurrect_at_=Clock::now()+std::chrono::milliseconds(15000); // a character admitted dead restarts the countdown (World::admit)
         } catch (const std::exception& e) {
             if (options_.ticks) throw;
             disconnected_=true; notice(std::string("Bağlantı kurulamadı: ")+e.what());
@@ -3823,6 +3832,13 @@ private:
         stat_floaters(state_); // before hud_values_ records the new values
         // The server's banker session (state "bank") opens the Banka window once; leaving range closes the session.
         if (state_.contains("bank")!=bank_session_) { bank_session_=!bank_session_; if (bank_session_) toggle_window(win_bank,true); }
+        // The world serves an NPC only within interaction_range (catalogs.reach): walking away closes its Satıcı and Konuş windows.
+        if (const double reach=state_.contains("catalogs")?state_.at("catalogs").value("reach",0.):0.; reach>0) {
+            const auto& me=character_state(state_); // the own actor is not among the entities
+            const auto away=[&](const Json* npc){ return npc && std::hypot(npc->value("x",0.)-me.value("x",0.),npc->value("y",0.)-me.value("y",0.))>reach; };
+            if (const Json* merchant=entity(target_); is_open(win_vendor) && merchant && merchant->contains("shop") && away(merchant)) toggle_window(win_vendor);
+            if (dialogue_.is_object() && away(entity(dialogue_.value("target",0u)))) dialogue_=nullptr;
+        }
         const auto& state=state_;
         const auto& cs=character_state(state_);
         // VOD 34:00 chat: "Yeniden canlanma için N para kaybettiniz." (server text; native takes the death_fee at death).
@@ -4019,7 +4035,8 @@ private:
             }
             else if (type=="death") {
                 if (event.at("entity")==session_->self) { resurrect_at_=Clock::now()+std::chrono::milliseconds(15000); resurrect_shown_=-2; hud_dirty_=true; }
-                else if (const Json* dead=entity(event.at("entity").get<std::uint32_t>()); dead && dead->contains("name")) notice("Dünyada ölüm: "+dead->at("name").get<std::string>()); // an entity outside this frame has no name to show
+                // NONCANONICAL notice, players only: every monster killed in view (bots farm rats all day) flooded chat and the centre flash.
+                else if (const Json* dead=entity(event.at("entity").get<std::uint32_t>()); dead && dead->value("kind",std::string{})=="player") notice("Dünyada ölüm: "+dead->value("name",std::string{})); // an entity outside this frame has no name to show
             }
             else if (type=="repair") { // helps.xml Para: örs repair; original ui\repair.raw (0x597c9c). Chat wording NONCANONICAL.
                 audio_->play_event("ui\\repair.raw");
@@ -4158,6 +4175,7 @@ private:
                     if (editing_) editing_=false;
                     else if (!confirm_.is_null()) confirm_=nullptr;
                     else if (context_) context_=0;
+                    else if (chat_menu_id_) chat_menu_id_=0; // chat-line name menu (0040aad0)
                     else if (!windows_.empty()) windows_.pop_back();
                     else system_menu_=!system_menu_; // original Esc menu "Ana Menü": Oyuna Dön / Ayarlar / Çıkış
                 } else if (key==SDLK_RETURN || key==SDLK_KP_ENTER) {
