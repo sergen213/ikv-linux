@@ -157,9 +157,10 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
  float fade_=0; // NONCANONICAL seamless door fade (post.frag frame.fade.x)
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
- // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance,
- // or any appearance with faithful RT (RtStyle). Enhanced appearance keeps its sampling/FSR either way.
- bool original_lighting_=true;
+ // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance
+ // (with faithful RT: plus actor Sun-ray shadows). Enhanced appearance keeps its own shading, water and parallax with RT:
+ // physical traces sun/GI/reflections; faithful keeps enhanced raster shading, Sun ray instead of the shadow map.
+ bool original_lighting_=true,physical_rt_=false;
  std::uint64_t history_eligible_frames_=0,history_reset_events_=0,history_retained_dirty_frames_=0;
  std::uint64_t total_frames_=0;
  std::filesystem::path cache_path_;
@@ -970,9 +971,10 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      // Physical RT only traces in enhanced lighting: with original appearance it would build/refresh AS for nothing.
      rt_enabled_=options_.ray_tracing!=RayTracing::off&&features.supported()&&compute_queue()&&
          (options_.rt_style==RtStyle::faithful||!options_.original_appearance);
-     original_lighting_=options_.original_appearance||(rt_enabled_&&options_.rt_style==RtStyle::faithful);
+     original_lighting_=options_.original_appearance;
+     physical_rt_=rt_enabled_&&!original_lighting_&&options_.rt_style==RtStyle::physical;
      const char* denoise=SDL_getenv("IKV_RT_DENOISE");
-     denoise_enabled_=rt_enabled_&&!original_lighting_&&(!denoise||std::strcmp(denoise,"0"));
+     denoise_enabled_=physical_rt_&&(!denoise||std::strcmp(denoise,"0"));
      VkPhysicalDeviceFeatures available{};vkGetPhysicalDeviceFeatures(physical_,&available);
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
@@ -2345,7 +2347,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
     if(primary.frame&&(jumped(f.sun,last.sun)||jumped(f.ambient,last.ambient)||jumped(f.diffuse,last.diffuse)||
        jumped(f.fog_color,last.fog_color)||jumped(f.fog,last.fog)||jumped(f.sky_b,last.sky_b)||jumped(f.sky_c,last.sky_c)))
         primary.frame=0;
-     f.params={original_lighting_?0.f:1.f,options_.exposure,
+     f.params={original_lighting_?0.f:rt_enabled_&&!physical_rt_?2.f:1.f,options_.exposure, // lighting.glsl params.x
          denoise_enabled_&&primary.frame>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
      f.viewport={float(render_extent_.width),float(render_extent_.height),float(total_frames_%16777216u),denoise_enabled_?1.f:0.f};
      const float tangent=std::tan(options_.camera.fov*.008726646259971648f);
@@ -2598,14 +2600,14 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      previous_jitter_={f.jitter[0],f.jitter[1]};rendered_=true;
      ++total_frames_;
      if(total_frames_<=2||total_frames_%300==0) {
-         const bool active=rt_enabled_&&!original_lighting_;
+         const bool active=physical_rt_;
          // Rendered (submitted) frame period since the previous line: the FIFO-paced frame rate without frame generation.
          const auto now=std::chrono::steady_clock::now();
          const double frame_ms_avg=log_frame_?std::chrono::duration<double,std::milli>(now-log_time_).count()/double(total_frames_-log_frame_):0;
          log_time_=now;log_frame_=total_frames_;
          std::cerr<<"Vulkan submitted frame="<<total_frames_<<" provider=vulkan appearance="
             <<(options_.original_appearance?"original":"enhanced")<<" rtStyle="<<(options_.rt_style==RtStyle::faithful?"faithful":"physical")
-            <<" lighting="<<(original_lighting_?"original":"physical")<<" hardwareRayQueries="<<rt_enabled_
+            <<" lighting="<<(original_lighting_?"original":physical_rt_?"physical":"enhanced")<<" hardwareRayQueries="<<rt_enabled_
             <<" accelerationStructure="<<(rt_enabled_&&primary.rt->acceleration_structure()!=VK_NULL_HANDLE)
             <<" sceneSets="<<sets_.size()<<" portalViews="<<view_count
             <<" reflections="<<active<<" shadows="<<rt_enabled_<<" diffuseGI="<<active<<" renderedFrameMs="<<frame_ms_avg

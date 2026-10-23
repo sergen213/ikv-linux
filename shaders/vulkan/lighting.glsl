@@ -267,12 +267,18 @@ if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
 #ifdef IKV_RT
+// params.x 1: physical RT (traced sun, GI, reflections). 2: faithful RT with enhanced appearance: the enhanced raster
+// shading below, its shadow map replaced by the deterministic Sun ray (scenery + actors, mask 3: the ocean, mask 4,
+// casts none, like the raster shadow pass).
+if(frame.params.x<1.5){
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
 rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(texel.rgb);
 #endif
-#else
+}else
+#endif
+{
 // NONCANONICAL wave 19 (renderer_gl.cpp scene_fragment matches): ambient is the original baked light (vertex ambient x
 // record ambient, lightmap) without its source sun term, linearised; the GGX sun and sky reflection follow the clock
 // record. Roofed zones keep the whole original light (source sun included, unshadowed) and no shadow-mapped sun: the
@@ -281,9 +287,14 @@ bool roofed=sceneRoofed();
 vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):
 // Eminönü noon 108 vs 115, every roofed interior above original (analysis/porting-wave19/LightingFixes/report.md).
-result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*shadowVisibility(n))+baked+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
-if(frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),result,clamp(sourceFog,0,1));
+#ifdef IKV_RT
+float sunShadow=!roofed&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,l,3u,0u):1.;
+#else
+float sunShadow=shadowVisibility(n);
 #endif
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+baked+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
+if(frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),result,clamp(sourceFog,0,1));
+}
 }
 if(frame.params.x<.5&&frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(frame.fogColor.rgb,result,clamp(sourceFog,0,1));
 outputColor=vec4(result,original.a);

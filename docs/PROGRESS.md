@@ -193,6 +193,12 @@ Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** ea
 
 Verification (0.10.1): `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** each, warning-free; RT smoke 5/5 and signed launcher smoke PASSED (`analysis/porting-wave20/Verify-0.10.1/`).
 
+## 2026-10-23 wave 21 (0.10.2): faithful RT keeps the enhanced look
+
+User report: Ayarlar "Işın izleme ışığı" = faithful disabled most enhancements, including water and parallax. Cause: `renderer_vk.cpp` set `original_lighting_` (frame `params.x=0`, the original equation) for faithful RT in *every* appearance, a wave-12 design choice. Now faithful with enhanced appearance keeps the enhanced raster shading, water and parallax (`params.x=2`) and swaps only the shadow map for the deterministic RT Sun ray against scenery + actors. The source ocean has its own TLAS mask (4) so it casts no shadow, as in the raster shadow pass. Original appearance + faithful and physical RT are unchanged. The log now says `lighting=enhanced` for this case.
+
+Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** (233.0 s / 205.2 s / 348.3 s); RT smoke 5/5 ok (`rt_display.py`, faithful expectation now `lighting=enhanced`; `analysis/rt-faithful-enhanced/rt-smoke/`). Eminönü and Sivri Ada captures for VK enhanced raster / RT faithful / RT physical (`analysis/rt-faithful-enhanced/`): faithful now matches enhanced raster (Eminönü luma 52.3 vs 52.7; it was the original equation before) with water and sand parallax present, logs free of errors. The darker far horizon over the sea under RT is the same in RT physical (pre-existing, not from this change). Signed launcher smoke (Vulkan ½ scale, enhanced, RT required faithful) PASSED (`analysis/porting-wave21/Verify/`).
+
 ## Status and evidence vocabulary
 
 [Goal](../Goal) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.

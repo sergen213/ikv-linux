@@ -527,13 +527,16 @@ struct VulkanRtScene::Impl {
                 for (std::size_t column = 0; column < 4; ++column)
                     instance.transform.matrix[row][column] = placed->matrix[column*4 + row];
             instance.instanceCustomIndex = state->mesh_offset[mesh] & 0xffffffu;
-            // Mask 2: actors (entity-attached); 1: static scenery. Faithful RT sun rays from lightmapped (static)
-            // receivers test only actors, since the baked lightmap already holds the scenery's shadows.
-            instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02 : 0x01;
+            const auto material = preview || scene.instances[i].material == UINT32_MAX
+                ? scene.meshes[mesh].material : scene.instances[i].material;
+            // Mask 2: actors (entity-attached); 4: source ocean; 1: other static scenery. Faithful RT sun rays from
+            // lightmapped (static) receivers test only actors, since the baked lightmap already holds the scenery's
+            // shadows; enhanced faithful RT tests 1|2 (the ocean casts no shadow on the bed refracted through it).
+            instance.mask = !preview && scene.instances[i].entity_id != 0 ? 0x02
+                : material < scene.materials.size() && scene.materials[material].source_ocean ? 0x04 : 0x01;
             // Source clockwise-front triangles are ray back faces by default; rt_lighting.glsl culls back faces.
             instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR;
-            alpha_test(instance, scene, preview || scene.instances[i].material == UINT32_MAX
-                ? scene.meshes[mesh].material : scene.instances[i].material, state->alpha_textures, false);
+            alpha_test(instance, scene, material, state->alpha_textures, false);
             instance.accelerationStructureReference = state->bottom[state->mesh_blas[mesh]]->address;
             instances.push_back(instance);
         }

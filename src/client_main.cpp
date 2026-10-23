@@ -148,7 +148,7 @@ Options parse_options(int argc,char** argv) {
                 "[--asset-root DIR --renderer opengl|vulkan --appearance original|enhanced]\n"
                 "[--model-map JSON --sound-map JSON --audio ORIGINAL_OGG (replaces zone music)]\n"
                 "[--settings JSON --width N --height N --fullscreen --screenshot PPM --rt off|auto|required --render-scale .25..1 (Vulkan only)]\n"
-                "[--rt-style faithful|physical]  RT lighting: original equation + RT actor shadows (default), or physically based GI\n"
+                "[--rt-style faithful|physical]  RT lighting: appearance's own lighting + RT Sun shadows (default), or physically based GI\n"
                 "[--upscaler bilinear|fsr3 --fsr-mode native|quality|balanced|performance|ultra_performance --fsr-sharpness 0..1]\n"
                 "  fsr3: AMD FidelityFX Super Resolution 3.1.4 temporal upscaling (Vulkan only; replaces --render-scale)\n"
                 "[--frame-generation on|off]  FSR 3.1.4 frame generation (Vulkan + --upscaler fsr3; default off)\n"
