@@ -50,7 +50,10 @@ vec3 mappedNormal(){
     vec3 t=worldTangent-n*dot(n,worldTangent);
     if(dot(t,t)<=1e-12)return n;
     t=normalize(t);
-    return normalize(mat3(t,cross(n,t),n)*(texture(normalMap,texcoord).xyz*2-1));
+    // Source normal maps carry only xy (b: specular mask, a: illumination, originalSurface): z is rebuilt as the original
+    // does. Decoding b as z bent specular-free texels (b~0) inward, so normal-mapped actors went near-black (wave 19).
+    vec2 xy=texture(normalMap,texcoord).xy*2-1;
+    return normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1-dot(xy,xy))));
 }
 // Independently expressed recovered original shader equations, not copied proprietary shader source.
 // sunVisibility: 1 in raster; RT sun-ray visibility. Occlusion removes only the source directional terms.
@@ -91,6 +94,18 @@ vec4 originalSurface(vec4 diffuse,float sunVisibility) {
         return vec4(result*vertexLight,1);
     }
     return vec4((diffuse.rgb-lightmap*frame.fog.z)*vertexLight,diffuse.a);
+}
+// Enhanced raster albedo keeps the original subtractive lightmap darkening (originalSurface; not on the normal-mapped
+// path): without it the sun lit lightmap-darkened art (Çemberlitaş copies) 3x brighter than original (NONCANONICAL
+// wave 19). RT physical traces its own occlusion: none.
+vec3 enhancedLightmapShadow(float alpha){
+#ifdef IKV_RT
+    return vec3(0);
+#else
+    if(draw.extra.x<.5||draw.flags.x>.5)return vec3(0);
+    vec3 shadow=texture(originalLightmap,lightmapUV).rgb*frame.fog.z;
+    return draw.flags.y>.5?shadow*(1-clamp(alpha,0,1)):shadow;
+#endif
 }
 vec4 sourceOceanSurface() {
     vec3 normal0=texture(normalMap,sourceOceanUV*.80000001).rgb*2-1;
@@ -168,7 +183,7 @@ if(frame.params.x<.5&&frame.sun.w>.5&&fract(draw.extra.w)<.25&&dot(worldNormal,f
 vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.rgb,sourceAlpha);
 if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
-if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb,vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
+if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
 #ifdef IKV_RT
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
 result=albedo*(light.sun+light.diffuse)+light.reflection;
@@ -176,7 +191,16 @@ result=albedo*(light.sun+light.diffuse)+light.reflection;
 rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(texel.rgb);
 #endif
 #else
-result=direct*shadowVisibility(n)+albedo*environment(n)*.35+environment(reflect(-v,n))*f*(1-roughness)*.4;
+// NONCANONICAL wave 19 (renderer_gl.cpp scene_fragment matches): ambient is the original baked light (vertex ambient x
+// record ambient, lightmap) without its source sun term, linearised; the GGX sun and sky reflection follow the clock
+// record. Roofed zones keep the whole original light (source sun included, unshadowed) and no shadow-mapped sun: the
+// roof shadowed interiors to sky-only darkness. The record fog is applied in linear like the original's (sky included).
+bool roofed=sceneRoofed();
+vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
+// x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):
+// Eminönü noon 108 vs 115, every roofed interior above original (analysis/porting-wave19/LightingFixes/report.md).
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*shadowVisibility(n))+baked+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
+if(frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),result,clamp(sourceFog,0,1));
 #endif
 }
 if(frame.params.x<.5&&frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(frame.fogColor.rgb,result,clamp(sourceFog,0,1));

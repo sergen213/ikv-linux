@@ -4,23 +4,39 @@
 #include <charconv>
 #include <cerrno>
 #include <cctype>
+#include <csignal>
 #include <cstdlib>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace {
+#ifdef _WIN32
+// NONCANONICAL wave 19: no owner/mode bits on Windows; the launcher keeps the DSN under the per-user %LOCALAPPDATA% ACL.
+std::string read_dsn(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) throw std::runtime_error("DSN file cannot be opened");
+    const auto size = static_cast<std::streamoff>(file.tellg());
+    if (size <= 0 || size > 65536) throw std::runtime_error("DSN file must be a regular file of at most 64 KiB");
+    std::string dsn(static_cast<std::size_t>(size), '\0');
+    file.seekg(0);
+    if (!file.read(dsn.data(), size)) throw std::runtime_error("DSN file could not be fully read");
+#else
 struct File {
     int fd;
     ~File() { if (fd >= 0) ::close(fd); }
 };
-
 std::string read_dsn(const std::filesystem::path& path) {
     File file{::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW)};
     if (file.fd < 0) throw std::runtime_error("DSN file cannot be opened");
@@ -37,6 +53,7 @@ std::string read_dsn(const std::filesystem::path& path) {
         if (count <= 0) throw std::runtime_error("DSN file could not be fully read");
         offset += static_cast<std::size_t>(count);
     }
+#endif
     while (!dsn.empty() && std::isspace(static_cast<unsigned char>(dsn.back()))) dsn.pop_back();
     if (dsn.empty() || dsn.find('\0') != std::string::npos)
         throw std::runtime_error("DSN file must contain a nonempty connection string");
@@ -57,6 +74,7 @@ void usage() {
                  "  [--admin-bind 127.0.0.1] [--admin-port 7444]\n"
                  "  [--migrations database/migrations] [--admin-bootstrap EXISTING_USERNAME]\n"
                  "  [--web-root web] [--backup-dir backups]\n"
+                 "  [--stop-on-stdin-eof] (stop like SIGINT when stdin closes; the Windows launcher supervisor)\n"
                  "Offline restore (stop auth/world first):\n"
                  "  ikv-auth --dsn-file FILE --restore-backup FILE\n"
                  "Use separate flags and values; never put the DSN or session tokens in argv.\n";
@@ -71,10 +89,12 @@ int main(int argc, char** argv) {
     std::filesystem::path restore;
     std::string bootstrap;
     std::set<std::string> seen;
+    bool stop_on_stdin_eof = false;
     try {
         for (int i = 1; i < argc; ++i) {
             const std::string flag(argv[i]);
             if (flag == "--help") { usage(); return 0; }
+            if (flag == "--stop-on-stdin-eof") { stop_on_stdin_eof = true; continue; }
             if (!seen.insert(flag).second) throw std::runtime_error("Duplicate option");
             if (i + 1 >= argc) throw std::runtime_error("Each option requires a separate value");
             const std::string value(argv[++i]);
@@ -111,7 +131,11 @@ int main(int argc, char** argv) {
         auto dsn = read_dsn(dsn_file);
         stage = "database connection";
         // Private configuration only. pg_dump/pg_restore receive secrets through the Store's environment/file handling.
+#ifdef _WIN32
+        if (_putenv_s("IKV_BACKUP_DIR", backups.string().c_str()) != 0)
+#else
         if (::setenv("IKV_BACKUP_DIR", backups.c_str(), 1) != 0)
+#endif
             throw std::runtime_error("Cannot set backup directory");
         ikv::Store store(std::move(dsn));
         if (!restore.empty()) {
@@ -127,6 +151,16 @@ int main(int argc, char** argv) {
             store.bootstrap_admin(bootstrap);
         }
         stage = "HTTPS certificate, private listeners and dashboard initialization";
+        // Raw reads, not stdio (a CRT-locked stdin can hang exit() on Windows); SIGINT reaches run_https's signal_set.
+        if (stop_on_stdin_eof) std::thread([] {
+            char byte = 0;
+#ifdef _WIN32
+            for (DWORD got = 0; ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &got, nullptr) && got;) {}
+#else
+            for (ssize_t got; (got = ::read(STDIN_FILENO, &byte, 1)) > 0 || (got < 0 && errno == EINTR);) {}
+#endif
+            std::raise(SIGINT);
+        }).detach();
         ikv::run_https(store, config);
         return 0;
     } catch (...) {

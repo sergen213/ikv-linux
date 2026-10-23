@@ -20,13 +20,17 @@
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <thread>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <spawn.h>
-#include <thread>
 #include <unistd.h>
+#endif
 
 namespace ikv {
 namespace {
@@ -142,16 +146,27 @@ Identity identity(PGconn* connection,std::string_view bearer) {
 void audit(PGconn* connection,std::string_view action,std::int64_t actor,std::int64_t target,const Json& details=Json::object()) {
     sql(connection,"INSERT INTO audit_events(action,actor_id,target_id,details) VALUES($1,$2::bigint,NULLIF($3,'0')::bigint,$4::jsonb)",{std::string(action),std::to_string(actor),std::to_string(target),details.dump()});
 }
+// NONCANONICAL wave 19, Windows: CreateProcess replaces posix_spawn/waitpid, the private service file lives under the
+// per-user %TEMP% with a random name, and the child gets the ANSI environment (ponytail: non-ANSI paths need the W APIs).
 void process(const char* binary,const std::vector<std::string>& arguments,PGconn* connection) {
     // Build child-only libpq environment; passwords never appear in argv or logs.
     std::vector<std::string> environment;
+#ifdef _WIN32
+    for(char** e=_environ;*e;++e)if(!std::string_view(*e).starts_with("PG"))environment.emplace_back(*e);
+#else
     for(char** e=::environ;*e;++e)if(!std::string_view(*e).starts_with("PG"))environment.emplace_back(*e);
+#endif
     std::unique_ptr<PQconninfoOption,decltype(&PQconninfoFree)> options(PQconninfo(connection),PQconninfoFree);
     if(!options)throw ApiError(503,"backup_error","Cannot read database connection parameters");
     struct PrivateServiceFile {
         std::string path;
+#ifdef _WIN32
+        PrivateServiceFile():path((std::filesystem::temp_directory_path()/("ikv-pg-service-"+random_hex(16))).string()){}
+        ~PrivateServiceFile(){std::remove(path.c_str());}
+#else
         PrivateServiceFile(){char pattern[]="/tmp/ikv-pg-service-XXXXXX";int fd=mkstemp(pattern);if(fd<0)throw ApiError(503,"backup_error","Cannot create private database tool configuration");path=pattern;close(fd);}
         ~PrivateServiceFile(){if(!path.empty())unlink(path.c_str());}
+#endif
     } private_service;
     std::string config="[ikv_owned_tool]\n";
     auto append=[&](std::string_view key,std::string_view value){
@@ -171,6 +186,28 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
     }
     environment.emplace_back("PGSERVICEFILE="+private_service.path);
     environment.emplace_back("PGSERVICE=ikv_owned_tool");
+#ifdef _WIN32
+    std::string command="\""+std::string(binary)+"\"";
+    for(const auto& a:arguments){if(a.find('"')!=std::string::npos)throw ApiError(503,"backup_error","Database tool arguments cannot contain quotes");command+=" \""+a+"\"";}
+    std::string block;for(const auto& e:environment){block+=e;block.push_back('\0');}block.push_back('\0');
+    for(auto& e:environment)OPENSSL_cleanse(e.data(),e.size());
+    SECURITY_ATTRIBUTES inherit{sizeof(SECURITY_ATTRIBUTES),nullptr,TRUE};
+    const HANDLE null=CreateFileA("NUL",GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,&inherit,OPEN_EXISTING,0,nullptr);
+    STARTUPINFOA startup{};startup.cb=sizeof startup;startup.dwFlags=STARTF_USESTDHANDLES;startup.hStdInput=startup.hStdOutput=startup.hStdError=null;
+    PROCESS_INFORMATION child{};
+    const bool started=null!=INVALID_HANDLE_VALUE&&CreateProcessA(nullptr,command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,block.data(),nullptr,&startup,&child);
+    OPENSSL_cleanse(block.data(),block.size());
+    if(null!=INVALID_HANDLE_VALUE)CloseHandle(null);
+    if(!started)throw ApiError(503,"backup_error","Cannot start database tool");
+    CloseHandle(child.hThread);
+    DWORD status=1;
+    const bool finished=WaitForSingleObject(child.hProcess,5*60*1000)==WAIT_OBJECT_0;
+    if(!finished){TerminateProcess(child.hProcess,1);WaitForSingleObject(child.hProcess,INFINITE);}
+    else GetExitCodeProcess(child.hProcess,&status);
+    CloseHandle(child.hProcess);
+    if(!finished)throw ApiError(503,"backup_timeout","Database tool exceeded five-minute timeout");
+    if(status!=0)throw ApiError(503,"backup_error","Database tool failed; check PostgreSQL tool versions and privileges");
+#else
     std::vector<char*> envp;for(auto& e:environment)envp.push_back(e.data());envp.push_back(nullptr);
     std::vector<char*> argv;argv.push_back(const_cast<char*>(binary));for(const auto& a:arguments)argv.push_back(const_cast<char*>(a.c_str()));argv.push_back(nullptr);
     posix_spawn_file_actions_t actions;
@@ -191,6 +228,7 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     if(!WIFEXITED(status)||WEXITSTATUS(status)!=0)throw ApiError(503,"backup_error","Database tool failed; check PostgreSQL tool versions and privileges");
+#endif
 }
 } // anonymous namespace
 
@@ -222,7 +260,11 @@ struct Store::Impl {
                     if(std::string_view(PQhost(c))!=PQhost(first)||std::string_view(PQhostaddr(c))!=PQhostaddr(first)||std::string_view(PQport(c))!=PQport(first)||std::string_view(PQdb(c))!=PQdb(first))throw ApiError(503,"database_endpoint","Database pool endpoints differ; use one authoritative PostgreSQL endpoint");
                 }
                 const int socket=PQsocket(c);
+#ifdef _WIN32
+                if(socket<0||!SetHandleInformation(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(socket)),HANDLE_FLAG_INHERIT,0))throw ApiError(503,"database_error","Cannot secure database connection");
+#else
                 if(socket<0||fcntl(socket,F_SETFD,FD_CLOEXEC)<0)throw ApiError(503,"database_error","Cannot secure database connection");
+#endif
                 sql(c,"SET statement_timeout='10s'");
                 sql(c,"SET lock_timeout='5s'");
                 sql(c,"SELECT pg_advisory_lock_shared($1::bigint)",{std::string(process_lock)});
@@ -358,6 +400,15 @@ std::string Store::backup_download(std::string_view bearer,std::string_view name
     impl_->rate("backup_download",6,true);
     if(name.size()<9||name.size()>64||!name.starts_with("ikv-")||!name.ends_with(".sql")||!std::all_of(name.begin()+4,name.end()-4,[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f')||c=='-';}))throw ApiError(404,"backup_not_found","Backup not found");
     const char* configured=std::getenv("IKV_BACKUP_DIR");const auto file=std::filesystem::path(configured?configured:"backups")/std::string(name);
+#ifdef _WIN32
+    // NONCANONICAL wave 19: no owner bits on Windows (per-user ACL); a link or non-regular entry is still refused.
+    constexpr std::uintmax_t limit=256ULL*1024*1024;
+    if(!std::filesystem::is_regular_file(std::filesystem::symlink_status(file)))throw ApiError(404,"backup_not_found","Backup not found");
+    const auto size=std::filesystem::file_size(file);
+    if(size>limit)throw ApiError(413,"backup_too_large","Backups above 256 MiB must be copied from the server's backup directory");
+    std::string bytes(static_cast<std::size_t>(size),'\0');std::ifstream stream(file,std::ios::binary);
+    if(!stream.read(bytes.data(),static_cast<std::streamsize>(size)))throw ApiError(503,"backup_error","Cannot read backup");
+#else
     constexpr off_t limit=256LL*1024*1024;
     const int fd=open(file.c_str(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC);if(fd<0)throw ApiError(404,"backup_not_found","Backup not found");
     struct Closer{int fd;~Closer(){close(fd);}} closer{fd};
@@ -365,6 +416,7 @@ std::string Store::backup_download(std::string_view bearer,std::string_view name
     if(info.st_size>limit)throw ApiError(413,"backup_too_large","Backups above 256 MiB must be copied from the server's backup directory");
     std::string bytes(static_cast<std::size_t>(info.st_size),'\0');std::size_t done=0;
     while(done<bytes.size()){auto n=read(fd,bytes.data()+done,bytes.size()-done);if(n<0&&errno==EINTR)continue;if(n<=0)throw ApiError(503,"backup_error","Cannot read backup");done+=static_cast<std::size_t>(n);}
+#endif
     Impl::Connection connection(*impl_);audit(connection,"database.backup_download",who.account_id,0,{{"name",std::string(name)}});
     return bytes;
 }
@@ -560,15 +612,25 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
 
 Json Store::backup(const std::filesystem::path& directory) {
     std::filesystem::create_directories(directory);
+#ifdef _WIN32
+    if(!std::filesystem::is_directory(std::filesystem::symlink_status(directory)))throw ApiError(500,"backup_directory","Backup directory must be owned and not a symlink");
+    auto name="ikv-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count())+"-"+random_hex(8)+".sql";auto file=directory/name;
+    const HANDLE created=CreateFileW(file.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(created==INVALID_HANDLE_VALUE)throw ApiError(503,"backup_error","Cannot create private backup");CloseHandle(created);
+#else
     struct stat info{};if(lstat(directory.c_str(),&info)!=0||!S_ISDIR(info.st_mode)||info.st_uid!=geteuid())throw ApiError(500,"backup_directory","Backup directory must be owned and not a symlink");
     if(chmod(directory.c_str(),0700)!=0)throw ApiError(500,"backup_directory","Cannot restrict backup directory");
     auto name="ikv-"+std::to_string(std::chrono::system_clock::now().time_since_epoch().count())+"-"+random_hex(8)+".sql";auto file=directory/name;
     int descriptor=open(file.c_str(),O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC,0600);if(descriptor<0)throw ApiError(503,"backup_error","Cannot create private backup");close(descriptor);
+#endif
     try {Impl::Connection connection(*impl_);process("pg_dump",{"--format=plain","--clean","--if-exists","--no-owner","--no-privileges","--file",file.string()},connection);}catch(...){std::filesystem::remove(file);throw;}
     return {{"name",name},{"size",std::filesystem::file_size(file)}};
 }
 void Store::restore(const std::filesystem::path& file) {
+#ifdef _WIN32
+    if(!std::filesystem::is_regular_file(std::filesystem::symlink_status(file)))throw ApiError(400,"restore_file","Restore requires a regular backup file");
+#else
     struct stat info{};if(lstat(file.c_str(),&info)!=0||!S_ISREG(info.st_mode)||info.st_uid!=geteuid()||(info.st_mode&0077)!=0)throw ApiError(400,"restore_file","Restore requires an owned, regular 0600 backup file");
+#endif
     // Every live Store (auth or world) holds shared locks; offline restore is exclusive.
     std::unique_lock guard(impl_->mutex);if(std::any_of(impl_->used.begin(),impl_->used.end(),[](bool value){return value;}))throw ApiError(409,"restore_busy","Restore must run in a separate offline process");
     for(auto* c:impl_->connections)sql(c,"SELECT pg_advisory_unlock_shared($1::bigint)",{std::string(process_lock)});

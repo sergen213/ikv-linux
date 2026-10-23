@@ -139,6 +139,45 @@ User report: a new character had no starter items, NPCs had no names, and NPCs o
 
 Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **18/18** each, warning-free (client_eof/isolated_services helpers now accept the server's reasoned goodbye); RT smoke 5/5 (`ok`, no errors) and signed launcher smoke (Vulkan RT required, ½ scale) PASSED (`analysis/porting-wave18/Verify/`); `build-release` rebuilt.
 
+## 2026-10-23 wave 19 (1.0): Windows server and hosting, quest/lighting bug hunt, menus at the cursor
+
+`ikv-auth.exe`, `ikv-server.exe` and the launcher's **Sunucu Kur** now build and run on Windows x64 (NONCANONICAL platform port; Linux behaviour unchanged, Windows code behind `#ifdef _WIN32`). Report and evidence: `analysis/porting-wave19/WinServer/`.
+
+- Server: Winsock (`WSAPoll`, `SO_EXCLUSIVEADDRUSE`, non-inherited sockets), working-set memory, `CreateProcess` for `pg_dump`/`psql` backups and restore, DSN/backup files without POSIX mode checks (per-user ACL). New `--stop-on-stdin-eof` on both services: stdin EOF is the graceful stop the Windows supervisor uses, because console children receive no SIGTERM.
+- Hosting: packaged EDB PostgreSQL 16.15 subset in `bin\pgsql` (SCRAM over 127.0.0.1 on a free port instead of peer auth over a Unix socket), certificates via a packaged static `openssl.exe`, the supervisor re-runs the launcher detached (`state.json` handshake, `LockFileEx` locks, kill-on-close job object, `stop.request` instead of SIGTERM). The Windows launcher shows **Sunucu Kur** like Linux.
+- Packaging: `tools/package_windows.py` builds the server and the portable `protocol-test`/`world-test`, stages `openssl.exe`, `bin\pgsql` and the app-local VC++ runtime (closure check case-insensitive, unresolved DLLs fail the build). Pinned inputs added to `tools/windows/Dockerfile`: EDB zip and `VC_redist.x64.exe` (`ADD --checksum`); OpenSSL now builds its apps.
+
+Verification: Windows cross build warning-free; `protocol-test.exe` and `world-test.exe` pass under Wine 11.20; the Windows build of `launcher-gui-smoke` (host-server mode) drove the real Sunucu Kur panel under Wine through creation, backup, restore, Durdur (graceful world stop), auto-start and delete; a scripted Wine smoke covered a Linux `ikv-client` login + walk, the shutdown save of a connected character, restart and job kill-on-close. Linux `build-full`/`build-gl-only` warning-free, `ctest -R 'launcher|host|auth|multiplayer|protocol'` 5/5 and `analysis/host_server_smoke.py` passed (now also asserting the graceful world stop after Durdur).
+
+Lighting fixes (`analysis/porting-wave19/LightingFixes/report.md`, from the 270-shot `LightSweep` matrix; all NONCANONICAL):
+
+- Enhanced/RT physical particles are linearised for the HDR target and `post.frag` clamps negatives before ACES: no more solarised Çemberlitaş or white Topkapı torches.
+- Enhanced raster (GL + VK) and RT physical follow the clock record: sun and ambient scale with the record multipliers relative to noon, so nights are dark and have no sun shadows; enhanced raster applies the record fog.
+- Enhanced ambient is the original baked light without its sun term (lightmap, vertex ambient, record ambient); roofed zones keep the whole original light and no shadow-mapped sun; ×1.5 gain calibrated to original brightness. Karaköy İç 27.9 → 81 (original 73.7), Büyük Hol 39.8 → 81.6 (72.8). Near-black actors: enhanced decoded the normal map's blue (specular) channel as z; z is now rebuilt from xy like the original.
+- Every pureblack-sky zone is roofed: Yeraltı and the shared Çemberlitaş zone now keep the interior record at night.
+- GL enhanced: the source ocean casts shadows (shared v_ocean displacement in the shadow pass).
+- Enhanced vs original camera framing was measured identical (0 px offset in all 18 grids); the difference was lighting.
+
+Verification: `build-full`/`build-gl-only` warning-free; the 270-shot matrix rerun with 0 failures; original and RT faithful within 0.5 luma outside Çemberlitaş (there within the run-to-run rain noise of ±4.4); `rt_display.py` 5/5 ok.
+
+Quest fixes (`analysis/porting-wave19/Quests/report.md`; static audit of all 326 quests, 241 completable on foot before, 326 after; all NONCANONICAL):
+
+- Sandal/Sandal 2/Drezin arrivals landed on 24–68-cell boat/rail patches cut off from their zone: `tools/generate_content.cpp` snaps door arrivals to the zone's largest walkable region and refuses to write a config in which a door arrival cannot walk back to its zone spawn.
+- Çemberlitaş had no way in except dying there: Santral Bölgesi Giriş is now a one-way door (quest 242) to the zone's Ruh Taşı.
+- Umut Dergisi deadlock (the q281/q282 givers stood behind the q282-gated door, 55 quests dead): Diafon and Rağmen moved outside into Karaköy.
+- q304 needed 50 Meteor Altını from a recipe whose Madalya input had only 8 one-off sources: Meteor Altını drops from Gizitim Bıçak Ustası while q304 is active.
+- A quest gating a door in the current zone can no longer be abandoned there (trap); 14 quests now require the gate quest their area needs; six single-class weapon rewards get same-level weapons for the other classes; foreign-class reward prefixes are remapped (29) or dropped (4); 37 recipe components with no renewable source are sold by their trade's scroll seller (recipes with an unobtainable component 112/139 → 0/139).
+- Server: walk-to-NPC route search runs 8000 nodes per tick for up to 4 ticks (İşportacı Genç now reachable from the Eminönü spawn); `quest_accept` gives the level/class refusal text again; bots walk through see-through portals instead of teleporting.
+- New ctest `world-quest-reachability` (`tests/quest_reachability_test.cpp`): every quest completable on foot from the spawn and every door arrival reaching its zone spawn; it fails 85 quests/4 doors on the 0.8 config.
+
+Client fixes (`analysis/porting-wave19/ClientFixes/`, `analysis/porting-wave19/CursorMenus/`):
+
+- User report: right-click menus opened under the target frame. The İşlemler menu and the Ganimet window now open at the cursor, kept on screen (NONCANONICAL against the binary, which uses the cursor only for the chat-name menu `0040aad0`; that menu now also opens at the cursor). Right-clicking an actor's body (not just its name label) selects it and opens its menu; right-clicking a Ganimet sack loots it.
+- Camera inside the character after a teleport (Antrepo spawn: wall 2.28 u behind the target, eye at 1.28 u): `nocamera` faces count only from the walkable side and the minimum eye distance is 3.
+- Wrong-class/sex item tooltip lines are red/green like Seviye; actor model installs check that the target zone holds every texture (the wave-10 `yusuf_diffuse.dds` throw).
+
+Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** each, warning-free (215.7 s / 215.2 s / 352.0 s); RT smoke 5/5 (`ok`, no errors) and signed launcher smoke (Vulkan RT required, ½ scale) PASSED (`analysis/porting-wave19/Verify/`). The sanitizer shutdown timeout stays open (not seen in this run).
+
 ## Status and evidence vocabulary
 
 [Goal](../Goal) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.

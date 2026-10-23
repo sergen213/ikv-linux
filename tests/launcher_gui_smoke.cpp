@@ -44,8 +44,13 @@
 #include <QTcpServer>
 #include <csignal>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
+#include <sys/file.h>
+#endif
 
 namespace {
 template <class T> T* control(Launcher& launcher, const char* name) {
@@ -61,6 +66,7 @@ QString requiredString(const QJsonObject& fixture, const char* key) {
     return value.toString();
 }
 
+#ifndef _WIN32 // play mode only (the Windows build runs host-server mode)
 // Make a control reachable the way a user would: open the settings dialog via its
 // gear button and select the tab that contains the control.
 void reveal(Launcher& launcher, QWidget* widget) {
@@ -79,6 +85,7 @@ void click(Launcher& launcher, const char* name) {
         throw std::runtime_error(std::string("Unavailable GUI button: ") + name);
     button->click();
 }
+#endif
 
 QString currentPage(Launcher& launcher) {
     return control<QStackedWidget>(launcher, "pages")->currentWidget()->objectName();
@@ -194,10 +201,21 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         return file.open(QIODevice::ReadOnly) ? QJsonDocument::fromJson(file.readAll()).object() : QJsonObject{};
     };
     const auto supervisorAlive = [&] {
+#ifdef _WIN32
+        // launcher_server.cpp's flock shim locks one byte at 0x40000000 (Windows byte-range locks are mandatory).
+        const int fd = _wopen(reinterpret_cast<const wchar_t*>((serverDir + "/supervisor.lock").utf16()), _O_RDONLY | _O_NOINHERIT);
+        if (fd < 0) return false;
+        OVERLAPPED at{}; at.Offset = 0x40000000;
+        const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+        const bool held = !LockFileEx(handle, LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &at);
+        if (!held) UnlockFileEx(handle, 0, 1, 0, &at);
+        _close(fd);
+#else
         const int fd = ::open(QFile::encodeName(serverDir + "/supervisor.lock").constData(), O_RDONLY | O_CLOEXEC);
         if (fd < 0) return false;
         const bool held = ::flock(fd, LOCK_SH | LOCK_NB) != 0;
         ::close(fd);
+#endif
         return held;
     };
     const auto running = [&] { return label("hostStatus").startsWith(QString::fromUtf8("Çalışıyor")) && supervisorAlive(); };
@@ -272,17 +290,25 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
                       serverDir + "/secrets/client-ca.pem", {}, token);
     };
     const auto checkPrivate = [&] {
+#ifdef _WIN32
+        // NONCANONICAL wave 19: no POSIX modes on Windows (per-user ACL); PostgreSQL listens on 127.0.0.1 only, no socket.
+        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "pg-superuser", "tls-ca", "tls-cert", "tls-key"};
+#else
+        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "tls-ca", "tls-cert", "tls-key"};
         const auto dirMode = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner | QFileDevice::ReadUser | QFileDevice::WriteUser | QFileDevice::ExeUser;
         const auto fileMode = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadUser | QFileDevice::WriteUser;
         for (const auto& dir : {serverDir, serverDir + "/secrets", serverDir + "/sock", serverDir + "/backups", serverDir + "/pg"})
             if (QFileInfo(dir).permissions() != dirMode) throw std::runtime_error(("Server directory is not mode 0700: " + dir).toStdString());
         for (const auto& name : {"host.json", "state.json", "server.log", "supervisor.lock", "launcher.lock"})
             if (QFileInfo(serverDir + "/" + name).permissions() != fileMode) throw std::runtime_error(std::string("Server file is not mode 0600: ") + name);
+#endif
         const QStringList secrets = QDir(serverDir + "/secrets").entryList(QDir::Files | QDir::Hidden);
-        if (secrets != QStringList{"client-ca.pem", "development-ca-key", "dsn", "tls-ca", "tls-cert", "tls-key"})
+        if (secrets != expectedSecrets)
             throw std::runtime_error(("Unexpected secret set: " + secrets.join(',')).toStdString());
+#ifndef _WIN32
         for (const auto& name : secrets)
             if (QFileInfo(serverDir + "/secrets/" + name).permissions() != fileMode) throw std::runtime_error(("Secret is not mode 0600: " + name).toStdString());
+#endif
         QFile dsn(serverDir + "/secrets/dsn"), log(serverDir + "/server.log");
         if (!dsn.open(QIODevice::ReadOnly) || !log.open(QIODevice::ReadOnly)) throw std::runtime_error("Cannot read DSN/server.log");
         const auto match = QRegularExpression("password=([0-9a-f]{64}) ").match(QString::fromUtf8(dsn.readAll()));
@@ -291,8 +317,13 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
             throw std::runtime_error("DSN must hold a random 256-bit password; neither it nor the admin password may reach the logs");
         QFile pid(serverDir + "/pg/postmaster.pid");
         const auto lines = pid.open(QIODevice::ReadOnly) ? pid.readAll().split('\n') : QList<QByteArray>{};
+#ifdef _WIN32
+        if (lines.size() < 6 || !lines[4].trimmed().isEmpty() || lines[5].trimmed() != "127.0.0.1")
+            throw std::runtime_error("Private PostgreSQL must listen only on 127.0.0.1 (no Unix socket)");
+#else
         if (lines.size() < 6 || lines[4] != QFile::encodeName(serverDir + "/sock") || !lines[5].trimmed().isEmpty())
             throw std::runtime_error("Private PostgreSQL must listen only on its 0700 Unix socket directory (no TCP)");
+#endif
     };
     const auto verifyServer = [&](const char* run) {
         const auto saved = json(serverDir + "/host.json");
@@ -476,6 +507,13 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         waitUntil([&] { return !supervisorAlive() && label("hostStatus") == "Durduruldu"; }, 120, "stop");
         if (QFileInfo::exists(serverDir + "/pg/postmaster.pid")) throw std::runtime_error("PostgreSQL survived Durdur");
         if (json(serverDir + "/state.json").value("phase").toString() != "stopped") throw std::runtime_error("Supervisor did not record a clean stop");
+        {
+            QFile log(serverDir + "/server.log"); // the world finished its loop and saved (not killed after the 20 s grace)
+            const auto text = log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()) : QString();
+            const auto at = text.lastIndexOf(QString::fromUtf8("durdurma isteği alındı"));
+            if (at < 0 || text.indexOf("ikv-server: STOP tick=", at) < 0 || text.indexOf(QString::fromUtf8("ikv-server çıktı: kod=0"), at) < 0)
+                throw std::runtime_error("Durdur did not stop the world gracefully (STOP tick + exit 0)");
+        }
 
         stage = "autostart";
         ctl(static_cast<QCheckBox*>(nullptr), "hostKeepAlive")->setChecked(false);
@@ -510,8 +548,12 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         if (auto* open = qobject_cast<QDialog*>(widget); open && open->isVisible() && open->objectName() != "hostDialog") open->reject();
     launcher.reset();
     if (supervisorAlive()) { // failure path: never leave a (possibly kept-alive) server behind
+#ifdef _WIN32
+        if (QFile request(serverDir + "/stop.request"); !request.open(QIODevice::WriteOnly)) reason += "; cannot request the supervisor stop";
+#else
         QFile lock(serverDir + "/supervisor.lock");
         if (lock.open(QIODevice::ReadOnly)) ::kill(static_cast<pid_t>(lock.readAll().trimmed().toInt()), SIGTERM);
+#endif
         for (int i = 0; i < 600 && supervisorAlive(); ++i) QThread::msleep(100);
         result = 1;
     }
@@ -548,6 +590,9 @@ int main(int argc, char** argv) {
             ownedUsername = requiredString(fixture, "admin_username");
             return hostServerSmoke(argc, argv, fixture, stage);
         }
+#ifdef _WIN32
+        throw std::runtime_error("The Windows build of this smoke runs only \"mode\":\"host-server\"");
+#else
         secretPassword = requiredString(fixture, "password");
         ownedUsername = requiredString(fixture, "username");
         const QString installRoot = requiredString(fixture, "install_root");
@@ -1132,6 +1177,7 @@ int main(int argc, char** argv) {
         });
         poll.start();
         return app.exec();
+#endif
     } catch (const std::exception& error) {
         const auto output = redact("FAIL launcher-gui stage=" + stage + ": " + QString::fromUtf8(error.what()) + '\n').toUtf8();
         std::fwrite(output.constData(), 1, static_cast<std::size_t>(output.size()), stderr);

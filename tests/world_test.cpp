@@ -851,8 +851,9 @@ void quest_objectives(ikv::Json config) {
         for(const auto& e:f.at("entities"))if(e.at("id")==giver && std::ranges::find(e.at("quests"),ikv::Json(q))!=e.at("quests").end())++seen;
         return seen;};
     check(offered("v1")==2 && !offered("m1") && !offered("w1") && !offered("r1"),"under-level, other-class and locked quests are not offered");
-    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","m1"}});check(event(world.state(1),"error","quest"),"OFF-Q level requirement (min_level) refuses a lower level");
-    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","w1"}});check(event(world.state(1),"error","quest"),"a class-limited quest refuses other classes");
+    const auto refusal=[&](const char* code){const auto f=world.state(1);for(const auto& e:f.at("events"))if(e.at("type")=="error" && e.at("code")==code)return e.at("message").get<std::string>();return std::string();};
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","m1"}});check(refusal("level")=="Bu görev için seviyeniz yetersiz.","OFF-Q level requirement (min_level) refuses a lower level with its reason");
+    world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","w1"}});check(refusal("class")=="Bu görev sınıfınıza verilmiyor.","a class-limited quest refuses other classes with its reason");
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","r1"}});check(event(world.state(1),"error","quest"),"a quest waits for every prerequisite");
     world.action(1,{{"action","quest_accept"},{"target",giver},{"quest","l1"}});world.action(1,{{"action","quest_complete"},{"target",giver},{"quest","l1"}});
     check(own().at("level")==2 && offered("m1")==2,"reaching min_level offers the quest at once");
@@ -916,7 +917,7 @@ void starter_kit(ikv::Json config) {
     auto old=record(2,300);old["state"]["inventory"]=ikv::Json::array();world.add(2,2,2,old); // created before the kit: an empty bag
     const auto count=[&](uint32_t id,const char* item){int n=0;const auto s=world.state(id);for(const auto& e:s.at("character").at("state").at("inventory"))if(e.at("item")==item)n+=e.at("quantity").get<int>();return n;};
     const auto wears=[&](uint32_t id,const char* slot,const char* item){const auto s=world.state(id).at("character").at("state");bool on=false;
-        for(const auto& e:s.at("inventory"))on=on||(e.at("item")==item && s.at("equipment").value(slot,ikv::Json())==e.at("uid"));return on;};
+        for(const auto& e:s.at("inventory")){on=on||(e.at("item")==item && s.at("equipment").value(slot,ikv::Json())==e.at("uid"));}return on;};
     check(count(1,"healing_tonic")==3 && count(1,"armour_f")==1 && count(1,"blade_b")==1 && !count(1,"armour_m") && !count(1,"blade_s"),
           "a new character gets the kit as its own class/sex variant");
     check(wears(1,"body","armour_f") && wears(1,"weapon","blade_b") && world.state(1).at("character").at("equipment").size()==2,"the kit is worn and visible");
@@ -1347,7 +1348,37 @@ void portal_walks(const ikv::Json& config, const std::filesystem::path& assets) 
     world.action(5,{{"action","chat"},{"channel","local"},{"text","/otur"}});
     check(event(world.state(6),"emote") && !event(world.state(4),"emote"),"events reach observers through an open door only");
     check(entity(world.state(6),5).value("portal",0u)==2147493987u,"the taken quest opens Umut Dergisi");
+    // Wave 19: a quest gating a door of the player's zone is kept there (Seçili görevi sil), elsewhere it can be dropped.
+    world.action(6,{{"action","quest_abandon"},{"quest","q282"}}); const auto kept=world.state(6);
+    check(event(kept,"error","quest") && kept.at("character").at("state").at("quests").contains("q282"),"a quest gating a door of the player's zone cannot be abandoned there");
+    admit(7,"eminonu",arrive(2147493934u),{{"q282",{{"progress",0}}}}); world.action(7,{{"action","quest_abandon"},{"quest","q282"}});
+    check(!world.state(7).at("character").at("state").at("quests").contains("q282"),"the same quest can be abandoned in a zone it does not gate");
     walk(6,2147493987u,"karakoyic"); walk(6,2147493988u,"karakoy");
+    // Wave 19: İşportacı Genç is clicked from the Eminönü spawn (a ~10.7k-cell route: the approach search runs over several ticks).
+    uint32_t seller=0; for (const auto& n : config.at("npcs")) if (n.at("name")=="İşportacı Genç") seller=n.at("id");
+    admit(8,"eminonu",config.at("zones").at("eminonu").at("spawn")); world.action(8,{{"action","interact"},{"target",seller}});
+    bool talked=false, refused=false;
+    for (int tick=0;tick<1200 && !talked && !refused;++tick) {
+        world.advance(); const auto f=world.state(8); refused=event(f,"error","range");
+        for (const auto& e : f.at("events")) talked=talked || (e.at("type")=="dialogue" && e.at("target")==seller);
+    }
+    check(seller && talked && !refused,"İşportacı Genç is reached and talked to from the Eminönü spawn");
+    // Wave 19: a companion bot follows its leader through the Antrepo door by walking its opening, not by the door's teleport.
+    admit(9,"eminonu",arrive(2147493938u)); auto fresh=world.bot_character(10); fresh["state"]["zone"]="eminonu"; fresh["state"]["x"]=arrive(2147493938u)[0]; fresh["state"]["y"]=arrive(2147493938u)[1];
+    const auto bot=world.add_bot(990,990,fresh,{{"behaviour","companion"}});
+    const auto row=[&]{ for (const auto& r : world.bots()) if (r.at("id")==bot) return r; throw std::runtime_error("bot missing"); };
+    world.action(9,{{"action","group_invite"},{"target",bot}});
+    for (int tick=0;tick<200 && row().at("leader")!=9;++tick) world.advance();
+    check(row().at("leader")==9,"the companion bot joins its leader's group");
+    walk(9,2147493937u,"antrepo");
+    ikv::Json entered;
+    for (int tick=0;tick<600 && entered.is_null();++tick) { world.advance(); if (const auto r=row(); r.at("zone")=="antrepo") entered=r; }
+    check(!entered.is_null() && (entered.at("x")!=arrive(2147493937u)[0] || entered.at("y")!=arrive(2147493937u)[1]),"a bot walks through a see-through door instead of teleporting to its arrival");
+    // Wave 19: a reward prefix of another class becomes this class's equivalent (q104: Büyü Kritik Artırıcı 456 -> Rus Ruleti Emsali 392).
+    const uint32_t lider=config.at("quests").at("q104").at("giver");
+    for (const auto& n : config.at("npcs")) if (n.at("id")==lider) admit(10,n.at("zone").get<std::string>().c_str(),ikv::Json::array({n.at("x"),n.at("y")}),{{"q104",{{"progress",1}}}});
+    world.action(10,{{"action","quest_complete"},{"target",lider},{"quest","q104"}}); const auto paid=world.state(10).at("character").at("state").at("inventory");
+    check(std::any_of(paid.begin(),paid.end(),[](const ikv::Json& e){return e.value("prefixes",ikv::Json())==ikv::Json::array({392});}),"a savaşçı gets the savaşçı twin of a büyücü reward prefix");
 }
 // Real content: a crafter at economy.recipe_limit (the largest recipes) with a full bag of the largest items, at the
 // Eminönü banker with a full Banka tab of the largest items open. The recipes/bank travel as Type::catalog parts, each

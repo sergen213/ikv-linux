@@ -63,6 +63,13 @@ constexpr Pair loc_pairs[] = {
 // dikilitaş on the Meteor grid whose gamezonename names Eminönü, as a boat's names its destination; the arena side was server
 // data): NONCANONICAL one-way exit to Eminönü beside the Meteor Girişi 30046.
 constexpr Pair appended_pairs[] = {{30201, 30046, false}};
+// Pairs whose door takes the NPC slot of the prop its loc was placed as before (ids stay stable). NONCANONICAL (wave 19):
+// Santral Bölgesi Giriş 131356 (santralgiris, requiredquestid 242) had no partner, so the Çemberlitaş vent arrival pocket was
+// sealed: one-way to the Çemberlitaş Ruh Taşı 131387 (the zone's main region).
+constexpr Pair prop_pairs[] = {{131356, 131387, false}};
+// NONCANONICAL (wave 19): the boat decks (Sandal 3/4) and the Topkapı draisine rail stand on walkable pockets apart from the
+// destination town, so these arrivals move to the nearest cell of the destination zone's largest walkable region.
+constexpr unsigned vehicle_arrivals[] = {132165, 132166, 131516};
 // A capitalised boat gamezonename names the destination, not the zone the loc stands in; Karaköy elevator pairs at one
 // shaft stand in Karaköy (132059/132060) and Karaköy İç Mekan (132176/132177).
 constexpr std::pair<unsigned, const char*> loc_zone_overrides[] = {{132058, "eminonu"}, {132165, "karakoy"}, {132164, "eminonu"}, {132166, "karakoy"},
@@ -189,6 +196,7 @@ int main(int argc, char** argv) try {
     }
     std::vector<Trigger> triggers; std::vector<std::pair<unsigned, unsigned>> edges;
     std::vector<Pair> pairs(std::begin(loc_pairs), std::end(loc_pairs)); for (const Pair& p : appended_pairs) pairs.push_back(p); // GCC 16 -O3 -Warray-bounds false positive on range insert
+    for (const Pair& p : prop_pairs) pairs.push_back(p);
     for (const auto& p : pairs) {
         for (int direction = 0; direction < (p.both ? 2 : 1); ++direction) {
             const unsigned from = direction ? p.to : p.from, to = direction ? p.from : p.to;
@@ -202,8 +210,8 @@ int main(int argc, char** argv) try {
     Ordered zones = Ordered::object();
     for (const auto& [name, registry] : zone_registry) zones[name] = {{"source_registry_id", registry}, {"bounds", {-ikv::coordinate_limit, -ikv::coordinate_limit, ikv::coordinate_limit - 1500, ikv::coordinate_limit - 1500}}, {"spawn", nullptr}, {"collision", Ordered::array()}};
     for (const auto& [name, first, count] : zone_instances) { Ordered rows = Ordered::array(); for (unsigned n = 0; n < count; ++n) rows.push_back(first + n); zones[name]["instances"] = std::move(rows); }
-    std::vector<std::pair<unsigned, Ordered>> doors, late_doors, final_doors; // source loc uid -> door definition (placed as NPCs after the
-                                                                              // town; late: narrow-arrival doors after the traps; final: appended_pairs, last)
+    std::vector<std::pair<unsigned, Ordered>> doors, late_doors, final_doors, prop_doors; // source loc uid -> door definition (placed as NPCs
+                                       // after the town; late: narrow-arrival doors after the traps; final: appended_pairs, last; prop: prop_pairs)
     for (const auto& [from, to] : edges) {
         const auto& source = triggers_by_uid.at(from); const auto& target = triggers_by_uid.at(to); const Grid& g = *target.grid;
         int32_t partner = -1; double best = 1e9;
@@ -217,17 +225,24 @@ int main(int argc, char** argv) try {
         if (narrow) arrive = ring_search(target.x, target.y, target.range + 1.5, target.range + 40, 0, [&](int x, int y) {
             return g.walk(x, y) && g.component(x, y) == partner && !in_triggers(triggers, g, units(x), units(y), 0); });
         if (!arrive) { std::cerr << "skipped loc " << from << "->" << to << ": no arrival cell\n"; continue; }
+        const bool vehicle = std::find(std::begin(vehicle_arrivals), std::end(vehicle_arrivals), to) != std::end(vehicle_arrivals);
+        if (vehicle) {
+            const auto main = int32_t(std::max_element(g.sizes.begin(), g.sizes.end()) - g.sizes.begin());
+            arrive = ring_search(target.x, target.y, 0, target.range + 40, 0, [&](int x, int y) {
+                return g.block(x, y, 1) && g.component(x, y) == main && !in_triggers(triggers, g, units(x), units(y), 1.5); });
+            if (!arrive) throw std::runtime_error("vehicle arrival without the main region nearby: " + std::to_string(to));
+        }
         Ordered door = {{"to", g.name}, {"arrive", {wire(arrive->first), wire(arrive->second)}}, {"source_destination_uid", to}};
         if (source.quest >= 0) door["required_quest"] = source.quest; // classes.dat requiredquestid
         if (const int death = integer(locs.at(from), "requiredentitydeathid", -1); death > 0) door["required_death"] = death; // a classid
         if (integer(locs.at(from), "gmonly") == 1) door["gmonly"] = true;
         std::cout << "door " << from << ' ' << source.grid->name << " r" << source.range << " -> " << to << ' ' << g.name << '\n';
-        for (const auto* list : {&doors, &late_doors, &final_doors})
+        for (const auto* list : {&doors, &late_doors, &final_doors, &prop_doors})
             if (std::any_of(list->begin(), list->end(), [&](const auto& d) { return d.first == from; })) throw std::runtime_error("loc used as two doors: " + std::to_string(from));
-        const bool appended = std::any_of(std::begin(appended_pairs), std::end(appended_pairs), [&](const Pair& p) { return p.from == from || (p.both && p.to == from); });
-        (appended ? final_doors : narrow ? late_doors : doors).push_back({from, std::move(door)});
+        const auto listed = [&](const auto& table) { return std::any_of(std::begin(table), std::end(table), [&](const Pair& p) { return p.from == from || (p.both && p.to == from); }); };
+        (listed(appended_pairs) ? final_doors : listed(prop_pairs) ? prop_doors : narrow ? late_doors : doors).push_back({from, std::move(door)});
         // Zone spawn: the arrival with the largest connected walkable area (Eminönü keeps the Yeni Cami courtyard).
-        if (!narrow && (!spawns.contains(g.name) || (g.name != "eminonu" && g.reach(*arrive) > g.reach(spawns.at(g.name))))) spawns[g.name] = *arrive;
+        if (!narrow && !vehicle && (!spawns.contains(g.name) || (g.name != "eminonu" && g.reach(*arrive) > g.reach(spawns.at(g.name))))) spawns[g.name] = *arrive;
     }
     for (auto& [name, g] : grids) if (!spawns.contains(name)) {
         // Zones without an inbound door (Er Meydanı arena): nearest open support to the grid centre.
@@ -243,8 +258,29 @@ int main(int argc, char** argv) try {
     // Components players arrive on (the zone spawn and every door arrival): placed NPCs and spawn groups must stand on one.
     std::map<std::string, std::set<int32_t>> entries;
     for (const auto& [name, s] : spawns) entries[name].insert(grids.at(name).component(s.first, s.second));
-    for (const auto* list : {&doors, &late_doors, &final_doors})
+    for (const auto* list : {&doors, &late_doors, &final_doors, &prop_doors})
         for (const auto& [uid, door] : *list) { const auto& g = grids.at(door.at("to").get<std::string>()); entries[g.name].insert(g.component(door.at("arrive")[0].get<int>() / 1500 + 1024, door.at("arrive")[1].get<int>() / 1500 + 1024)); }
+    // Wave 19: every door arrival must lead back to its zone's spawn region through doors (any gate open, footprint cells as the
+    // door's side): a pocket whose exits all lead away (the Karaköy boat decks, the Çemberlitaş vent) strands whoever arrives.
+    {
+        using Region = std::pair<std::string, int32_t>;
+        std::map<Region, std::set<Region>> exits; std::vector<Region> arrivals;
+        for (const auto* list : {&doors, &late_doors, &final_doors, &prop_doors})
+            for (const auto& [uid, door] : *list) {
+                const auto& t = triggers_by_uid.at(uid); const Grid& to = grids.at(door.at("to").get<std::string>());
+                const Region dest{to.name, to.component(door.at("arrive")[0].get<int>() / 1500 + 1024, door.at("arrive")[1].get<int>() / 1500 + 1024)};
+                arrivals.push_back(dest);
+                for (int y = cell(t.y - t.range); y <= cell(t.y + t.range); ++y)
+                    for (int x = cell(t.x - t.range); x <= cell(t.x + t.range); ++x)
+                        if (t.grid->walk(x, y) && dist(units(x), units(y), t.x, t.y) <= t.range) exits[{t.grid->name, t.grid->component(x, y)}].insert(dest);
+            }
+        for (const auto& start : arrivals) {
+            const auto& s = spawns.at(start.first); const Region home{start.first, grids.at(start.first).component(s.first, s.second)};
+            std::set<Region> seen{start}; std::vector<Region> open{start};
+            while (!open.empty() && !seen.contains(home)) { const auto r = open.back(); open.pop_back(); for (const auto& n : exits[r]) if (seen.insert(n).second) open.push_back(n); }
+            if (!seen.contains(home)) throw std::runtime_error("door arrival in " + start.first + " region " + std::to_string(start.second) + " cannot walk back to the zone spawn");
+        }
+    }
 
     // ---- prefixes (prefixes.dat, loader 0043aac0): server-side Efsun table; the client reads prefixes.dat itself ----
     // attreffects ids are character attribute ids (names: original 004338f0; Karakter Bilgisi getters 00402f60).
@@ -897,7 +933,7 @@ int main(int argc, char** argv) try {
         const Placed p{n.at("x").get<double>() / 1000, n.at("y").get<double>() / 1000};
         placed[n.at("zone").get<std::string>()].push_back(p); chief_spots[n.at("zone").get<std::string>()].push_back(p); // apart from earlier Şefs
     }
-    for (const auto& [uid, door] : final_doors) arrival(door);
+    for (const auto* list : {&final_doors, &prop_doors}) for (const auto& [uid, door] : *list) arrival(door);
     for (const auto& [uid, zone, anchor] : late_chiefs) {
         if (!actors.contains(uid) || !renders(uid) || (anchor && !triggers_by_uid.contains(anchor))) { std::cerr << "skipped chief " << uid << '\n'; continue; }
         const Grid& g = grids.at(zone);
@@ -1024,6 +1060,7 @@ int main(int argc, char** argv) try {
         const auto& a = locs.at(uid); const auto type = get(a, "locationtypename");
         if (represented.contains(uid) || type.starts_with("maden") || type == "damage1") continue;
         if ((t.x == 0 && t.y == 0) || stacked.at({t.x, t.y}) >= 3) { std::cerr << "skipped prop " << uid << ' ' << get(a, "locationname") << ": parked centre\n"; continue; }
+        if (const auto d = std::find_if(prop_doors.begin(), prop_doors.end(), [&](const auto& p) { return p.first == uid; }); d != prop_doors.end()) { place_door(uid, d->second); continue; }
         const Grid& g = *t.grid;
         const auto at = ring_search(t.x, t.y, 0, t.radius + 6, 0, [&](int x, int y) { return g.walk(x, y); });
         if (!at) { std::cerr << "skipped prop " << uid << ": no support near its centre\n"; continue; }
@@ -1049,6 +1086,20 @@ int main(int argc, char** argv) try {
     for (auto& n : npcs)
         for (const auto& [seller, craft] : scroll_sellers)
             if (n.at("source_uid") == seller && recipe_scrolls.contains(craft)) for (const auto& id : recipe_scrolls.at(craft)) n["shop"].push_back(id);
+    // NONCANONICAL (wave 19): a recipe component nothing renews (no gather yield, rare yield, shop or recipe; its drops were server
+    // data) is sold, at its classes.dat price, by the recipe seller of the first recipe (by id) that needs it.
+    std::set<std::string> renewable;
+    for (const auto& n : npcs) {
+        for (const auto& id : n.at("shop")) renewable.insert(id.get<std::string>());
+        if (n.contains("gather")) for (const char* key : {"item", "rare"}) if (n.at("gather").contains(key)) renewable.insert(n.at("gather").at(key).get<std::string>());
+    }
+    for (const auto& [id, r] : recipes.items()) renewable.insert(r.at("product").get<std::string>());
+    for (const auto& [id, r] : recipes.items())
+        for (const auto& c : r.at("components")) if (const std::string item = c.at("item"); renewable.insert(item).second) {
+            const auto craft = std::find(std::begin(professions), std::end(professions), r.at("craft").get<std::string>()) - std::begin(professions);
+            const auto seller = std::find_if(std::begin(scroll_sellers), std::end(scroll_sellers), [&](const auto& s) { return s.second == craft; })->first;
+            for (auto& n : npcs) if (n.at("source_uid") == seller) { n["shop"].push_back(item); break; }
+        }
     // NONCANONICAL: later-tier Tılsım without a recipe scroll (drop tables were server data) join the Şef tables in turn
     // (guide: Şefs drop important items).
     std::set<std::string> crafted; for (const auto& [id, r] : recipes.items()) crafted.insert(r.at("product").get<std::string>());

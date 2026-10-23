@@ -84,9 +84,11 @@ RUN <<'OPENSSL'
 set -eu
 mkdir /tmp/ossl && tar -xzf /opt/ikv-baseline/sources/openssl-3.5.9.tar.gz -C /tmp/ossl
 cd /tmp/ossl/openssl-3.5.9
-./Configure mingw64 --cross-compile-prefix=x86_64-w64-mingw32- --prefix=/opt/w64 --libdir=lib no-shared no-tests no-docs no-apps
-make -j"$(nproc)" build_libs
+# Wave 19: with apps: the launcher's hosting issues its development CA/leaf through the bundled openssl.exe.
+./Configure mingw64 --cross-compile-prefix=x86_64-w64-mingw32- --prefix=/opt/w64 --libdir=lib no-shared no-tests no-docs
+make -j"$(nproc)" build_programs # depends on build_libs; naming both races on the same objects
 make install_dev
+install -Dm755 apps/openssl.exe /opt/w64/bin/openssl.exe
 install -Dm644 LICENSE.txt /opt/w64/share/licenses/openssl/LICENSE.txt
 rm -rf /tmp/ossl
 OPENSSL
@@ -127,5 +129,22 @@ chmod 644 /opt/w64/share/licenses/qt/*
 7z x -bd -o/opt/w64/innoextract /opt/ikv-baseline/sources/innoextract-1.9-windows.zip > /dev/null
 test -f /opt/w64/innoextract/innoextract.exe
 PREBUILT
+# Wave 19 Windows hosting: EDB PostgreSQL 16.15 binaries (server, initdb/pg_ctl/psql/pg_dump, libpq + import lib) and the
+# Microsoft Visual C++ 2015-2022 x64 runtime they import (app-local vcruntime140/msvcp140 from the redist's own cabinet).
+ADD --checksum=sha256:840b9d265f6ab6c0a971c1d8e9096de564950d38dc2a5ccd98c8820179ecf115 https://get.enterprisedb.com/postgresql/postgresql-16.15-2-windows-x64-binaries.zip /opt/ikv-baseline/sources/
+ADD --checksum=sha256:cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b https://download.visualstudio.microsoft.com/download/pr/990c720a-46ce-4dc7-87b9-c2eb615d34b9/CC0FF0EB1DC3F5188AE6300FAEF32BF5BEEBA4BDD6E8E445A9184072096B713B/VC_redist.x64.exe /opt/ikv-baseline/sources/
+RUN <<'POSTGRES'
+set -eu
+7z x -bd -o/opt/w64 /opt/ikv-baseline/sources/postgresql-16.15-2-windows-x64-binaries.zip 'pgsql/bin' 'pgsql/lib' 'pgsql/share' 'pgsql/include' \
+  pgsql/server_license.txt pgsql/commandlinetools_3rd_party_licenses.txt > /dev/null
+mkdir -p /opt/w64/share/licenses/postgresql && mv /opt/w64/pgsql/*.txt /opt/w64/share/licenses/postgresql/
+mkdir /tmp/vc && cd /tmp/vc
+7z x -bd -t# /opt/ikv-baseline/sources/VC_redist.x64.exe > /dev/null # burn bundle: the attached container is 4.cab
+7z x -bd 4.cab a12 > /dev/null && 7z x -bd -ort a12 > /dev/null
+mkdir -p /opt/w64/vcredist && for dll in vcruntime140 vcruntime140_1 msvcp140 msvcp140_1; do cp rt/$dll.dll_amd64 /opt/w64/vcredist/$dll.dll; done
+7z x -bd /opt/ikv-baseline/sources/VC_redist.x64.exe u4 > /dev/null && grep -q 'MICROSOFT SOFTWARE LICENSE TERMS' u4
+install -Dm644 u4 /opt/w64/share/licenses/vcredist/LICENSE.rtf
+rm -rf /tmp/vc
+POSTGRES
 WORKDIR /work
 CMD ["/bin/bash"]

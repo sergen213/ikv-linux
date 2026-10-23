@@ -433,7 +433,10 @@ bool on_apron(const Quad& q,float depth,const std::array<float,3>& p) {
     const float into=dot(d,n)/length,u=(d[0]*e1[0]+d[2]*e1[2])/(e1[0]*e1[0]+e1[2]*e1[2]);
     return into<=.05f && into>=-depth-.05f && u>=-.02f && u<=1.02f;
 }
-// Nearest ray parameter against one recovered source collider class (walk set or 'nocamera' blockers).
+// Nearest ray parameter against one recovered source collider class (walk set or 'nocamera' blockers). NONCANONICAL: a
+// 'nocamera' blocker counts only from its walk side (determinant<0; Mısır's closed shell, walk cells inside, has positive
+// volume, so the D3D clockwise winding's cross(ab,ac) faces away from where the camera target stands): a target behind or
+// inside a collider (admin teleport, summon) no longer pulls the eye into the body on the hull's far wall.
 template<class Accept>
 std::optional<float> source_ray(const ikv::Scene& scene,bool support,const std::array<float,3>& origin,const std::array<float,3>& ray,Accept accept) {
     float nearest=std::numeric_limits<float>::max();
@@ -449,7 +452,7 @@ std::optional<float> source_ray(const ikv::Scene& scene,bool support,const std::
             const auto c=transform_point(instance.transform,mesh.vertices[mesh.indices[i+2]]);
             const auto ab=subtract(b,a),ac=subtract(c,a);
             const auto p=cross(ray,ac); const float determinant=dot(ab,p);
-            if (std::abs(determinant)<1e-8f) continue;
+            if (std::abs(determinant)<1e-8f || (!support && determinant>0)) continue;
             const float inverse=1/determinant; const auto t=subtract(origin,a);
             const float u=dot(t,p)*inverse; if (u<0 || u>1) continue;
             const auto q=cross(t,ab); const float v=dot(ray,q)*inverse; if (v<0 || u+v>1) continue;
@@ -489,11 +492,13 @@ std::optional<float> ray_box(const std::array<float,3>& eye,const std::array<flo
     }
     return enter;
 }
+// Eye distance for the first 'nocamera' blocker. NONCANONICAL floor 3 (was 1, inside the head: a blocker ~2 u behind the
+// target at an admin-teleport spawn); the original's near plane is 3, so it never drew anything closer to the eye either.
+float eye_distance(std::optional<float> hit,float distance) { return hit?std::max(3.f,*hit-1):distance; }
 // Source 'nocamera' colliders keep the third-person eye outside buildings: pull it in front of the first blocker.
 float unoccluded_distance(const ikv::Scene& scene,const ikv::Camera& camera) {
     const auto forward=ikv::camera_basis(camera).forward;
-    const auto hit=source_ray(scene,false,camera.target,{-forward[0],-forward[1],-forward[2]},[&](float d){return d<camera.distance;});
-    return hit?std::max(1.f,*hit-1):camera.distance;
+    return eye_distance(source_ray(scene,false,camera.target,{-forward[0],-forward[1],-forward[2]},[&](float d){return d<camera.distance;}),camera.distance);
 }
 
 class Application {
@@ -694,6 +699,8 @@ class Application {
     bool trade_allowed_=true,invites_allowed_=true;
     std::uint32_t chat_menu_id_=0; std::string chat_menu_name_; // chat-line name menu (0040aad0)
     Json loot_; // open Ganimet window: last 'loot_open' event, taken slots nulled (null = closed)
+    // Cursor (drawable pixels) when the İşlemler menu, the chat name menu and the Ganimet window opened; their top-left corner.
+    std::array<int,2> menu_at_{},chat_menu_at_{},loot_at_{};
     Json dialogue_; // last 'dialogue' event of the open NPC Konuş window (null = closed)
     int dialogue_page_=0;
     std::string selected_quest_;
@@ -1298,6 +1305,15 @@ private:
     template<class... A> static std::string printf_text(const char* pattern,A... args) { char text[160]; std::snprintf(text,sizeof(text),pattern,args...); return text; }
     struct Flow { int left,right,x,y; };
     int S(float v) const { return static_cast<int>(std::lround(v*s_)); }
+    std::array<int,2> cursor() const {
+        float x=0,y=0; SDL_GetMouseState(&x,&y);
+        const auto [px,py]=pixel(x,y);
+        return {static_cast<int>(px),static_cast<int>(py)};
+    }
+    // 00490330: a popup placed at a point is pushed back inside the screen.
+    std::array<int,2> on_screen(std::array<int,2> at,int w,int h) const {
+        return {std::clamp(at[0],0,std::max(0,width_-w)),std::clamp(at[1],0,std::max(0,height_-h))};
+    }
     int lh() const { return ui_->line_height(); }
     void ui_atlas(const ikv::assets::DdsImage& image,float x,float y,float dx,float dy,float dw,float dh,
                   float u,float v,float sw,float sh,std::uint32_t argb=0xffffffff) {
@@ -1497,8 +1513,11 @@ private:
         label(S(x+14),S(player?15.f:9.f)-lh()/2,fit(subject->value("name",std::to_string(target_)),S(92)-ui_->text_width(suffix))+suffix);
         hits_.push_back({S(x),0,S(168),S(player?74.f:54.f),nullptr,-1,"context"});
         paint_effects(subject->value("debuffs",Json::array()),x+168,5,15); // the target's effects beside its frame, at most 15
-        float menu_y=player?76.f:56.f;
         if (!context_) return;
+        // The menu opens at the cursor of the click that opened it (context_ 1 → 2 latches it on the next paint, same frame).
+        // NONCANONICAL: 0041a230 is placed by its callers: the target frame button 0041a740 at the frame's top-left + 16,
+        // a world actor click 004b7959 at screen centre (W/2-56, H/2). Placed at the cursor as players remember it.
+        if (context_==1) { menu_at_=cursor(); context_=2; }
         // Contextual actions for the selected target; the server validates every request.
         std::vector<std::tuple<std::string,Json,std::string>> items;
         const auto kind=subject->value("kind",std::string{});
@@ -1524,8 +1543,9 @@ private:
             }
         }
         if (items.empty()) return;
-        const int row=lh()+S(10),count=static_cast<int>(items.size());
-        const auto content=frame(0,S(x),S(menu_y),S(190),S(48)+count*row,"İşlemler");
+        const int row=lh()+S(10),count=static_cast<int>(items.size()),mh=S(48)+count*row;
+        const auto [mx,my]=on_screen(menu_at_,S(190),mh);
+        const auto content=frame(0,mx,my,S(190),mh,"İşlemler");
         int ry=content[1];
         for (auto& [text,action,value]:items) { button(content[0],ry,text,std::move(action),-1,value,content[2]-content[0]); ry+=row; }
     }
@@ -1804,9 +1824,10 @@ private:
         hits_.push_back({ix+S(18),by+S(44),S(16),S(15),nullptr,-1,"chat-up"});
         hits_.push_back({ix+S(34),by+S(44),S(16),S(15),nullptr,-1,"chat-down"});
         hits_.push_back({ix+S(50),by+S(44),S(16),S(15),nullptr,-1,"chat-end"});
-        if (chat_menu_id_) { // 0040aad0 name menu above the chat window, titled with the clicked name
+        if (chat_menu_id_) { // 0040aad0 name menu at the cursor (004902c0 0x77d290/94), kept on screen (00490330), titled with the clicked name
             std::vector<std::tuple<std::string,Json,std::string>> items; player_items(items,chat_menu_id_,true);
-            const int row=lh()+S(10),mh=S(48)+static_cast<int>(items.size())*row,mx=ix+S(110),my=iy-mh;
+            const int row=lh()+S(10),mh=S(48)+static_cast<int>(items.size())*row;
+            const auto [mx,my]=on_screen(chat_menu_at_,S(190),mh);
             const auto content=frame(0,mx,my,S(190),mh,chat_menu_name_);
             hits_.push_back({mx+S(160),my,S(30),S(28),nullptr,-1,"chat-menu-close"});
             int ry=content[1];
@@ -2422,22 +2443,24 @@ private:
         hits_.push_back({x+S(196),y+S(hb-7),S(15),S(15),nullptr,-1,"dialogue-close"}); // Görevi reddet
         ui_->set_pixel_size(px);
     }
-    // Ganimet window 00436140: UI2 235,580 120x134 at 200,100, caption "Ganimet" at 11,5, close button 16x16 at 102,4 (0042de30),
+    // Ganimet window 00436140: UI2 235,580 120x134, caption "Ganimet" at 11,5, close button 16x16 at 102,4 (0042de30),
     // nine 32x32 slots at 9+33*(i%3), 26+33*(i/3). A slot click asks the server for the item; the window closes with the box.
+    // NONCANONICAL: 00436140 places it at 200,100; here it opens at the cursor (loot_at_), kept on screen.
     void paint_loot() {
         if (!loot_.is_object()) return;
         if (const Json* box=entity(loot_.value("target",0u)); !box || box->value("looted",true)) { loot_=nullptr; return; }
-        ui_atlas(original_ui2_,0,0,200,100,120,134,235,580,120,134);
-        hits_.push_back({S(200),S(100),S(120),S(134),nullptr,-1,{}});
-        label(S(211),S(105),"Ganimet",gold_rgba);
-        hits_.push_back({S(302),S(104),S(16),S(16),nullptr,-1,"loot-close"});
+        const auto [px,py]=on_screen(loot_at_,S(120),S(134));
+        ui_atlas(original_ui2_,static_cast<float>(px),static_cast<float>(py),0,0,120,134,235,580,120,134);
+        hits_.push_back({px,py,S(120),S(134),nullptr,-1,{}});
+        label(px+S(11),py+S(5),"Ganimet",gold_rgba);
+        hits_.push_back({px+S(102),py+S(4),S(16),S(16),nullptr,-1,"loot-close"});
         const auto& items=loot_.at("items");
         for (std::size_t i=0;i<std::min<std::size_t>(9,items.size());++i) {
             if (!items[i].is_object()) continue;
-            const float sx=209+33.f*static_cast<float>(i%3),sy=126+33.f*static_cast<float>(i/3);
-            source_icon(sx*s_,sy*s_,32*s_,catalog_icon(items[i].value("item",std::string{})));
-            if (const int count=items[i].value("quantity",1); count>1) label(S(sx+2),S(sy+31)-lh(),std::to_string(count));
-            hits_.push_back({S(sx),S(sy),S(32),S(32),nullptr,-1,"loot-slot:"+std::to_string(i)});
+            const float sx=9+33.f*static_cast<float>(i%3),sy=26+33.f*static_cast<float>(i/3);
+            source_icon(static_cast<float>(px)+sx*s_,static_cast<float>(py)+sy*s_,32*s_,catalog_icon(items[i].value("item",std::string{})));
+            if (const int count=items[i].value("quantity",1); count>1) label(px+S(sx+2),py+S(sy+31)-lh(),std::to_string(count));
+            hits_.push_back({px+S(sx),py+S(sy),S(32),S(32),nullptr,-1,"loot-slot:"+std::to_string(i)});
         }
     }
     // Item tooltip 0x437590 for the selected bag item, beside the bag: title "<prefix1> <prefix2> <name>" coloured by prefix
@@ -2481,8 +2504,10 @@ private:
         lines.push_back({" ",0xfff5f5f5}); lines.push_back({"Gereksinimler:",0xfff5f5f5});
         lines.push_back({printf_text("Seviye: [%.0f]",d.value("level",1.0)),st.value("level",1)<d.value("level",1)?0xffe30000u:0xff00dc00u});
         static constexpr std::array<const char*,3> classes{"[Savaşçı]","[Büyücü]","[Şifacı]"}; // 0x5920d0..
-        if (d.contains("class")) lines.push_back({std::string("Sınıf: ")+classes[static_cast<std::size_t>(std::clamp(d.at("class").get<int>(),0,2))],0xfff5f5f5});
-        if (d.contains("sex")) lines.push_back({std::string("Cinsiyet: ")+(d.at("sex").get<int>()?"[Erkek]":"[Kadın]"),0xfff5f5f5});
+        // NONCANONICAL: Sınıf/Cinsiyet colour (original colour unknown) follows the Seviye red/green rule, matching can_equip.
+        const auto& own=state_.at("character"); const auto fits=[](bool ok){return ok?0xff00dc00u:0xffe30000u;};
+        if (d.contains("class")) lines.push_back({std::string("Sınıf: ")+classes[static_cast<std::size_t>(std::clamp(d.at("class").get<int>(),0,2))],fits(d.at("class").get<int>()+1==own.value("class_id",0))});
+        if (d.contains("sex")) lines.push_back({std::string("Cinsiyet: ")+(d.at("sex").get<int>()?"[Erkek]":"[Kadın]"),fits(d.at("sex")==own.value("appearance",Json::object()).value("sex",1))});
         int width=0; for (const auto& line:lines) width=std::max(width,ui_->text_width(line.first));
         const int w=width+S(16),hgt=lh()*static_cast<int>(lines.size())+S(12),left=std::max(0,bag_x-w-S(4));
         bag_y=std::max(0,std::min(bag_y,height_-hgt)); // on screen (chat links sit at the bottom)
@@ -3375,8 +3400,17 @@ private:
         if (assembly_.valid()) install_models(load_cpu([&]{return assembly_.get();}));
         // ponytail: whole-cache reset at a zone entry past half the 4096-model budget; LRU if long sessions thrash it.
         if (actor_context_.model_resources.size()>2048) actor_context_.model_resources.clear();
-        install_models(load_cpu([&,requests=std::move(assembly_queue_),resident=resident_textures()]{return assemble(requests,resident);}));
-        assembly_queue_.clear();
+        install_models(load_cpu([&,requests=std::exchange(assembly_queue_,{}),resident=resident_textures()]{return assemble(requests,resident);}));
+    }
+    // Every texture a prepared model's drawn materials bind (normalize_loaded_bindings' set, which the renderer looks up).
+    static bool holds_textures(const ikv::Scene& zone,const ikv::Scene& model) {
+        const auto usage=ikv::scene_material_usage(model);
+        const auto held=[&](const std::string& name){return name.empty() || std::any_of(zone.textures.begin(),zone.textures.end(),[&](const auto& t){return t.name==name;});};
+        for (std::size_t i=0;i<model.materials.size();++i) if (usage[i]) {
+            const auto& m=model.materials[i];
+            if (!held(m.diffuse) || !held(m.normal) || !held(m.environment) || !held(m.luminance) || !held(m.lightmap)) return false;
+        }
+        return true;
     }
     // Each frame after the mutations: install a finished batch, then start the next one.
     void poll_assembly() {
@@ -3447,6 +3481,13 @@ private:
             auto* actor=actor_state(id);
             auto* zone=target(result);
             if (!zone) continue;
+            // The worker skipped textures the snapshot at queue time saw in every held zone; a held-zone change since then
+            // (instant door, fade, eviction) can leave this zone without one (renderer: "scene references missing decoded
+            // texture: textures/yusuf_diffuse.dds"). Assemble it again against the current zones instead of installing.
+            if (result.actor && !holds_textures(*zone,result.actor->model)) {
+                auto request=actor->request; request.into=result.into; assembly_queue_.push_back(std::move(request));
+                std::cerr<<"actor "<<id<<" re-queued: target zone lacks a model texture\n"; continue;
+            }
             if (result.into) { // mirror: posed by update_scenes; dropped if its entry went meanwhile
                 if (result.actor && zone!=actor->home && std::any_of(mirrors_.begin(),mirrors_.end(),[&](const Mirror& m){return m.zone==zone && m.id==id && m.serial==result.serial;}))
                     ikv::install_actor(*zone,std::move(*result.actor));
@@ -4051,6 +4092,7 @@ private:
             else if (type=="loot_open") { // 'sdbt' answer to a Ganimet click: 3x3 window (00436140), shown while a slot is left
                 const auto& items=event.value("items",Json::array());
                 loot_=std::any_of(items.begin(),items.end(),[](const Json& slot){return slot.is_object();})?event:Json(nullptr);
+                if (loot_.is_object()) loot_at_=cursor();
             }
             else if (type=="loot" && event.contains("item")) { // VOD 34:00 "[Unalli çantadan aldı][Savunma Artırıcı Kanvaslı Deri Eldiven]"
                 Json taken{{"item",event.at("item")}}; if (event.contains("prefixes")) taken["prefixes"]=event.at("prefixes");
@@ -4241,7 +4283,11 @@ private:
                 } else if (session_ && session_->self) {
                     context_=0;
                     editing_=false;
-                    if (const auto id=label_at(x,y)) { target_=id; context_=1; }
+                    // 004b7888: a right click on an actor's body selects it and opens its menu, like its name label.
+                    std::uint32_t id=label_at(x,y); std::optional<std::array<float,3>> ground;
+                    if (!id) id=entity_at(x,y,ground);
+                    if (id && !entity(id)) click_entity(id); // a Ganimet sack: loot it as a left click does
+                    else if (id) { target_=id; context_=1; }
                 }
             }
         }
@@ -4439,7 +4485,7 @@ private:
         }
         else if (value.starts_with("chatline:")) { // 0040aad0: clicking a player's chat line opens the name menu
             const auto index=std::strtoul(value.c_str()+9,nullptr,10);
-            if (index<log_.size() && log_[index].from) { chat_menu_id_=log_[index].from; chat_menu_name_=log_[index].name; }
+            if (index<log_.size() && log_[index].from) { chat_menu_id_=log_[index].from; chat_menu_name_=log_[index].name; chat_menu_at_=cursor(); }
         }
         else if (value=="chat-menu-close") chat_menu_id_=0;
         else if (value.starts_with("loot-slot:") && loot_.is_object()) send(Json{{"action","loot_take"},{"target",loot_.at("target")},{"slot",std::strtoul(value.c_str()+10,nullptr,10)}});
@@ -4607,7 +4653,7 @@ private:
         const float split=through?std::min(*through,camera.distance):camera.distance;
         auto hit=trace(beyond,0,split);
         if (!hit && split<camera.distance) hit=trace(!beyond,split,camera.distance);
-        return hit?std::max(1.f,*hit-1):camera.distance;
+        return eye_distance(hit,camera.distance);
     }
     // Money as 00436bd0 prints it: '.' between thousands.
     static std::string dotted(std::uint64_t value) {

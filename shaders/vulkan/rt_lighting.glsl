@@ -2,6 +2,7 @@
 #define IKV_RT_LIGHTING_GLSL
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_nonuniform_qualifier : require
+#include "frame.glsl"
 
 // Include after #version 460, before shader declarations. No ray-tracing pipeline
 // or shader binding table is used: every visibility/hit test below is a ray query.
@@ -61,15 +62,16 @@ vec3 rtUnit(vec3 value) {
 }
 float rtBias(vec3 point) { return max(0.002, length(point) * 0.000002); }
 vec3 rtSky(vec3 direction) {
-    return mix(vec3(0.035, 0.04, 0.05), vec3(0.42, 0.58, 0.85),
+    return enhancedAmbientScale() * mix(vec3(0.035, 0.04, 0.05), vec3(0.42, 0.58, 0.85),
                smoothstep(-0.2, 0.8, direction.y));
 }
 vec3 rtSkyIrradiance(vec3 normal) {
     // Analytic hemispherical environment estimate, not a traced second bounce.
-    return mix(vec3(0.08, 0.09, 0.11), vec3(0.32, 0.43, 0.62),
+    // Noon values; the clock record scales sky and sun (frame.glsl, NONCANONICAL wave 19).
+    return enhancedAmbientScale() * mix(vec3(0.08, 0.09, 0.11), vec3(0.32, 0.43, 0.62),
                clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
 }
-vec3 rtSunRadiance() { return vec3(2.8, 2.55, 2.2); }
+vec3 rtSunRadiance() { return vec3(2.8, 2.55, 2.2) * enhancedSunScale(); }
 vec3 rtHemisphere(vec3 normal, vec2 u) {
     float phi = 6.28318530718 * u.x;
     float radius = sqrt(u.y);

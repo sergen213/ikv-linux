@@ -1335,7 +1335,8 @@
    "level": 25,
    "giver": 1007,
    "requires": [
-    "q50"
+    "q50",
+    "q72"
    ],
    "objective": {
     "kind": "kill",
@@ -1349,7 +1350,7 @@
     "currency": 2500,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #51; W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #51; W-AGL description; NONCANONICAL prerequisite: gate quest 72 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q52",
@@ -2713,10 +2714,26 @@
        314,
        238
       ]
+     },
+     {
+      "item": "o13140",
+      "quantity": 1,
+      "prefixes": [
+       314,
+       238
+      ]
+     },
+     {
+      "item": "o13141",
+      "quantity": 1,
+      "prefixes": [
+       314,
+       238
+      ]
      }
     ]
    },
-   "provenance": "W-ZGK/OFF-Q #108; W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #108; W-AGL description; NONCANONICAL reward: the other classes get Gümüşi Kütük Yaran, Civanlı Boğa (Asa); reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q109",
@@ -3334,10 +3351,26 @@
        328,
        292
       ]
+     },
+     {
+      "item": "o13033",
+      "quantity": 1,
+      "prefixes": [
+       328,
+       292
+      ]
+     },
+     {
+      "item": "o13035",
+      "quantity": 1,
+      "prefixes": [
+       328,
+       292
+      ]
      }
     ]
    },
-   "provenance": "W-ZGK/OFF-Q #134; W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #134; W-AGL description; NONCANONICAL reward: the other classes get Turuncu Kanca (Asa), Pembe Yılan (Asa); reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q135",
@@ -4101,10 +4134,24 @@
       "prefixes": [
        485
       ]
+     },
+     {
+      "item": "o13166",
+      "quantity": 1,
+      "prefixes": [
+       485
+      ]
+     },
+     {
+      "item": "o13032",
+      "quantity": 1,
+      "prefixes": [
+       485
+      ]
      }
     ]
    },
-   "provenance": "W-ZGK/OFF-Q #163; W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #163; W-AGL description; NONCANONICAL reward: the other classes get Platin Engerek Dişi, Safir Akrep (Asa); reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q164",
@@ -5254,10 +5301,26 @@
        503,
        581
       ]
+     },
+     {
+      "item": "o13655",
+      "quantity": 1,
+      "prefixes": [
+       503,
+       581
+      ]
+     },
+     {
+      "item": "o13662",
+      "quantity": 1,
+      "prefixes": [
+       503,
+       581
+      ]
      }
     ]
    },
-   "provenance": "W-ZGK/OFF-Q #211; W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #211; W-AGL description; NONCANONICAL reward: the other classes get Topaz Battal Yatağanı, Topaz Güneş Asa; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q212",
@@ -5990,7 +6053,8 @@
    "level": 49,
    "giver": 1048,
    "requires": [
-    "q242"
+    "q242",
+    "q246"
    ],
    "objective": {
     "kind": "kill",
@@ -6005,7 +6069,7 @@
     "currency": 4900,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #243; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #243; NONCANONICAL prerequisite: gate quest 246 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q244",
@@ -6339,7 +6403,8 @@
    "level": 46,
    "giver": 131323,
    "requires": [
-    "q132"
+    "q132",
+    "q238"
    ],
    "turn_in": 17068,
    "objective": {
@@ -6352,7 +6417,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #256; W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #256; W-AGL description; NONCANONICAL prerequisite: gate quest 238 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q257",
@@ -6406,7 +6471,8 @@
    "level": 45,
    "giver": 131830,
    "requires": [
-    "q190"
+    "q190",
+    "q275"
    ],
    "objective": {
     "kind": "visit",
@@ -6419,7 +6485,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #259; W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #259; W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q260",
@@ -6428,7 +6494,8 @@
    "level": 45,
    "auto": true,
    "requires": [
-    "q259"
+    "q259",
+    "q275"
    ],
    "objective": {
     "kind": "kill",
@@ -6443,7 +6510,7 @@
     "currency": 4500,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #260; W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #260; W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q261",
@@ -6452,7 +6519,8 @@
    "level": 45,
    "giver": 131830,
    "requires": [
-    "q260"
+    "q260",
+    "q275"
    ],
    "turn_in": 1029,
    "objective": {
@@ -6465,7 +6533,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "W-ZGK/OFF-Q #261; W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "W-ZGK/OFF-Q #261; W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q262",
@@ -6797,7 +6865,8 @@
    "level": 49,
    "giver": 131878,
    "requires": [
-    "q275"
+    "q275",
+    "q282"
    ],
    "turn_in": 131995,
    "objective": {
@@ -6810,7 +6879,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "QT 266 (original id 276 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 266 (original id 276 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 282 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q277",
@@ -6819,7 +6888,8 @@
    "level": 49,
    "giver": 131878,
    "requires": [
-    "q276"
+    "q276",
+    "q282"
    ],
    "turn_in": 131995,
    "objective": {
@@ -6832,7 +6902,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "QT 267 (original id 277 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 267 (original id 277 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 282 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q278",
@@ -6840,6 +6910,9 @@
    "name": "Yardım Çağrısı",
    "level": 49,
    "giver": 132075,
+   "requires": [
+    "q282"
+   ],
    "time_limit": 600,
    "objective": {
     "kind": "kill",
@@ -6853,7 +6926,7 @@
     "currency": 4900,
     "items": []
    },
-   "provenance": "QT 268 (original id 278 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 268 (original id 278 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 282 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q279",
@@ -6862,7 +6935,8 @@
    "level": 49,
    "giver": 132055,
    "requires": [
-    "q278"
+    "q278",
+    "q275"
    ],
    "objective": {
     "kind": "kill",
@@ -6876,7 +6950,7 @@
     "currency": 4900,
     "items": []
    },
-   "provenance": "QT 269 (original id 279 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 269 (original id 279 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q280",
@@ -6885,7 +6959,8 @@
    "level": 49,
    "giver": 132054,
    "requires": [
-    "q279"
+    "q279",
+    "q275"
    ],
    "objective": {
     "kind": "kill",
@@ -6905,10 +6980,26 @@
        35073,
        35081
       ]
+     },
+     {
+      "item": "o132024",
+      "quantity": 1,
+      "prefixes": [
+       35073,
+       35081
+      ]
+     },
+     {
+      "item": "o132021",
+      "quantity": 1,
+      "prefixes": [
+       35073,
+       35081
+      ]
      }
     ]
    },
-   "provenance": "QT 270 (original id 280 [INFERENCE]); W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 270 (original id 280 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL reward: the other classes get Üçgen, Odunsaplı; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q281",
@@ -7461,16 +7552,17 @@
    "objective": {
     "kind": "collect",
     "item": "o132152",
-    "count": 50
+    "count": 50,
+    "monster": 131863
    },
    "objective_text": "50 meteor altını getir.",
-   "description": "Görevi Kapıcı vermektedir.Görevi tamamlamak için Kapıcı'ya 50 adet Meteor Altın'ı götürmelisiniz.",
+   "description": "Görevi Kapıcı vermektedir.Görevi tamamlamak için Kapıcı'ya 50 adet Meteor Altın'ı götürmelisiniz. [Gizitim Bıçak Ustasıları {at:mon:131863}'de bulabilirsiniz.]",
    "reward": {
     "xp": 4928,
     "currency": 5400,
     "items": []
    },
-   "provenance": "QT 294 (original id 304 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 294 (original id 304 [INFERENCE]); W-AGL description; NONCANONICAL objective: the item drops from Gizitim Bıçak Ustası while the quest is active (source was server data); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q305",
@@ -7723,7 +7815,8 @@
    "level": 55,
    "giver": 131899,
    "requires": [
-    "q303"
+    "q303",
+    "q305"
    ],
    "objective": {
     "kind": "kill",
@@ -7737,7 +7830,7 @@
     "currency": 5500,
     "items": []
    },
-   "provenance": "QT 304 (original id 314 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 304 (original id 314 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 305 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q315",
@@ -8145,7 +8238,8 @@
    "level": 57,
    "giver": 132085,
    "requires": [
-    "q329"
+    "q329",
+    "q305"
    ],
    "objective": {
     "kind": "visit",
@@ -8158,7 +8252,7 @@
     "currency": 0,
     "items": []
    },
-   "provenance": "QT 320 (original id 330 [INFERENCE]); W-AGL description; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 320 (original id 330 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 305 done (its door leads to the quest); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q331",
@@ -8230,10 +8324,26 @@
        35107,
        35111
       ]
+     },
+     {
+      "item": "o132149",
+      "quantity": 1,
+      "prefixes": [
+       35107,
+       35111
+      ]
+     },
+     {
+      "item": "o132141",
+      "quantity": 1,
+      "prefixes": [
+       35107,
+       35111
+      ]
      }
     ]
    },
-   "provenance": "QT 323 (original id 333 [INFERENCE]); W-AGL description; reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 323 (original id 333 [INFERENCE]); W-AGL description; NONCANONICAL reward: the other classes get Bor Çatal (Asa), Bor Kızılgöz (Asa); reward items W-REW/QT; NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   },
   {
    "id": "q334",
@@ -8263,7 +8373,8 @@
    "level": 52,
    "giver": 131878,
    "requires": [
-    "q280"
+    "q280",
+    "q275"
    ],
    "objective": {
     "kind": "collect",
@@ -8278,7 +8389,7 @@
     "currency": 5200,
     "items": []
    },
-   "provenance": "QT 325 (original id 335 [INFERENCE]); W-AGL description; NONCANONICAL objective: the item drops from Gizitim Bıçak Ustası while the quest is active (source was server data); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
+   "provenance": "QT 325 (original id 335 [INFERENCE]); W-AGL description; NONCANONICAL prerequisite: gate quest 275 done (its door leads to the quest); NONCANONICAL objective: the item drops from Gizitim Bıçak Ustası while the quest is active (source was server data); NONCANONICAL xp/para scale (VOD-fitted 77·(10+L))"
   }
  ]
 }

@@ -343,7 +343,17 @@ bool World::bot_reach(uint32_t id, Actor& a, Bot& b, uint32_t target, Json reque
 }
 bool World::bot_travel(uint32_t id, Actor& a, Bot& b, const std::string& zone) {
     const std::string here = a.character.at("state").at("zone");
-    for (const auto& [reached,door] : bot_zones(b,here)) if (door && reached == base_zone(config_,zone)) return bot_reach(id,a,b,door,{{"action","interact"},{"target",door}});
+    for (const auto& [reached,door] : bot_zones(b,here)) if (door && reached == base_zone(config_,zone)) {
+        // NONCANONICAL (wave 19): at a see-through door the bot walks through its opening like a player's portal click (advance()
+        // crosses it) toward the door's arrival; the door's interact (teleport) stays the fallback.
+        if (a.moving && a.beyond.door == door) return true;
+        if (portals_.contains(door) && close(id,door,config_.at("interaction_range"))) {
+            const auto& arrive = npcs_.at(door).definition.at("door").at("arrive");
+            destination(id,arrive[0].get<int32_t>(),arrive[1].get<int32_t>(),a.sequence+1,door);
+            if (a.moving) return true;
+        }
+        return bot_reach(id,a,b,door,{{"action","interact"},{"target",door}});
+    }
     return false;
 }
 

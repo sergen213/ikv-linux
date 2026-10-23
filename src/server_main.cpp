@@ -25,6 +25,13 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <thread>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -32,6 +39,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/rand.h>
@@ -43,6 +51,19 @@ constexpr auto tick_period = std::chrono::milliseconds(50);
 constexpr auto close_timeout = std::chrono::seconds(2);
 volatile std::sig_atomic_t stopping = 0;
 extern "C" void stop_signal(int) { stopping = 1; }
+#ifdef _WIN32
+// NONCANONICAL wave 19 (Windows server): Winsock. A SOCKET is kept in the int fd slots below: Windows kernel handles
+// fit in 32 bits (documented for 32/64-bit interop) and INVALID_SOCKET casts to -1.
+using nfds_t = ULONG;
+int poll(pollfd* fds, nfds_t count, int timeout) { return WSAPoll(fds, count, timeout); }
+pollfd poll_entry(int fd, short events) { pollfd entry{}; entry.fd = static_cast<SOCKET>(fd); entry.events = events; return entry; }
+int socket_error() { const int e = WSAGetLastError(); return e == WSAEWOULDBLOCK ? EWOULDBLOCK : e == WSAEINTR ? EINTR : e; }
+void close_socket(int fd) { ::closesocket(static_cast<SOCKET>(fd)); }
+#else
+pollfd poll_entry(int fd, short events) { return {fd, events, 0}; }
+int socket_error() { return errno; }
+void close_socket(int fd) { ::close(fd); }
+#endif
 class Socket {
 public:
     explicit Socket(int fd = -1) : fd_(fd) {}
@@ -50,10 +71,22 @@ public:
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
     int get() const { return fd_; }
-    void close() { if (fd_ >= 0) { ::close(fd_); fd_ = -1; } }
+    void close() { if (fd_ >= 0) { close_socket(fd_); fd_ = -1; } }
 private:
     int fd_;
 };
+#ifdef _WIN32
+void nonblocking(int fd) {
+    u_long on = 1;
+    if (ioctlsocket(static_cast<SOCKET>(fd), FIONBIO, &on) != 0 ||
+        !SetHandleInformation(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(fd)), HANDLE_FLAG_INHERIT, 0))
+        throw std::runtime_error("socket flags failed");
+}
+long resident_kib() {
+    PROCESS_MEMORY_COUNTERS counters{};
+    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof counters) ? static_cast<long>(counters.WorkingSetSize / 1024) : 0;
+}
+#else
 void nonblocking(int fd) {
     const int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
@@ -65,6 +98,7 @@ long resident_kib() {
     statm >> pages >> resident;
     return resident * (sysconf(_SC_PAGESIZE) / 1024);
 }
+#endif
 // Administrator dry run: parse and construct a World from the configured gameplay file without touching the live one.
 // Source support grids are not reloaded, so grid-walkability of configured points is checked only at real startup.
 ikv::Json validate_config(const std::string& path) {
@@ -77,6 +111,16 @@ ikv::Json validate_config(const std::string& path) {
         return {{"ok", true}, {"path", path}, {"zones", status.at("zones").size()}, {"npcs", status.at("npcs")}};
     } catch (const std::exception& e) { return {{"ok", false}, {"path", path}, {"error", e.what()}}; }
 }
+#ifdef _WIN32
+// NONCANONICAL wave 19: no owner/mode bits on Windows; the launcher keeps the DSN under the per-user %LOCALAPPDATA% ACL.
+std::string secret_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const auto size = file ? static_cast<std::streamoff>(file.tellg()) : 0;
+    if (size <= 0 || size > 8192) throw std::runtime_error("DSN file must be a regular file of at most 8 KiB");
+    std::string value(static_cast<std::size_t>(size), '\0');
+    file.seekg(0);
+    if (!file.read(value.data(), size)) throw std::runtime_error("DSN file read failed");
+#else
 std::string secret_file(const std::string& path) {
     Socket file(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
     struct stat st {};
@@ -91,6 +135,7 @@ std::string secret_file(const std::string& path) {
         if (n <= 0) throw std::runtime_error("DSN file read failed");
         offset += static_cast<std::size_t>(n);
     }
+#endif
     while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) value.pop_back();
     if (value.empty() || value.find('\0') != std::string::npos) throw std::runtime_error("invalid DSN file");
     return value;
@@ -368,6 +413,7 @@ struct Options {
     std::string asset_root;
     std::uint16_t port = 7000;
     std::optional<std::uint32_t> ticks, bots;
+    bool stop_on_stdin_eof = false;
 };
 std::uint32_t number(std::string_view value) {
     std::uint32_t result = 0;
@@ -384,9 +430,11 @@ Options options(int argc, char** argv) {
             std::cout << "Independent authenticated IKV community world (custom protocol v2)\n"
                          "Usage: ikv-server --cert FILE --key FILE --dsn-file FILE [--bind IPv4] [--port 7000]\n"
                          "                  [--gameplay config/gameplay.json] [--ticks N] [--bots N (0..256; default gameplay.json bots.spawn)]\n"
-                         "                  [--asset-root ROOT (required by source-associated gameplay zones)]\n";
+                         "                  [--asset-root ROOT (required by source-associated gameplay zones)]\n"
+                         "                  [--stop-on-stdin-eof (graceful stop when stdin closes; the Windows launcher supervisor)]\n";
             std::exit(0);
         }
+        if (option == "--stop-on-stdin-eof") { result.stop_on_stdin_eof = true; continue; }
         if (i + 1 >= argc) throw std::invalid_argument("incomplete option");
         const std::string value(argv[++i]);
         if (option == "--bind") result.bind = value;
@@ -414,12 +462,29 @@ Options options(int argc, char** argv) {
     return result;
 }
 int run(const Options& opts) {
+#ifdef _WIN32
+    WSADATA winsock{};
+    if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) throw std::runtime_error("Winsock startup failed");
+    if (std::signal(SIGINT, stop_signal) == SIG_ERR || std::signal(SIGBREAK, stop_signal) == SIG_ERR)
+        throw std::runtime_error("signal setup failed");
+#else
     struct sigaction signal_action {};
     signal_action.sa_handler = stop_signal; sigemptyset(&signal_action.sa_mask);
     if (sigaction(SIGINT, &signal_action, nullptr) < 0 || sigaction(SIGTERM, &signal_action, nullptr) < 0)
         throw std::runtime_error("signal setup failed");
     signal_action.sa_handler = SIG_IGN;
     if (sigaction(SIGPIPE, &signal_action, nullptr) < 0) throw std::runtime_error("signal setup failed");
+#endif
+    // Raw reads, not stdio: a thread blocked inside the CRT's locked stdin can hang exit() on Windows.
+    if (opts.stop_on_stdin_eof) std::thread([] {
+        char byte = 0;
+#ifdef _WIN32
+        for (DWORD got = 0; ReadFile(GetStdHandle(STD_INPUT_HANDLE), &byte, 1, &got, nullptr) && got;) {}
+#else
+        for (ssize_t got; (got = ::read(STDIN_FILENO, &byte, 1)) > 0 || (got < 0 && errno == EINTR);) {}
+#endif
+        stopping = 1;
+    }).detach();
     std::unique_ptr<SSL_CTX, decltype(&SSL_CTX_free)> context(SSL_CTX_new(TLS_server_method()), SSL_CTX_free);
     if (!context || SSL_CTX_set_min_proto_version(context.get(), TLS1_2_VERSION) != 1 ||
         SSL_CTX_use_certificate_chain_file(context.get(), opts.cert.c_str()) != 1 ||
@@ -459,11 +524,16 @@ int run(const Options& opts) {
     bots.start(opts.bots);
     sockaddr_in address {}; address.sin_family = AF_INET; address.sin_port = htons(opts.port);
     if (inet_pton(AF_INET, opts.bind.c_str(), &address.sin_addr) != 1) throw std::invalid_argument("bind must be numeric IPv4");
-    Socket listener(socket(AF_INET, SOCK_STREAM, 0));
+    Socket listener(static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)));
     if (listener.get() < 0) throw std::runtime_error("socket failed");
     nonblocking(listener.get());
+#ifdef _WIN32
+    const BOOL exclusive = TRUE; // Windows SO_REUSEADDR would let another process take over the bound port
+    if (setsockopt(static_cast<SOCKET>(listener.get()), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) < 0 ||
+#else
     const int reuse = 1;
     if (setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0 ||
+#endif
         bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
         listen(listener.get(), static_cast<int>(max_connections)) < 0) throw std::runtime_error("listen failed");
     socklen_t address_size = sizeof(address);
@@ -508,24 +578,25 @@ int run(const Options& opts) {
         if (exit_code != 0) break;
         std::array<pollfd, max_connections + 1> pollfds {};
         std::array<Peer*, max_connections + 1> polled {};
-        std::size_t count = 1; pollfds[0] = {listener.get(), POLLIN, 0};
+        std::size_t count = 1; pollfds[0] = poll_entry(listener.get(), POLLIN);
         for (auto& peer : peers) {
-            pollfds[count] = {peer.socket.get(), poll_interest(peer), 0}; polled[count++] = &peer;
+            pollfds[count] = poll_entry(peer.socket.get(), poll_interest(peer)); polled[count++] = &peer;
         }
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - Clock::now()).count();
         const int ready = poll(pollfds.data(), static_cast<nfds_t>(count), static_cast<int>(std::clamp<std::int64_t>(remaining, 0, 50)));
-        if (ready < 0) { if (errno == EINTR) continue; throw std::runtime_error("poll failed"); }
+        if (ready < 0) { if (socket_error() == EINTR) continue; throw std::runtime_error("poll failed"); }
         if (pollfds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) throw std::runtime_error("listener failed");
         if (pollfds[0].revents & POLLIN) {
             for (std::size_t attempt = 0; attempt < max_connections; ++attempt) {
-                const int fd = accept(listener.get(), nullptr, nullptr);
+                const int fd = static_cast<int>(accept(listener.get(), nullptr, nullptr));
                 if (fd < 0) {
-                    if (errno == EINTR) continue;
-                    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                    const int error = socket_error();
+                    if (error == EINTR) continue;
+                    if (error == EAGAIN || error == EWOULDBLOCK) break;
                     throw std::runtime_error("accept failed");
                 }
-                if (peers.size() >= max_connections) { ::close(fd); continue; }
-                try { nonblocking(fd); } catch (...) { ::close(fd); throw; }
+                if (peers.size() >= max_connections) { close_socket(fd); continue; }
+                try { nonblocking(fd); } catch (...) { close_socket(fd); throw; }
                 peers.emplace_back(fd, next_connection++, context.get());
             }
         }
@@ -646,7 +717,7 @@ int run(const Options& opts) {
         for (auto& peer : peers) {
             advance_close(peer);
             if (peer.socket.get() < 0) continue;
-            pollfds[count] = {peer.socket.get(), poll_interest(peer), 0}; polled[count++] = &peer;
+            pollfds[count] = poll_entry(peer.socket.get(), poll_interest(peer)); polled[count++] = &peer;
         }
         if (count == 0) break;
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(drain_deadline - Clock::now()).count();
@@ -657,7 +728,7 @@ int run(const Options& opts) {
         const int ready = poll(pollfds.data(), static_cast<nfds_t>(count),
                                static_cast<int>(std::min<std::int64_t>(remaining, 50)));
         if (ready < 0) {
-            if (errno == EINTR) continue;
+            if (socket_error() == EINTR) continue;
             for (auto& peer : peers) disconnect(peer, "socket");
             exit_code = 1; break;
         }

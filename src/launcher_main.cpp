@@ -82,16 +82,13 @@ using Callback = std::function<void(const QByteArray&)>;
 QString failure(const std::exception& e) { return QString::fromUtf8(e.what()); }
 std::filesystem::path fs(const QString& p) { return std::filesystem::path(p.toStdU16String()); }
 #ifdef _WIN32
-// NONCANONICAL: server hosting (launcher_server.cpp: PostgreSQL + ikv-auth/ikv-server supervisor) and the
-// AppImage self-update are Linux-only; the Windows launcher joins servers through Sunucu ekle.
+// NONCANONICAL: the AppImage self-update is Linux-only. Hosting (launcher_server.cpp) runs on both since wave 19.
 constexpr char platformName[] = "Windows", innoextractName[] = "innoextract.exe", innoextractLabel[] = "innoextract.exe",
                innoextractPrompt[] = "innoextract.exe programını seçin (Windows)", innoextractMagic[] = "MZ";
 #else
 constexpr char platformName[] = "Linux", innoextractName[] = "innoextract", innoextractLabel[] = "innoextract (ELF)",
                innoextractPrompt[] = "Linux innoextract programını seçin (ELF)", innoextractMagic[] = "\x7f" "ELF";
 #endif
-constexpr char hostingNote[] = "Sunucu barındırma (Sunucu Kur) Linux sürümündedir. Ağdaki bir İKV sunucusuna katılmak için "
-                               "Sunucu ekle ile adresini ve CA sertifika dosyasını girin.";
 QString dataRoot() { return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation); }
 void saveJson(const QString& path, const QJsonObject& value) {
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -454,10 +451,10 @@ class Launcher final : public QWidget {
         skinLog->document()->setMaximumBlockCount(500); activity->addWidget(skinLog, 1);
         skinLog->moveCursor(QTextCursor::End);
         auto* news = box({344, 558, 243, 112}, "Sunucu Kur");
-        auto* hostButton = findChild<QPushButton*>("hostButton"); // absent on Windows (hostingNote)
-        auto* body = new QLabel(hostButton ? "Bu bilgisayarda kendi özel topluluk sunucunuzu kurun, başlatın ve yönetin." : hostingNote);
+        auto* hostButton = findChild<QPushButton*>("hostButton");
+        auto* body = new QLabel("Bu bilgisayarda kendi özel topluluk sunucunuzu kurun, başlatın ve yönetin.");
         body->setObjectName("skinBody"); body->setWordWrap(true); news->addWidget(body);
-        if (hostButton) { news->addWidget(hostButton, 0, Qt::AlignLeft); hostButton->show(); }
+        news->addWidget(hostButton, 0, Qt::AlignLeft); hostButton->show();
         news->addStretch();
 
         skinActions = new QWidget; place(skinActions, {39, 481, 136, 49});
@@ -1046,9 +1043,7 @@ public:
         auto* title = new QLabel(QString("<span style='font-size:20pt;font-weight:bold'>İstanbul Kıyamet Vakti</span><br>Bağımsız %1 başlatıcısı").arg(platformName));
         header->addWidget(title, 1);
         button(header, "⚙ Ayarlar", "settingsButton", [this] { settingsDialog->show(); settingsDialog->raise(); settingsDialog->activateWindow(); });
-#ifndef _WIN32
         hostDialog = ikv::launcher_server::createHostPanel(this, button(header, "Sunucu Kur", "hostButton", [] {}), hostHooks()); // live status chip
-#endif
         pages = new QStackedWidget; pages->setObjectName("pages"); main->addWidget(pages, 1);
 
         installPage = new QWidget; installPage->setObjectName("installPage"); auto* iv = new QVBoxLayout(installPage);
@@ -1057,12 +1052,8 @@ public:
         intro->setWordWrap(true); iv->addWidget(intro);
         button(iv, "Kurulum dosyasını seç (istanbulkur6_0.exe)", "extractButton", [this] { importAssets(true); })->setMinimumHeight(48);
         button(iv, "Mevcut kurulum klasörünü seç", "importButton", [this] { importAssets(false); });
-#ifdef _WIN32
-        auto* hostNote = new QLabel(hostingNote); hostNote->setObjectName("hostingNote"); hostNote->setWordWrap(true); iv->addWidget(hostNote);
-#else
         hostAfterInstall = new QCheckBox("Bu bilgisayarda yerel sunucu da kur (Sunucu Kur)"); hostAfterInstall->setObjectName("hostAfterInstall");
         iv->addWidget(hostAfterInstall);
-#endif
         installNote = new QLabel; installNote->setWordWrap(true); installNote->setEnabled(false); iv->addWidget(installNote);
         iv->addStretch(); pages->addWidget(installPage);
 
@@ -1138,9 +1129,7 @@ public:
 };
 } // namespace
 int main(int argc, char** argv) {
-#ifndef _WIN32
     if (ikv::launcher_server::isSupervisorInvocation(argc, argv)) return ikv::launcher_server::supervisorMain(argc, argv);
-#endif
     QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
     QCoreApplication::setApplicationVersion(ikv::release::version);
 #ifndef _WIN32

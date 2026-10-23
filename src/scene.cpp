@@ -344,7 +344,9 @@ const SourceSceneDescriptor& source_scene_descriptor(unsigned registry_id) {
   add(70,17,"karakoyic","Karakoy İç Mekan","karakoyic",749,members("karakoyic",true),"textures/clouds.dds");
   // NONCANONICAL wave 17: drawn geometry covers >= 99.5 % of 400 sampled walk cells from above (sky_box membership does
   // not: Karaköy İç is roofed with it, Sivri Ada open without it); analysis/porting-wave17/MisirLights/roof.cpp.
-  for(auto& row:out)for(const char* key:{"misir","antrepo","labirent","migrat","siginak","buyukhol","karakoyic"})row.roofed=row.roofed||row.environment_key==key;
+  // NONCANONICAL wave 19: every pureblack-sky zone is an interior too: Yeraltı (underground, 55 % cave-ceiling coverage) and
+  // the shared Çemberlitaş zone 66 followed the outdoor night; its cemberli_sky instance copies 47..65 stay outdoors.
+  for(auto& row:out)for(const char* key:{"misir","antrepo","labirent","migrat","siginak","buyukhol","karakoyic"})row.roofed=row.roofed||row.environment_key==key||row.lightmap=="textures/pureblack.dds";
   return out;
  }();
  need(registry_id<rows.size(),"original scene registry ID outside supplied corpus");return rows[registry_id];
@@ -450,7 +452,7 @@ Scene load_source_scene(const std::filesystem::path& installation,unsigned regis
   scene.diagnostics.push_back("Original registered scene component absent and unloaded: registry="+std::to_string(registry_id)+" member["+std::to_string(index)+"] "+objects.source_name+":"+member);
  }
  scene.source_registry_id=registry_id;scene.source_support=descriptor.support_id;scene.source_environment_key=descriptor.environment_key;scene.source_lightmap=descriptor.lightmap;
- scene.zone=load_zone(installation,descriptor.support_id);set_scene_environment(scene,descriptor.support_id,descriptor.minute);
+ scene.zone=load_zone(installation,descriptor.support_id);set_scene_environment(scene,descriptor.support_id,descriptor.minute);scene.lighting.roofed=descriptor.roofed;
  bind_source_skydome(scene,descriptor);
  load_model_resources(scene,base);load_scene_help(scene,base);return scene;
 }
@@ -882,7 +884,7 @@ void scene_decoder_self_test() {
  set_scene_clock(daylight,3.5f,{255,0,0,0,0,0,0,0,0,51,255});need(daylight.lighting.glow==1&&daylight.lighting.sky_blend==.75f&&daylight.lighting.ambient_multiplier[0]==1&&daylight.lighting.lightmap_strength==.2f,"004a4c90 night ramp and 004b6970 record self-check");
  set_scene_clock(daylight,23.5f,{});need(daylight.lighting.sky_blend==.25f,"004a4c90 evening ramp self-check");set_scene_clock(daylight,12,{});need(daylight.lighting.sky_blend==0,"004a4c90 day self-check");
  set_scene_environment(daylight,4);need(daylight.lighting.source_minute==590,"source zone clock initializer self-check");
- need(source_scene_descriptor(1).roofed&&source_scene_descriptor(68).roofed&&source_scene_descriptor(70).roofed&&source_scene_descriptor(30).roofed&&!source_scene_descriptor(0).roofed&&!source_scene_descriptor(5).roofed&&!source_scene_descriptor(26).roofed,"roofed interiors self-check");
+ need(source_scene_descriptor(1).roofed&&source_scene_descriptor(68).roofed&&source_scene_descriptor(70).roofed&&source_scene_descriptor(30).roofed&&source_scene_descriptor(26).roofed&&source_scene_descriptor(66).roofed&&!source_scene_descriptor(0).roofed&&!source_scene_descriptor(5).roofed&&!source_scene_descriptor(47).roofed&&!source_scene_descriptor(67).roofed,"roofed interiors self-check");
  const auto store=[](std::vector<std::uint8_t>& b,std::size_t p,std::uint32_t w){for(unsigned i=0;i<4;++i)b.at(p+i)=std::uint8_t(w>>(8*i));};
  const auto real=[&](std::vector<std::uint8_t>& b,std::size_t p,float f){store(b,p,std::bit_cast<std::uint32_t>(f));};
  std::vector<assets::AdfChunk> chunks{{"mate",0,std::vector<std::uint8_t>(468)},{"item",1,std::vector<std::uint8_t>(256)},{"vert",1,std::vector<std::uint8_t>(144)},{"tris",1,std::vector<std::uint8_t>(160)},{"qkey",1,std::vector<std::uint8_t>(64)}};

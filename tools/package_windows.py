@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cross-build the IKV Windows (x64) client + launcher and package them.
+"""Cross-build the IKV Windows (x64) client, launcher and server (hosting) and package them.
 
 Host:  python3 tools/package_windows.py [X.Y.Z] [--build-only] [--work DIR] [--dist DIR]   (docker or podman)
        Builds tools/windows/Dockerfile (pinned Debian 13 snapshot, MinGW-w64 GCC 14 posix/SEH, Qt 6.11.3 win64_mingw,
@@ -26,15 +26,22 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.search(r"^project\(\w+ VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(), re.MULTILINE).group(1)
 IMAGE = "ikv-windows-toolchain:trixie"
 QT = Path("/opt/w64/qt")
-# DLL search order for the closure: Qt, our dependency prefix, the GCC 14 posix runtime, the MinGW-w64 CRT side libs.
-SEARCH = [QT / "bin", Path("/opt/w64/bin"), Path("/usr/lib/gcc/x86_64-w64-mingw32/14-posix"), Path("/usr/x86_64-w64-mingw32/lib")]
+# DLL search order for the closure: Qt, our dependency prefix, the GCC 14 posix runtime, the MinGW-w64 CRT side libs,
+# then EDB PostgreSQL (libpq and its OpenSSL/gettext DLLs) and the app-local Visual C++ runtime they import.
+PGSQL, VCREDIST = Path("/opt/w64/pgsql"), Path("/opt/w64/vcredist")
+SEARCH = [QT / "bin", Path("/opt/w64/bin"), Path("/usr/lib/gcc/x86_64-w64-mingw32/14-posix"), Path("/usr/x86_64-w64-mingw32/lib"),
+          PGSQL / "bin", VCREDIST]
+# The hosted server's PostgreSQL subset (bin/pgsql/, found by launcher_server.cpp pgBinDir()); EDB's own DLLs come first.
+PG_TOOLS = ["initdb.exe", "pg_ctl.exe", "postgres.exe", "psql.exe", "pg_dump.exe"]
+PG_SEARCH = [PGSQL / "bin", VCREDIST]
+PG_LIB_SKIP = re.compile(r"(perl|python|pltcl)", re.IGNORECASE)  # procedural languages needing an absent Perl/Python/Tcl
 QT_PLUGINS = {"platforms": ["qwindows.dll"], "styles": ["qmodernwindowsstyle.dll"],
               "tls": ["qschannelbackend.dll", "qcertonlybackend.dll"], "imageformats": ["qico.dll", "qjpeg.dll", "qgif.dll"]}
 # Provided by Windows 10/11 itself or by the GPU driver (opengl32 front end, vulkan-1 loader): never bundled.
 SYSTEM = set("""advapi32 authz bcrypt cfgmgr32 comctl32 comdlg32 crypt32 d2d1 d3d11 d3d12 d3d9 dcomp dnsapi dwmapi dwrite
-dxgi gdi32 hid imm32 iphlpapi kernel32 mpr msvcrt ncrypt netapi32 normaliz ntdll ole32 oleaut32 opengl32 powrprof
+dxgi gdi32 hid imm32 iphlpapi kernel32 mpr msvcrt mswsock ncrypt netapi32 normaliz ntdll ole32 oleaut32 opengl32 pdh powrprof
 rpcrt4 secur32 setupapi shcore shell32 shlwapi user32 userenv usp10 uxtheme version vulkan-1 winhttp winmm winspool.drv
-wintrust wtsapi32 ws2_32""".split())
+wintrust wldap32 wtsapi32 ws2_32""".split())
 
 
 def run(*args, **kwargs) -> str:
@@ -55,10 +62,10 @@ def imports(path: Path) -> list[str]:
     return re.findall(r"DLL Name: (\S+)", run("x86_64-w64-mingw32-objdump", "-p", path))
 
 
-def close_dependencies(bin_dir: Path) -> tuple[dict, list]:
-    """windeployqt-equivalent closure: copy every non-system imported DLL into bin/, fail on anything unresolved."""
+def close_dependencies(bin_dir: Path, scan: list[Path] | None = None, search: list[Path] = SEARCH) -> tuple[dict, list]:
+    """windeployqt-equivalent closure: copy every non-system imported DLL into bin_dir, fail on anything unresolved."""
     bundled, system = {}, set()
-    pending = [p for p in sorted(bin_dir.rglob("*")) if p.suffix.lower() in (".exe", ".dll")]
+    pending = scan if scan is not None else [p for p in sorted(bin_dir.rglob("*")) if p.suffix.lower() in (".exe", ".dll")]
     present = {p.name.lower() for p in bin_dir.iterdir()}
     while pending:
         pe = pending.pop()
@@ -68,15 +75,17 @@ def close_dependencies(bin_dir: Path) -> tuple[dict, list]:
                 continue
             if name.lower() in present:
                 continue
-            source = next((d / name for d in SEARCH if (d / name).is_file()), None)
+            # Windows resolves imports case-insensitively (EDB tools import LIBPQ.dll, the file is libpq.dll).
+            source = next((p for d in search if d.is_dir() for p in sorted(d.iterdir()) if p.name.lower() == name.lower()), None)
             if source is None:
                 raise SystemExit(f"Unresolved DLL {pe.name} -> {name}")
-            shutil.copyfile(source, bin_dir / name)
+            target = bin_dir / source.name
+            shutil.copyfile(source, target)
             if str(source).startswith("/usr/"):  # Debian's GCC/winpthreads runtime DLLs carry debug info (26 MB libstdc++)
-                run("x86_64-w64-mingw32-strip", "--strip-unneeded", bin_dir / name)
+                run("x86_64-w64-mingw32-strip", "--strip-unneeded", target)
             present.add(name.lower())
-            bundled[name] = {"source": str(source), "sha256": sha256(bin_dir / name)}
-            pending.append(bin_dir / name)
+            bundled[source.name] = {"source": str(source), "sha256": sha256(target)}
+            pending.append(target)
     return bundled, sorted(system)
 
 
@@ -85,7 +94,8 @@ def configure_and_build(version: str, out: Path) -> Path:
     run("cmake", "-S", "/src", "-B", build, "-G", "Ninja", "-DCMAKE_TOOLCHAIN_FILE=/src/tools/windows/mingw-w64.cmake",
         "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_PREFIX_PATH=/opt/w64;/opt/w64/qt", "-DOPENSSL_USE_STATIC_LIBS=ON",
         "-DQT_NO_QTPATHS_DEPLOYMENT_WARNING=ON",  # Qt's deploy API is unused: close_dependencies() deploys
-        "-DBUILD_TESTING=OFF", "-DIKV_BUILD_SERVER=OFF", "-DIKV_BUILD_ASSET_TOOLS=OFF", "-DIKV_BUILD_ORIGINAL_TOOLS=OFF",
+        "-DBUILD_TESTING=ON", "-DIKV_BUILD_SERVER=ON", "-DIKV_BUILD_ASSET_TOOLS=OFF", "-DIKV_BUILD_ORIGINAL_TOOLS=OFF",
+        f"-DPostgreSQL_INCLUDE_DIR={PGSQL / 'include'}", f"-DPostgreSQL_LIBRARY={PGSQL / 'lib/libpq.lib'}",
         "-DIKV_BUILD_CLIENT=ON", "-DIKV_BUILD_VULKAN=ON", "-DIKV_BUILD_LAUNCHER=ON", f"-DIKV_VERSION={version}",
         "-DCMAKE_CXX_FLAGS=-march=x86-64 -mtune=generic")
     log = subprocess.run(["cmake", "--build", build, "--parallel", str(os.cpu_count())],
@@ -109,6 +119,7 @@ def inside(args) -> None:
     run("cmake", "--install", build, "--prefix", stage, "--strip")
     bin_dir = stage / "bin"
     shutil.copyfile("/opt/w64/innoextract/innoextract.exe", bin_dir / "innoextract.exe")
+    shutil.copyfile("/opt/w64/bin/openssl.exe", bin_dir / "openssl.exe")  # launcher hosting: development CA and leaf
     for category, names in QT_PLUGINS.items():
         (bin_dir / category).mkdir()
         for name in names:
@@ -116,6 +127,14 @@ def inside(args) -> None:
     bundled, system = close_dependencies(bin_dir)
     if any(p.name.lower() == "vulkan-1.dll" for p in bin_dir.iterdir()):
         raise SystemExit("vulkan-1.dll must come from the GPU driver, not the package")
+    pg = bin_dir / "pgsql"
+    (pg / "bin").mkdir(parents=True)
+    for tool in PG_TOOLS:
+        shutil.copyfile(PGSQL / "bin" / tool, pg / "bin" / tool)
+    shutil.copytree(PGSQL / "lib", pg / "lib", ignore=lambda d, names: [n for n in names if not n.lower().endswith(".dll") or PG_LIB_SKIP.search(n)])
+    shutil.copytree(PGSQL / "share", pg / "share", ignore=shutil.ignore_patterns("doc"))
+    pg_bundled, pg_system = close_dependencies(pg / "bin", sorted((pg / "bin").iterdir()) + sorted((pg / "lib").glob("*.dll")), PG_SEARCH)
+    system = sorted(set(system) | set(pg_system))
 
     licenses = stage / "share/licenses"
     shutil.copytree("/opt/w64/share/licenses", licenses, dirs_exist_ok=True)
@@ -129,12 +148,14 @@ def inside(args) -> None:
 
     report = {"version": args.version, "asset_free": True,
               "compiler_warnings": (out / "warnings.txt").read_text().splitlines(),
-              "bundled_dlls": bundled, "system_dlls": system,
+              "bundled_dlls": bundled, "pgsql_bundled_dlls": pg_bundled, "system_dlls": system,
               "components": {"toolchain": run("x86_64-w64-mingw32-g++-posix", "--version").splitlines()[0],
-                             "qt": "6.11.3 win64_mingw (official prebuilt qtbase)", "openssl": "3.5.9 (static)",
+                             "qt": "6.11.3 win64_mingw (official prebuilt qtbase)", "openssl": "3.5.9 (static; openssl.exe for hosting)",
                              "sdl3": "3.4.18 (static)", "freetype": "2.14.3 (static)", "libjpeg-turbo": "3.2.0 (static)",
                              "zlib": "1.3.2 (static)", "vulkan": "headers/loader import lib 1.4.363; vulkan-1.dll from the driver",
-                             "innoextract": "1.9 signed upstream Windows build"},
+                             "innoextract": "1.9 signed upstream Windows build",
+                             "postgresql": "EDB 16.15-2 windows-x64 binaries (bin/pgsql: " + ", ".join(PG_TOOLS) + ")",
+                             "vcredist": "Microsoft Visual C++ 2015-2022 x64 runtime (app-local, from VC_redist.x64.exe sha256 cc0ff0eb…713b)"},
               "debian_packages": Path("/opt/ikv-baseline/installed-packages.tsv").read_text().splitlines(),
               "inventory": {str(p.relative_to(stage)): {"size": p.stat().st_size, "sha256": sha256(p)}
                             for p in sorted(stage.rglob("*")) if p.is_file()}}
@@ -182,6 +203,8 @@ def self_check() -> None:
     assert system_dll("KERNEL32.dll") and system_dll("api-ms-win-crt-runtime-l1-1-0.dll") and system_dll("vulkan-1.dll")
     assert system_dll("OPENGL32.dll") and system_dll("WS2_32.dll")
     assert not system_dll("libstdc++-6.dll") and not system_dll("Qt6Core.dll") and not system_dll("libwinpthread-1.dll")
+    assert system_dll("WLDAP32.dll") and not system_dll("VCRUNTIME140.dll") and not system_dll("LIBPQ.dll")
+    assert PG_LIB_SKIP.search("plperl.dll") and PG_LIB_SKIP.search("jsonb_plpython3.dll") and not PG_LIB_SKIP.search("plpgsql.dll")
     print("package_windows self-check passed")
 
 

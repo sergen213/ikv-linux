@@ -1877,7 +1877,7 @@ void World::engage(uint32_t id, Actor& a) {
     const bool pvp = player != actors_.end();
     // Attacking needs a living target; looting (walk over, then claim the corpse's Ganimet) a dead one.
     if ((pvp ? a.looting || !hostile(id,a.engaged) : found == npcs_.end() || (found->second.hp > 0) == a.looting || found->second.definition.at("zone") != s.at("zone")) || !close(id,a.engaged,config_.at("aoi"))) {
-        a.engaged = 0; a.moving = false; a.route.clear(); return;
+        a.engaged = 0; a.moving = false; a.route.clear(); a.search = RouteSearch{}; return;
     }
     // Bots never take a monster a real player has clicked or hit, even after the bot's own click (no swing, no first hit).
     if (a.bot && !pvp && !a.looting && strikable(found->second.definition,s) && player_claim(id,a.engaged)) { a.engaged = 0; a.moving = false; a.route.clear(); return; }
@@ -1889,7 +1889,22 @@ void World::engage(uint32_t id, Actor& a) {
     if (!close(id,a.engaged,range)) {
         // Re-plan only when the target left the planned end point's reach (A* per tick is too costly).
         if (a.moving && !a.route.empty() && distance(a.route.back().first,a.route.back().second,tx,ty) <= int64_t(range/2)*(range/2)) return;
-        a.route = route(s.at("zone"),s.at("x"),s.at("y"),tx,ty,a.bot ? 1000 : click_route_nodes); a.waypoint = 0; a.moving = !a.route.empty(); a.dx = a.dy = 0;
+        std::optional<std::vector<std::pair<int32_t,int32_t>>> path;
+        if (a.bot) path = route(s.at("zone"),s.at("x"),s.at("y"),tx,ty,1000);
+        else { // a player searches click_route_nodes cells a tick for up to 4 ticks, standing meanwhile (İşportacı Genç from the
+               // Eminönü spawn takes ~10.7k); a new search when the player or the target moved off the one in flight
+            const std::string zone = s.at("zone"); const int32_t x = coordinate(s,"x"), y = coordinate(s,"y");
+            if (a.search.zone != zone || a.search.x != x || a.search.y != y || distance(a.search.nx,a.search.ny,tx,ty) > int64_t(range/2)*(range/2)) {
+                a.search = RouteSearch{}; path = route_begin(a.search,zone,x,y,tx,ty);
+            }
+            if (!path) {
+                route_step(a.search,click_route_nodes);
+                if (!a.search.over && a.search.popped < 4*click_route_nodes) { a.moving = false; a.route.clear(); a.dx = a.dy = 0; return; }
+                path = route_finish(a.search,false);
+            }
+            a.search = RouteSearch{};
+        }
+        a.route = std::move(*path); a.waypoint = 0; a.moving = !a.route.empty(); a.dx = a.dy = 0;
         if (!a.moving) { a.engaged = 0; reject(id,"range","Hedefe ulaşılamıyor."); }
         return;
     }
@@ -2084,10 +2099,17 @@ void World::handle(uint32_t id, const Json& request) {
     if (action == "quest_accept" || action == "quest_complete") {
         // offered = quests_at: the Görev al rules (quest_eligible: level, class, prerequisites) are those of the Konuş list.
         auto t = target(); auto& n = npc(id,t); auto quest = text(request.at("quest"),32); const auto offered = quests_at(n,current,a.character.at("class_id"));
-        require(config_.at("quests").contains(quest) && std::find(offered.begin(),offered.end(),Json(quest)) != offered.end(),"quest","Bu görev burada verilmiyor.");
-        const auto& q = config_.at("quests").at(quest); auto s = current; Json events = Json::array();
         // Instanced zone copies clone their NPCs at id + n*65536 (same source_uid): the copy serves the configured NPC's quests.
         const auto is = [&](const Json& configured) { const uint32_t c = configured; return t == c || (t > c && (t-c) % 65536 == 0 && npcs_.contains(c) && n.definition.at("source_uid") == npcs_.at(c).definition.at("source_uid")); };
+        if (action == "quest_accept" && config_.at("quests").contains(quest) && std::find(offered.begin(),offered.end(),Json(quest)) == offered.end()) {
+            const auto& q = config_.at("quests").at(quest); // this giver's untaken quest: the level/class reason, else the generic refusal
+            if (!q.value("auto",false) && is(q.at("giver")) && !current.at("quests").contains(quest) && !quest_finished(current,quest)) {
+                require(current.at("level").get<int>() >= q.value("min_level",q.at("level").get<int>()),"level","Bu görev için seviyeniz yetersiz."); // OFF-Q Seviye Gereksinimi
+                require(!q.contains("class") || q.at("class") == a.character.at("class_id"),"class","Bu görev sınıfınıza verilmiyor."); // W-AGL Silah Takası: "sadece Savaşçı"
+            }
+        }
+        require(config_.at("quests").contains(quest) && std::find(offered.begin(),offered.end(),Json(quest)) != offered.end(),"quest","Bu görev burada verilmiyor.");
+        const auto& q = config_.at("quests").at(quest); auto s = current; Json events = Json::array();
         if (action == "quest_accept") {
             require(q.value("auto",false) ? n.definition.value("auto_quests",false) : is(q.at("giver")),"quest","Bu görevi bu kişi vermiyor.");
             require(!s.at("quests").contains(quest) && !quest_finished(s,quest),"quest","Bu görevi zaten aldınız.");
@@ -2106,6 +2128,13 @@ void World::handle(uint32_t id, const Json& request) {
     if (action == "quest_abandon") { // Görevler 'Seçili görevi sil': drop an unfinished quest and its progress.
         auto quest = text(request.at("quest"),32); auto s = current;
         require(s.at("quests").contains(quest),"quest","Silinecek tamamlanmamış bir görev yok.");
+        // NONCANONICAL (wave 19): a quest whose classes.dat requiredquestid opens a door of the player's zone is kept there: dropping
+        // it could shut every way out of the area it let the player into (the Karaköy boats, Asansör, Hidra Engel, Çemberlitaş).
+        const auto& quests = config_.at("quests");
+        const int gate = quests.contains(quest) ? quests.at(quest).value("source_quest_id",-1) : -1;
+        require(gate < 0 || std::none_of(npcs_.begin(),npcs_.end(),[&](const auto& e) { const auto& d = e.second.definition;
+                    return d.at("kind") == "door" && d.at("zone") == s.at("zone") && d.at("door").value("required_quest",-1) == gate; }),
+                "quest","Bu görev bulunduğunuz bölgedeki bir geçidi açıyor; bölgeden ayrılmadan silinemez.");
         s["quests"].erase(quest); commit({{id,s}}); ack(); return;
     }
     if (action == "stat_points") {
@@ -2755,14 +2784,14 @@ void World::advance() {
         if (nx==x && ny==y) continue;
         const auto zone=s.at("zone").get<std::string>();
         // NONCANONICAL see-through doorways (wave 16): a player's step from the approach side over a threshold (within a..b)
-        // walks into the linked zone; bots keep using the door (interact).
-        if (const auto doors=zone_portals_.find(zone); !a.bot && doors!=zone_portals_.end()) {
+        // walks into the linked zone; a bot crosses only the door it walks through on purpose (bot_travel, wave 19).
+        if (const auto doors=zone_portals_.find(zone); doors!=zone_portals_.end()) {
             const auto over=[&](const Portal& p) {
                 if (!(side(p,x,y) <= 0 && side(p,nx,ny) > 0)) return false;
                 const auto turn=[&](int64_t px,int64_t py){return (int64_t(nx)-x)*(py-y)-(int64_t(ny)-y)*(px-x);}; // p->q against a, b
                 const auto ta=turn(p.ax,p.ay),tb=turn(p.bx,p.by); return (ta<=0) != (tb<=0) || !ta || !tb;
             };
-            if (const auto door=std::find_if(doors->second.begin(),doors->second.end(),[&](uint32_t d){return over(portals_.at(d));}); door!=doors->second.end()) { cross(id,*door,nx,ny); continue; }
+            if (const auto door=std::find_if(doors->second.begin(),doors->second.end(),[&](uint32_t d){return (!a.bot || d==a.beyond.door) && over(portals_.at(d));}); door!=doors->second.end()) { cross(id,*door,nx,ny); continue; }
         }
         // route() validated each source segment whole; re-sampling 800-unit steps of it picks different cell corners and
         // falsely collided mid-route, so routed steps only need a supported endpoint.
@@ -3404,12 +3433,30 @@ void World::quest_finish(Json& s, const Json& character, const std::string& ques
             std::any_of(s.at("inventory").begin(), s.at("inventory").end(), [&](const Json& e) { return e.at("item") == item; })) continue;
         Json instance = Json::object();
         if (reward.contains("prefixes")) {
+            // A class-limited prefix moves to its same-name sibling; NONCANONICAL (wave 19): else to this class's nearest equivalent
+            // (same slot index and item flag, each attribute the same or its Silah/Büyü Efsun twin as paired in the Karakter
+            // Bilgisi rows of 00402f60, nearest level), else the piece comes without it.
+            static constexpr std::pair<int,int> twins[] = {{39,58},{48,53},{49,54},{50,55},{51,56},{52,57},{42,37}};
+            const auto twin = [](int x, int y) { return x == y || std::any_of(std::begin(twins), std::end(twins), [&](const auto& t) { return (t.first == x && t.second == y) || (t.first == y && t.second == x); }); };
             instance["prefixes"] = Json::array();
             for (const auto& pid : reward.at("prefixes")) {
                 std::string chosen = std::to_string(pid.get<int>()); const auto& want = config_.at("prefixes").at(chosen);
-                if (want.contains("class") && want.at("class") != cls) for (const auto& [other, p] : config_.at("prefixes").items()) if (p.at("name") == want.at("name") && p.at("index") == want.at("index") && (!p.contains("class") || p.at("class") == cls)) { chosen = other; break; }
+                if (want.contains("class") && want.at("class") != cls) {
+                    std::string same, near; int gap = INT_MAX;
+                    for (const auto& [other, p] : config_.at("prefixes").items()) {
+                        if (p.at("index") != want.at("index") || (p.contains("class") && p.at("class") != cls)) continue;
+                        if (p.at("name") == want.at("name")) { same = other; break; }
+                        const auto& x = p.at("attributes"); const auto& y = want.at("attributes");
+                        bool match = p.contains("class") && p.at("flag") == want.at("flag") && x.size() == y.size();
+                        for (size_t i = 0; match && i < x.size(); ++i) match = twin(x[i][0].get<int>(), y[i][0].get<int>());
+                        if (const int d = std::abs(p.at("level").get<int>() - want.at("level").get<int>()); match && d < gap) { near = other; gap = d; }
+                    }
+                    chosen = same.empty() ? near : same;
+                    if (chosen.empty()) continue;
+                }
                 instance["prefixes"].push_back(std::stoi(chosen));
             }
+            if (instance.at("prefixes").empty()) instance.erase("prefixes");
         }
         give(s, item, reward.at("quantity"), instance);
     }

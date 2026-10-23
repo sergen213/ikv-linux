@@ -2107,7 +2107,7 @@ void set_particles(const ParticleFrame& frame)override {
  static void set_lighting(Frame& f,const SceneLighting& lighting) {
      const auto sun=enhanced_sun(lighting);
      f.sun={sun[0],sun[1],sun[2],lighting.source_values?1.f:0.f};
-     f.ambient={lighting.ambient_multiplier[0],lighting.ambient_multiplier[1],lighting.ambient_multiplier[2],0};
+     f.ambient={lighting.ambient_multiplier[0],lighting.ambient_multiplier[1],lighting.ambient_multiplier[2],lighting.roofed?1.f:0.f};
      f.diffuse={lighting.diffuse_multiplier[0],lighting.diffuse_multiplier[1],lighting.diffuse_multiplier[2],0};
      f.fog_color={lighting.fog_color[0],lighting.fog_color[1],lighting.fog_color[2],lighting.fog_enabled?1.f:0.f};
      f.fog={lighting.fog_start,lighting.fog_end,lighting.lightmap_strength,lighting.sky_blend};

@@ -1,7 +1,7 @@
-IKV native Windows client and launcher — packaging notice
-==========================================================
+IKV native Windows client, launcher and server — packaging notice
+==================================================================
 
-tools/package_windows.py cross-builds the IKV client and launcher from this source tree in the pinned container
+tools/package_windows.py cross-builds the IKV client, launcher, ikv-auth and ikv-server from this source tree in the pinned container
 tools/windows/Dockerfile (Debian 13 snapshot 20261007T000000Z, MinGW-w64 GCC 14 posix/SEH/msvcrt). It produces the
 Setup.exe (NSIS) and the portable .zip. The package contains no original game data, installer, artwork or credentials:
 the launcher imports the original files only from the user's own installer or installation folder. The icon is generic
@@ -18,7 +18,15 @@ Bundled third-party components (licence texts in this directory, share\licenses\
                                          gcc-mingw-w64-x86-64-posix-runtime.copyright
   mingw-w64 12.0.0 winpthreads libwinpthread-1.dll (Debian mingw-w64 12.0.0-5)
                                          MIT/BSD-style, mingw-w64-common.copyright
-  Statically linked into ikv-client.exe / ikv-launcher.exe:
+  PostgreSQL 16.15, EnterpriseDB windows-x64 binaries 16.15-2, unmodified subset (bin\pgsql\: initdb, pg_ctl,
+    postgres, psql, pg_dump, their DLLs incl. libpq/OpenSSL 3/ICU/gettext/libxml2/lz4/zstd/zlib, lib\*.dll without the
+    Perl/Python/Tcl languages, share\), also bin\libpq.dll and its DLLs for ikv-auth/ikv-server
+                                         PostgreSQL Licence, postgresql\server_license.txt;
+                                         bundled libraries: postgresql\commandlinetools_3rd_party_licenses.txt
+  Microsoft Visual C++ 2015-2022 x64 runtime vcruntime140.dll / msvcp140.dll (app-local, unmodified, taken from
+    VC_redist.x64.exe, imported by the PostgreSQL binaries)   Microsoft distributable code, vcredist\LICENSE.rtf
+  OpenSSL 3.5.9 command-line tool (bin\openssl.exe, static; the launcher's local server certificates)  Apache-2.0, openssl\
+  Statically linked into ikv-client.exe / ikv-launcher.exe / ikv-auth.exe / ikv-server.exe:
     OpenSSL 3.5.9                        Apache-2.0, openssl\
     SDL 3.4.18                           zlib licence, SDL3\
     FreeType 2.14.3                      FreeType Licence (FTL), freetype\
@@ -41,6 +49,8 @@ Source locations
   GCC runtime, winpthreads: Debian source packages gcc-mingw-w64 27 and mingw-w64 12.0.0-5 from
                   https://snapshot.debian.org/archive/debian/20261007T000000Z/
   Statically linked components: the release tarballs named and pinned in tools/windows/Dockerfile.
+  PostgreSQL:     https://get.enterprisedb.com/postgresql/postgresql-16.15-2-windows-x64-binaries.zip (sha256 pinned);
+                  sources: https://ftp.postgresql.org/pub/source/v16.15/
 
 LGPL / GPL notes and source offer
   Qt is used unmodified and dynamically linked. To use a modified or different build of Qt (ABI-compatible MinGW

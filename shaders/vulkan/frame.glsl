@@ -36,6 +36,13 @@ layout(set=0,binding=0,std140) uniform Frame {
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
 // Applied once to display values on every present path (scene in post.frag, HUD in overlay.frag), fullscreen only.
 vec3 sourceGammaRamp(vec3 c){return frame.sourceTime.w>.5?min(pow(max(c,vec3(0)),vec3(1./1.2))*1.005,vec3(1)):c;}
+// NONCANONICAL wave 19: enhanced and RT physical light follows the server clock record (004b6970 multipliers_2 sun,
+// multipliers_1 ambient) relative to the noon record (config clock 8..18 h = the 0041c9a0 Eminönü zone-load constants),
+// linearised like the authored colours: night has no full-strength sun or sun shadows. Without source values: 1.
+vec3 enhancedSunScale(){return frame.sun.w>.5?pow(max(frame.diffuse.rgb*(255./vec3(126,105,110)),vec3(0)),vec3(2.2)):vec3(1);}
+vec3 enhancedAmbientScale(){return frame.sun.w>.5?pow(max(frame.ambient.rgb*(255./vec3(200,157,142)),vec3(0)),vec3(2.2)):vec3(1);}
+// frame.ambient.w: 1 in a roofed zone (SceneLighting::roofed): enhanced keeps the original baked light, no shadow-mapped sun.
+bool sceneRoofed(){return frame.ambient.w>.5;}
 // Independently expressed v_ocean.vsh EXPP fraction and authored polynomial.
 vec4 sourceOceanPosition(vec4 world) {
     float phase=fract((world.x/32+world.y/13+frame.sourceTime.y)*.15915494-.25);

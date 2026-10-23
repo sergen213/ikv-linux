@@ -47,6 +47,13 @@ public:
     Json bot_character(int level) const; // a fresh bot {name, class_id, appearance, state} with original class/sex/cosmetics
     Json bot_plan(int total) const; // spawn specs from gameplay.json bots.spawn; total < 0: the configured counts, else round-robin
 private:
+    struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
+    struct RouteSearch {
+        std::string zone; int32_t x = 0, y = 0, nx = 0, ny = 0;
+        int sx = 0, sy = 0, gx = 0, gy = 0, start = 0, goal = 0, best = 0, best_h = 0, popped = 0; bool found = false, over = false;
+        std::unordered_map<int, std::pair<int,int>> visited; // cell -> (cost, parent)
+        std::priority_queue<RoutePending> open;
+    };
     struct Actor {
         int64_t account_id = 0, character_id = 0;
         Json character, events = Json::array();
@@ -60,6 +67,7 @@ private:
         bool moving = false, looting = false; // looting: engaged target is a corpse to walk to and claim
         std::vector<std::pair<int32_t,int32_t>> route;
         size_t waypoint = 0;
+        RouteSearch search; // a player's NPC approach searched over several ticks (engage), empty zone when idle
         // See-through doorways (wave 16): the door walked through since the last state(); a portal destination's door and its
         // target in the linked zone; the linked zone copy shown through each open door in view (the crossing enters it).
         uint32_t crossed = 0; struct Beyond { uint32_t door = 0; int32_t x = 0, y = 0; } beyond;
@@ -147,13 +155,6 @@ private:
     std::vector<std::pair<int32_t,int32_t>> route(const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny, int limit = 1000, bool partial = false) const;
     // route() in resumable parts: begin (trivial answers: unreachable end, straight line, independent fixture zone), step (pop at
     // most `nodes` more cells), finish (cell path, smoothed; partial = toward the explored cell nearest the goal when not found).
-    struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
-    struct RouteSearch {
-        std::string zone; int32_t x = 0, y = 0, nx = 0, ny = 0;
-        int sx = 0, sy = 0, gx = 0, gy = 0, start = 0, goal = 0, best = 0, best_h = 0, popped = 0; bool found = false, over = false;
-        std::unordered_map<int, std::pair<int,int>> visited; // cell -> (cost, parent)
-        std::priority_queue<RoutePending> open;
-    };
     std::optional<std::vector<std::pair<int32_t,int32_t>>> route_begin(RouteSearch& r, const std::string& zone, int32_t x, int32_t y, int32_t nx, int32_t ny) const;
     void route_step(RouteSearch& r, int nodes) const;
     std::vector<std::pair<int32_t,int32_t>> route_finish(RouteSearch& r, bool partial, size_t cells = SIZE_MAX) const;

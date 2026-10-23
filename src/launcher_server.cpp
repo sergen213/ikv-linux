@@ -53,11 +53,16 @@
 #include <QVBoxLayout>
 #include <openssl/rand.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#else
 #include <pwd.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#endif
 #include <algorithm>
 #include <cerrno>
 #include <climits>
@@ -68,6 +73,26 @@
 #include <memory>
 #include <stdexcept>
 
+#ifdef _WIN32
+// NONCANONICAL wave 19 (Windows hosting): the few POSIX calls below map onto the CRT/Win32 API. flock is LockFileEx;
+// Windows byte-range locks are mandatory, so it locks one byte far past the content and the pid/text stays readable.
+// Private files stay binary (no CRLF translation) and uninherited by the server children.
+namespace {
+constexpr int LOCK_SH = 1, LOCK_EX = 2, LOCK_NB = 4, O_CLOEXEC = _O_NOINHERIT | _O_BINARY, O_NOFOLLOW = 0;
+int flock(int fd, int operation) {
+    OVERLAPPED at{}; at.Offset = 0x40000000;
+    if (LockFileEx(reinterpret_cast<HANDLE>(_get_osfhandle(fd)), (operation & LOCK_EX ? LOCKFILE_EXCLUSIVE_LOCK : 0) |
+                   (operation & LOCK_NB ? LOCKFILE_FAIL_IMMEDIATELY : 0), 0, 1, 0, &at)) return 0;
+    errno = GetLastError() == ERROR_LOCK_VIOLATION ? EWOULDBLOCK : EIO;
+    return -1;
+}
+int fsync(int fd) { return _commit(fd); }
+// The packaged static openssl.exe's compiled-in config path (/opt/w64/ssl) does not exist on Windows and every option
+// comes from argv: its children (via systemEnvironment()) read the empty NUL device instead.
+const bool opensslConfig = qEnvironmentVariableIsSet("OPENSSL_CONF") || qputenv("OPENSSL_CONF", "NUL");
+}
+#endif
+
 namespace ikv::launcher_server {
 namespace {
 // ---- Blocking helpers: run on worker threads in the launcher and inline in the supervisor ----
@@ -77,7 +102,9 @@ int runCode(const QString& program, const QStringList& args, QByteArray* output 
             const QProcessEnvironment& environment = QProcessEnvironment::systemEnvironment()) {
     QProcess process; process.setProgram(program); process.setArguments(args); process.setProcessEnvironment(environment);
     process.setProcessChannelMode(QProcess::MergedChannels);
+#ifndef _WIN32
     process.setChildProcessModifier([] { ::umask(077); });
+#endif
     process.start();
     if (!process.waitForStarted(10000)) throw hostIssue(QFileInfo(program).fileName() + " başlatılamadı");
     if (!input.isEmpty()) process.write(input);
@@ -100,12 +127,24 @@ QByteArray randomHex(int bytes) {
     if (RAND_bytes(reinterpret_cast<unsigned char*>(raw.data()), bytes) != 1) throw hostIssue("Rastgele sayı üretilemedi");
     const auto hex = raw.toHex(); raw.fill('\0'); return hex;
 }
+#ifdef _WIN32
+// NONCANONICAL wave 19: Windows has no owner/mode bits here; %LOCALAPPDATA% is per-user by ACL, so only links are refused.
+bool privateDirectoryOk(const QString& path) {
+    const QFileInfo info(path);
+    return info.isDir() && !info.isSymLink() && !info.isJunction();
+}
+#else
 bool privateDirectoryOk(const QString& path) {
     struct stat info {};
     return ::lstat(QFile::encodeName(path).constData(), &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == ::geteuid() && (info.st_mode & 07777) == 0700;
 }
+#endif
 void privateDirectory(const QString& path) {
+#ifdef _WIN32
+    QDir().mkdir(path);
+#else
     if (::mkdir(QFile::encodeName(path).constData(), 0700) != 0 && errno != EEXIST) throw hostIssue("Özel klasör oluşturulamadı: " + path);
+#endif
     if (!privateDirectoryOk(path))
         throw hostIssue("Sunucu klasörü bu kullanıcıya ait, mod 0700, sembolik bağ olmayan bir klasör olmalı: " + path);
 }
@@ -113,7 +152,7 @@ void writePrivate(const QString& path, const QByteArray& bytes) {
     const int fd = ::open(QFile::encodeName(path).constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) throw hostIssue("Özel dosya oluşturulamadı: " + path);
     for (qsizetype done = 0; done < bytes.size();) {
-        const auto written = ::write(fd, bytes.constData() + done, static_cast<std::size_t>(bytes.size() - done));
+        const auto written = ::write(fd, bytes.constData() + done, static_cast<unsigned>(bytes.size() - done)); // MinGW: unsigned count
         if (written < 0 && errno == EINTR) continue;
         if (written <= 0) { ::close(fd); throw hostIssue("Özel dosya yazılamadı: " + path); }
         done += written;
@@ -125,10 +164,23 @@ QByteArray quoted(const QString& value) { // libpq conninfo / postgresql.conf si
     auto bytes = value.toUtf8(); bytes.replace("\\", "\\\\").replace("'", "\\'"); return "'" + bytes + "'";
 }
 QString openssl() {
+#ifdef _WIN32
+    const auto found = QStandardPaths::findExecutable("openssl", {QCoreApplication::applicationDirPath()}); // packaged openssl.exe
+#else
     const auto found = QStandardPaths::findExecutable("openssl");
+#endif
     if (found.isEmpty()) throw hostIssue("openssl kurulu değil. Kurun: sudo pacman -S openssl · sudo apt install openssl");
     return found;
 }
+#ifdef _WIN32
+// NONCANONICAL wave 19: the Windows package carries EDB PostgreSQL 16 in pgsql/ beside the executables.
+QString pgBinDir() {
+    const QString dir = QCoreApplication::applicationDirPath() + "/pgsql/bin";
+    for (const char* tool : {"initdb.exe", "pg_ctl.exe", "psql.exe", "postgres.exe"})
+        if (!QFileInfo::exists(dir + "/" + tool)) throw hostIssue("Paketteki PostgreSQL araçları eksik (" + dir + "); IKV'yi yeniden kurun");
+    return dir;
+}
+#else
 // First directory holding initdb, pg_ctl and psql: PATH, then Debian's /usr/lib/postgresql/<newest>/bin.
 QString pgBinDir() {
     QStringList candidates;
@@ -142,6 +194,7 @@ QString pgBinDir() {
     throw hostIssue("PostgreSQL sunucu araçları (initdb, pg_ctl, psql) kurulu değil. Kurun: sudo pacman -S postgresql · "
                     "sudo apt install postgresql · sudo dnf install postgresql-server");
 }
+#endif
 // Mirrors deploy/prepare-secrets.py: SAN service certificate from the owned development CA (never production trust).
 void issueServiceCertificate(const QString& secrets, const QStringList& sans, bool newKey) {
     const QString csr = secrets + "/request.csr", extensions = secrets + "/certificate.cnf", next = secrets + "/tls-cert.new";
@@ -156,7 +209,11 @@ void issueServiceCertificate(const QString& secrets, const QStringList& sans, bo
                     "-set_serial", "0x" + QString::fromLatin1(randomHex(16)), "-days", "30", "-sha256", "-extfile", extensions, "-out", next});
     QFile::remove(csr); QFile::remove(extensions);
     if (!QFile::setPermissions(next, QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
+#ifdef _WIN32
+        !MoveFileExW(reinterpret_cast<LPCWSTR>(next.utf16()), reinterpret_cast<LPCWSTR>((secrets + "/tls-cert").utf16()), MOVEFILE_REPLACE_EXISTING))
+#else
         ::rename(QFile::encodeName(next).constData(), QFile::encodeName(secrets + "/tls-cert").constData()) != 0)
+#endif
         throw hostIssue("Hizmet sertifikası yerleştirilemedi");
 }
 void startPostgres(const QString& dir, const QString& bin) {
@@ -168,12 +225,19 @@ void stopPostgres(const QString& dir, const QString& bin) {
 }
 // New private cluster: no TCP listener, 0700 Unix socket, the OS user is superuser by peer only,
 // and the services use a least-privilege SCRAM role owning just database ikv (as deploy/init-database.sh).
+// NONCANONICAL wave 19, Windows: no peer auth or Unix sockets. Superuser postgres (password in secrets/pg-superuser)
+// and role ikv use SCRAM over 127.0.0.1 only, on a port the OS reports free at creation.
 void provisionHost(const QString& dir, const QStringList& sans, const QString& bin, const std::function<void(int)>& step) {
-    const QString secrets = dir + "/secrets", pg = dir + "/pg", socket = dir + "/sock";
+    const QString secrets = dir + "/secrets", pg = dir + "/pg";
     if (QFileInfo::exists(secrets) || QFileInfo::exists(pg))
         throw hostIssue("Yarım kalmış sunucu klasörü var; önce \"Sunucuyu sil\": " + dir);
+#ifdef _WIN32
+    for (const auto& path : {secrets, dir + "/backups"}) privateDirectory(path);
+#else
+    const QString socket = dir + "/sock";
     for (const auto& path : {secrets, socket, dir + "/backups"}) privateDirectory(path);
     if (QFile::encodeName(socket + "/.s.PGSQL.5432").size() > 100) throw hostIssue("PostgreSQL soket yolu çok uzun: " + socket);
+#endif
     step(2);
     run(openssl(), {"req", "-x509", "-newkey", "rsa:3072", "-noenc", "-sha256", "-days", "3650",
                     "-subj", "/CN=IKV LAUNCHER LOCAL CA - NOT PRODUCTION", "-addext", "basicConstraints=critical,CA:TRUE",
@@ -185,24 +249,45 @@ void provisionHost(const QString& dir, const QStringList& sans, const QString& b
     for (const auto& name : QDir(secrets).entryList(QDir::Files))
         QFile::setPermissions(secrets + "/" + name, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     step(3);
+#ifdef _WIN32
+    const QString user = "postgres";
+    auto superuser = randomHex(32);
+    writePrivate(secrets + "/pg-superuser", superuser);
+    run(bin + "/initdb", {"-D", pg, "--no-locale", "--encoding=UTF8", "--auth=scram-sha-256", "--username=" + user, "--pwfile=" + secrets + "/pg-superuser"});
+    QTcpServer probe; // ponytail: free at creation only; a later collision fails pg_ctl start with its log
+    if (!probe.listen(QHostAddress::LocalHost, 0)) throw hostIssue("PostgreSQL için boş port bulunamadı");
+    const QByteArray endpoint = "host=127.0.0.1 port=" + QByteArray::number(probe.serverPort());
+    probe.close();
+    const QByteArray access = "host all postgres 127.0.0.1/32 scram-sha-256\nhost ikv ikv 127.0.0.1/32 scram-sha-256\n";
+    const QByteArray settings = "\nlisten_addresses = '127.0.0.1'\nunix_socket_directories = ''\nport = " +
+        endpoint.mid(endpoint.indexOf("port=") + 5) + "\npassword_encryption = scram-sha-256\n";
+    auto environment = QProcessEnvironment::systemEnvironment();
+    environment.insert("PGPASSWORD", QString::fromLatin1(superuser)); // child environment only, never argv
+    superuser.fill('\0');
+#else
     const auto* account = ::getpwuid(::geteuid());
     if (!account) throw hostIssue("İşletim sistemi kullanıcısı bulunamadı");
     const QString user = QString::fromLocal8Bit(account->pw_name);
     run(bin + "/initdb", {"-D", pg, "--no-locale", "--encoding=UTF8", "--auth-local=peer", "--auth-host=reject", "--username=" + user});
+    const QByteArray endpoint = "host=" + quoted(socket) + " port=5432";
+    const QByteArray access = "local all \"" + user.toUtf8() + "\" peer\nlocal ikv ikv scram-sha-256\n";
+    const QByteArray settings = "\nlisten_addresses = ''\nunix_socket_directories = " + quoted(socket) +
+        "\nunix_socket_permissions = 0700\nport = 5432\npassword_encryption = scram-sha-256\n";
+    const auto environment = QProcessEnvironment::systemEnvironment();
+#endif
     QSaveFile hba(pg + "/pg_hba.conf");
     QFile conf(pg + "/postgresql.conf");
-    if (!hba.open(QIODevice::WriteOnly) || hba.write("local all \"" + user.toUtf8() + "\" peer\nlocal ikv ikv scram-sha-256\n") < 0 || !hba.commit() ||
-        !conf.open(QIODevice::Append) || conf.write("\nlisten_addresses = ''\nunix_socket_directories = " + quoted(socket) +
-            "\nunix_socket_permissions = 0700\nport = 5432\npassword_encryption = scram-sha-256\n") < 0 || !conf.flush())
+    if (!hba.open(QIODevice::WriteOnly) || hba.write(access) < 0 || !hba.commit() ||
+        !conf.open(QIODevice::Append) || conf.write(settings) < 0 || !conf.flush())
         throw hostIssue("PostgreSQL yapılandırması yazılamadı");
     conf.close();
     startPostgres(dir, bin);
     auto password = randomHex(32);
     run(bin + "/psql", {"--no-psqlrc", "--quiet", "--set", "ON_ERROR_STOP=1", "--file", "-", "--dbname",
-                        QString::fromUtf8("host=" + quoted(socket) + " port=5432 dbname=postgres user=" + quoted(user))},
+                        QString::fromUtf8(endpoint + " dbname=postgres user=" + quoted(user))},
         "CREATE ROLE ikv LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '" + password + "';\n"
-        "CREATE DATABASE ikv OWNER ikv;\n", password);
-    writePrivate(secrets + "/dsn", "host=" + quoted(socket) + " port=5432 dbname=ikv user=ikv password=" + password + " connect_timeout=5\n");
+        "CREATE DATABASE ikv OWNER ikv;\n", password, environment);
+    writePrivate(secrets + "/dsn", endpoint + " dbname=ikv user=ikv password=" + password + " connect_timeout=5\n");
     password.fill('\0');
 }
 QJsonObject readJson(const QString& path) {
@@ -222,7 +307,11 @@ QString hostResource(const QString& relative) {
         if (QFileInfo::exists(candidate)) return QFileInfo(candidate).canonicalFilePath();
     throw hostIssue("Sunucu kaynağı bulunamadı: " + relative);
 }
+#ifdef _WIN32
+QString binary(const char* name) { return QCoreApplication::applicationDirPath() + "/" + QString::fromLatin1(name) + ".exe"; }
+#else
 QString binary(const char* name) { return QCoreApplication::applicationDirPath() + "/" + QString::fromLatin1(name); }
+#endif
 QSslConfiguration pinnedTls(const QString& caPath) {
     QSslConfiguration tls = QSslConfiguration::defaultConfiguration();
     tls.setProtocol(QSsl::TlsV1_2OrLater); tls.setPeerVerifyMode(QSslSocket::VerifyPeer);
@@ -254,7 +343,8 @@ QJsonObject withAccessIdentity(QJsonObject config) {
         for (const auto& interface : QNetworkInterface::allInterfaces()) {
             const auto name = interface.name();
             if (!(interface.flags() & QNetworkInterface::IsUp) || (interface.flags() & QNetworkInterface::IsLoopBack) ||
-                name.startsWith("docker") || name.startsWith("br-") || name.startsWith("virbr") || name.startsWith("veth")) continue;
+                name.startsWith("docker") || name.startsWith("br-") || name.startsWith("virbr") || name.startsWith("veth") ||
+                interface.humanReadableName().startsWith("vEthernet")) continue; // Windows Hyper-V/WSL switches
             for (const auto& entry : interface.addressEntries()) {
                 if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol || entry.ip().isLoopback()) continue;
                 const auto ip = entry.ip().toString();
@@ -295,11 +385,32 @@ bool anyHolder(const QString& path) {
     ::close(fd);
     return held;
 }
-pid_t lockPid(const QString& path) {
-    QFile file(path);
+// Linux: SIGTERM to the pid in supervisor.lock. Windows (NONCANONICAL wave 19): no signals between unrelated processes;
+// the supervisor's 250 ms watch picks up DIR/stop.request.
+bool askSupervisorStop(const QString& dir) {
+#ifdef _WIN32
+    QFile request(dir + "/stop.request");
+    return request.open(QIODevice::WriteOnly);
+#else
+    QFile file(dir + "/supervisor.lock");
     const pid_t pid = file.open(QIODevice::ReadOnly) ? static_cast<pid_t>(file.read(32).trimmed().toInt()) : 0;
-    return pid > 1 ? pid : 0;
+    return pid > 1 && ::kill(pid, SIGTERM) == 0;
+#endif
 }
+#ifdef _WIN32
+// NONCANONICAL wave 19: replaces PR_SET_PDEATHSIG. Children join this kill-on-close job, so a killed supervisor
+// never leaves ikv-auth/ikv-server running.
+HANDLE childJob() {
+    static const HANDLE job = [] {
+        const HANDLE created = CreateJobObjectW(nullptr, nullptr);
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (created) SetInformationJobObject(created, JobObjectExtendedLimitInformation, &limits, sizeof limits);
+        return created;
+    }();
+    return job;
+}
+#endif
 QString since(qint64 seconds) {
     if (seconds < 0) return "—";
     return QString("%1 sa %2 dk %3 sn").arg(seconds / 3600).arg(seconds / 60 % 60).arg(seconds % 60);
@@ -308,7 +419,9 @@ QString countText(const QJsonValue& value) { return value.isDouble() ? QString::
 
 // ---- Supervisor: one detached process owns PostgreSQL, ikv-auth and ikv-server ----
 volatile std::sig_atomic_t stopRequested = 0;
-void requestStop(int) { stopRequested = 1; }
+#ifndef _WIN32
+void requestStop(int) { stopRequested = 1; } // Windows: DIR/stop.request (askSupervisorStop)
+#endif
 
 class Supervisor final : public QObject {
 public:
@@ -316,6 +429,9 @@ public:
         : dir_(std::move(dir)), assets_(std::move(assets)), admin_(std::move(admin)), password_(std::move(password)) {
         watch_.setInterval(250);
         connect(&watch_, &QTimer::timeout, this, [this] {
+#ifdef _WIN32
+            if (QFile::remove(dir_ + "/stop.request")) stopRequested = 1; // askSupervisorStop
+#endif
             if (stopRequested) { say("durdurma isteği alındı"); shutdown({}); return; }
             if (++ticks_ % 4) return;
             if (!readJson(dir_ + "/host.json").value("keep_alive").toBool() && !anyHolder(dir_ + "/launcher.lock")) {
@@ -340,6 +456,7 @@ public:
                     const auto names = certificate.subjectAlternativeNames();
                     for (auto it = names.cbegin(); it != names.cend(); ++it) current << (it.key() == QSsl::DnsEntry ? "DNS:" : "IP:") + it.value();
                 }
+            leaf.close(); // an open handle blocks the replacing rename on Windows
             if (QSet(current.begin(), current.end()) != QSet(wanted.begin(), wanted.end()) ||
                 runCode(openssl(), {"x509", "-checkend", "172800", "-noout", "-in", dir_ + "/secrets/tls-cert"}) != 0) {
                 say("hizmet sertifikası yenileniyor: " + wanted.join(','));
@@ -372,6 +489,16 @@ private:
         std::fprintf(stdout, "%s supervisor: %s\n", QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toUtf8().constData(), line.toUtf8().constData());
         std::fflush(stdout);
     }
+    // Linux: SIGTERM. Windows (NONCANONICAL wave 19): console children get no SIGTERM; closing their stdin
+    // (--stop-on-stdin-eof) is the graceful stop, so ikv-server still saves characters.
+    static void stopChild(QProcess* process, int milliseconds) {
+#ifdef _WIN32
+        process->closeWriteChannel();
+#else
+        process->terminate();
+#endif
+        if (!process->waitForFinished(milliseconds)) { process->kill(); process->waitForFinished(5000); }
+    }
     void phase(const QString& name, const QString& message = {}) {
         say("aşama " + name + (message.isEmpty() ? QString() : ": " + message));
         try {
@@ -382,12 +509,23 @@ private:
     }
     QProcess* spawn(const QString& name, const QStringList& args, const QString& pattern, int seconds,
                     std::function<void(const QRegularExpressionMatch&)> ready) {
-        auto* process = new QProcess(this); process->setProgram(binary(name.toLatin1().constData())); process->setArguments(args);
+        auto* process = new QProcess(this); process->setProgram(binary(name.toLatin1().constData()));
         auto environment = QProcessEnvironment::systemEnvironment(); // auth backups run the cluster's own pg_dump
-        environment.insert("PATH", bin_ + ":" + environment.value("PATH"));
+        environment.insert("PATH", bin_ + QDir::listSeparator() + environment.value("PATH"));
         process->setProcessEnvironment(environment);
         process->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef _WIN32
+        process->setArguments(QStringList(args) << "--stop-on-stdin-eof");
+        connect(process, &QProcess::started, this, [process] {
+            if (const HANDLE child = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, static_cast<DWORD>(process->processId()))) {
+                if (!childJob() || !AssignProcessToJobObject(childJob(), child)) say("uyarı: alt süreç iş nesnesine eklenemedi");
+                CloseHandle(child);
+            }
+        });
+#else
+        process->setArguments(args);
         process->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); }); // never orphaned by a killed supervisor
+#endif
         auto* timer = new QTimer(process); timer->setSingleShot(true);
         connect(timer, &QTimer::timeout, this, [this, name] { shutdown(name + " hazır olmadı (zaman aşımı); Kayıt sekmesine bakın"); });
         auto pending = std::make_shared<QByteArray>();
@@ -453,7 +591,7 @@ private:
         post("/v1/register", credentials, [this, credentials](int code, const QJsonObject& reply) {
             const auto next = [this] {
                 password_.fill('\0'); password_.clear();
-                if (auto* process = std::exchange(auth_, nullptr)) { process->terminate(); if (!process->waitForFinished(15000)) { process->kill(); process->waitForFinished(5000); } }
+                if (auto* process = std::exchange(auth_, nullptr)) stopChild(process, 15000);
                 startAuth(Auth::Bootstrap);
             };
             if (code >= 200 && code < 300) { next(); return; }
@@ -497,10 +635,7 @@ private:
         stopping_ = true; watch_.stop();
         phase("stopping", problem);
         for (QProcess** slot : {&world_, &auth_}) // world first: it persists characters through auth's database
-            if (auto* process = std::exchange(*slot, nullptr)) {
-                process->terminate();
-                if (!process->waitForFinished(20000)) { process->kill(); process->waitForFinished(5000); }
-            }
+            if (auto* process = std::exchange(*slot, nullptr)) stopChild(process, 20000);
         if (!bin_.isEmpty()) {
             try { stopPostgres(dir_, bin_); say("PostgreSQL durduruldu"); } catch (const std::exception& e) { say(failure(e)); }
         }
@@ -545,7 +680,7 @@ public:
         ::close(std::exchange(lockFd_, -1));
         // Closing the launcher stops a server it does not keep alive, unless another launcher still holds the lock.
         if (readJson(dir() + "/host.json").value("keep_alive").toBool() || !alive() || anyHolder(dir() + "/launcher.lock")) return;
-        if (const pid_t pid = lockPid(dir() + "/supervisor.lock")) ::kill(pid, SIGTERM);
+        askSupervisorStop(dir());
         for (int i = 0; i < 600 && alive(); ++i) QThread::msleep(100);
     }
 
@@ -632,12 +767,17 @@ private:
         createPage_ = named(new QWidget, "hostCreatePage"); pages_->addWidget(createPage_);
         auto* v = new QVBoxLayout(createPage_);
         auto* intro = new QLabel("Bu bilgisayarda kendi topluluk sunucunuzu kurar: yerel geliştirme CA'sı ve gizli anahtarlar, "
-                                 "yalnız Unix soketli özel PostgreSQL, ikv-auth ve ikv-server. Resmî sunucu kullanılmaz; varsayılan parola yoktur.");
+                                 "dışarıya kapalı özel PostgreSQL, ikv-auth ve ikv-server. Resmî sunucu kullanılmaz; varsayılan parola yoktur.");
         intro->setWordWrap(true); v->addWidget(intro);
         auto* f = new QFormLayout; v->addLayout(f);
         name_ = named(new QLineEdit("Yerel Sunucu"), "hostName"); f->addRow("İsim", name_);
+#ifdef _WIN32
+        const auto user = qEnvironmentVariable("USERNAME").toLower(); // account names are lowercase (store.cpp username())
+        adminUser_ = named(new QLineEdit(user.isEmpty() ? QString("yonetici") : user), "hostAdminUser");
+#else
         const auto* account = ::getpwuid(::geteuid());
         adminUser_ = named(new QLineEdit(account ? QString::fromLocal8Bit(account->pw_name) : QString("yonetici")), "hostAdminUser");
+#endif
         f->addRow("Yönetici hesabı", adminUser_);
         adminPassword_ = named(new QLineEdit, "hostAdminPassword"); adminPassword_->setEchoMode(QLineEdit::Password);
         adminPassword_->setPlaceholderText("en az 12 karakter; yalnız hesap servisine gönderilir");
@@ -1034,7 +1174,7 @@ private:
             mode_ = Mode::Busy; info("Yedek geri yükleniyor…");
             background([file] {
                 const QString bin = pgBinDir(), home = dir();
-                auto environment = QProcessEnvironment::systemEnvironment(); environment.insert("PATH", bin + ":" + environment.value("PATH"));
+                auto environment = QProcessEnvironment::systemEnvironment(); environment.insert("PATH", bin + QDir::listSeparator() + environment.value("PATH"));
                 startPostgres(home, bin);
                 try { run(binary("ikv-auth"), {"--dsn-file", home + "/secrets/dsn", "--restore-backup", file}, {}, {}, environment); }
                 catch (...) { stopPostgres(home, bin); throw; }
@@ -1166,9 +1306,8 @@ private:
         process->closeWriteChannel();
     }
     void stopServer() {
-        const pid_t pid = lockPid(dir() + "/supervisor.lock");
-        if (!alive() || !pid) throw hostIssue("Yerel sunucu çalışmıyor");
-        if (::kill(pid, SIGTERM) != 0) throw hostIssue("Sunucu gözetmenine durdurma sinyali gönderilemedi");
+        if (!alive()) throw hostIssue("Yerel sunucu çalışmıyor");
+        if (!askSupervisorStop(dir())) throw hostIssue("Sunucu gözetmenine durdurma isteği gönderilemedi");
         mode_ = Mode::Stopping; info("Sunucu durduruluyor (dünya kaydediyor)…"); refreshButtons();
     }
     void restartServer() {
@@ -1270,15 +1409,20 @@ private:
         if (config.value("bind").toString() != "127.0.0.1")
             for (const auto& san : config.value("sans").toVariant().toStringList())
                 if (san != "IP:127.0.0.1" && san != "DNS:localhost") lan << QString("https://%1:%2").arg(san.section(':', 1)).arg(authPort);
+#ifdef _WIN32
+        const QString firewall = "\nWindows Güvenlik Duvarı ilk başlatmada ikv-auth ve ikv-server için izin sorar: yalnız 'Özel ağlar'a izin verin (TCP %1 ve %2).";
+#else
         QFile ufw("/etc/ufw/ufw.conf"); // world-readable; its rules need root, so only the enabled flag is known
         const bool ufwOn = !lan.isEmpty() && ufw.open(QIODevice::ReadOnly) && ufw.read(4096).contains("\nENABLED=yes");
+        const QString firewall = ufwOn ? QString("\nufw etkin: izin verilmediyse diğer bilgisayarlar bağlanamaz; TCP %1 ve %2 portlarını açın: sudo ufw allow %1,%2/tcp")
+                                       : QString("\nGüvenlik duvarı açıksa TCP %1 ve %2 portlarına izin verin (ör. sudo ufw allow %1,%2/tcp · "
+                                                 "sudo firewall-cmd --add-port=%1/tcp --add-port=%2/tcp).");
+#endif
         addresses_->setText(!provisioned ? QString("—")
             : (lan.isEmpty() ? QString("yalnız bu bilgisayar: https://localhost:%1 (LAN kapalı)").arg(authPort)
                              : "LAN oyuncuları (sunucu profili adresi): " + lan.join(" · ") +
                                "\nDiğer bilgisayarda profilin CA dosyası olarak 'CA dosyasını kaydet' ile alınan dosyayı seçin." +
-                               (ufwOn ? QString("\nufw etkin: izin verilmediyse diğer bilgisayarlar bağlanamaz; TCP %1 ve %2 portlarını açın: sudo ufw allow %1,%2/tcp")
-                                      : QString("\nGüvenlik duvarı açıksa TCP %1 ve %2 portlarına izin verin (ör. sudo ufw allow %1,%2/tcp · "
-                                                "sudo firewall-cmd --add-port=%1/tcp --add-port=%2/tcp).")).arg(authPort).arg(worldPort)) +
+                               firewall.arg(authPort).arg(worldPort)) +
               (running ? QString("\ndünya portu %1 · yönetim 127.0.0.1:%2 (yalnız bu bilgisayar)").arg(worldPort).arg(state.value("admin_port").toInt()) : QString()));
         if (!running) {
             for (auto* label : {uptime_, players_, botCount_, zones_, tickLabel_, memory_, countdown_}) label->setText("—");
@@ -1372,14 +1516,18 @@ int supervisorMain(int argc, char** argv) {
     if (argc < 3) { std::fprintf(stderr, "kullanım: ikv-launcher --host-supervisor DIR --asset-root PATH [--bootstrap-admin NAME]\n"); return 2; }
     const QString dir = QFileInfo(QFile::decodeName(argv[2])).absoluteFilePath();
     QString assets, admin;
+    bool detached = false;
     for (int i = 3; i + 1 < argc; i += 2) {
         if (std::strcmp(argv[i], "--asset-root") == 0) assets = QFile::decodeName(argv[i + 1]);
         else if (std::strcmp(argv[i], "--bootstrap-admin") == 0) admin = QFile::decodeName(argv[i + 1]);
+#ifdef _WIN32
+        else if (std::strcmp(argv[i], "--daemon") == 0) detached = true; // internal: the detached half (below)
+#endif
         else { std::fprintf(stderr, "bilinmeyen seçenek: %s\n", argv[i]); return 2; }
     }
     if (assets.isEmpty() || !privateDirectoryOk(dir)) { std::fprintf(stderr, "Sunucu klasörü (0700) veya --asset-root geçersiz\n"); return 2; }
     QByteArray password;
-    if (!admin.isEmpty()) { // the creation password arrives on stdin, never argv or disk
+    if (!admin.isEmpty() && !detached) { // the creation password arrives on stdin, never argv or disk
         char buffer[1024];
         for (ssize_t got; password.size() < 1024 && (got = ::read(STDIN_FILENO, buffer, sizeof buffer)) != 0;) {
             if (got < 0) { if (errno == EINTR) continue; break; }
@@ -1389,6 +1537,29 @@ int supervisorMain(int argc, char** argv) {
         while (password.endsWith('\n') || password.endsWith('\r')) password.chop(1);
         if (password.isEmpty()) { std::fprintf(stderr, "Yönetici parolası stdin'den okunamadı\n"); return 2; }
     }
+#ifdef _WIN32
+    // NONCANONICAL wave 19: no fork/setsid on Windows. The launcher's child (this process) relaunches the executable
+    // detached with --daemon 1 and returns once the daemon holds supervisor.lock and wrote its pid to state.json. The
+    // creation password crosses in secrets/bootstrap-password (per-user %LOCALAPPDATA% ACL); the daemon reads and deletes it.
+    QCoreApplication app(argc, argv);
+    const QString handoff = dir + "/secrets/bootstrap-password";
+    if (!detached) {
+        if (lockHeld(dir + "/supervisor.lock")) { std::fprintf(stderr, "Sunucu zaten çalışıyor\n"); return 3; }
+        QFile::remove(handoff);
+        try { if (!password.isEmpty()) writePrivate(handoff, password); }
+        catch (const std::exception& e) { password.fill('\0'); std::fprintf(stderr, "%s\n", e.what()); return 1; }
+        password.fill('\0');
+        qint64 child = 0;
+        if (!QProcess::startDetached(QCoreApplication::applicationFilePath(), QCoreApplication::arguments().mid(1) << "--daemon" << "1",
+                                     QCoreApplication::applicationDirPath(), &child)) {
+            QFile::remove(handoff); std::fprintf(stderr, "gözetmen başlatılamadı\n"); return 1;
+        }
+        for (int i = 0; i < 300; ++i, QThread::msleep(100))
+            if (readJson(dir + "/state.json").value("pid").toInteger() == child) return 0;
+        std::fprintf(stderr, "gözetmen 30 sn içinde başlamadı; server.log dosyasına bakın\n");
+        return 1;
+    }
+#endif
     const int lock = ::open(QFile::encodeName(dir + "/supervisor.lock").constData(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (lock < 0) { std::fprintf(stderr, "supervisor.lock açılamadı\n"); return 1; }
     bool locked = false;
@@ -1396,6 +1567,19 @@ int supervisorMain(int argc, char** argv) {
     if (!locked) { std::fprintf(stderr, "Sunucu zaten çalışıyor\n"); return 3; }
     const QString log = dir + "/server.log";
     if (QFileInfo(log).size() > (4 << 20)) { QFile::remove(log + ".1"); QFile::rename(log, log + ".1"); }
+#ifdef _WIN32
+    if (!_wfreopen(reinterpret_cast<const wchar_t*>(log.utf16()), L"a", stdout) || !_wfreopen(reinterpret_cast<const wchar_t*>(log.utf16()), L"a", stderr)) return 1;
+    if (!admin.isEmpty()) {
+        QFile file(handoff);
+        if (file.open(QIODevice::ReadOnly)) password = file.read(1024);
+        file.close(); QFile::remove(handoff);
+        if (password.isEmpty()) { std::fprintf(stderr, "Yönetici parolası aktarılamadı\n"); return 2; }
+    }
+    const auto pid = QByteArray::number(QCoreApplication::applicationPid());
+    if (::ftruncate(lock, 0) != 0 || ::write(lock, pid.constData(), static_cast<unsigned>(pid.size())) != pid.size()) return 1;
+    QFile::remove(dir + "/stop.request");
+    try { saveJson(dir + "/state.json", {{"pid", QCoreApplication::applicationPid()}, {"phase", "starting"}}); } catch (...) { return 1; }
+#else
     const int output = ::open(QFile::encodeName(log).constData(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0600);
     const int null = ::open("/dev/null", O_RDWR | O_CLOEXEC);
     int ready[2];
@@ -1422,6 +1606,7 @@ int supervisorMain(int argc, char** argv) {
     if (::write(ready[1], &byte, 1) != 1) ::_exit(1);
     ::close(ready[1]);
     QCoreApplication app(argc, argv);
+#endif
     Supervisor supervisor(dir, assets, admin, std::move(password));
     QTimer::singleShot(0, &supervisor, [&supervisor] { supervisor.start(); });
     return app.exec();

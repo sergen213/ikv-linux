@@ -1,4 +1,4 @@
-; NONCANONICAL wave 17: IKV Windows installer (per-user, no administrator rights). Built by tools/package_windows.py:
+; NONCANONICAL wave 17 (server/hosting since wave 19): IKV Windows installer (per-user, no administrator rights). Built by tools/package_windows.py:
 ;   makensis -INPUTCHARSET UTF8 -DVERSION=X.Y.Z -DSTAGE=<install tree> -DUNINSTALL_LIST=<uninstall.nsh> -DOUTFILE=<Setup.exe> ikv.nsi
 ; UNINSTALL_LIST (generated from the staged tree) deletes only the files this package installed and then only the
 ; directories left empty: the install folder may be user-chosen and contain unrelated files.
@@ -18,7 +18,7 @@ VIProductVersion "${VERSION}.0"
 VIAddVersionKey /LANG=0 "ProductName" "${APP}"
 VIAddVersionKey /LANG=0 "ProductVersion" "${VERSION}"
 VIAddVersionKey /LANG=0 "FileVersion" "${VERSION}"
-VIAddVersionKey /LANG=0 "FileDescription" "${APP} native client and launcher setup"
+VIAddVersionKey /LANG=0 "FileDescription" "${APP} native client, launcher and server setup"
 VIAddVersionKey /LANG=0 "LegalCopyright" "IKV community port; original game data is not included"
 
 !define MUI_ICON "${__FILEDIR__}/ikv.ico"
@@ -34,8 +34,8 @@ VIAddVersionKey /LANG=0 "LegalCopyright" "IKV community port; original game data
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "Turkish"
 !insertmacro MUI_LANGUAGE "English"
-LangString prereq ${LANG_TURKISH} "Kurulum tamamlandı.$\r$\n$\r$\nGereksinimler: 64-bit Windows 10/11 ve Vulkan 1.2 ile OpenGL 3.3 destekleyen güncel bir ekran kartı sürücüsü (vulkan-1.dll sürücüyle gelir). Oyun verisi için orijinal kurulum dosyanız (istanbulkur6_0.exe) gerekir; başlatıcı onu içe aktarır. Sunucu barındırma yalnızca Linux'ta; Windows başlatıcısı bir sunucuya (ör. yerel ağdaki bir PC) bağlanır."
-LangString prereq ${LANG_ENGLISH} "Setup finished.$\r$\n$\r$\nRequirements: 64-bit Windows 10/11 and a current graphics driver with Vulkan 1.2 and OpenGL 3.3 (vulkan-1.dll comes with the driver). Game data comes from your own original installer (istanbulkur6_0.exe), imported by the launcher. Hosting a server is Linux-only; the Windows launcher joins a server (e.g. a PC on your LAN)."
+LangString prereq ${LANG_TURKISH} "Kurulum tamamlandı.$\r$\n$\r$\nGereksinimler: 64-bit Windows 10/11 ve Vulkan 1.2 ile OpenGL 3.3 destekleyen güncel bir ekran kartı sürücüsü (vulkan-1.dll sürücüyle gelir). Oyun verisi için orijinal kurulum dosyanız (istanbulkur6_0.exe) gerekir; başlatıcı onu içe aktarır. Başlatıcının Sunucu Kur bölümü bu bilgisayarda özel bir sunucu kurar (PostgreSQL 16 dahil); LAN modunda Windows Güvenlik Duvarı izin sorar."
+LangString prereq ${LANG_ENGLISH} "Setup finished.$\r$\n$\r$\nRequirements: 64-bit Windows 10/11 and a current graphics driver with Vulkan 1.2 and OpenGL 3.3 (vulkan-1.dll comes with the driver). Game data comes from your own original installer (istanbulkur6_0.exe), imported by the launcher. The launcher's Sunucu Kur hosts a private server on this PC (PostgreSQL 16 included); in LAN mode Windows Firewall asks for permission."
 
 Section
     SetOutPath "$INSTDIR"

@@ -32,7 +32,7 @@ struct HelpParagraph { std::string text; std::uint32_t color=0xffffffff; };
 struct HelpPage { std::string book,header; std::vector<HelpParagraph> paragraphs; };
 // fog_record: original fog start/end distances (game-state record +0xec/+0xf0) before the Görüş Mesafesi scale;
 // fog_start/fog_end/fog_far are the applied values (set_scene_fog).
-struct SceneLighting { bool source_values=false; std::array<float,3> sun_direction{},ambient_multiplier{},diffuse_multiplier{},sky_b{},sky_c{}; bool fog_enabled=false; std::array<float,3> fog_color{}; std::array<float,2> fog_record{}; float fog_start=0,fog_end=0,fog_far=0,source_minute=749,lightmap_strength=0,sky_blend=0,sky_rotation=0,source_hour=-1,glow=0; unsigned source_zone=0; }; // source_hour: server clock (original thgf), -1 until received; glow: record HDR glow byte/255 (c308)
+struct SceneLighting { bool source_values=false; std::array<float,3> sun_direction{},ambient_multiplier{},diffuse_multiplier{},sky_b{},sky_c{}; bool fog_enabled=false; std::array<float,3> fog_color{}; std::array<float,2> fog_record{}; float fog_start=0,fog_end=0,fog_far=0,source_minute=749,lightmap_strength=0,sky_blend=0,sky_rotation=0,source_hour=-1,glow=0; unsigned source_zone=0; bool roofed=false; }; // source_hour: server clock (original thgf), -1 until received; glow: record HDR glow byte/255 (c308)
 struct SourceSurfaceCorner { std::uint32_t mesh=0,vertex=0,next=UINT32_MAX; };
 struct SourceSurface {
  std::vector<std::uint32_t> heads,indices,unweighted_corners;
@@ -44,7 +44,8 @@ struct SourceSurface {
 enum class SourceScalarUse : std::uint8_t { ReplacedNormal,NoColorNormal,DegenerateNormal,InactiveLightmapUv,UnorderedBounds,InactiveSkinNormal,ZeroWeightPosition,UnreferencedNormal };
 struct SourceScalarWord { std::uint32_t resource=0,chunk=0,offset=0,bits=0; SourceScalarUse use=SourceScalarUse::ReplacedNormal; };
 // roofed (NONCANONICAL wave 17): drawn geometry covers the zone's walkable cells from above (an interior); such zones take
-// the server's interior record (clock.interior) instead of the day/night cycle.
+// the server's interior record (clock.interior) instead of the day/night cycle, and enhanced/physical lighting draws them
+// with the original baked light and no shadow-mapped sun (SceneLighting::roofed, wave 19).
 struct SourceSceneDescriptor { unsigned registry_id=0,support_id=0; std::string key,label,environment_key; float minute=749; std::string lightmap; std::vector<std::string> members; bool roofed=false; };
 struct SourceEquipment { unsigned slot=0,uid=0; bool operator==(const SourceEquipment&) const = default; };
 struct SourceAppearance { unsigned source_class=3,face=0,hair=0,hair_color=0,beard=0,beard_color=0; std::vector<SourceEquipment> equipment; bool operator==(const SourceAppearance&) const = default; };
