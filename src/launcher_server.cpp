@@ -1,4 +1,5 @@
 #include "ikv/launcher_server.hpp"
+#include "ikv/release_defaults.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -505,7 +506,7 @@ private:
         try {
             saveJson(dir_ + "/state.json", {{"pid", static_cast<qint64>(::getpid())}, {"phase", name}, {"message", message},
                 {"host", config_.value("host")}, {"bind", config_.value("bind")}, {"auth_port", authPort_}, {"admin_port", adminPort_},
-                {"world_port", worldPort_}, {"started_at", started_}});
+                {"world_port", worldPort_}, {"started_at", started_}, {"version", ikv::release::version}});
         } catch (const std::exception& e) { say(failure(e)); }
     }
     QProcess* spawn(const QString& name, const QStringList& args, const QString& pattern, int seconds,
@@ -980,7 +981,8 @@ private:
             {"self_ban", "Etkin yönetici hesabı yasaklanamaz."}, {"command_pending", "Bekleyen bir yeniden başlatma/kapatma komutu var; önce iptal edin."},
             {"command_queue_full", "Dünya 64 bekleyen komutu işlemedi; dünya sunucusu çalışıyor mu?"},
             {"account_not_found", "Hesap bulunamadı."}, {"rate_limited", "Çok fazla deneme; biraz bekleyin."},
-            {"conflict", "Bu kullanıcı adı zaten kullanılıyor."}};
+            {"conflict", "Bu kullanıcı adı zaten kullanılıyor."},
+            {"not_found", "Çalışan sunucu bu işlemi tanımıyor; sunucu eski bir sürümle çalışıyor olabilir: Durdur, sonra Başlat."}};
         return known.value(code, message);
     }
     void call(const QByteArray& method, const QString& path, const QJsonObject& body, std::function<void(const QJsonObject&)> done,
@@ -1420,8 +1422,15 @@ private:
         title_->setText("<h2>" + (admin && !creating_ ? "Sunucu Yönetimi — " + config.value("name").toString("Yerel Sunucu").toHtmlEscaped() : QString("Sunucu Kur")) + "</h2>");
         setWindowTitle(admin && !creating_ ? "Sunucu Yönetimi" : "Sunucu Kur");
         const QString phaseText = phase == "database" ? "veritabanı" : phase == "auth" || phase == "bootstrap" ? "hesap servisi" : phase == "register" ? "yönetici kaydı" : phase == "world" ? "dünya yükleniyor" : phase;
+        // A supervisor started by an older launcher (state.json without or with another version, e.g. autostart just
+        // before a self-update) keeps that release's ikv-auth/ikv-server and web panel until a full stop and start.
+        const auto serverVersion = state.value("version").toString();
+        const QString stale = running && serverVersion != QLatin1String(ikv::release::version)
+            ? QString(" — DİKKAT: sunucu %1 ile çalışıyor (başlatıcı v%2); yeni özellikler için Durdur, sonra Başlat")
+                  .arg(serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion, QString::fromLatin1(ikv::release::version))
+            : QString();
         status_->setText(running ? QString("Çalışıyor — hesap %1:%2, yönetim 127.0.0.1:%3, dünya %1:%4")
-                                       .arg(state.value("host").toString()).arg(state.value("auth_port").toInt()).arg(state.value("admin_port").toInt()).arg(state.value("world_port").toInt())
+                                       .arg(state.value("host").toString()).arg(state.value("auth_port").toInt()).arg(state.value("admin_port").toInt()).arg(state.value("world_port").toInt()) + stale
                          : up ? (phase == "stopping" ? QString("Durduruluyor…") : "Başlatılıyor (" + phaseText + ")…")
                          : mode_ == Mode::Launching || mode_ == Mode::Busy ? QString("Hazırlanıyor…")
                          : phase == "failed" ? "Durduruldu (hata: " + state.value("message").toString() + ")"
