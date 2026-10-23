@@ -431,14 +431,18 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         Impl::Connection connection(*impl_);auto result=sql(connection,"SELECT instance,status::text FROM world_instances WHERE updated_at>now()-interval '5 seconds' ORDER BY updated_at DESC LIMIT 1");
         Json world=Json::object();if(PQntuples(result.get())){auto state=Json::parse(cell(result,0,1));world["instance"]=cell(result,0,0);if(state.contains("players"))world["player_count"]=state["players"];else if(state.contains("player_count"))world["player_count"]=state["player_count"];if(state.contains("tick"))world["tick"]=state["tick"];if(state.contains("world_port"))world["world_port"]=state["world_port"];}return {{"online",PQntuples(result.get())>0},{"world",world}};
     }
+    // Shared by /v1/register and POST /v1/admin/accounts; the KDF runs before a pooled connection is taken. actor 0 = the new account itself.
+    auto create_account=[this](const std::string& user,std::string& password,bool admin,std::string_view action,std::int64_t actor,const Json& details){
+        auto salt=random_hex(16);auto hash=password_hash(password,salt);OPENSSL_cleanse(password.data(),password.size());
+        Impl::Connection connection(*impl_);Transaction transaction(connection);auto result=sql(connection,"INSERT INTO accounts(username,password_salt,password_hash,admin) VALUES($1,$2,$3,$4::boolean) RETURNING id",{user,salt,hash,admin?"true":"false"});auto id=integer(result,0,0);audit(connection,action,actor?actor:id,id,details);transaction.commit();return Json{{"account_id",id}};
+    };
     if(method=="POST"&&(path=="/v1/register"||path=="/v1/login"||path=="/v1/reset")){
         impl_->rate("peer:"+std::string(peer),60,peer.starts_with("admin:"));auto user=username(body);
         const auto credential_limit="credentials:"+std::string(path)+":"+std::string(peer)+":"+user;
         if(path=="/v1/register"){
             if(body.contains("admin")||body.contains("role"))throw ApiError(400,"invalid_request","Kayıt sırasında yetki verilemez.");
             auto password=text(body,"password",12,256);impl_->rate(credential_limit,12,peer.starts_with("admin:"));
-            auto salt=random_hex(16);auto hash=password_hash(password,salt);OPENSSL_cleanse(password.data(),password.size());
-            Impl::Connection connection(*impl_);Transaction transaction(connection);auto result=sql(connection,"INSERT INTO accounts(username,password_salt,password_hash) VALUES($1,$2,$3) RETURNING id",{user,salt,hash});auto id=integer(result,0,0);audit(connection,"account.register",id,id);transaction.commit();return {{"account_id",id}};
+            return create_account(user,password,false,"account.register",0,Json::object());
         }
         if(path=="/v1/login"){
             auto password=text(body,"password",1,256);impl_->rate(credential_limit,12,peer.starts_with("admin:"));
@@ -496,6 +500,11 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
     }
     if(!path.starts_with("/v1/admin/"))throw ApiError(404,"not_found","Böyle bir adres yok.");
     if(!who.admin)throw ApiError(403,"forbidden","Administrator role required");
+    if(method=="POST"&&path=="/v1/admin/accounts"){
+        auto user=username(body);if(body.contains("role")||(body.contains("admin")&&!body["admin"].is_boolean()))throw ApiError(400,"invalid_request","Yetki yalnızca 'admin' doğru/yanlış alanıyla verilebilir.");
+        auto password=text(body,"password",12,256);const bool admin=body.value("admin",false);
+        return create_account(user,password,admin,"account.create",who.account_id,{{"admin",admin}});
+    }
     if(method=="GET"&&path=="/v1/admin/status"){
         Impl::Connection connection(*impl_);auto counts=sql(connection,"SELECT (SELECT count(*) FROM accounts),(SELECT count(*) FROM characters WHERE deleted_at IS NULL),(SELECT count(*) FROM sessions WHERE expires_at>now() AND revoked_at IS NULL)");
         Json worlds=Json::array();auto rows=sql(connection,"SELECT instance,status::text,to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),updated_at>now()-interval '5 seconds' FROM world_instances ORDER BY instance");

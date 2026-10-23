@@ -78,7 +78,8 @@
     selectedCharacter = '';
     accountLoaded = false;
     characterLoaded = false;
-    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message'].forEach((id) => { element(id).value = ''; });
+    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat'].forEach((id) => { element(id).value = ''; });
+    element('create-admin').checked = false;
     tables.forEach((id) => element(id).replaceChildren());
     ['move-zone', 'bot-zone'].forEach((id) => element(id).replaceChildren());
     ['m-online', 'm-bots', 'm-tick', 'm-uptime', 'm-memory', 'm-accounts', 'm-characters', 'm-sessions'].forEach((id) => { element(id).textContent = '—'; });
@@ -597,6 +598,24 @@
         if (typeof result.token !== 'string' || !result.token) throw new Error('Sunucu sıfırlama tokenı döndürmedi; yeniden üretmeden önce durumu kontrol edin.');
         await afterMutation(`Hesap ${id} için sıfırlama tokenı üretildi. Güvenli bir kanaldan elle teslim edin.\nTOKEN: ${result.token}\nSon kullanım: ${date(result.expires_at)}\nSonraki işlemde bu token ekrandan silinir.`, true);
       } else await afterMutation(`Hesap ${id}: ${{ ban: 'yasak uygulandı', unban: 'yasak kaldırıldı', plus: 'Plus Paket verildi', unplus: 'Plus Paket kaldırıldı', kasa: 'Kasa Erişimi verildi', unkasa: 'Kasa Erişimi kaldırıldı' }[action]}.`);
+    });
+  });
+
+  element('account-create').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const username = element('create-username').value.trim();
+    const password = element('create-password').value;
+    const repeat = element('create-repeat').value;
+    const admin = element('create-admin').checked;
+    void perform(async () => {
+      if (password !== repeat) throw new Error('Şifreler aynı değil.');
+      if (password.length < 12) throw new Error('Şifre en az 12 karakter olmalıdır.');
+      if (admin && !window.confirm(`${username} yönetici yetkisiyle oluşturulsun mu?`)) { notice('İşlem iptal edildi.'); return; }
+      const result = await request('/v1/admin/accounts', 'POST', { username, password, admin });
+      ['create-username', 'create-password', 'create-repeat'].forEach((id) => { element(id).value = ''; });
+      element('create-admin').checked = false;
+      accountLoaded = true;
+      await afterMutation(`Hesap oluşturuldu: ${username} (ID ${text(result.account_id)})${admin ? ' · yönetici' : ''}.`);
     });
   });
 

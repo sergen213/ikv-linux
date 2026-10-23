@@ -80,12 +80,17 @@ class VulkanRenderer final:public Renderer {
  // glow_sets_: [0]/[1] half_intensity from hdr_[0]/hdr_[1] with bb38, [2] reads bb3c, [3] reads bb38.
  VkRenderPass glow_pass_=VK_NULL_HANDLE;VkFramebuffer glow_fb_[2]{};VkPipeline glow_pipeline_=VK_NULL_HANDLE,glow_composite_pipeline_=VK_NULL_HANDLE;VkDescriptorSet glow_sets_[4]{};
  Image hdr_[2],raw_hdr_,guide_[2],depth_,shadow_,output_,overlay_,white_,flat_normal_,glow_chain_[2];
+// NONCANONICAL enhanced water (lighting.glsl waterSurface): the scene colour/depth copied before the source ocean draws
+// (copy_water, bindings 12/13), and water_pass_ continuing the scene pass with writable depth. water_ready_: in a sampled
+// layout (portal-view water reads them before any copy).
+Image water_color_,water_depth_;VkRenderPass water_pass_=VK_NULL_HANDLE;bool water_ready_=false;
+static constexpr std::uint32_t scene_images=14; // combined image samplers per frame/material descriptor set
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
  // 2 motion (RG16F previousUV-UV, FSR or RT denoise), 3/4 RT illumination/reflection history, 5 FSR reactive (R8).
  std::vector<VkFormat> scene_colors_,after_colors_,temporal_colors_{VK_FORMAT_R16G16B16A16_SFLOAT};
  const std::vector<VkFormat>& colors_of(VkRenderPass pass)const {
      static const std::vector<VkFormat> single{VK_FORMAT_R16G16B16A16_SFLOAT};
-     return pass==scene_pass_?scene_colors_:pass==after_pass_?after_colors_:pass==temporal_pass_?temporal_colors_:single;
+    return pass==scene_pass_||pass==water_pass_?scene_colors_:pass==after_pass_?after_colors_:pass==temporal_pass_?temporal_colors_:single;
  }
  static std::uint32_t attachments(const std::vector<VkFormat>& colors){return static_cast<std::uint32_t>(std::count_if(colors.begin(),colors.end(),[](VkFormat f){return f!=VK_FORMAT_UNDEFINED;}));}
  // FSR 3.1.4: motion_/reactive_ render-resolution inputs, fsr_output_ the upscaled colour post.frag samples.
@@ -105,7 +110,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  // every set (uniform_offset_ while recording).
  static constexpr unsigned max_portals=2,view_slots=1+max_portals;
  Buffer uniform_;std::uint32_t uniform_stride_=0,uniform_offset_=0;
- struct ViewsLess {bool operator()(const std::array<VkImageView,5>& a,const std::array<VkImageView,5>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
+ struct ViewsLess {bool operator()(const std::array<VkImageView,6>& a,const std::array<VkImageView,6>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
  struct ContourItem {std::uint32_t mesh,material;Matrix4 model;std::array<float,3> color;};
  std::vector<ContourItem> contours_;
  // NONCANONICAL wave-16 resident scene set: everything one Scene uploads, its RT scene and its temporal history, keyed
@@ -114,7 +119,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      const Scene* scene=nullptr;
      std::vector<Image> textures;std::unordered_map<std::string,std::size_t> texture_lookup;std::vector<Geometry> geometry;
      std::vector<VkDescriptorSet> material_sets;
-     std::map<std::array<VkImageView,5>,VkDescriptorSet,ViewsLess> material_cache;std::vector<VkDescriptorPool> material_pools; // see material_set()
+     std::map<std::array<VkImageView,6>,VkDescriptorSet,ViewsLess> material_cache;std::vector<VkDescriptorPool> material_pools; // see material_set()
      std::vector<std::uint8_t> material_usage;
      std::vector<Matrix4> history_instance_models;
      std::unique_ptr<VulkanRtScene> rt;VkDescriptorPool rt_pool=VK_NULL_HANDLE;VkDescriptorSet rt_set=VK_NULL_HANDLE;
@@ -855,8 +860,8 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
  }
 // colors: one format per fragment output location, VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED; attachments are the defined
 // colours in location order, then depth. load: continue a finished scene target (colour SHADER_READ_ONLY, read-only
-// depth) for the AfterHDR particle pass.
-VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bool depth,bool load=false) {
+// depth) for the AfterHDR particle pass; depth_write: the continued depth stays writable (water_pass_).
+VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bool depth,bool load=false,bool depth_write=false) {
      std::array<VkAttachmentDescription,9> attachments{};
      std::array<VkAttachmentReference,8> refs{};
      VkAttachmentReference depth_ref{};
@@ -876,7 +881,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          a.loadOp=load?VK_ATTACHMENT_LOAD_OP_LOAD:VK_ATTACHMENT_LOAD_OP_CLEAR;a.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
          a.stencilLoadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE;a.stencilStoreOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;
          a.initialLayout=load?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_UNDEFINED;a.finalLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-         depth_ref={count++,load?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+         depth_ref={count++,load&&!depth_write?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
      }
      VkSubpassDescription subpass{};subpass.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;
      subpass.colorAttachmentCount=static_cast<std::uint32_t>(colors.size());subpass.pColorAttachments=colors.empty()?nullptr:refs.data();
@@ -1110,9 +1115,10 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      if(depth_features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
      sampler.compareEnable=VK_TRUE;sampler.compareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
      checked(vkCreateSampler(device_,&sampler,nullptr,&shadow_compare_),"shadow compare sampler");
-     std::array<VkDescriptorSetLayoutBinding,12> bindings{};
+     // Image bindings 1..14 (write_set): 10/11 temporal guides (white without denoise), 12/13 the water copy, 14 parallax height.
+     std::array<VkDescriptorSetLayoutBinding,scene_images+1> bindings{};
      bindings[0]={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
-     const std::uint32_t binding_count=denoise_enabled_?12:10;
+     const std::uint32_t binding_count=scene_images+1;
      for(std::uint32_t i=1;i<binding_count;++i)bindings[i]={i,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
      VkDescriptorSetLayoutCreateInfo lc{};lc.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
      lc.bindingCount=binding_count;lc.pBindings=bindings.data();
@@ -1179,8 +1185,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      if(post_fb_)vkDestroyFramebuffer(device_,post_fb_,nullptr);
      post_fb_=VK_NULL_HANDLE;
      for(auto& f:hud_fb_){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
-     for(auto* p:{&scene_pass_,&shadow_pass_,&post_pass_,&temporal_pass_,&after_pass_,&glow_pass_,&hud_pass_}){if(*p)vkDestroyRenderPass(device_,*p,nullptr);*p=VK_NULL_HANDLE;}
-     destroy(hdr_[0]);destroy(hdr_[1]);destroy(raw_hdr_);destroy(guide_[0]);destroy(guide_[1]);destroy(depth_);destroy(shadow_);destroy(output_);destroy(glow_chain_[0]);destroy(glow_chain_[1]);
+     for(auto* p:{&scene_pass_,&water_pass_,&shadow_pass_,&post_pass_,&temporal_pass_,&after_pass_,&glow_pass_,&hud_pass_}){if(*p)vkDestroyRenderPass(device_,*p,nullptr);*p=VK_NULL_HANDLE;}
+     destroy(hdr_[0]);destroy(hdr_[1]);destroy(raw_hdr_);destroy(guide_[0]);destroy(guide_[1]);destroy(depth_);destroy(water_color_);destroy(water_depth_);destroy(shadow_);destroy(output_);destroy(glow_chain_[0]);destroy(glow_chain_[1]);
     for(auto* i:{&generated_[0],&generated_[1],&real_[0],&real_[1]})destroy(*i);
     generating_=false;
     fsr_.reset();destroy(motion_);destroy(reactive_);destroy(fsr_output_);
@@ -1300,7 +1306,10 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          reactive_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R8_UNORM,VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
          fsr_output_=image(extent_.width,extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_STORAGE_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      }
-     depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
+     depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
+     water_color_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+     water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
+     water_ready_=false;
      shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // primary | portal view
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1310,6 +1319,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          real_[i]=image(extent_.width,extent_.height,swap_format_,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
      }
      scene_pass_=render_pass(scene_colors_,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,true);
+     water_pass_=render_pass(scene_colors_,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,true,true,true);
      shadow_pass_=render_pass({},VK_IMAGE_LAYOUT_UNDEFINED,true);
      const VkFormat post_colors[]{swap_format_};
      post_pass_=render_pass(post_colors,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,false);
@@ -1387,14 +1397,14 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
  const Image& texture(const SceneSet& set,const std::string& name,const Image& fallback)const{if(name.empty())return fallback;auto found=set.texture_lookup.find(name);if(found==set.texture_lookup.end())throw std::runtime_error("scene references missing decoded texture: "+name);return set.textures[found->second];}
 VkDescriptorSet allocate_set(VkDescriptorSetLayout layout,VkDescriptorPool pool=VK_NULL_HANDLE){VkDescriptorSetAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;a.descriptorPool=pool?pool:descriptor_pool_;a.descriptorSetCount=1;a.pSetLayouts=&layout;VkDescriptorSet result;checked(vkAllocateDescriptorSets(device_,&a,&result),"allocate descriptor set");return result;}
 // temporal: input_diffuse/input_reflection replace the previous history at 6/8 (a-trous iterations read the last pass).
-// bound: a material's five scene maps (material_maps); null for frame-target sets.
-void write_set(VkDescriptorSet set,const std::array<const Image*,5>* bound,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
+// bound: a material's six scene maps (material_maps); null for frame-target sets.
+void write_set(VkDescriptorSet set,const std::array<const Image*,6>* bound,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
                const Image* input_diffuse=nullptr,const Image* input_reflection=nullptr) {
      VkDescriptorBufferInfo buffer_info{uniform_.handle,0,sizeof(Frame)};
-     std::array<VkDescriptorImageInfo,11> images{};
-     const Image* maps[11]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_};
+     std::array<VkDescriptorImageInfo,scene_images> images{};
+     const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_};
      if(post)maps[0]=&hdr_[history];
-     else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];}
+     else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];maps[13]=(*bound)[5];}
     if(diffuse)maps[0]=diffuse;
     if(second)maps[1]=second;
     // temporal.frag bindings: 1 raw, 2/3 current diffuse/reflection, 4 motion, 6/8 previous diffuse/reflection history,
@@ -1402,13 +1412,13 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,5>* bound,unsig
     if(temporal){maps[0]=&raw_hdr_;maps[1]=&rt_diffuse_;maps[2]=&rt_reflection_;maps[3]=&motion_;maps[5]=&diffuse_history_[1-history];
         maps[7]=&reflection_history_[1-history];maps[9]=&guide_[history];maps[10]=&guide_[1-history];
         if(input_diffuse){maps[5]=input_diffuse;maps[7]=input_reflection;}}
-     const unsigned image_count=denoise_enabled_?11:9;
-     std::array<VkWriteDescriptorSet,12> writes{};
+     const unsigned image_count=scene_images;
+     std::array<VkWriteDescriptorSet,scene_images+1> writes{};
      writes[0].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[0].dstSet=set;writes[0].dstBinding=0;
      writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
      writes[0].pBufferInfo=&buffer_info;
      for(unsigned i=0;i<image_count;++i) {
-         images[i]={i==4?shadow_compare_:i==6||i>=9?shadow_sampler_:i==5||i==7||(post&&i<2)?linear_clamp_:sampler_,
+         images[i]={i==4?shadow_compare_:i==6||i==9||i==10||i==12?shadow_sampler_:i==5||i==7||i==11||(post&&i<2)?linear_clamp_:sampler_,
              maps[i]->view,i==4||i==6?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
          writes[i+1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i+1].dstSet=set;writes[i+1].dstBinding=i+1;
          writes[i+1].descriptorCount=1;writes[i+1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1416,16 +1426,18 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,5>* bound,unsig
      }
      vkUpdateDescriptorSets(device_,image_count+1,writes.data(),0,nullptr);
  }
-std::array<const Image*,5> material_maps(const SceneSet& set,const Material& m)const {
+// [5]: NONCANONICAL parallax height (lighting.glsl parallax(); 1x1 white = none): enhanced with RendererOptions::parallax.
+std::array<const Image*,6> material_maps(const SceneSet& set,const Material& m)const {
      return {&texture(set,m.diffuse,white_),&texture(set,m.normal,flat_normal_),
          &texture(set,!m.environment.empty()?m.environment:!m.luminance.empty()?m.luminance:m.lightmap,white_),
-         &texture(set,m.luminance,white_),&texture(set,m.lightmap,white_)};
+         &texture(set,m.luminance,white_),&texture(set,m.lightmap,white_),
+         options_.parallax&&!options_.original_appearance?&texture(set,m.height,white_):&white_};
 }
-// A material set depends only on its five bound views (the rest are frame targets), so retained-scene reloads (actor AOI
+// A material set depends only on its six bound views (the rest are frame targets), so retained-scene reloads (actor AOI
 // churn) reuse cached sets instead of rewriting thousands. Cleared whenever textures or render targets are destroyed.
 VkDescriptorSet material_set(SceneSet& set,const Material& m) {
      const auto bound=material_maps(set,m);
-     const std::array<VkImageView,5> key{bound[0]->view,bound[1]->view,bound[2]->view,bound[3]->view,bound[4]->view};
+     const std::array<VkImageView,6> key{bound[0]->view,bound[1]->view,bound[2]->view,bound[3]->view,bound[4]->view,bound[5]->view};
      const auto [found,inserted]=set.material_cache.try_emplace(key,VK_NULL_HANDLE);
      if(!inserted)return found->second;
      try {
@@ -1437,7 +1449,7 @@ VkDescriptorSet material_set(SceneSet& set,const Material& m) {
          }
          if(result==VK_ERROR_OUT_OF_POOL_MEMORY||result==VK_ERROR_FRAGMENTED_POOL) {
              constexpr std::uint32_t chunk=1024;
-             const VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,chunk},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,chunk*(denoise_enabled_?11u:9u)}};
+             const VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,chunk},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,chunk*scene_images}};
              VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;p.maxSets=chunk;p.poolSizeCount=2;p.pPoolSizes=sizes;
              set.material_pools.push_back(VK_NULL_HANDLE);
              checked(vkCreateDescriptorPool(device_,&p,nullptr,&set.material_pools.back()),"material descriptor pool");
@@ -1495,7 +1507,7 @@ void clear_material_sets(SceneSet& set) {
      if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
      descriptor_pool_=VK_NULL_HANDLE;
      const std::uint32_t sets=2+(denoise_enabled_?8:0)+(glow_pass_?4:0);
-     VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*(denoise_enabled_?11u:9u)}};
+     VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,sets},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,sets*scene_images}};
      VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
      p.maxSets=sets;p.poolSizeCount=2;p.pPoolSizes=sizes;
      checked(vkCreateDescriptorPool(device_,&p,nullptr,&descriptor_pool_),"descriptor pool");
@@ -1602,6 +1614,8 @@ void clear_material_sets(SceneSet& set) {
      for(;set.texture_cursor<s.textures.size()&&batch.total_bytes<budget;++set.texture_cursor) {
          progress();
          const auto& t=s.textures[set.texture_cursor];
+         // Derived parallax relief (Material::height) is never bound unless enhanced parallax is on: not uploaded.
+         if(t.name.ends_with("#parallax")&&(options_.original_appearance||!options_.parallax))continue;
          if(!set.texture_lookup.emplace(t.name,set.texture_cursor).second)throw std::runtime_error("duplicate original texture name");
          set.textures[set.texture_cursor]=upload_texture(t,&batch);bytes+=t.data.size();
      }
@@ -1758,7 +1772,8 @@ void record_geometry_uploads(SceneSet& set) {
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
      for(const auto& item:items) {
-         if(shadow?item.sky:!item.visible)continue;
+        // Shadow pass (enhanced raster only): the source ocean casts none, it would darken the bed refracted through it.
+        if(shadow?item.sky||(item.material<scene.materials.size()&&scene.materials[item.material].source_ocean):!item.visible)continue;
          if(!scene.materials.empty()) {
              if(item.material>=scene.materials.size()||item.material>=material_usage_.size())
                  throw std::runtime_error("scene draw material index out of range");
@@ -1809,6 +1824,28 @@ void record_geometry_uploads(SceneSet& set) {
      VkViewport viewport{0,0,float(size.width),float(size.height),0,1};VkRect2D scissor{{0,0},size};
      vkCmdSetViewport(c,0,1,&viewport);vkCmdSetScissor(c,0,1,&scissor);
  }
+// NONCANONICAL enhanced water: copies the finished opaque scene (scene pass colour 0 + depth) into water_color_/
+// water_depth_ between the scene pass and water_pass_, restoring the layouts water_pass_ loads.
+void copy_water(VkCommandBuffer c,const Image& color) {
+    constexpr auto shader_read=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,depth_read=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+    constexpr auto src=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,dst=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    constexpr VkPipelineStageFlags tests=VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        transfer=VK_PIPELINE_STAGE_TRANSFER_BIT,fragment=VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,output=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    constexpr auto depth=VK_IMAGE_ASPECT_DEPTH_BIT;
+    barrier(c,color.handle,shader_read,src,VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT,output,transfer);
+    barrier(c,depth_.handle,depth_read,src,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,VK_ACCESS_TRANSFER_READ_BIT,tests,transfer,depth);
+    barrier(c,water_color_.handle,VK_IMAGE_LAYOUT_UNDEFINED,dst,0,VK_ACCESS_TRANSFER_WRITE_BIT,fragment,transfer);
+    barrier(c,water_depth_.handle,VK_IMAGE_LAYOUT_UNDEFINED,dst,0,VK_ACCESS_TRANSFER_WRITE_BIT,fragment,transfer,depth);
+    VkImageCopy region{};region.extent={render_extent_.width,render_extent_.height,1};
+    region.srcSubresource=region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+    vkCmdCopyImage(c,color.handle,src,water_color_.handle,dst,1,&region);
+    region.srcSubresource=region.dstSubresource={depth,0,0,1};
+    vkCmdCopyImage(c,depth_.handle,src,water_depth_.handle,dst,1,&region);
+    barrier(c,color.handle,src,shader_read,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,transfer,output);
+    barrier(c,depth_.handle,src,depth_read,VK_ACCESS_TRANSFER_READ_BIT,VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,transfer,tests,depth);
+    barrier(c,water_color_.handle,dst,shader_read,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,transfer,fragment);
+    barrier(c,water_depth_.handle,dst,shader_read,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,transfer,fragment,depth);
+}
  void cleanup()noexcept {
      if(presenter_.joinable()) { // finishes queued presents first
          {std::scoped_lock lock(present_mutex_);present_stop_=true;}
@@ -1943,6 +1980,10 @@ void set_fade(float black)override { fade_=std::clamp(black,0.f,1.f); }
 // The primary's set retires (freed once in-flight frames completed); the next render() fully loads the Scene. Other
 // resident sets stay.
 void release_scene()override { if(primary_)retire_set(*primary_); }
+void set_view_distance(float distance)override {
+    if(!std::isfinite(distance)||distance<0)throw std::invalid_argument("view distance requires a finite value >= 0");
+    options_.view_distance=distance;
+}
 void set_upscaling(Upscaler upscaler,FsrQuality quality,float sharpness,bool frame_generation)override {
     if(!std::isfinite(sharpness)||sharpness<0||sharpness>1)throw std::invalid_argument("FSR sharpness requires [0,1]");
     // Render extent, targets, or the frame-generation contexts/swapchain owner change.
@@ -1963,7 +2004,7 @@ void set_particles(const ParticleFrame& frame)override {
     // ponytail: fixed 256-texture pool; the original XML references 64 particle textures plus effect icons.
     constexpr std::uint32_t capacity=256;
     if(!particle_pool_&&!frame.textures.empty()) {
-        VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,capacity},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity*11}};
+        VkDescriptorPoolSize sizes[2]{{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,capacity},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,capacity*scene_images}};
         VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;p.maxSets=capacity;p.poolSizeCount=2;p.pPoolSizes=sizes;
         checked(vkCreateDescriptorPool(device_,&p,nullptr,&particle_pool_),"particle descriptor pool");
     }
@@ -2037,7 +2078,9 @@ void set_particles(const ParticleFrame& frame)override {
      auto add=[&](std::uint32_t mesh,const Matrix4& matrix,std::uint32_t override_material=UINT32_MAX,
                   bool sky=false,bool fog=false,bool dynamic=false,std::array<float,4> scroll={},bool visible=true,const Matrix4* previous=nullptr) {
          auto material=override_material==UINT32_MAX?scene.meshes[mesh].material:override_material;
-         bool alpha=material<scene.materials.size()&&(scene.materials[material].alpha||scene.materials[material].color[3]<.99f);
+        // NONCANONICAL enhanced water (authored alpha-blended) is drawn opaque with depth over the scene copy (waterSurface).
+        bool alpha=material<scene.materials.size()&&(scene.materials[material].alpha||scene.materials[material].color[3]<.99f)&&
+            (options_.original_appearance||!scene.materials[material].source_ocean);
          float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
          draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix});
      };
@@ -2080,9 +2123,10 @@ void set_particles(const ParticleFrame& frame)override {
                  previous_matrix={c,0,-s,0,0,1,0,0,s,0,c,0,last[0],last[1],last[2],1}; // follows last frame's eye
              }
              const auto material=instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material;
-             const bool visible=!cull||instance.sky||instance.ocean||!scene.meshes[instance.mesh].influences.empty()||
-                 (material<scene.materials.size()&&scene.materials[material].source_ocean)||
-                 sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds);
+             const bool always=instance.sky||instance.ocean||!scene.meshes[instance.mesh].influences.empty()||
+                 (material<scene.materials.size()&&scene.materials[material].source_ocean);
+             const bool visible=always||(sphere_within(eye,matrix,set.geometry[instance.mesh].bounds,options_.view_distance)&&
+                 (!cull||sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds)));
              const bool fog=visible&&test_fog&&source_fog_enabled(instance.source_half_extents,center,matrix,eye,scene.lighting.fog_start);
              add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
              if(!visible||!contours)continue;
@@ -2092,10 +2136,13 @@ void set_particles(const ParticleFrame& frame)override {
              }
          }
      }
-     // In-place sorting avoids stable_sort's temporary allocation every frame.
-     std::sort(draws.begin(),draws.end(),[](const auto& a,const auto& b) {
-         if(a.sky!=b.sky)return a.sky;
-         if(a.alpha!=b.alpha)return !a.alpha;
+    // In-place sorting avoids stable_sort's temporary allocation every frame.
+    // NONCANONICAL enhanced water: source ocean draws close the opaque list, after the scene copy (copy_water).
+    const auto water=[&](const DrawItem& d){return !options_.original_appearance&&d.material<scene.materials.size()&&scene.materials[d.material].source_ocean;};
+    std::sort(draws.begin(),draws.end(),[&](const auto& a,const auto& b) {
+        if(a.sky!=b.sky)return a.sky;
+        if(a.alpha!=b.alpha)return !a.alpha;
+        if(!a.alpha&&water(a)!=water(b))return water(b);
          // Opaque nearest-first: early Z rejects hidden fragments before their ray queries (-13% scene pass,
          // analysis/porting-wave12/Perf/report.md). Equal distances (meshes of one placement) fall back to material/mesh,
          // so coplanar opaque parts never swap draw order between frames.
@@ -2321,6 +2368,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
          sync(*find_set(*portal.scene),portal.entities,slot);
          if((views[view_count]=portal_view(portal,f,eye,planes,f.clip,f.clip_or,view_count==0)))views[view_count++]->set->drawn=total_frames_;
      }
+    f.fade[2]=1; // after the portal frames: only the primary view's water reads the scene copy (lighting.glsl waterSurface)
      // Background residency: one budgeted step of one set per frame (never the primary or a set drawn this frame).
      if(portals_supported_)for(auto& set:sets_)if(!set->loaded){stream(*set,slot);break;}
      const auto view_offset=[&](unsigned view){return (slot*view_slots+view)*uniform_stride_;};
@@ -2346,6 +2394,11 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      }
      vkCmdEndRenderPass(command_);
      if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*4,4);timed_[slot]=true;timing_portals_+=view_count>0;}
+    if(!water_ready_) { // portal-view water may sample the copy before the first copy_water
+        barrier(command_,water_color_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        barrier(command_,water_depth_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
+        water_ready_=true;
+    }
      begin_pass(command_,scene_pass_,scene_fb_[current],render_extent_,true);
      if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timing_pool_,slot*4);
     // Source sky, portal views (destination, then its seal), then the rest of the source: source geometry in front of a
@@ -2367,7 +2420,20 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
         }
     }
     if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+2);
-    draw_scene(command_,false,primary,source.subspan(sky_end),f.clip[0]!=std::array<float,4>{0,0,0,1});
+    // NONCANONICAL enhanced water: the opaque scene is copied before the source ocean (sorted after the other opaque
+    // draws, build_draws), which then continues the pass with the alpha list in water_pass_.
+    const auto rest=source.subspan(sky_end);const bool source_clip=f.clip[0]!=std::array<float,4>{0,0,0,1};
+    const auto is_water=[&](const DrawItem& d){return d.material<scene.materials.size()&&scene.materials[d.material].source_ocean;};
+    std::size_t water_begin=rest.size();
+    if(!options_.original_appearance&&std::any_of(rest.begin(),rest.end(),[&](const DrawItem& d){return d.visible&&is_water(d);}))
+        water_begin=std::size_t(std::find_if(rest.begin(),rest.end(),[&](const DrawItem& d){return d.alpha||is_water(d);})-rest.begin());
+    draw_scene(command_,false,primary,rest.first(water_begin),source_clip);
+    if(water_begin<rest.size()) {
+        vkCmdEndRenderPass(command_);
+        copy_water(command_,denoise_enabled_?raw_hdr_:hdr_[current]);
+        begin_pass(command_,water_pass_,scene_fb_[current],render_extent_,false);
+        draw_scene(command_,false,primary,rest.subspan(water_begin),source_clip);
+    }
     // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input), then the hilite; 0046cbe0 draws
     // AfterHDR particles after the glow composite (0046fdb0 @470aed/@47183f).
     const auto draw_particles=[&](bool after_hdr) {

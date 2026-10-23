@@ -121,6 +121,17 @@ def authentication(services):
     assert [a["plus"] for a in listed if a["username"] == "test_banned"] == [True], "Plus grant not stored"
     services.api("POST", f"/v1/admin/accounts/{banned['id']}/unplus", {}, session=admin, admin=True)
     assert services.sql(f"SELECT plus FROM accounts WHERE id={int(banned['id'])}") == "f", "Plus revoke not stored"
+    # Administrator-created accounts: same validation as /v1/register plus an explicit boolean admin flag.
+    created = services.api("POST", "/v1/admin/accounts", {"username": "test_created", "password": PASSWORD, "admin": False}, session=admin, admin=True)
+    assert isinstance(created["account_id"], int) and created["account_id"] > 0
+    assert services.sql(f"SELECT admin FROM accounts WHERE id={int(created['account_id'])}") == "f"
+    assert services.sql(f"SELECT count(*) FROM audit_events WHERE action='account.create' AND target_id={int(created['account_id'])}") == "1"
+    users["test_created"] = {"id": created["account_id"], "session": services.api("POST", "/v1/login", {"username": "test_created", "password": PASSWORD})["session"]}
+    assert expect_error(services, "POST", "/v1/admin/accounts", {"username": "test_created", "password": PASSWORD}, session=admin, status=409, admin=True) == "conflict"
+    assert expect_error(services, "POST", "/v1/admin/accounts", {"username": "test_forbidden", "password": PASSWORD}, session=alice, status=403, admin=True) == "forbidden"
+    expect_error(services, "POST", "/v1/admin/accounts", {"username": "test_short", "password": "short"}, session=admin, admin=True)
+    expect_error(services, "POST", "/v1/admin/accounts", {"username": "test_role", "password": PASSWORD, "admin": "yes"}, session=admin, admin=True)
+    assert services.sql("SELECT count(*) FROM accounts WHERE username IN ('test_forbidden','test_short','test_role')") == "0"
     return users
 
 

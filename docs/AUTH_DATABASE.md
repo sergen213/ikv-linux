@@ -81,6 +81,7 @@ All routes below require a valid administrator bearer session on the **administr
 | --- | --- | --- |
 | GET `/v1/admin/status` | None | `{accounts,characters,sessions,worlds:[{instance,status,updated_at,online}],logs:[{id,action,actor_id,target_id,details,created_at}],commands:[{id,command,arguments,result,actor_id,created_at,consumed}]}`; status/performance comes from real world heartbeats, not fabricated charts. `commands` is the last 30 world commands; `result` is null until the world executed it. |
 | GET `/v1/admin/accounts?search=VALUE` | None | `{accounts:[{id,username,admin,banned,ban_reason,plus}]}`; account search/counts and moderation selection. |
+| POST `/v1/admin/accounts` | `{username,password,admin?}` | `{account_id}`; same username/password rules as `/v1/register`, `admin` must be a boolean when present; 409 `conflict` for a taken name; audited `account.create` (`details.admin`). Web panel: Oyuncular → Hesap yönetimi → Yeni hesap; launcher: Sunucu Yönetimi → Hesaplar → Yeni hesap…. |
 | GET `/v1/admin/characters?search=VALUE` | None | `{characters:[...]}`; character search and moderation selection. |
 | POST `/v1/admin/accounts/{id}/ban` | `{reason,duration_seconds}` | Reason 1–512 bytes; duration 0–31536000 seconds, where 0 is a permanent ban; revokes sessions. |
 | POST `/v1/admin/accounts/{id}/unban` | `{}` | Removes the account ban; does not resurrect revoked sessions. |

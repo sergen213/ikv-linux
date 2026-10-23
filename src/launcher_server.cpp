@@ -8,6 +8,7 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -904,6 +905,7 @@ private:
             const auto row = selected(accounts_, "hesap");
             call("POST", "/v1/admin/accounts/" + row.value(0) + "/unban", {}, [this](const QJsonObject&) { info("Yasak kaldırıldı"); refreshAccounts(); });
         });
+        button(accountActions, "Yeni hesap…", "hostAccountCreate", [this] { createAccount(); });
         accountActions->addStretch();
         tabs->addTab(accountsPage, "Hesaplar");
 
@@ -946,7 +948,7 @@ private:
             if (title == "Hesaplar") refreshAccounts(); else if (title == "Yedekler") refreshBackups(); else if (title == "Oranlar") loadSettings();
         });
         needsSession_ = {announce_, playersTable_, banReason_, banDuration_, botTarget_, accounts_, accountSearch_, xp_, drop_, regen_, zonesList_, backups_};
-        for (auto* name : {"hostAnnounce", "hostKick", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban",
+        for (auto* name : {"hostAnnounce", "hostKick", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
                            "hostSettingsSave", "hostSettingsRefresh", "hostBackupCreate", "hostBackupRefresh", "hostBackupRestore"})
             needsSession_ << managePage_->findChild<QPushButton*>(QString::fromLatin1(name));
     }
@@ -977,7 +979,8 @@ private:
             {"forbidden", "Bu hesabın yönetici yetkisi yok."}, {"admin_required", "Bu hesabın yönetici yetkisi yok."},
             {"self_ban", "Etkin yönetici hesabı yasaklanamaz."}, {"command_pending", "Bekleyen bir yeniden başlatma/kapatma komutu var; önce iptal edin."},
             {"command_queue_full", "Dünya 64 bekleyen komutu işlemedi; dünya sunucusu çalışıyor mu?"},
-            {"account_not_found", "Hesap bulunamadı."}, {"rate_limited", "Çok fazla deneme; biraz bekleyin."}};
+            {"account_not_found", "Hesap bulunamadı."}, {"rate_limited", "Çok fazla deneme; biraz bekleyin."},
+            {"conflict", "Bu kullanıcı adı zaten kullanılıyor."}};
         return known.value(code, message);
     }
     void call(const QByteArray& method, const QString& path, const QJsonObject& body, std::function<void(const QJsonObject&)> done,
@@ -1146,6 +1149,26 @@ private:
                 keys << QStringList{id, a.value("username").toString()};
             }
             fill(accounts_, rows, keys);
+        });
+    }
+    void createAccount() {
+        QDialog dialog(this); dialog.setObjectName("hostAccountDialog"); dialog.setWindowTitle("Yeni hesap");
+        auto* form = new QFormLayout(&dialog);
+        auto* user = named(new QLineEdit, "hostNewUser"); user->setPlaceholderText("3–32: küçük harf, rakam, _"); form->addRow("Kullanıcı adı", user);
+        auto* password = named(new QLineEdit, "hostNewPassword"); password->setEchoMode(QLineEdit::Password); password->setPlaceholderText("en az 12 karakter"); form->addRow("Şifre", password);
+        auto* repeat = named(new QLineEdit, "hostNewRepeat"); repeat->setEchoMode(QLineEdit::Password); form->addRow("Şifre tekrar", repeat);
+        auto* admin = named(new QCheckBox("Yönetici"), "hostNewAdmin"); form->addRow(admin);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Ok)->setText("Hesap oluştur"); form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            const char* issue = password->text() != repeat->text() ? "Şifreler aynı değil" : password->text().size() < 12 ? "Şifre en az 12 karakter olmalı" : nullptr;
+            if (issue) QMessageBox::warning(&dialog, "Yeni hesap", QString::fromUtf8(issue)); else dialog.accept();
+        });
+        if (dialog.exec() != QDialog::Accepted) return;
+        const auto name = user->text().trimmed(); const bool isAdmin = admin->isChecked();
+        call("POST", "/v1/admin/accounts", {{"username", name}, {"password", password->text()}, {"admin", isAdmin}}, [this, name, isAdmin](const QJsonObject& reply) {
+            info(QString("Hesap oluşturuldu: %1 (ID %2)%3").arg(name).arg(reply.value("account_id").toInteger()).arg(isAdmin ? QString(" — yönetici") : QString()));
+            refreshAccounts();
         });
     }
     void refreshBackups() {

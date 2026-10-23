@@ -151,5 +151,11 @@ int main() {
         }
     }
     assert(culled>100&&kept>100);
+    // View distance drops a sphere only when it lies wholly beyond the limit; 0 and infinite bounds never drop.
+    const ikv::Matrix4 far_cube{2,0,0,0,0,2,0,0,0,0,2,0,100,0,0,1}; // radius sqrt(3) at x=100
+    assert(ikv::sphere_within({0,0,0},far_cube,bounds,100-std::sqrt(3.f)+.01f));
+    assert(!ikv::sphere_within({0,0,0},far_cube,bounds,100-std::sqrt(3.f)-.01f));
+    assert(ikv::sphere_within({0,0,0},far_cube,bounds,0));
+    assert(ikv::sphere_within({0,0,0},far_cube,ikv::mesh_bounds(broken),1));
     return 0;
 }

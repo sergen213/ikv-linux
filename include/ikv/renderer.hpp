@@ -50,6 +50,12 @@ struct RendererOptions {
     bool antialiasing = true;
     float exposure = 1;
     bool vsync = true;
+    // NONCANONICAL (Ayarlar "Çizim Mesafesi"): draws whose bounding sphere lies wholly beyond this many units from the
+    // eye are skipped in the main view (shadows, RT and sky unaffected); 0 = unlimited.
+    float view_distance = 0;
+    // NONCANONICAL enhanced parallax occlusion on static zone materials with a derived height (Material::height); original
+    // appearance never applies it.
+    bool parallax = true;
     // Main-thread transport progress only: must not reenter Scene/UI/Renderer; may throw.
     std::function<void()> progress;
 };
@@ -173,19 +179,32 @@ inline FrustumPlanes frustum_planes(const Matrix4& m) {
         }
     return planes;
 }
-// False only when the transformed bounding sphere lies wholly outside one plane (affine model matrices).
-inline bool sphere_visible(const FrustumPlanes& planes, const Matrix4& model, const std::array<float, 4>& bounds) {
-    if (!std::isfinite(bounds[3])) return true;
-    std::array<float, 3> centre{};
+// World-space bounding sphere {centre, radius} of an affine model matrix; non-finite bounds stay infinite.
+inline std::array<float, 4> world_sphere(const Matrix4& model, const std::array<float, 4>& bounds) {
+    if (!std::isfinite(bounds[3])) return {0, 0, 0, INFINITY};
+    std::array<float, 4> s{};
     for (unsigned r = 0; r < 3; ++r)
-        centre[r] = model[r] * bounds[0] + model[4 + r] * bounds[1] + model[8 + r] * bounds[2] + model[12 + r];
+        s[r] = model[r] * bounds[0] + model[4 + r] * bounds[1] + model[8 + r] * bounds[2] + model[12 + r];
     float scale = 0;
     for (unsigned c = 0; c < 3; ++c)
         scale = std::max(scale, model[c*4]*model[c*4] + model[c*4+1]*model[c*4+1] + model[c*4+2]*model[c*4+2]);
-    const float radius = bounds[3] * std::sqrt(scale);
+    s[3] = bounds[3] * std::sqrt(scale);
+    return s;
+}
+// False only when the transformed bounding sphere lies wholly outside one plane (affine model matrices).
+inline bool sphere_visible(const FrustumPlanes& planes, const Matrix4& model, const std::array<float, 4>& bounds) {
+    const auto s = world_sphere(model, bounds);
+    if (!std::isfinite(s[3])) return true;
     for (const auto& p : planes)
-        if (p[0]*centre[0] + p[1]*centre[1] + p[2]*centre[2] + p[3] < -radius) return false;
+        if (p[0]*s[0] + p[1]*s[1] + p[2]*s[2] + p[3] < -s[3]) return false;
     return true;
+}
+// RendererOptions::view_distance test: false only when the sphere lies wholly beyond `distance` (0 = unlimited).
+inline bool sphere_within(const std::array<float, 3>& eye, const Matrix4& model, const std::array<float, 4>& bounds, float distance) {
+    if (distance <= 0) return true;
+    const auto s = world_sphere(model, bounds);
+    const float d = distance + s[3];
+    return !std::isfinite(d) || (s[0]-eye[0])*(s[0]-eye[0]) + (s[1]-eye[1])*(s[1]-eye[1]) + (s[2]-eye[2])*(s[2]-eye[2]) <= d*d;
 }
 // Plane picking only; client must intersect recovered collision geometry before sending movement.
 inline std::optional<std::array<float, 3>> camera_ground_point(const Camera& c, float pixel_x, float pixel_y,
@@ -294,6 +313,7 @@ public:
     // Vulkan applies upscaler/quality/sharpness/frame generation from the next render() (targets rebuilt on change);
     // OpenGL renders natively.
     virtual void set_upscaling(Upscaler, FsrQuality, float /*sharpness*/, bool /*frame_generation*/) {}
+    virtual void set_view_distance(float) = 0; // RendererOptions::view_distance from the next render()
 };
 // Window lifetime belongs to caller and must exceed renderer lifetime. Factories throw on unsupported providers.
 std::unique_ptr<Renderer> make_gl_renderer(SDL_Window*, const RendererOptions& = {});

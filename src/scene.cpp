@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <future>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -408,6 +409,57 @@ void load_model_resources(Scene& scene,const std::filesystem::path& base,const S
  }
  normalize_loaded_bindings(scene,usage,resident);
 }
+// NONCANONICAL parallax occlusion (enhanced only): the original ships no height maps and its world architecture no normal
+// maps, so relief is the diffuse luminance high-passed (wrapping box blur, radius 1/32 of the texture) and normalised per
+// texture: mortar/joints dark = deep. RGBA8 at <=512 texels: r height (1 = surface), g/b dh/dtexel + .5 (lighting normal).
+Texture parallax_height(const Texture& d) {
+ std::size_t level=0;while(level+1<d.mips.size()&&std::max(d.mips[level].width,d.mips[level].height)>512)++level;
+ const auto& mip=d.mips.at(level);const unsigned w=mip.width,h=mip.height;if(std::min(w,h)<64)return {};
+ const auto rgba=d.format==assets::DdsFormat::rgba8?std::vector<std::uint8_t>(d.data.begin()+mip.offset,d.data.begin()+mip.offset+mip.size):
+  assets::decompress_dds({w,h,std::vector<std::uint8_t>(d.data.begin()+mip.offset,d.data.begin()+mip.offset+mip.size),{{w,h,0,mip.size}},d.format}).rgba;
+ const std::size_t n=std::size_t(w)*h;std::vector<float> l(n),low,t(n);
+ for(std::size_t i=0;i<n;++i)l[i]=(.2126f*rgba[i*4]+.7152f*rgba[i*4+1]+.0722f*rgba[i*4+2])/255;
+ const auto blur=[&](std::vector<float>& a,int r){for(int pass=0;pass<2;++pass)for(int axis=0;axis<2;++axis){const int len=axis?int(h):int(w),lines=axis?int(w):int(h);const std::size_t stride=axis?w:1,step=axis?1:w;
+  for(int line=0;line<lines;++line){float* p=a.data()+line*step;float s=0;for(int k=-r;k<=r;++k)s+=p[std::size_t((k+len)%len)*stride];
+   for(int k=0,add=r+1,sub=len-r;k<len;++k){t[k]=s/float(2*r+1);if(add>=len)add-=len;if(sub>=len)sub-=len;s+=p[std::size_t(add++)*stride]-p[std::size_t(sub++)*stride];}
+   for(int k=0;k<len;++k)p[k*stride]=t[k];}}};
+ low=l;blur(low,std::max(2,int(std::min(w,h)/32)));blur(l,1);
+ double variance=0;for(std::size_t i=0;i<n;++i){l[i]-=low[i];variance+=double(l[i])*l[i];}
+ const float sigma=float(std::sqrt(variance/double(n)));if(sigma<.02f)return {}; // flat art (poured concrete, plain marble): no relief
+ // Normalised per texture, but never amplified past sigma .1 (cobblestones ~.095): low-contrast art (marble, plaster, the
+ // calm regions of atlases) stays shallow instead of turning luminance noise into crumpled relief.
+ for(auto& v:l)v=std::clamp(.5f+v/(4*std::max(sigma,.1f)),0.f,1.f);
+ Texture out{d.name+"#parallax",w,h,{},{},d.source_path+"#parallax",assets::DdsFormat::rgba8};out.data.reserve(n*4*4/3+64);
+ std::vector<float> level_rgba(n*4);
+ for(unsigned y=0;y<h;++y)for(unsigned x=0;x<w;++x){const auto at=[&](unsigned xx,unsigned yy){return l[std::size_t(yy%h)*w+xx%w];};float* p=&level_rgba[(std::size_t(y)*w+x)*4];
+  p[0]=at(x,y);p[1]=std::clamp(.5f+(at(x+1,y)-at(x+w-1,y)),0.f,1.f);p[2]=std::clamp(.5f+(at(x,y+1)-at(x,y+h-1)),0.f,1.f);p[3]=1;}
+ for(unsigned mw=w,mh=h;;){
+  out.mips.push_back({mw,mh,out.data.size(),std::size_t(mw)*mh*4});for(float v:level_rgba)out.data.push_back(std::uint8_t(std::lround(v*255)));
+  if(mw==1&&mh==1)break;
+  const unsigned nw=std::max(1u,mw/2),nh=std::max(1u,mh/2);std::vector<float> next(std::size_t(nw)*nh*4);
+  for(unsigned y=0;y<nh;++y)for(unsigned x=0;x<nw;++x)for(unsigned c=0;c<4;++c){float s=0;for(unsigned k=0;k<4;++k)s+=level_rgba[(std::size_t(std::min(mh-1,y*2+k/2))*mw+std::min(mw-1,x*2+k%2))*4+c];next[(std::size_t(y)*nw+x)*4+c]=s/4;}
+  level_rgba=std::move(next);mw=nw;mh=nh;
+ }
+ return out;
+}
+// Static zone materials only: opaque, no cutout/blend, ocean or environment map, every placement an unanimated non-sky zone
+// instance (no actors). Material::height names the derived texture.
+void derive_parallax_heights(Scene& scene) {
+ std::vector<std::uint8_t> state(scene.materials.size()); // 1 eligible, 2 excluded
+ for(const auto& instance:scene.instances){const auto material=instance.material==UINT32_MAX?scene.meshes[instance.mesh].material:instance.material;if(material>=state.size())continue;const auto& m=scene.materials[material];
+  const bool ok=!instance.sky&&!instance.ocean&&!instance.entity_id&&!instance.occlusion_proxy&&scene.meshes[instance.mesh].influences.empty()&&!m.alpha&&m.alpha_cutoff<=0&&!m.source_ocean&&m.environment.empty()&&!m.diffuse.empty();
+  state[material]=ok&&state[material]!=2?1:2;}
+ // One worker per source texture (~25 per zone, each ~10 ms): zone loads already run off the frame thread.
+ std::map<std::string,std::future<Texture>> jobs;
+ for(std::size_t i=0;i<scene.materials.size();++i)if(state[i]==1&&!jobs.contains(scene.materials[i].diffuse)){
+  auto source=std::find_if(scene.textures.begin(),scene.textures.end(),[&](const Texture& t){return t.name==scene.materials[i].diffuse;});
+  if(source!=scene.textures.end()&&!source->mips.empty())jobs.emplace(source->name,std::async(std::launch::async,parallax_height,std::cref(*source)));
+ }
+ std::set<std::string> made;std::vector<Texture> heights; // every job reads scene.textures: append only after all finish
+ for(auto& [name,job]:jobs)if(auto height=job.get();!height.data.empty()){made.insert(name);heights.push_back(std::move(height));}
+ for(auto& height:heights)scene.textures.push_back(std::move(height));
+ for(std::size_t i=0;i<scene.materials.size();++i)if(state[i]==1&&made.contains(scene.materials[i].diffuse))scene.materials[i].height=scene.materials[i].diffuse+"#parallax";
+}
 void resolve_model_lightmaps(Scene& model,const std::string& member,const std::filesystem::path& base,const std::vector<std::uint8_t>& usage) {
  std::optional<Pack> lightmaps;
  for(std::size_t i=0;i<model.materials.size();++i)if(usage[i]&&!model.materials[i].lightmap.empty()){
@@ -439,7 +491,7 @@ void bind_source_skydome(Scene& scene,const SourceSceneDescriptor& descriptor) {
 Scene load_scene(const std::filesystem::path& installation,const std::string& member) {
  const auto base=base_path(installation);Pack objects(base/"objects.dat");auto scene=read_model(objects,member,base);
  need(!scene.instances.empty(),"ADF standalone nonrenderable resource needs its original owning context, not a blank scene");
- load_model_resources(scene,base);load_scene_help(scene,base);return scene;
+ load_model_resources(scene,base);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
 }
 Scene load_source_scene(const std::filesystem::path& installation,unsigned registry_id) {
  const auto& descriptor=source_scene_descriptor(registry_id);const auto base=base_path(installation);Pack objects(base/"objects.dat");Scene scene;
@@ -454,7 +506,7 @@ Scene load_source_scene(const std::filesystem::path& installation,unsigned regis
  scene.source_registry_id=registry_id;scene.source_support=descriptor.support_id;scene.source_environment_key=descriptor.environment_key;scene.source_lightmap=descriptor.lightmap;
  scene.zone=load_zone(installation,descriptor.support_id);set_scene_environment(scene,descriptor.support_id,descriptor.minute);scene.lighting.roofed=descriptor.roofed;
  bind_source_skydome(scene,descriptor);
- load_model_resources(scene,base);load_scene_help(scene,base);return scene;
+ load_model_resources(scene,base);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
 }
 Scene load_charsel_scene(const std::filesystem::path& installation) {
  // cModuleCharsel 004b1950 loads charsel.adf, charsel_particles.adf and sky_box.adf; no zone grid or registry row.
@@ -1083,6 +1135,17 @@ void scene_decoder_self_test() {
   set_texture_detail(0,1);need(pick("textures")=="textures_2.DAT","detail 0 falls back to the nearest present pack (_2)");
   set_texture_detail(1,2);need(pick("textures")=="textures_2.DAT"&&pick("lightmaps")=="lightmaps_4.dat"&&texture_archive(root,"objects").empty(),"detail 1 selects _2; absent kinds select nothing");
   set_texture_detail(2,1);std::filesystem::remove_all(root);
+ }
+ { // NONCANONICAL parallax relief: dark grout reads deep, flat art gets none; only static opaque zone materials qualify.
+  Scene relief;relief.textures.resize(2);for(auto& t:relief.textures){t.width=t.height=64;t.mips={{64,64,0,64*64*4}};t.data.assign(64*64*4,200);}
+  relief.textures[0].name="tiles";relief.textures[1].name="flat";
+  for(std::size_t i=0;i<64*64;++i)if(i%64%16==0||i/64%16==0)for(int c=0;c<3;++c)relief.textures[0].data[i*4+c]=40;
+  relief.meshes.resize(2);relief.meshes[1].influences.resize(1);relief.materials.resize(4);
+  relief.materials[0].diffuse=relief.materials[2].diffuse=relief.materials[3].diffuse="tiles";relief.materials[1].diffuse="flat";relief.materials[2].alpha=true;
+  for(std::uint32_t m:{0u,1u,2u}){Instance i;i.material=m;relief.instances.push_back(i);}Instance actor;actor.mesh=1;actor.material=3;relief.instances.push_back(actor);
+  derive_parallax_heights(relief);const auto& h=relief.textures.back();
+  need(relief.textures.size()==3&&h.name=="tiles#parallax"&&h.mips.size()==7&&h.data[(8*64+8)*4]>=120&&h.data[(16*64+8)*4]<100,"parallax relief: grout deep, tile faces at the surface, full mip chain");
+  need(relief.materials[0].height==h.name&&relief.materials[1].height.empty()&&relief.materials[2].height.empty()&&relief.materials[3].height.empty(),"parallax only on static opaque zone materials with relief");
  }
 }
 } // namespace ikv

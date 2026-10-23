@@ -42,9 +42,38 @@ vec3 sky(vec3 direction) { return mix(vec3(.055,.07,.09),vec3(.32,.44,.62),clamp
 vec3 environment(vec3 direction) { if(draw.flags.y<.5)return sky(direction);return textureLod(environmentMap,vec2(atan(direction.z,direction.x)/(2*PI)+.5,acos(clamp(direction.y,-1,1))/PI),0).rgb; }
 // Shadow atlas (4096x2048): each view's 2048^2 map is the half starting at u = frame.fade.y (0 primary, .5 portal view).
 float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;uv.x=uv.x*.5+frame.fade.y;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));vec2 lo=vec2(frame.fade.y+t.x*.5,0),hi=vec2(frame.fade.y+.5-t.x*.5,1);float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(uv+vec2(x,y)*t,lo,hi),p.z-bias));return visible/9;}
+// NONCANONICAL parallax occlusion (enhanced): static zone materials get a relief texture derived from their diffuse
+// (scene.cpp derive_parallax_heights: r height, 1 = surface; g/b central differences + .5); others bind the 1x1 white.
+// Zone meshes carry no usable tangents: the frame comes from screen derivatives (exact per planar triangle, linear UVs).
+// The depth is 4 relief texels' world size (relief scales with its features; atlases stay inside their regions), capped
+// at .35 units; it fades out with distance and toward grazing angles. Offset
+// UVs feed diffuse/normal/fade samples, never the lightmap; geometry, depth, motion vectors and RT rays stay on the true
+// surface. parallaxGradient: world gradient of the relief, tilting the enhanced lighting normal.
+layout(set=0,binding=14) uniform sampler2D heightMap;
+vec2 surfaceUV;
+vec3 parallaxGradient=vec3(0);
+void parallax(){
+    surfaceUV=texcoord;
+    if(frame.params.x<.5||textureSize(heightMap,0).x<2)return;
+    vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),nf=cross(dp1,dp2),v=frame.eye.xyz-worldPosition;
+    vec2 du1=dFdx(texcoord),du2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
+    nf=normalize(nf);v/=dist;if(dot(nf,v)<0)nf=-nf;
+    vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det; // dP/du, dP/dv
+    vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
+    float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6);
+    if(!(depth>1e-3))return;
+    vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
+    int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,texcoord,du1,du2).r,lastT=0,lastF=h-1;
+    for(int i=0;i<steps&&t<1-h;++i){lastT=t;lastF=t-(1-h);t+=1./steps;h=textureGrad(heightMap,texcoord+shift*t,du1,du2).r;}
+    float f=t-(1-h);if(f>0&&lastF<0)t=mix(lastT,t,lastF/(lastF-f)); // secant refinement
+    surfaceUV=texcoord+shift*t;
+    vec2 slope=(textureGrad(heightMap,surfaceUV,du1,du2).gb-.5)*.5*vec2(textureSize(heightMap,0)); // dh/du, dh/dv
+    parallaxGradient=.7*depth*(slope.x*gu+slope.y*gv);
+}
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
-    if(draw.flags.x<.5)return n;
+    if(draw.flags.x<.5)return normalize(n-parallaxGradient);
     // Zero/degenerate-tangent source meshes (e.g. NPC staff tips) skip normal mapping, as GL does: a screen-derivative
     // tangent is per-triangle, so it rotated the map differently on every facet.
     vec3 t=worldTangent-n*dot(n,worldTangent);
@@ -52,7 +81,7 @@ vec3 mappedNormal(){
     t=normalize(t);
     // Source normal maps carry only xy (b: specular mask, a: illumination, originalSurface): z is rebuilt as the original
     // does. Decoding b as z bent specular-free texels (b~0) inward, so normal-mapped actors went near-black (wave 19).
-    vec2 xy=texture(normalMap,texcoord).xy*2-1;
+    vec2 xy=texture(normalMap,surfaceUV).xy*2-1;
     return normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1-dot(xy,xy))));
 }
 // Independently expressed recovered original shader equations, not copied proprietary shader source.
@@ -67,7 +96,7 @@ vec4 originalSurface(vec4 diffuse,float sunVisibility) {
     // since normalize(0) is NaN and the 9x9 glow taps would spread it as a dot grid.
     vec3 n=worldNormal,t=cross(cross(n,worldTangent),n); // tangent's component orthogonal to n, scaled by |n|^2
     if(hasNormal&&frame.sun.w>.5&&dot(t,t)>1e-12) {
-        vec4 normalTexel=texture(normalMap,texcoord);
+        vec4 normalTexel=texture(normalMap,surfaceUV);
         vec2 xy=normalTexel.xy*2-1;
         vec3 mapped=normalize(vec3(xy,1-dot(xy,xy)));
         n=normalize(n);t=normalize(t);
@@ -123,8 +152,61 @@ vec4 sourceOceanSurface() {
     if(frame.params.x>.5)result=pow(max(result,vec3(0)),vec3(2.2));
     return vec4(result,1);
 }
+// NONCANONICAL: enhanced source ocean after the Joan of Arc port's stylised water (pbr_shade.glsl shade_water): the
+// opaque scene behind the surface (renderer_vk.cpp copy_water: colour + depth copied before the water draws) refracted by
+// two scrolling layers of the original ocean_bump normal map, depth absorption teal -> deep blue, a soft shoreline foam
+// band, Fresnel sky (RT physical: mirror ray against the scene TLAS) reflection and sun glints. The v_ocean vertex
+// displacement is kept. frame.fade.z: 0 when this view has no copy (portal views): deep water, no refraction.
+layout(set=0,binding=12) uniform sampler2D waterColor;
+layout(set=0,binding=13) uniform sampler2D waterDepth;
+float waterHash(vec2 c){return fract(sin(dot(mod(c,289.),vec2(12.9898,78.233)))*43758.5453);}
+float waterNoise(vec2 x){vec2 i=floor(x),f=fract(x);f=f*f*(3-2*f);return mix(mix(waterHash(i),waterHash(i+vec2(1,0)),f.x),mix(waterHash(i+vec2(0,1)),waterHash(i+1),f.x),f.y);}
+vec3 waterWorld(mat4 inv,vec2 uv){vec4 p=inv*vec4(uv*2-1,textureLod(waterDepth,uv,0).r,1);return p.xyz/p.w;}
+vec3 waterSurface(){
+    const mat2 rot=mat2(.8,.6,-.6,.8);
+    vec3 p=worldPosition,v=normalize(frame.eye.xyz-p),l=normalize(frame.sun.xyz);float t=frame.sourceTime.y,dist=distance(frame.eye.xyz,p);
+    // World-anchored layers: broad swell and finer crossing ripples (Joan 900/260 units at ~4 Joan units per IKV unit).
+    vec3 ta=texture(normalMap,p.xz/225+t*vec2(.016,.009)).rgb*2-1,tb=texture(normalMap,rot*p.xz/65+t*vec2(-.03,.041)).rgb*2-1;
+    // ocean_bump is far steeper than Joan's Lake1 map: its slopes are scaled down so the Fresnel sky does not streak white.
+    vec2 s=.15*ta.xy/max(ta.z,.5)+.12*(transpose(rot)*tb.xy)/max(tb.z,.5);
+    vec3 n=normalize(vec3(s.x,1,s.y));float nv=max(dot(n,v),1e-3);
+    vec2 uv=gl_FragCoord.xy/frame.viewport.xy;mat4 inv=inverse(frame.vp);
+    bool copy=frame.fade.z>.5;
+    float depth=copy?max(p.y-waterWorld(inv,uv).y,0):1e4;
+    vec2 ruv=uv+s*(.025*smoothstep(0,20,depth)/(1+dist/375));
+    vec3 bed=copy?waterWorld(inv,ruv):p-v*1e4;
+    if(copy&&bed.y>p.y){ruv=uv;bed=waterWorld(inv,uv);} // offset sample above the water (shore, foreground): straight through
+    vec3 below=copy?textureLod(waterColor,ruv,0).rgb:vec3(0);
+    float path=distance(p,bed),bedDepth=max(p.y-bed.y,0);
+    // Absorption (red first: teal shallows) and in-scattering from teal to deep blue, lit like the original water.
+    vec3 light=frame.sun.w>.5?pow(min(frame.ambient.rgb+frame.diffuse.rgb*max(l.y,0),vec3(1)),vec3(2.2)):vec3(1);
+    vec3 tr=exp(-vec3(.032,.0104,.0076)*path);
+    vec3 c=below*tr+mix(vec3(.05,.32,.30),vec3(.006,.05,.11),smoothstep(5,65,bedDepth))*light*(1-tr);
+    // Fresnel reflection and sun glints fade in over the first units of depth: the waterline stays soft.
+    float edge=smoothstep(0,2.5,depth);
+    vec3 r=reflect(-v,n);r.y=abs(r.y);
+    vec3 fog=pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2));
+#ifdef IKV_RT
+    vec3 mirror=rtIncoming(p+vec3(0,.6,0),vec3(0,1,0),normalize(vec3(r.x,max(r.y,.02),r.z)),l);
+    float sun=rtSunVisibility(p+vec3(0,.6,0),vec3(0,1,0),l,0u);
+#else
+    vec3 mirror=mix(fog,sky(r)*enhancedAmbientScale()*2,smoothstep(0,.4,r.y));
+    float sun=sceneRoofed()?0:shadowVisibility(vec3(0,1,0));
+#endif
+    c=mix(c,mirror,(.02+.98*pow(1-nv,5))*edge);
+    vec3 h=normalize(l+v);float nl=max(dot(n,l),0),nh=max(dot(n,h),0),a2=.07*.07*.07*.07,k=.035;
+    float spec=a2/(PI*pow(nh*nh*(a2-1)+1,2))/(4*(nv*(1-k)+k)*(nl*(1-k)+k))*nl*(.02+.98*pow(1-max(dot(v,h),0),5));
+    c+=min(spec,64.)*vec3(2.8,2.55,2.2)*enhancedSunScale()*sun*edge;
+    // Shoreline foam: a band over the shallow bed, broken into drifting lace.
+    float lace=.6*waterNoise(p.xz/3+t*vec2(.25,-.15))+.4*waterNoise(p.xz/1.25-t*vec2(.2,.3));
+    float foam=(1-smoothstep(0,3,depth))*smoothstep(.55,.8,lace);
+    c=mix(c,light*.85,foam*.7*smoothstep(0,.3,depth));
+    if(frame.fogColor.w>.5&&draw.extra.z>.5)c=mix(fog,c,clamp(sourceFog,0,1));
+    return max(c,vec3(0));
+}
 void main(){
 outputMotion=(motionPrevious.xy/motionPrevious.w-motionCurrent.xy/motionCurrent.w)*.5;
+parallax(); // derivatives: before any discard
 // Reactive (FSR): opaque pipelines write 0 whatever this is. Blended draws overwrite it: alpha-tested ones (source
 // cutoff: foliage, decals) write motion vectors and are accumulated like opaque surfaces (0); untextured translucent
 // draws keep their coverage, how much the surface replaces history.
@@ -141,7 +223,7 @@ vec3 guideNormal=rtUnit(mat3(frame.toPrimary)*worldNormal),rtDiffuse=vec3(0),rtR
 float rtArtwork=0;
 #endif
 if(draw.extra.w>=2) {
-    outputColor=sourceOceanSurface();
+    outputColor=frame.params.x>.5?vec4(waterSurface(),1):sourceOceanSurface();
     if(draw.flags.w>0&&outputColor.a<=draw.flags.w)discard;
 #ifdef IKV_RT_GUIDED
     // Moving water has no displacement motion vectors: spatial guide only, never history or decomposition.
@@ -151,7 +233,7 @@ if(draw.extra.w>=2) {
 #endif
     return;
 }
-vec4 texel=texture(diffuseMap,texcoord)*draw.color;
+vec4 texel=texture(diffuseMap,surfaceUV)*draw.color;
 if(draw.extra.y>.5) {
     vec3 secondary=draw.flags.y>.5?texture(environmentMap,texcoord).rgb:vec3(0);
     vec3 clouds=mix(texel.rgb,secondary,clamp(frame.fog.w,0,1));
@@ -167,7 +249,7 @@ if(draw.extra.y>.5) {
 }
 // Source MAT+14 secondary fade is selected only without higher-priority normal/environment maps.
 if(draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5)
-    texel=mix(texture(fadeMap,texcoord)*draw.color,texel,fadeWeight);
+    texel=mix(texture(fadeMap,surfaceUV)*draw.color,texel,fadeWeight);
 float sourceAlpha=draw.flags.x>.5||draw.flags.y>.5?1:texel.a;
 float sunVisibility=1.;
 #ifdef IKV_RT

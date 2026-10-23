@@ -79,17 +79,20 @@ Json read_json(const std::filesystem::path& path, std::uintmax_t cap) {
     if (!file) throw std::runtime_error("cannot open JSON file");
     return Json::parse(file);
 }
+// NONCANONICAL Ayarlar "Çizim Mesafesi" steps in scene units (the original fog record reaches ~610); 0 = unlimited.
+constexpr std::array<float,11> view_distances{200,300,400,500,650,800,1000,1300,1700,2200,0};
 struct Options {
     std::string host,renderer="opengl",appearance="original",rt="off",rt_style="faithful",auth;
     std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map;
     std::uint16_t port=7000;
     std::uint64_t character=0;
     int width=1280,height=800,dx=0,dy=0,ticks=0;
-    bool headless=false,session_stdin=false,fullscreen=false;
+    bool headless=false,session_stdin=false,fullscreen=false,parallax=true;
     float volume=.5f,music_volume=1; // master device gain; original MusicVolume (music + ambient beds)
     // Ayarlar sliders 3-7 (original globals 0x5eabc0..0x5eabdc, 0..1): Karakter Detay Mes., Görüş Mesafesi (fog distance
     // scale, floor .1), Ortam Efektleri / Karakter Efektleri (particle range² = pref·160000), Ölü Yok Olma Süresi.
     std::array<float,5> prefs{1,1,1,1,1};
+    int view_distance=10; // Çizim Mesafesi step 0..10 into view_distances
     double render_scale=1;
     // Vulkan upscaler: bilinear (render_scale) or fsr3 (AMD FSR 3.1.4, fsr_mode preset + RCAS sharpness 0..1).
     std::string upscaler="bilinear",fsr_mode="quality";
@@ -131,6 +134,9 @@ Options parse_options(int argc,char** argv) {
             o.camera.distance=c.value("distance",o.camera.distance);
         }
         if (s.contains("preferences")) o.prefs=s.at("preferences").get<std::array<float,5>>();
+        if (s.contains("view_distance") && (!s.at("view_distance").is_number_integer() || s.at("view_distance").get<int>()<0 || s.at("view_distance").get<int>()>10))
+            throw std::invalid_argument("saved view_distance requires an integer in 0..10");
+        o.view_distance=s.value("view_distance",o.view_distance);
     }
     for (int i=1;i<argc;++i) {
         const std::string_view flag=argv[i];
@@ -146,6 +152,7 @@ Options parse_options(int argc,char** argv) {
                 "[--upscaler bilinear|fsr3 --fsr-mode native|quality|balanced|performance|ultra_performance --fsr-sharpness 0..1]\n"
                 "  fsr3: AMD FidelityFX Super Resolution 3.1.4 temporal upscaling (Vulkan only; replaces --render-scale)\n"
                 "[--frame-generation on|off]  FSR 3.1.4 frame generation (Vulkan + --upscaler fsr3; default off)\n"
+                "[--parallax on|off]  enhanced parallax occlusion relief on static zone surfaces (NONCANONICAL; default on)\n"
                 "[--texture-detail 0|1|2 --lightmap-detail 0|1|2]  original texture/lightmap packs _4/_2/_1 (default 2 and 1)\n"
                 "Ground click moves; WASD/arrows control camera; F1 displays recovered Turkish help.\n"
                 "Graphical scene, grid and character appearance follow the admitted authoritative source registry.\n";
@@ -156,7 +163,7 @@ Options parse_options(int argc,char** argv) {
         if (flag=="--fullscreen") { o.fullscreen=true; continue; }
         if (flag!="--host" && flag!="--port" && flag!="--ca" && flag!="--character" && flag!="--auth" &&
             flag!="--asset-root" && flag!="--renderer" && flag!="--appearance" && flag!="--rt" && flag!="--rt-style" && flag!="--render-scale" &&
-            flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" &&
+            flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" && flag!="--parallax" &&
             flag!="--texture-detail" && flag!="--lightmap-detail" &&
             flag!="--settings" && flag!="--width" && flag!="--height" && flag!="--ticks" &&
             flag!="--commands" && flag!="--screenshot" && flag!="--audio" && flag!="--dx" && flag!="--dy" &&
@@ -181,6 +188,10 @@ Options parse_options(int argc,char** argv) {
         else if (flag=="--frame-generation") {
             if (value!="on" && value!="off") throw std::invalid_argument("--frame-generation requires on|off");
             o.frame_generation=value=="on";
+        }
+        else if (flag=="--parallax") {
+            if (value!="on" && value!="off") throw std::invalid_argument("--parallax requires on|off");
+            o.parallax=value=="on";
         }
         else if (flag=="--texture-detail") o.texture_detail=number(value,0,2);
         else if (flag=="--lightmap-detail") o.lightmap_detail=number(value,0,2);
@@ -1156,7 +1167,8 @@ private:
         ro.render_scale=static_cast<float>(options_.render_scale);
         ro.upscaler=options_.upscaler=="fsr3"?ikv::Upscaler::fsr3:ikv::Upscaler::bilinear;
         ro.fsr_quality=fsr_quality(options_.fsr_mode); ro.fsr_sharpness=static_cast<float>(options_.fsr_sharpness);
-        ro.frame_generation=options_.frame_generation;
+        ro.frame_generation=options_.frame_generation; ro.parallax=options_.parallax;
+        ro.view_distance=view_distances[static_cast<std::size_t>(options_.view_distance)];
         ro.progress=[this]{load_progress();};
 #if IKV_HAS_VULKAN
         renderer_=options_.renderer=="opengl"?ikv::make_gl_renderer(window_,ro):ikv::make_vk_renderer(window_,ro);
@@ -2159,7 +2171,7 @@ private:
         for (const int id:{static_cast<int>(win_bag),static_cast<int>(win_character)}) if (is_open(id)) order.push_back(id);
         for (auto it=windows_.rbegin();it!=windows_.rend();++it) if (*it!=win_bag && *it!=win_character && *it!=win_trade) order.push_back(*it);
         // Yetenekler: 15 rows + detail text; Üretim/Banka: original UI2 art heights (Banka + native money/withdraw strip).
-        static constexpr std::array<int,win_contacts+1> desired{0,650,420,380,0,300,575,340,0,580,760,346,410,360}; // Ayarlar: 7 sliders + Vulkan upscaler + frame generation
+        static constexpr std::array<int,win_contacts+1> desired{0,650,420,380,0,300,615,340,0,580,760,346,410,360}; // Ayarlar: 7 sliders + Çizim Mesafesi + Vulkan upscaler + frame generation
         int x=width_-S(4),bag_x=-1;
         for (const int id:order) {
             const int w=window_width(id,available);
@@ -2857,6 +2869,16 @@ private:
                 for (int k=0;k<=10;++k) {
                     ui_->rect(left+k*cell,y,cell-S(1),S(10),k<=value?Rgba{200,170,90,235}:Rgba{40,44,48,235});
                     hits_.push_back({left+k*cell,y-S(3),cell,S(16),nullptr,-1,"pref:"+std::to_string(i)+":"+std::to_string(k)});
+                }
+                y+=S(18);
+            }
+            { // Native addition (not original): draw distance, applied immediately like the upscaler; the last step is unlimited.
+                const auto distance=view_distances[static_cast<std::size_t>(options_.view_distance)];
+                ui_->text(left,y,distance>0?"Çizim Mesafesi ("+std::to_string(static_cast<int>(distance))+")":std::string("Çizim Mesafesi (sınırsız)")); y+=lh()+S(2);
+                const int cell=std::max(1,width/11);
+                for (int k=0;k<=10;++k) {
+                    ui_->rect(left+k*cell,y,cell-S(1),S(10),k<=options_.view_distance?Rgba{200,170,90,235}:Rgba{40,44,48,235});
+                    hits_.push_back({left+k*cell,y-S(3),cell,S(16),nullptr,-1,"view-dist:"+std::to_string(k)});
                 }
                 y+=S(18);
             }
@@ -4410,6 +4432,10 @@ private:
         else if (value=="system-settings") { system_menu_=0; prefs_saved_=options_.prefs; toggle_window(win_settings,true); }
         else if (value=="system-quit") { system_menu_=0; confirm_="quit"; confirm_text_="Oyundan çıkmak istediğinize eminmisiniz?"; }
         else if (value.starts_with("pref:")) { setting(value[5]-'0')=static_cast<float>(std::stoi(value.substr(7)))/10; apply_prefs(); }
+        else if (value.starts_with("view-dist:")) {
+            options_.view_distance=std::stoi(value.substr(10));
+            renderer_->set_view_distance(view_distances[static_cast<std::size_t>(options_.view_distance)]);
+        }
         else if (value=="prefs-keep") toggle_window(win_settings);
         else if (value=="upscaler-next" || value.starts_with("fsr-sharp:") || value=="framegen-toggle") {
             // Off -> FSR 3.1.4 Native AA -> Quality -> Balanced -> Performance -> Ultra Performance -> Off.
@@ -5006,7 +5032,7 @@ private:
             {"appearance",options_.appearance},{"rt",options_.rt},{"rt_style",options_.rt_style},{"render_scale",options_.render_scale},
             {"upscaler",options_.upscaler},{"fsr_mode",options_.fsr_mode},{"fsr_sharpness",options_.fsr_sharpness},
             {"frame_generation",options_.frame_generation},{"texture_detail",options_.texture_detail},
-            {"lightmap_detail",options_.lightmap_detail},{"preferences",options_.prefs},
+            {"lightmap_detail",options_.lightmap_detail},{"preferences",options_.prefs},{"view_distance",options_.view_distance},
             {"camera",{{"yaw",c.yaw},{"pitch",c.pitch},{"distance",options_.camera.distance}}}};
         auto temp=options_.settings; temp+=".tmp";
         std::ofstream file(temp,std::ios::trunc); file << settings.dump(2) << '\n'; file.close();

@@ -188,6 +188,16 @@
                 </fieldset>
               </form>
               <p class="hint">Sıfırlama tokenı yalnızca işlem mesajında gösterilir. Güvenli bir kanaldan elle teslim edin; sonraki işlemde veya çıkışta ekrandan silinir.</p>
+              <form id="account-create" class="selection">
+                <h3 title="Create a new account">Yeni hesap</h3>
+                <div class="row">
+                  <div class="field"><label for="create-username" title="3-32 lowercase letters, digits or underscore">Kullanıcı adı</label><input id="create-username" minlength="3" maxlength="32" pattern="[a-z0-9_]+" autocomplete="off" required></div>
+                  <div class="field"><label for="create-password" title="12-256 characters">Şifre (en az 12 karakter)</label><input id="create-password" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></div>
+                  <div class="field"><label for="create-repeat" title="Repeat the password">Şifre tekrar</label><input id="create-repeat" type="password" minlength="12" maxlength="256" autocomplete="new-password" required></div>
+                  <div class="field"><label><input id="create-admin" type="checkbox"> Yönetici</label></div>
+                  <button type="submit" data-operation title="Create the account">Hesap oluştur</button>
+                </div>
+              </form>
             </section>
             <section class="panel" aria-labelledby="characters-heading">
               <div class="panel-head"><span class="section-number">05</span><h2 id="characters-heading" title="Character moderation and inspection">Karakter moderasyonu</h2></div>

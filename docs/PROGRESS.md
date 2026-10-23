@@ -155,7 +155,7 @@ Lighting fixes (`analysis/porting-wave19/LightingFixes/report.md`, from the 270-
 - Enhanced raster (GL + VK) and RT physical follow the clock record: sun and ambient scale with the record multipliers relative to noon, so nights are dark and have no sun shadows; enhanced raster applies the record fog.
 - Enhanced ambient is the original baked light without its sun term (lightmap, vertex ambient, record ambient); roofed zones keep the whole original light and no shadow-mapped sun; ×1.5 gain calibrated to original brightness. Karaköy İç 27.9 → 81 (original 73.7), Büyük Hol 39.8 → 81.6 (72.8). Near-black actors: enhanced decoded the normal map's blue (specular) channel as z; z is now rebuilt from xy like the original.
 - Every pureblack-sky zone is roofed: Yeraltı and the shared Çemberlitaş zone now keep the interior record at night.
-- GL enhanced: the source ocean casts shadows (shared v_ocean displacement in the shadow pass).
+- GL enhanced: the source ocean casts shadows (shared v_ocean displacement in the shadow pass). *Superseded in wave 20:* enhanced raster ocean casts no shadow (it darkened the bed refracted through the water).
 - Enhanced vs original camera framing was measured identical (0 px offset in all 18 grids); the difference was lighting.
 
 Verification: `build-full`/`build-gl-only` warning-free; the 270-shot matrix rerun with 0 failures; original and RT faithful within 0.5 luma outside Çemberlitaş (there within the run-to-run rain noise of ±4.4); `rt_display.py` 5/5 ok.
@@ -177,6 +177,17 @@ Client fixes (`analysis/porting-wave19/ClientFixes/`, `analysis/porting-wave19/C
 - Wrong-class/sex item tooltip lines are red/green like Seviye; actor model installs check that the target zone holds every texture (the wave-10 `yusuf_diffuse.dds` throw).
 
 Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** each, warning-free (215.7 s / 215.2 s / 352.0 s); RT smoke 5/5 (`ok`, no errors) and signed launcher smoke (Vulkan RT required, ½ scale) PASSED (`analysis/porting-wave19/Verify/`). The sanitizer shutdown timeout stays open (not seen in this run).
+
+## 2026-10-23 wave 20 (0.10.0): admin account creation, Joan of Arc water, parallax mapping, draw distance
+
+Released as 0.10.0 (pre-1.0). No wire or database change.
+
+- Accounts: `POST /v1/admin/accounts {username,password,admin?}` (same rules as `/v1/register`, boolean `admin`, audited `account.create`; register and admin creation share one hash/INSERT path). Web panel: Oyuncular → Hesap yönetimi → Yeni hesap; launcher: Sunucu Yönetimi → Hesaplar → "Yeni hesap…". `authenticated-multiplayer` covers create, login, duplicate 409, non-admin 403 and bad input 400.
+- Water (NONCANONICAL, enhanced only; ported from the Joan of Arc native port's stylised water): source ocean drawn opaque after the other opaque draws over a copy of scene colour + depth (VK `vkCmdCopyImage` + continuation pass, GL `glBlitFramebuffer`): refraction, depth absorption teal → deep blue, shoreline foam and soft waterline, two scrolling `ocean_bump` layers, Fresnel sky reflection, GGX glints; RT physical uses an inline mirror ray. The ocean no longer casts shadows in enhanced raster. Original appearance unchanged. Captures: `analysis/water-joan/`.
+- Parallax occlusion mapping (NONCANONICAL, enhanced GL/VK/RT physical, `--parallax on|off`, default on): heights derived at zone load from diffuse luminance (high-pass, per-texture normalised, RGBA8 height+slope with mips; ~25 ms per Eminönü load) for static opaque zone materials; screen-derivative TBN, 8–24 steps + secant refinement, fades out 50–90 units, lighting normal tilted by the relief. VK scene pass 1.37 → 1.58 ms, RT physical 12.70 → 13.91 ms (RX 7900 XTX, 1792×1008). Captures: `analysis/parallax/`.
+- Ayarlar "Çizim Mesafesi" (NONCANONICAL): 11 steps 200…2200 units + unlimited (default), saved as `view_distance`; `RendererOptions::view_distance` / `Renderer::set_view_distance` skip main-view draws whose bounding sphere lies wholly beyond the distance (GL and VK, raster and RT G-buffer). The original "Görüş Mesafesi" (fog scale) is unchanged. Captures: `analysis/view-distance/`.
+
+Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** each, warning-free (230.8 s / 229.5 s / 341.4 s); RT smoke 5/5 (`ok`, no errors) and signed launcher smoke (Vulkan RT required, ½ scale) PASSED (`analysis/porting-wave20/Verify/`); admin web form created an account against a dev `ikv-auth` (audit row checked); real-asset GL / VK raster / VK RT physical captures for water, parallax on/off and draw-distance steps 0/3/10 inspected (logs free of errors and validation messages), plus a combined-tree water + parallax capture (`analysis/integration/ada/`). The sanitizer shutdown timeout stays open (not seen in this run).
 
 ## Status and evidence vocabulary
 

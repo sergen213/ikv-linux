@@ -8,8 +8,6 @@ layout(push_constant) uniform Draw {mat4 model;vec4 color;vec4 flags;vec4 extra;
 layout(location=0) out vec2 texcoord;
 layout(location=1) out float fadeWeight;
 void main(){
-    texcoord=draw.extra.w>=2?uv+draw.scroll.xy:uv;fadeWeight=sourceColor.a;
-    vec4 world=draw.model*vec4(position,1);
-    if(draw.extra.w>=2)world=sourceOceanPosition(world);
-    gl_Position=frame.lightVP*world;
+    texcoord=uv;fadeWeight=sourceColor.a;
+    gl_Position=frame.lightVP*draw.model*vec4(position,1); // the source ocean casts no shadow (renderer_vk.cpp draw_scene)
 }

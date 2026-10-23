@@ -16,7 +16,7 @@ namespace ikv {
 namespace {
 // Independently written GLSL. Original shader evidence is documented in GRAPHICS_ROADMAP.
 // Independently expressed v_ocean.vsh EXPP fraction and authored polynomial (Vulkan frame.glsl sourceOceanPosition):
-// scene and shadow vertex shaders; needs uniforms camera_position and source_time.
+// scene vertex shader; needs uniforms camera_position and source_time.
 #define IKV_GL_SOURCE_OCEAN R"GLSL(
 vec4 source_ocean_position(vec4 world_position) {
     float phase=fract((world_position.x/32.0+world_position.y/13.0+source_time.y)*0.15915494-0.25);
@@ -85,6 +85,7 @@ void main() {
         gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
         world_position=source_ocean_position(world_position);
         gl_Position=view_projection*world_position;
+        fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position; // enhanced water_surface
         texcoord=uv+source_scroll.xy;
         lightmap_uv=uv+source_scroll.zw;
         source_tangent_eye=normalize(camera_position-world_position.xyz);
@@ -215,11 +216,35 @@ float shadow_visibility(vec3 n,vec3 l) {
     return visible/9.0;
 }
 out vec4 output_color;
+// NONCANONICAL parallax occlusion: Vulkan lighting.glsl parallax() (derived relief of static zone materials, enhanced only).
+uniform sampler2D height_map;
+uniform bool has_height_map;
+vec2 surface_uv;
+vec3 parallax_gradient=vec3(0.0);
+void parallax() {
+    surface_uv=texcoord;
+    if(!has_height_map||original_appearance||sky||source_ocean)return;
+    vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),nf=cross(dp1,dp2),v=camera_position-fragment_position;
+    vec2 du1=dFdx(texcoord),du2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
+    nf=normalize(nf);v/=dist;if(dot(nf,v)<0.0)nf=-nf;
+    vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
+    vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
+    float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6);
+    if(!(depth>1e-3))return;
+    vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
+    int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,texcoord,du1,du2).r,last_t=0.0,last_f=h-1.0;
+    for(int i=0;i<steps&&t<1.0-h;++i){last_t=t;last_f=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(height_map,texcoord+shift*t,du1,du2).r;}
+    float f=t-(1.0-h);if(f>0.0&&last_f<0.0)t=mix(last_t,t,last_f/(last_f-f));
+    surface_uv=texcoord+shift*t;
+    vec2 slope=(textureGrad(height_map,surface_uv,du1,du2).gb-0.5)*0.5*vec2(textureSize(height_map,0));
+    parallax_gradient=0.7*depth*(slope.x*gu+slope.y*gv);
+}
 bool source_normal_path(){return has_normal_map&&source_lighting&&length(source_tangent_eye)>0.00001;}
 // Original lit surface (display-referred). sun_visibility 0 drops the source directional term (Vulkan originalSurface).
 vec4 original_surface(vec4 surface,float sun_visibility) {
     if(source_normal_path()) {
-        vec4 mapped_texel=texture(normal_map,texcoord);
+        vec4 mapped_texel=texture(normal_map,surface_uv);
         vec2 xy=mapped_texel.xy*2.0-1.0;
         vec3 mapped=normalize(vec3(xy,1.0-dot(xy,xy)));
         float factor=mix(1.0,dot(mapped,source_tangent_sun)*0.5+0.5,sun_visibility);
@@ -247,9 +272,54 @@ vec4 original_surface(vec4 surface,float sun_visibility) {
 // Vulkan frame.glsl enhancedSunScale/enhancedAmbientScale (NONCANONICAL wave 19): clock record relative to noon, linear.
 vec3 enhanced_sun_scale(){return source_lighting?pow(max(diffuse_multiplier*(255.0/vec3(126.0,105.0,110.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
 vec3 enhanced_ambient_scale(){return source_lighting?pow(max(ambient_multiplier*(255.0/vec3(200.0,157.0,142.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
+// NONCANONICAL: enhanced source ocean, Vulkan lighting.glsl waterSurface (the Joan of Arc port's stylised water): the
+// opaque scene copy (water_*_map, blitted before the water draws) refracted, depth absorption, shoreline foam, Fresnel
+// sky reflection, sun glints. The copy holds tonemapped display colour: inverted to linear before mixing.
+uniform sampler2D water_color_map;
+uniform sampler2D water_depth_map;
+uniform bool water_refraction;
+uniform mat4 view_projection;
+uniform vec4 source_time;
+float water_hash(vec2 c){return fract(sin(dot(mod(c,289.0),vec2(12.9898,78.233)))*43758.5453);}
+float water_noise(vec2 x){vec2 i=floor(x),f=fract(x);f=f*f*(3.0-2.0*f);return mix(mix(water_hash(i),water_hash(i+vec2(1.0,0.0)),f.x),mix(water_hash(i+vec2(0.0,1.0)),water_hash(i+1.0),f.x),f.y);}
+vec3 water_world(mat4 inv,vec2 uv){vec4 p=inv*vec4(uv*2.0-1.0,textureLod(water_depth_map,uv,0.0).r*2.0-1.0,1.0);return p.xyz/p.w;}
+vec3 water_linear(vec3 y){y=min(pow(y,vec3(2.2)),vec3(0.99));vec3 a=2.43*y-2.51,b=0.59*y-0.03,c=0.14*y;return (-b-sqrt(b*b-4.0*a*c))/(2.0*a)/exposure;}
+vec3 water_surface() {
+    const mat2 rot=mat2(0.8,0.6,-0.6,0.8);
+    vec3 p=fragment_position,v=normalize(camera_position-p),l=normalize(sun_direction);float t=source_time.y,dist=distance(camera_position,p);
+    vec3 ta=texture(normal_map,p.xz/225.0+t*vec2(0.016,0.009)).rgb*2.0-1.0,tb=texture(normal_map,rot*p.xz/65.0+t*vec2(-0.03,0.041)).rgb*2.0-1.0;
+    vec2 s=0.15*ta.xy/max(ta.z,0.5)+0.12*(transpose(rot)*tb.xy)/max(tb.z,0.5);
+    vec3 n=normalize(vec3(s.x,1.0,s.y));float nv=max(dot(n,v),1e-3);
+    vec2 uv=gl_FragCoord.xy/vec2(textureSize(water_depth_map,0));mat4 inv=inverse(view_projection);
+    float depth=water_refraction?max(p.y-water_world(inv,uv).y,0.0):1e4;
+    vec2 ruv=uv+s*(0.025*smoothstep(0.0,20.0,depth)/(1.0+dist/375.0));
+    vec3 bed=water_refraction?water_world(inv,ruv):p-v*1e4;
+    if(water_refraction&&bed.y>p.y){ruv=uv;bed=water_world(inv,uv);}
+    vec3 below=water_refraction?water_linear(textureLod(water_color_map,ruv,0.0).rgb):vec3(0.0);
+    float path=distance(p,bed),bed_depth=max(p.y-bed.y,0.0);
+    vec3 light=source_lighting?pow(min(ambient_multiplier+diffuse_multiplier*max(l.y,0.0),vec3(1.0)),vec3(2.2)):vec3(1.0);
+    vec3 tr=exp(-vec3(0.032,0.0104,0.0076)*path);
+    vec3 c=below*tr+mix(vec3(0.05,0.32,0.30),vec3(0.006,0.05,0.11),smoothstep(5.0,65.0,bed_depth))*light*(1.0-tr);
+    float edge=smoothstep(0.0,2.5,depth);
+    vec3 r=reflect(-v,n);r.y=abs(r.y);
+    vec3 fog=pow(max(fog_color,vec3(0.0)),vec3(2.2));
+    vec3 mirror=mix(fog,mix(vec3(0.055,0.07,0.09),vec3(0.32,0.44,0.62),clamp(r.y*0.5+0.5,0.0,1.0))*enhanced_ambient_scale()*2.0,smoothstep(0.0,0.4,r.y));
+    c=mix(c,mirror,(0.02+0.98*pow(1.0-nv,5.0))*edge);
+    vec3 h=normalize(l+v);float nl=max(dot(n,l),0.0),nh=max(dot(n,h),0.0),a2=0.07*0.07*0.07*0.07,k=0.035,dd=nh*nh*(a2-1.0)+1.0;
+    float spec=a2/(PI*dd*dd)/(4.0*(nv*(1.0-k)+k)*(nl*(1.0-k)+k))*nl*(0.02+0.98*pow(1.0-max(dot(v,h),0.0),5.0));
+    c+=min(spec,64.0)*vec3(2.8,2.55,2.2)*enhanced_sun_scale()*(scene_roofed?0.0:shadow_visibility(vec3(0.0,1.0,0.0),l))*edge;
+    float lace=0.6*water_noise(p.xz/3.0+t*vec2(0.25,-0.15))+0.4*water_noise(p.xz/1.25-t*vec2(0.2,0.3));
+    float foam=(1.0-smoothstep(0.0,3.0,depth))*smoothstep(0.55,0.8,lace);
+    c=mix(c,light*0.85,foam*0.7*smoothstep(0.0,0.3,depth));
+    c=mix(fog,max(c,vec3(0.0)),clamp(fog_blend,0.0,1.0));
+    c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
+    return pow(c,vec3(1.0/2.2));
+}
 void main() {
+    if(source_ocean&&!original_appearance){vec3 c=water_surface();if(grayscale)c=vec3(dot(c,vec3(0.299,0.587,0.114)));output_color=vec4(c,1.0);return;}
+    parallax();
     vec4 surface=material_color;
-    if(has_texture&&!source_ocean) surface*=texture(diffuse_map,texcoord);
+    if(has_texture&&!source_ocean) surface*=texture(diffuse_map,surface_uv);
     // Evaluates source constants when available; otherwise explicitly reduced ambient-only rendering.
     if(source_ocean) {
         // t_ocean.psh uses only diffuse and normal samplers; authored alpha is one.
@@ -271,7 +341,7 @@ void main() {
         surface=original_surface(surface,1.0);
     } else {
         // Source MAT+14 secondary fade applies only without higher-priority normal/environment maps.
-        if(has_fade_map&&!has_normal_map&&!has_environment_map)surface=mix(texture(fade_map,texcoord)*material_color,surface,fade_blend);
+        if(has_fade_map&&!has_normal_map&&!has_environment_map)surface=mix(texture(fade_map,surface_uv)*material_color,surface,fade_blend);
         // Vulkan lighting.glsl (NONCANONICAL wave 19): ambient = original light without its sun term (roofed: with it, and
         // no shadow-mapped sun), linearised; sun and sky reflection scaled by the clock record; record fog in linear.
         vec3 baked=pow(max(original_surface(surface,scene_roofed?1.0:0.0).rgb,vec3(0.0)),vec3(2.2));
@@ -284,8 +354,8 @@ void main() {
         if(has_normal_map) {
             vec3 t=world_tangent-n*dot(n,world_tangent);
             // Source normal maps carry only xy (b specular, a illumination): z rebuilt as original_surface (Vulkan mappedNormal).
-            if(dot(t,t)>1e-12){t=normalize(t);vec2 xy=texture(normal_map,texcoord).xy*2.0-1.0;n=normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1.0-dot(xy,xy))));}
-        }
+            if(dot(t,t)>1e-12){t=normalize(t);vec2 xy=texture(normal_map,surface_uv).xy*2.0-1.0;n=normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1.0-dot(xy,xy))));}
+        } else n=normalize(n-parallax_gradient);
         vec3 v=normalize(camera_position-fragment_position),l=normalize(sun_direction),h=normalize(v+l);
         const float roughness=0.65;
         vec3 albedo=pow(max(surface.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
@@ -313,18 +383,11 @@ layout(location=2) in vec2 uv;
 layout(location=6) in vec4 diffuse_color;
 uniform mat4 light_view_projection;
 uniform mat4 object_matrix;
-uniform bool source_ocean;
-uniform vec3 camera_position;
-uniform vec4 source_time;
-uniform vec4 source_scroll;
 out vec2 texcoord;
 out float fade_blend;
-)GLSL" IKV_GL_SOURCE_OCEAN R"GLSL(
 void main(){
-    texcoord=source_ocean?uv+source_scroll.xy:uv;fade_blend=diffuse_color.a;
-    vec4 world=object_matrix*vec4(position,1.0);
-    if(source_ocean)world=source_ocean_position(world);
-    vec4 p=light_view_projection*world;
+    texcoord=uv;fade_blend=diffuse_color.a;
+    vec4 p=light_view_projection*object_matrix*vec4(position,1.0);
     gl_Position=vec4(p.xy,p.z*2.0-p.w,p.w);
 }
 )GLSL";
@@ -509,7 +572,7 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLCOMPRESSEDTEXIMAGE2DPROC, glCompressedTexImage2D);
 #undef GL_ENTRY
     struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; };
-    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0; bool referenced=false; };
+    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; };
     struct Draw { const Instance* instance; Matrix4 matrix; float distance; std::uint32_t material; bool fog; std::array<float,4> scroll; bool visible=true; };
     struct ContourDraw { std::uint32_t mesh; Matrix4 matrix; std::array<float,3> color; };
     SDL_Window* window_;
@@ -534,8 +597,6 @@ class GlRenderer final : public Renderer {
     std::array<Matrix4,2> shadow_lights_{};
     GLint light_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
     GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
-    GLint shadow_ocean_location_=-1,shadow_camera_location_=-1,shadow_time_location_=-1,shadow_scroll_location_=-1;
-    std::array<float,4> source_time_{}; // this frame's v_ocean c38 (scene and shadow passes)
     GLint glow_mode_location_=-1,glow_step_location_=-1;
     GLint vp_location_=-1,object_location_=-1,color_location_=-1,texture_location_=-1,original_location_=-1,exposure_location_=-1;
     GLint normal_location_=-1,cutoff_location_=-1;
@@ -544,8 +605,10 @@ class GlRenderer final : public Renderer {
     GLint camera_location_=-1,environment_location_=-1,lightmap_location_=-1;
     GLint sky_b_location_=-1,sky_c_location_=-1,lightmap_strength_location_=-1;
     GLint sky_location_=-1,sky_blend_location_=-1;
-    GLint fade_location_=-1;
+    GLint fade_location_=-1,height_location_=-1;
     GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1,clip_location_=-1,roofed_location_=-1;
+    GLuint water_framebuffer_=0,water_textures_[2]{}; // NONCANONICAL enhanced water scene copy: colour, depth
+    GLint water_location_=-1; // water_refraction: the primary view's water samples the copy
     GLuint seal_program_=0;
     GLint seal_vp_location_=-1,seal_corners_location_=-1;
     bool overlay_present_=false,rendered_=false,grayscale_=false;
@@ -629,7 +692,7 @@ public:
             lightmap_location_=uniform(program_,"has_lightmap");lightmap_strength_location_=uniform(program_,"lightmap_strength");
             sky_b_location_=uniform(program_,"sky_b");sky_c_location_=uniform(program_,"sky_c");
             sky_location_=uniform(program_,"sky");sky_blend_location_=uniform(program_,"sky_blend");
-            fade_location_=uniform(program_,"has_fade_map");
+            fade_location_=uniform(program_,"has_fade_map");height_location_=uniform(program_,"has_height_map");
             ocean_location_=uniform(program_,"source_ocean");time_location_=uniform(program_,"source_time");
             scroll_location_=uniform(program_,"source_scroll");
             clip_location_=uniform(program_,"clip_planes");roofed_location_=uniform(program_,"scene_roofed");
@@ -639,6 +702,8 @@ public:
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
             glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
+            glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
+            water_location_=uniform(program_,"water_refraction");
             light_location_=uniform(program_,"light_view_projection");
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
@@ -677,8 +742,6 @@ public:
                 shadow_color_location_=uniform(shadow_program_,"material_color");shadow_cutoff_location_=uniform(shadow_program_,"alpha_cutoff");
                 shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
                 shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
-                shadow_ocean_location_=uniform(shadow_program_,"source_ocean");shadow_camera_location_=uniform(shadow_program_,"camera_position");
-                shadow_time_location_=uniform(shadow_program_,"source_time");shadow_scroll_location_=uniform(shadow_program_,"source_scroll");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
                 glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
                 for(int i=0;i<2;++i) {
@@ -697,6 +760,7 @@ public:
                 glBindFramebuffer_(GL_FRAMEBUFFER,0);check("allocating shadow map");
             }
             glGenFramebuffers_(1,&framebuffer_); glGenTextures(1,&color_); glGenRenderbuffers_(1,&depth_);
+            glGenFramebuffers_(1,&water_framebuffer_);glGenTextures(2,water_textures_);
             int w=0,h=0;
             if(!SDL_GetWindowSizeInPixels(window_,&w,&h)) fail("SDL window extent");
             resize(w,h);
@@ -722,12 +786,28 @@ public:
         glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,color_,0);
         glFramebufferRenderbuffer_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depth_);
         if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL scene framebuffer incomplete");
+        // NONCANONICAL enhanced water: colour + depth copy of the opaque scene (copy_water), sampled unfiltered-depth.
+        for(int i=0;i<2;++i) {
+            glBindTexture(GL_TEXTURE_2D,water_textures_[i]);
+            if(i)glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,width,height,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+            else glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,width,height,0,GL_RGBA,GL_UNSIGNED_BYTE,nullptr);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,i?GL_NEAREST:GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,i?GL_NEAREST:GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+        }
+        glBindFramebuffer_(GL_FRAMEBUFFER,water_framebuffer_);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,water_textures_[0],0);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,water_textures_[1],0);
+        if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL water framebuffer incomplete");
         width_=width;height_=height;rendered_=false;
         check("allocating scene framebuffer");
         progress();
     }
     void set_grayscale(bool on) override { grayscale_=on; }
     void set_fade(float black) override { fade_=std::clamp(black,0.f,1.f); }
+    void set_view_distance(float distance) override {
+        if(!std::isfinite(distance)||distance<0)throw std::invalid_argument("view distance requires a finite value >= 0");
+        options_.view_distance=distance;
+    }
     void set_overlay(const Overlay& overlay,std::span<const std::array<int,4>> changed) override {
         current();
         if(overlay.width==0 && overlay.height==0 && overlay.rgba.empty()){overlay_present_=false;return;}
@@ -796,16 +876,17 @@ public:
         glUseProgram_(program_);
         const auto vp=camera_view_projection(options_.camera,width_,height_);
         glUniform1i_(original_location_,options_.original_appearance?1:0);glUniform1f_(exposure_location_,options_.exposure);
+        glUniform1i_(water_location_,0); // portal views: no scene copy
         glUniform1i_(uniform(program_,"grayscale"),grayscale_?1:0);
         const auto& light=scene.lighting;
         validate_lighting(light);
         const auto ticks=static_cast<std::uint32_t>(SDL_GetTicks());
-        source_time_={static_cast<float>(ticks),static_cast<float>(ticks)*0.001f,0.0f,0.0f};
-        glUniform4fv_(time_location_,1,source_time_.data());
+        const std::array<float,4> source_time{static_cast<float>(ticks),static_cast<float>(ticks)*0.001f,0.0f,0.0f}; // v_ocean c38
+        glUniform4fv_(time_location_,1,source_time.data());
         contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
         build(view_,set,scene,entities,vp,eye,nullptr,true);
-        if(shadow_program_)shadow_pass(0,set,scene,view_,shadow_light_matrix(options_.camera,enhanced_sun(light)),eye);
+        if(shadow_program_)shadow_pass(0,set,scene,view_,shadow_light_matrix(options_.camera,enhanced_sun(light)));
         Clip source_clip=no_clip;
         view_uniforms(scene,vp,eye,source_clip);
         glDepthMask(GL_FALSE);
@@ -828,7 +909,19 @@ public:
         if(!portals.empty())view_uniforms(scene,vp,eye,source_clip);
         clip_distances(split);
         glDisable(GL_BLEND);glDepthMask(GL_TRUE);
-        for(const auto& draw:view_.opaque) if(draw.visible) draw_instance(set,scene,draw);
+        // NONCANONICAL enhanced water: source ocean draws after the rest of the opaque scene, which is copied first
+        // (colour + depth) for its refraction and depth absorption (scene_fragment water_surface).
+        const auto water=[&](const Draw& d){return !options_.original_appearance&&scene.materials[d.material].source_ocean;};
+        for(const auto& draw:view_.opaque) if(draw.visible&&!water(draw)) draw_instance(set,scene,draw);
+        if(std::any_of(view_.opaque.begin(),view_.opaque.end(),[&](const Draw& d){return d.visible&&water(d);})) {
+            glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,water_framebuffer_);
+            glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+            glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);
+            glActiveTexture_(GL_TEXTURE6);glBindTexture(GL_TEXTURE_2D,water_textures_[0]);
+            glActiveTexture_(GL_TEXTURE7);glBindTexture(GL_TEXTURE_2D,water_textures_[1]);
+            glUniform1i_(water_location_,1);
+            for(const auto& draw:view_.opaque) if(draw.visible&&water(draw)) draw_instance(set,scene,draw);
+        }
         std::sort(view_.alpha.begin(),view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
         for(const auto& draw:view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
@@ -1009,8 +1102,10 @@ private:
     void upload_material(GlSet& set,const Scene& scene,std::size_t index) {
         const auto& material=scene.materials[index];
         validate_material(material);
+        // height: NONCANONICAL parallax relief (scene_fragment parallax()), enhanced with RendererOptions::parallax only.
         set.materials[index]={find_texture(set,material.diffuse),find_texture(set,material.normal),
-            find_texture(set,material.environment),find_texture(set,material.lightmap),find_texture(set,material.luminance),true};
+            find_texture(set,material.environment),find_texture(set,material.lightmap),find_texture(set,material.luminance),
+            options_.parallax&&!options_.original_appearance?find_texture(set,material.height):0,true};
         progress();
     }
     void validate_mesh(const Scene& scene,std::size_t index) const {
@@ -1148,6 +1243,8 @@ private:
             for(;set.next_texture<set.textures.size();++set.next_texture) {
                 if(due())return false;
                 const auto i=set.next_texture;
+                // Derived parallax relief (Material::height) is never bound unless enhanced parallax is on: not uploaded.
+                if(scene.textures[i].name.ends_with("#parallax")&&(options_.original_appearance||!options_.parallax))continue;
                 upload_texture(scene.textures[i],set.textures[i]);
                 if(!set.texture_names.emplace(scene.textures[i].name,set.textures[i]).second)throw std::invalid_argument("duplicate scene texture name");
                 progress();
@@ -1253,7 +1350,8 @@ private:
             // Frustum culling: sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
             // Culled alpha draws stay in alpha so its distance sort sees the unculled list.
             const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
-                (sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds)&&(!clip||sphere_visible(*clip,matrix,set.meshes[instance.mesh].bounds)));
+                (sphere_within(eye,matrix,set.meshes[instance.mesh].bounds,options_.view_distance)&&
+                 sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds)&&(!clip||sphere_visible(*clip,matrix,set.meshes[instance.mesh].bounds)));
             // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
             if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
             bool fog=false;
@@ -1266,7 +1364,9 @@ private:
             }
             const float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
             Draw draw{&instance,matrix,dx*dx+dy*dy+dz*dz,material,fog,scroll,visible};
-            (instance.sky?view.sky:(scene.materials[material].alpha?view.alpha:view.opaque)).push_back(draw);
+            // NONCANONICAL enhanced water (authored alpha-blended) is drawn opaque with depth over the scene copy.
+            const bool alpha=scene.materials[material].alpha&&(options_.original_appearance||!scene.materials[material].source_ocean);
+            (instance.sky?view.sky:(alpha?view.alpha:view.opaque)).push_back(draw);
             if(!visible||!source)continue;
             if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
                 for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
@@ -1359,7 +1459,7 @@ private:
         build(portal_view_,set,scene,portal.entities,portal_vp,portal_eye,&cull,false);
         if(shadow_program_) {
             Camera virtual_camera=options_.camera;virtual_camera.target=inverse(options_.camera.target);
-            shadow_pass(1,set,scene,portal_view_,shadow_light_matrix(virtual_camera,enhanced_sun(scene.lighting)),portal_eye);
+            shadow_pass(1,set,scene,portal_view_,shadow_light_matrix(virtual_camera,enhanced_sun(scene.lighting)));
         }
         view_uniforms(scene,portal_vp,portal_eye,clip);
         clip_distances(true);
@@ -1388,7 +1488,7 @@ private:
         check("drawing portal view");
     }
     // Enhanced sun shadow map slot (0: primary view, 1: portal destination view); leaves it bound for program_.
-    void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp,const std::array<float,3>& eye) {
+    void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp) {
         shadow_lights_[static_cast<std::size_t>(slot)]=light_vp;
         glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glViewport(0,0,2048,2048);
         // Vulkan shadow pipeline: back faces culled, depth bias 1.25 constant / 1.75 slope. The light matrix keeps
@@ -1399,8 +1499,8 @@ private:
         // clipped, a building's long low-sun shadow came and went with the camera zoom.
         glEnable(GL_DEPTH_CLAMP);
         glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
-        glUniform3fv_(shadow_camera_location_,1,eye.data());glUniform4fv_(shadow_time_location_,1,source_time_.data());
-        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)draw_shadow(set,scene,draw);
+        // NONCANONICAL enhanced water: the source ocean casts no shadow, which would darken the bed seen through it.
+        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)if(!scene.materials[draw.material].source_ocean)draw_shadow(set,scene,draw);
         glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
         glUseProgram_(program_);shadow_bind(slot);
@@ -1455,8 +1555,6 @@ private:
     }
     void draw_shadow(const GlSet& set,const Scene& scene,const Draw& draw){
         const auto& material=scene.materials[draw.material];
-        glUniform1i_(shadow_ocean_location_,material.source_ocean?1:0);
-        if(material.source_ocean)glUniform4fv_(shadow_scroll_location_,1,draw.scroll.data());
         if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
         const auto& gpu=set.meshes[draw.instance->mesh];const auto& maps=set.materials[draw.material];
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
@@ -1478,11 +1576,12 @@ private:
         const GLuint environment=draw.instance->sky
             ? (maps.environment?maps.environment:(maps.fade?maps.fade:maps.lightmap)):maps.environment;
         glUniform1i_(environment_location_,environment?1:0);glUniform1i_(lightmap_location_,maps.lightmap?1:0);
-        glUniform1i_(fade_location_,maps.fade?1:0);
+        glUniform1i_(fade_location_,maps.fade?1:0);glUniform1i_(height_location_,maps.height?1:0);
         glActiveTexture_(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,maps.normal);
         glActiveTexture_(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,environment);
         glActiveTexture_(GL_TEXTURE3);glBindTexture(GL_TEXTURE_2D,maps.lightmap);
         glActiveTexture_(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,maps.fade);
+        glActiveTexture_(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,maps.height);
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
         glUniformMatrix4fv_(object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(color_location_,1,material.color.data());glUniform1i_(texture_location_,diffuse?1:0);
         glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
@@ -1505,6 +1604,8 @@ private:
             if(color_)glDeleteTextures(1,&color_);
             if(depth_ && glDeleteRenderbuffers_)glDeleteRenderbuffers_(1,&depth_);
             if(framebuffer_ && glDeleteFramebuffers_)glDeleteFramebuffers_(1,&framebuffer_);
+            if(water_textures_[0])glDeleteTextures(2,water_textures_);
+            if(water_framebuffer_ && glDeleteFramebuffers_)glDeleteFramebuffers_(1,&water_framebuffer_);
             if(glow_program_ && glDeleteProgram_)glDeleteProgram_(glow_program_);
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
