@@ -1499,8 +1499,11 @@ private:
         // clipped, a building's long low-sun shadow came and went with the camera zoom.
         glEnable(GL_DEPTH_CLAMP);
         glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
-        // NONCANONICAL enhanced water: the source ocean casts no shadow, which would darken the bed seen through it.
-        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)if(!scene.materials[draw.material].source_ocean)draw_shadow(set,scene,draw);
+        // NONCANONICAL enhanced water: the source ocean casts no shadow. Keep near-clamped casters, cull the rest by light.
+        const auto caster_planes=shadow_caster_planes(light_vp);
+        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)
+            if(!scene.materials[draw.material].source_ocean&&
+               sphere_visible(caster_planes,draw.matrix,set.meshes[draw.instance->mesh].bounds))draw_shadow(set,scene,draw);
         glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
         glUseProgram_(program_);shadow_bind(slot);

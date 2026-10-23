@@ -935,8 +935,8 @@ class Launcher final : public QWidget {
         connect(upscaler, &QComboBox::currentIndexChanged, this, syncUpscaler);
         appearance = new QComboBox; appearance->setObjectName("appearance"); appearance->addItems({"original", "enhanced"}); appearance->setCurrentText(settings.value("graphics/appearance", "original").toString()); gf->addRow("Görünüm", appearance);
         rayTracing = new QComboBox; rayTracing->setObjectName("rayTracing"); rayTracing->addItems({"off", "auto", "required"}); rayTracing->setCurrentText(settings.value("graphics/rt", "off").toString()); gf->addRow("Işın izleme (donanıma bağlı)", rayTracing);
-        // faithful: original appearance keeps the original lighting + RT actor shadows; enhanced keeps its shading with an
-        // RT Sun shadow ray. physical: enhanced GGX/GI/reflections.
+        // faithful: original appearance keeps original lighting + RT actor shadows; enhanced keeps its direct shading with
+        // RT Sun shadows and diffuse GI. physical: enhanced GGX/GI/reflections.
         const QString savedRtStyle = settings.value("graphics/rt_style", "faithful").toString();
         if (savedRtStyle != "faithful" && savedRtStyle != "physical")
             throw std::runtime_error("Invalid saved rt_style: faithful or physical required");

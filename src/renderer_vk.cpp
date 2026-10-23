@@ -158,8 +158,8 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  float fade_=0; // NONCANONICAL seamless door fade (post.frag frame.fade.x)
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
  // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance
- // (with faithful RT: plus actor Sun-ray shadows). Enhanced appearance keeps its own shading, water and parallax with RT:
- // physical traces sun/GI/reflections; faithful keeps enhanced raster shading, Sun ray instead of the shadow map.
+ // (with faithful RT: plus actor Sun-ray shadows). Enhanced appearance keeps its own direct shading, water and parallax:
+ // physical traces sun/GI/reflections; faithful traces Sun shadows and diffuse GI with the same guided resolve.
  bool original_lighting_=true,physical_rt_=false;
  std::uint64_t history_eligible_frames_=0,history_reset_events_=0,history_retained_dirty_frames_=0;
  std::uint64_t total_frames_=0;
@@ -968,13 +968,13 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      }
      if(!physical_)throw std::runtime_error("no Vulkan1.2 graphics/present device satisfies requested capabilities");
      const auto features=query_rt_features(physical_);
-     // Physical RT only traces in enhanced lighting: with original appearance it would build/refresh AS for nothing.
+     // Original appearance never traces diffuse GI/reflections. Faithful enhanced and physical both need guided history.
      rt_enabled_=options_.ray_tracing!=RayTracing::off&&features.supported()&&compute_queue()&&
          (options_.rt_style==RtStyle::faithful||!options_.original_appearance);
      original_lighting_=options_.original_appearance;
      physical_rt_=rt_enabled_&&!original_lighting_&&options_.rt_style==RtStyle::physical;
      const char* denoise=SDL_getenv("IKV_RT_DENOISE");
-     denoise_enabled_=physical_rt_&&(!denoise||std::strcmp(denoise,"0"));
+     denoise_enabled_=rt_enabled_&&!original_lighting_&&(!denoise||std::strcmp(denoise,"0"));
      VkPhysicalDeviceFeatures available{};vkGetPhysicalDeviceFeatures(physical_,&available);
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
@@ -1767,15 +1767,19 @@ void record_geometry_uploads(SceneSet& set) {
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
  // items: a slice of set.draws. clip: the portal pipelines (scene_portal.vert, frame.clip) for a destination view or the
- // source half-space split.
- void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,bool clip=false) {
+ // source half-space split. casters: this view's light volume, with near-clamped casters retained.
+ void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,bool clip=false,
+                 const FrustumPlanes* casters=nullptr) {
      const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
      if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
      for(const auto& item:items) {
-        // Shadow pass (enhanced raster only): the source ocean casts none, it would darken the bed refracted through it.
-        if(shadow?item.sky||(item.material<scene.materials.size()&&scene.materials[item.material].source_ocean):!item.visible)continue;
+        // Shadow pass (enhanced raster only): source ocean casts none; off-camera casters still need light-volume culling.
+        if(shadow) {
+            if(item.sky||(item.material<scene.materials.size()&&scene.materials[item.material].source_ocean)||
+               (casters&&!sphere_visible(*casters,item.model,set.geometry[item.mesh].bounds)))continue;
+        } else if(!item.visible)continue;
          if(!scene.materials.empty()) {
              if(item.material>=scene.materials.size()||item.material>=material_usage_.size())
                  throw std::runtime_error("scene draw material index out of range");
@@ -2071,9 +2075,9 @@ void set_particles(const ParticleFrame& frame)override {
      return changed;
  }
  // One view's draw list in set.draws (sky, then opaque nearest-first, then alpha farthest-first). Frustum culling marks
- // draws instead of dropping them, so the sort orders exactly the unculled list. Sky, source ocean (vertex-displaced)
- // and skinned (per-frame world-space) meshes always draw; enhanced raster keeps every draw for the shadow pass (!cull).
- void build_draws(SceneSet& set,std::span<const RenderEntity> entities,const std::array<float,3>& eye,const FrustumPlanes& planes,bool cull,
+ // colour draws instead of dropping them, so the shadow pass retains off-screen casters and the sort sees the whole list.
+ // Sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
+ void build_draws(SceneSet& set,std::span<const RenderEntity> entities,const std::array<float,3>& eye,const FrustumPlanes& planes,
                   std::vector<ContourItem>* contours) {
      const Scene& scene=*set.scene;auto& draws=set.draws;draws.clear();
      // previous: last frame's model matrix (motion vectors); null = unmoved.
@@ -2128,7 +2132,7 @@ void set_particles(const ParticleFrame& frame)override {
              const bool always=instance.sky||instance.ocean||!scene.meshes[instance.mesh].influences.empty()||
                  (material<scene.materials.size()&&scene.materials[material].source_ocean);
              const bool visible=always||(sphere_within(eye,matrix,set.geometry[instance.mesh].bounds,options_.view_distance)&&
-                 (!cull||sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds)));
+                 sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds));
              const bool fog=visible&&test_fog&&source_fog_enabled(instance.source_half_extents,center,matrix,eye,scene.lighting.fog_start);
              add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
              if(!visible||!contours)continue;
@@ -2261,7 +2265,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      set_lighting(fp,portal.scene->lighting);
      set->touched=total_frames_;
      if(set->drawn+1!=total_frames_)set->frame=0;
-     build_draws(*set,portal.entities,{fp.eye[0],fp.eye[1],fp.eye[2]},cull,true,nullptr);
+     build_draws(*set,portal.entities,{fp.eye[0],fp.eye[1],fp.eye[2]},cull,nullptr);
      return view;
  }
  void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float,std::span<const PortalView> portals)override {
@@ -2317,9 +2321,8 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      auto eye=basis.eye;
      const auto source_ticks=static_cast<std::uint32_t>(SDL_GetTicks());
      contours_.clear();
-     const bool cull=options_.original_appearance||rt_enabled_;
      const auto planes=frustum_planes(camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true));
-     build_draws(primary,entities,eye,planes,cull,&contours_);
+     build_draws(primary,entities,eye,planes,&contours_);
      Frame f{};
      f.vp=camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true);
      std::array<float,2> fsr_jitter{};
@@ -2387,10 +2390,12 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      // the RT shaders never read it, so the pass only clears it.
      if(!options_.original_appearance&&!rt_enabled_) {
          const auto half=[&](float x){VkViewport v{x,0,2048,2048,0,1};VkRect2D r{{std::int32_t(x),0},{2048,2048}};vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);};
-         half(0);draw_scene(command_,true,primary,primary.draws);
+         half(0);const auto primary_casters=shadow_caster_planes(f.light);
+         draw_scene(command_,true,primary,primary.draws,false,&primary_casters);
          if(view_count&&views[0]->frame.fade[1]>0) {
              half(2048);uniform_offset_=view_offset(1);
-             draw_scene(command_,true,*views[0]->set,views[0]->set->draws);
+             const auto portal_casters=shadow_caster_planes(views[0]->frame.light);
+             draw_scene(command_,true,*views[0]->set,views[0]->set->draws,false,&portal_casters);
              uniform_offset_=view_offset(0);
          }
      }
@@ -2600,7 +2605,6 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      previous_jitter_={f.jitter[0],f.jitter[1]};rendered_=true;
      ++total_frames_;
      if(total_frames_<=2||total_frames_%300==0) {
-         const bool active=physical_rt_;
          // Rendered (submitted) frame period since the previous line: the FIFO-paced frame rate without frame generation.
          const auto now=std::chrono::steady_clock::now();
          const double frame_ms_avg=log_frame_?std::chrono::duration<double,std::milli>(now-log_time_).count()/double(total_frames_-log_frame_):0;
@@ -2610,7 +2614,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
             <<" lighting="<<(original_lighting_?"original":physical_rt_?"physical":"enhanced")<<" hardwareRayQueries="<<rt_enabled_
             <<" accelerationStructure="<<(rt_enabled_&&primary.rt->acceleration_structure()!=VK_NULL_HANDLE)
             <<" sceneSets="<<sets_.size()<<" portalViews="<<view_count
-            <<" reflections="<<active<<" shadows="<<rt_enabled_<<" diffuseGI="<<active<<" renderedFrameMs="<<frame_ms_avg
+            <<" reflections="<<physical_rt_<<" shadows="<<rt_enabled_<<" diffuseGI="<<(rt_enabled_&&!original_lighting_)<<" renderedFrameMs="<<frame_ms_avg
              <<" historyEligible="<<int(f.params[2])<<" historyEligibleFrames="<<history_eligible_frames_
              <<" historyResetEvents="<<history_reset_events_<<" historyRetainedDirtyFrames="<<history_retained_dirty_frames_
              <<" historySampleCap=32 geometryMotionVectors="<<motion_vectors_<<" denoise="<<denoise_enabled_<<" renderScale="<<options_.render_scale

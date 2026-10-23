@@ -179,6 +179,13 @@ inline FrustumPlanes frustum_planes(const Matrix4& m) {
         }
     return planes;
 }
+// Directional shadow casters: cull only outside the light's X/Y volume. Depth planes stay disabled: near-plane
+// casters are depth-clamped and can still shadow visible receivers; far casters are conservatively retained.
+inline FrustumPlanes shadow_caster_planes(const Matrix4& light_vp) {
+    auto planes = frustum_planes(light_vp);
+    planes[4] = planes[5] = {0, 0, 0, 1};
+    return planes;
+}
 // World-space bounding sphere {centre, radius} of an affine model matrix; non-finite bounds stay infinite.
 inline std::array<float, 4> world_sphere(const Matrix4& model, const std::array<float, 4>& bounds) {
     if (!std::isfinite(bounds[3])) return {0, 0, 0, INFINITY};

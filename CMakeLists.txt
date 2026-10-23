@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.10.2 LANGUAGES CXX)
+project(ikv_native VERSION 0.10.3 LANGUAGES CXX)
 
 option(IKV_BUILD_CLIENT "Build the native SDL3 OpenGL/Vulkan client" ON)
 option(IKV_BUILD_VULKAN "Build the Vulkan renderer and hardware ray-tracing support" ON)

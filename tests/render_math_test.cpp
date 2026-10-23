@@ -157,5 +157,12 @@ int main() {
     assert(!ikv::sphere_within({0,0,0},far_cube,bounds,100-std::sqrt(3.f)-.01f));
     assert(ikv::sphere_within({0,0,0},far_cube,bounds,0));
     assert(ikv::sphere_within({0,0,0},far_cube,ikv::mesh_bounds(broken),1));
+    const auto identity=ikv::Transform{}.matrix;
+    const auto caster_planes=ikv::shadow_caster_planes(identity),full_planes=ikv::frustum_planes(identity);
+    const ikv::Matrix4 near_clamped{1,0,0,0,0,1,0,0,0,0,1,0,0,0,-2,1};
+    const ikv::Matrix4 beside_light{1,0,0,0,0,1,0,0,0,0,1,0,2,0,0,1};
+    assert(!ikv::sphere_visible(full_planes,near_clamped,bounds));
+    assert(ikv::sphere_visible(caster_planes,near_clamped,bounds)); // depth-clamped Sun casters must not be near-culled
+    assert(!ikv::sphere_visible(caster_planes,beside_light,bounds));
     return 0;
 }

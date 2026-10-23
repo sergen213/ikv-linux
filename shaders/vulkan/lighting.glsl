@@ -124,17 +124,16 @@ vec4 originalSurface(vec4 diffuse,float sunVisibility) {
     }
     return vec4((diffuse.rgb-lightmap*frame.fog.z)*vertexLight,diffuse.a);
 }
-// Enhanced raster albedo keeps the original subtractive lightmap darkening (originalSurface; not on the normal-mapped
-// path): without it the sun lit lightmap-darkened art (Çemberlitaş copies) 3x brighter than original (NONCANONICAL
-// wave 19). RT physical traces its own occlusion: none.
+// Enhanced raster and faithful RT albedo keep the original subtractive lightmap darkening (originalSurface; not on the
+// normal-mapped path): without it the sun lit lightmap-darkened art 3x brighter than original (NONCANONICAL wave 19).
+// Physical RT traces its own occlusion and has no lightmap term.
 vec3 enhancedLightmapShadow(float alpha){
 #ifdef IKV_RT
-    return vec3(0);
-#else
+    if(frame.params.x<1.5)return vec3(0);
+#endif
     if(draw.extra.x<.5||draw.flags.x>.5)return vec3(0);
     vec3 shadow=texture(originalLightmap,lightmapUV).rgb*frame.fog.z;
     return draw.flags.y>.5?shadow*(1-clamp(alpha,0,1)):shadow;
-#endif
 }
 vec4 sourceOceanSurface() {
     vec3 normal0=texture(normalMap,sourceOceanUV*.80000001).rgb*2-1;
@@ -187,8 +186,11 @@ vec3 waterSurface(){
     vec3 r=reflect(-v,n);r.y=abs(r.y);
     vec3 fog=pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2));
 #ifdef IKV_RT
-    vec3 mirror=rtIncoming(p+vec3(0,.6,0),vec3(0,1,0),normalize(vec3(r.x,max(r.y,.02),r.z)),l);
-    float sun=rtSunVisibility(p+vec3(0,.6,0),vec3(0,1,0),l,0u);
+    vec3 mirror=frame.params.x<1.5?
+        rtIncoming(p+vec3(0,.6,0),vec3(0,1,0),normalize(vec3(r.x,max(r.y,.02),r.z)),l):
+        mix(fog,sky(r)*enhancedAmbientScale()*2,smoothstep(0,.4,r.y));
+    float sun=frame.params.x<1.5?rtSunVisibility(p+vec3(0,.6,0),vec3(0,1,0),l,0u):
+        sceneRoofed()?0:rtSunVisibilityMasked(p+vec3(0,.6,0),vec3(0,1,0),l,3u,0u);
 #else
     vec3 mirror=mix(fog,sky(r)*enhancedAmbientScale()*2,smoothstep(0,.4,r.y));
     float sun=sceneRoofed()?0:shadowVisibility(vec3(0,1,0));
@@ -267,9 +269,8 @@ if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
 #ifdef IKV_RT
-// params.x 1: physical RT (traced sun, GI, reflections). 2: faithful RT with enhanced appearance: the enhanced raster
-// shading below, its shadow map replaced by the deterministic Sun ray (scenery + actors, mask 3: the ocean, mask 4,
-// casts none, like the raster shadow pass).
+// params.x 1: physical RT (traced sun, GI, reflections). 2: faithful RT with enhanced appearance: enhanced direct
+// shading and diffuse GI below, with a deterministic Sun ray (scenery + actors, mask 3; ocean mask 4 casts none).
 if(frame.params.x<1.5){
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
 result=albedo*(light.sun+light.diffuse)+light.reflection;
@@ -279,20 +280,38 @@ rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwo
 }else
 #endif
 {
-// NONCANONICAL wave 19 (renderer_gl.cpp scene_fragment matches): ambient is the original baked light (vertex ambient x
-// record ambient, lightmap) without its source sun term, linearised; the GGX sun and sky reflection follow the clock
-// record. Roofed zones keep the whole original light (source sun included, unshadowed) and no shadow-mapped sun: the
-// roof shadowed interiors to sky-only darkness. The record fog is applied in linear like the original's (sky included).
+// NONCANONICAL wave 19 (renderer_gl.cpp scene_fragment matches): enhanced direct sun and sky reflection follow the
+// clock record. Faithful RT replaces outdoor baked ambient with traced diffuse GI; roofed interiors retain their
+// original baked light because the source's artificial lights have no RT emission data. Raster uses original baked
+// ambient everywhere. The record fog is applied in linear like the original's (sky included).
 bool roofed=sceneRoofed();
 vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):
 // Eminönü noon 108 vs 115, every roofed interior above original (analysis/porting-wave19/LightingFixes/report.md).
+vec3 ambient=baked;
 #ifdef IKV_RT
-float sunShadow=!roofed&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,l,3u,0u):1.;
+vec3 facet=rtUnit(rtFacet);if(dot(facet,v)<0)facet=-facet;
+float sunShadow=!roofed&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,facet,l,3u,0u):1.;
+if(!roofed) {
+    vec3 smoothNormal=rtUnit(dot(worldNormal,facet)<0?-worldNormal:worldNormal);
+    vec3 diffuse=rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
+    ambient=albedo*diffuse;
+#ifdef IKV_RT_GUIDED
+    // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.
+    float fogWeight=frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.;
+    rtDiffuse=diffuse*fogWeight;rtArtwork=rtGuidePackArtwork(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)));
+#endif
+}
 #else
 float sunShadow=shadowVisibility(n);
 #endif
-result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+baked+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
+#ifdef IKV_RT
+// The guided resolve replaces exactly albedo*diffuse: unlike the deterministic enhanced terms, faithful GI has no x1.5.
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale())
+    +(roofed?1.5*baked:ambient);
+#else
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+ambient+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
+#endif
 if(frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),result,clamp(sourceFog,0,1));
 }
 }

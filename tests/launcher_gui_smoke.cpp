@@ -1143,11 +1143,12 @@ int main(int argc, char** argv) {
                                 (requestedAppearance == "enhanced" || requestedRtStyle == "faithful")) {
                                 if (!QRegularExpression("Vulkan device=[^\\n]* hardwareRT=1(?:\\s|$)").match(text).hasMatch())
                                     throw std::runtime_error("Required RT frame has no actual hardware RT device");
-                                // Faithful RT traces only Sun-ray actor shadows; physical adds reflections and diffuse GI.
-                                const QString effects = requestedRtStyle == "physical" ? "1" : "0";
+                                // Enhanced faithful traces Sun shadows and diffuse GI; original faithful traces actor shadows only.
+                                const QString reflections = requestedRtStyle == "physical" ? "1" : "0";
+                                const QString diffuseGI = requestedAppearance == "enhanced" ? "1" : "0";
                                 for (const QString& flag : {QString("rtStyle=") + requestedRtStyle, QString("hardwareRayQueries=1"),
                                                             QString("accelerationStructure=1"), QString("shadows=1"),
-                                                            "reflections=" + effects, "diffuseGI=" + effects})
+                                                            "reflections=" + reflections, "diffuseGI=" + diffuseGI})
                                     if (!provider.captured(0).contains(flag))
                                         throw std::runtime_error("Required RT frame lacks actual acceleration/effect evidence");
                             }

@@ -153,6 +153,24 @@ vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir) {
 // Linear lighting split for the guided resolve: radiance = albedo * (sun + diffuse) + reflection.
 // sun: deterministic direct gain; diffuse: stochastic indirect gain; reflection: stochastic additive radiance.
 struct RtLight { vec3 sun; vec3 diffuse; vec3 reflection; };
+// One-bounce diffuse GI, shared by physical and faithful enhanced RT. Inputs are normalized; no direct sun or
+// reflection rays are traced here, so faithful does not pay for physical effects it does not display.
+vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal,
+                       vec3 sunDir, uvec2 pixel, uint frame, float quality) {
+    int samples = int(clamp(ceil(quality), 1.0, 4.0));
+    vec3 diffuse = vec3(0.0);
+#if IKV_RT_GI
+    for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
+        vec3 direction = rtAboveSurface(rtHemisphere(normal, rtSequence(pixel, 1u, frame * uint(samples) + uint(sampleIndex))), smoothNormal);
+        diffuse += rtIncoming(position, facet, direction, sunDir);
+    }
+    // Cosine-weighted estimator: cosine / PDF cancels pi for Lambertian BRDF.
+    diffuse *= 0.96 / float(samples);
+#else
+    diffuse = rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
+#endif
+    return diffuse;
+}
 // facet: physical triangle normal facing the eye; smoothNormal: interpolated vertex normal; normal: authored
 // (normal-mapped) shading normal.
 RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, vec3 viewDir, float roughness,
@@ -173,17 +191,8 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
         visibility = rtSunVisibility(position, facet, sunDir, 0u);
 #endif
     light.sun = rtSunRadiance() * (cosine * visibility * 0.96 / 3.14159265359);
+    light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality);
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
-#if IKV_RT_GI
-    for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
-        vec3 direction = rtAboveSurface(rtHemisphere(normal, rtSequence(pixel, 1u, frame * uint(samples) + uint(sampleIndex))), smoothNormal);
-        light.diffuse += rtIncoming(position, facet, direction, sunDir);
-    }
-    // Cosine-weighted estimator: cosine / PDF cancels pi for Lambertian BRDF.
-    light.diffuse *= 0.96 / float(samples);
-#else
-    light.diffuse = rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
-#endif
 #if IKV_RT_REFLECTIONS
     // GGX importance-sampled half vectors, Schlick Fresnel, Smith masking.
     float alpha = roughness * roughness;

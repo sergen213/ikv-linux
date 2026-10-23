@@ -247,13 +247,13 @@ def render(services, args, output, identities, backends, evidence):
             if record['rt_policy'] == 'required':
                 diagnostics = record.get('runtime_diagnostics', [])
                 device = any(line.startswith('Vulkan device=') and 'hardwareRT=1' in line for line in diagnostics)
-                # Faithful RT (default) traces only Sun-ray actor shadows; physical adds reflections and diffuse GI.
+                # Enhanced faithful traces Sun shadows and diffuse GI; physical also traces reflections.
                 style = getattr(args, 'rt_style', 'faithful')
-                effects = '1' if style == 'physical' else '0'
+                reflections = '1' if style == 'physical' else '0'
                 submitted = any(line.startswith('Vulkan submitted frame=') and
                                 all(flag in line for flag in ('provider=vulkan', 'appearance=enhanced', 'rtStyle=' + style,
                                     'hardwareRayQueries=1', 'accelerationStructure=1', 'shadows=1',
-                                    'reflections=' + effects, 'diffuseGI=' + effects)) for line in diagnostics)
+                                    'reflections=' + reflections, 'diffuseGI=1')) for line in diagnostics)
                 completed = any(re.search(r'^Vulkan completed frames=[1-9][0-9]* provider=vulkan hardwareRayQueries=1(?: |$)', line)
                                 for line in diagnostics)
                 if not (device and submitted and completed):
