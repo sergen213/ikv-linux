@@ -164,5 +164,35 @@ int main() {
     assert(!ikv::sphere_visible(full_planes,near_clamped,bounds));
     assert(ikv::sphere_visible(caster_planes,near_clamped,bounds)); // depth-clamped Sun casters must not be near-culled
     assert(!ikv::sphere_visible(caster_planes,beside_light,bounds));
+    const ikv::Camera shadow_camera;
+    const auto shadow_sun=ikv::enhanced_sun(ikv::SceneLighting{});
+    const auto shadow_radius=[](const ikv::Matrix4& light) {
+        return 1/std::sqrt(light[0]*light[0]+light[4]*light[4]+light[8]*light[8]);
+    };
+    assert(ikv::original_blob_shadows_enabled(true));
+    assert(!ikv::original_blob_shadows_enabled(false));
+    const auto unlimited=ikv::shadow_light_cascades(shadow_camera,shadow_sun,0);
+    assert(unlimited.light[0]==ikv::shadow_light_matrix(shadow_camera,shadow_sun));
+    assert(std::abs(unlimited.split-44)<1e-6f);
+    assert(std::abs(shadow_radius(unlimited.light[0])-44)<1e-4f);
+    assert(std::abs(shadow_radius(unlimited.light[1])-600)<1e-4f);
+    const auto small=ikv::shadow_light_cascades(shadow_camera,shadow_sun,10);
+    assert(std::abs(shadow_radius(small.light[1])-176)<1e-4f);
+    const auto configured=ikv::shadow_light_cascades(shadow_camera,shadow_sun,2000);
+    assert(std::abs(shadow_radius(configured.light[1])-2000)<1e-2f);
+    for(const auto& cascades:{unlimited,small,configured}) {
+        for(const auto& light:cascades.light) {
+            for(float value:light) assert(std::isfinite(value));
+            const float radius=shadow_radius(light);
+            assert(std::abs(light[12]*1024-std::round(light[12]*1024))<1e-3f);
+            assert(std::abs(light[13]*1024-std::round(light[13]*1024))<1e-3f);
+            for(float direction:{-1.f,1.f}) {
+                std::array<float,3> edge{};
+                for(unsigned i=0;i<3;++i) edge[i]=shadow_camera.target[i]+shadow_sun[i]*radius*direction;
+                const auto projected=project(light,edge);
+                assert(projected[2]>=0&&projected[2]<=1);
+            }
+        }
+    }
     return 0;
 }

@@ -59,12 +59,14 @@ uniform bool source_ocean;
 uniform vec4 source_time;
 uniform vec4 source_scroll;
 uniform mat4 light_view_projection;
+uniform mat4 far_light_view_projection;
 // Wave 16 portal view (NONCANONICAL): world-space clip planes; (0,0,0,1) always passes. Enabled only for portal draws.
 // clip_planes[5] widens plane 1 to a union (distance = max of both); (0,0,0,-1e9) leaves plane 1 alone.
 uniform vec4 clip_planes[6];
 out float gl_ClipDistance[5];
 out vec3 fragment_position;
 out vec4 shadow_position;
+out vec4 far_shadow_position;
 out vec2 texcoord;
 out vec3 world_normal;
 out vec3 world_tangent;
@@ -85,7 +87,7 @@ void main() {
         gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
         world_position=source_ocean_position(world_position);
         gl_Position=view_projection*world_position;
-        fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position; // enhanced water_surface
+        fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position; // enhanced water_surface
         texcoord=uv+source_scroll.xy;
         lightmap_uv=uv+source_scroll.zw;
         source_tangent_eye=normalize(camera_position-world_position.xyz);
@@ -101,13 +103,15 @@ void main() {
     for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(clip_planes[i],world_position);
     gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
     gl_Position=view_projection*world_position;
-    fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;
+    fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position;
     if(!original_appearance&&!sky) {
         // Normal-offset receiver: push the lookup up to 2 shadow texels out along the normal as the surface turns from the
         // sun, so curved actor skin stops self-shadowing against its own neighbouring shadow-map texels.
         vec3 n=transpose(inverse(mat3(object_matrix)))*normal;float nl=length(n);
         float texel=2.0/(2048.0*max(length(vec3(light_view_projection[0][0],light_view_projection[1][0],light_view_projection[2][0])),1e-6));
-        if(nl>0.00001){n/=nl;shadow_position+=light_view_projection*vec4(n*texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);}
+        float far_texel=2.0/(2048.0*max(length(vec3(far_light_view_projection[0][0],far_light_view_projection[1][0],far_light_view_projection[2][0])),1e-6));
+        if(nl>0.00001){n/=nl;shadow_position+=light_view_projection*vec4(n*texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);
+            far_shadow_position+=far_light_view_projection*vec4(n*far_texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);}
     }
     texcoord=uv;
     world_normal=normal;world_tangent=tangent;
@@ -197,9 +201,12 @@ uniform vec3 sun_direction;
 uniform float sky_blend;
 uniform bool grayscale; // original death view: 3D scene desaturated, HUD untouched
 uniform sampler2DShadow shadow_map; // GL_LINEAR + GL_COMPARE_REF_TO_TEXTURE: each tap is a bilinear 2x2 depth test
+uniform sampler2DShadow shadow_far_map;
+uniform float shadow_split;
 uniform vec3 camera_position;
 in vec3 fragment_position;
 in vec4 shadow_position;
+in vec4 far_shadow_position;
 in float sky_scatter;
 // Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
 const float PI=3.14159265359;
@@ -207,13 +214,19 @@ vec3 enhanced_environment(vec3 direction) {
     if(!has_environment_map)return mix(vec3(0.055,0.07,0.09),vec3(0.32,0.44,0.62),clamp(direction.y*0.5+0.5,0.0,1.0));
     return textureLod(environment_map,vec2(atan(direction.z,direction.x)/(2.0*PI)+0.5,acos(clamp(direction.y,-1.0,1.0))/PI),0.0).rgb;
 }
-// shadow_position is in Vulkan light clip space; the GL shadow pass maps z to window depth 0..1 unchanged.
-float shadow_visibility(vec3 n,vec3 l) {
-    vec3 p=shadow_position.xyz/shadow_position.w;vec2 uv=p.xy*0.5+0.5;
+// Shadow positions use Vulkan light clip space; the GL shadow pass maps z to window depth 0..1 unchanged.
+float shadow_pcf(sampler2DShadow map,vec3 p,vec3 n,vec3 l) {
+    vec2 uv=p.xy*0.5+0.5;
     if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||p.z<0.0||p.z>1.0)return 1.0;
-    float bias=max(0.0003,0.002*(1.0-dot(n,l)));vec2 texel=1.0/vec2(textureSize(shadow_map,0));float visible=0.0;
-    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadow_map,vec3(uv+vec2(x,y)*texel,p.z-bias));
+    float bias=max(0.0003,0.002*(1.0-dot(n,l)));vec2 texel=1.0/vec2(textureSize(map,0));float visible=0.0;
+    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(map,vec3(uv+vec2(x,y)*texel,p.z-bias));
     return visible/9.0;
+}
+float shadow_visibility(vec3 n,vec3 l) {
+    vec3 near=shadow_position.xyz/shadow_position.w;vec2 uv=near.xy*0.5+0.5;
+    bool near_valid=distance(camera_position,fragment_position)<=shadow_split&&all(greaterThanEqual(uv,vec2(0.0)))&&all(lessThanEqual(uv,vec2(1.0)))&&near.z>=0.0&&near.z<=1.0;
+    if(near_valid)return shadow_pcf(shadow_map,near,n,l);
+    return shadow_pcf(shadow_far_map,far_shadow_position.xyz/far_shadow_position.w,n,l);
 }
 out vec4 output_color;
 // NONCANONICAL parallax occlusion: Vulkan lighting.glsl parallax() (derived relief of static zone materials, enhanced only).
@@ -592,10 +605,11 @@ class GlRenderer final : public Renderer {
     std::vector<ContourDraw> contours_;
     GLuint framebuffer_=0,color_=0,depth_=0;
     GLuint glow_program_=0,glow_textures_[2]{},glow_framebuffers_[2]{}; // [0]=bb38, [1]=bb3c
-    // Enhanced appearance only: 2048^2 sun depth maps (Vulkan shadow pass parity); [1]: portal destination view.
-    GLuint shadow_program_=0,shadow_textures_[2]{},shadow_framebuffers_[2]{};
-    std::array<Matrix4,2> shadow_lights_{};
-    GLint light_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
+    // Enhanced appearance only: near/far 2048^2 maps for the main and portal views.
+    GLuint shadow_program_=0,shadow_textures_[4]{},shadow_framebuffers_[4]{};
+    std::array<Matrix4,4> shadow_lights_{};
+    std::array<float,2> shadow_splits_{};
+    GLint light_location_=-1,far_light_location_=-1,shadow_split_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
     GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
     GLint glow_mode_location_=-1,glow_step_location_=-1;
     GLint vp_location_=-1,object_location_=-1,color_location_=-1,texture_location_=-1,original_location_=-1,exposure_location_=-1;
@@ -703,8 +717,10 @@ public:
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
             glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
             glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
+            glUniform1i_(uniform(program_,"shadow_far_map"),9);
             water_location_=uniform(program_,"water_refraction");
             light_location_=uniform(program_,"light_view_projection");
+            far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
             glGenTextures(1,&overlay_texture_);
@@ -743,8 +759,8 @@ public:
                 shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
                 shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
-                glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
-                for(int i=0;i<2;++i) {
+                glGenTextures(4,shadow_textures_);glGenFramebuffers_(4,shadow_framebuffers_);
+                for(int i=0;i<4;++i) {
                     glBindTexture(GL_TEXTURE_2D,shadow_textures_[i]);
                     glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
                     // Bilinear comparison (hardware PCF): without it the 3x3 kernel's hard texel steps show as jagged
@@ -886,7 +902,11 @@ public:
         contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
         build(view_,set,scene,entities,vp,eye,nullptr,true);
-        if(shadow_program_)shadow_pass(0,set,scene,view_,shadow_light_matrix(options_.camera,enhanced_sun(light)));
+        if(shadow_program_) {
+            const auto cascades=shadow_light_cascades(options_.camera,enhanced_sun(light),options_.view_distance);
+            shadow_splits_[0]=cascades.split;
+            shadow_pass(0,set,scene,view_,cascades.light[0]);shadow_pass(1,set,scene,view_,cascades.light[1]);
+        }
         Clip source_clip=no_clip;
         view_uniforms(scene,vp,eye,source_clip);
         glDepthMask(GL_FALSE);
@@ -1459,7 +1479,9 @@ private:
         build(portal_view_,set,scene,portal.entities,portal_vp,portal_eye,&cull,false);
         if(shadow_program_) {
             Camera virtual_camera=options_.camera;virtual_camera.target=inverse(options_.camera.target);
-            shadow_pass(1,set,scene,portal_view_,shadow_light_matrix(virtual_camera,enhanced_sun(scene.lighting)));
+            const auto cascades=shadow_light_cascades(virtual_camera,enhanced_sun(scene.lighting),options_.view_distance);
+            shadow_splits_[1]=cascades.split;
+            shadow_pass(2,set,scene,portal_view_,cascades.light[0]);shadow_pass(3,set,scene,portal_view_,cascades.light[1]);
         }
         view_uniforms(scene,portal_vp,portal_eye,clip);
         clip_distances(true);
@@ -1487,7 +1509,7 @@ private:
         glUseProgram_(program_);
         check("drawing portal view");
     }
-    // Enhanced sun shadow map slot (0: primary view, 1: portal destination view); leaves it bound for program_.
+    // Enhanced sun shadow slots: 0/1 main near/far, 2/3 portal near/far; leaves both bound for program_.
     void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp) {
         shadow_lights_[static_cast<std::size_t>(slot)]=light_vp;
         glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glViewport(0,0,2048,2048);
@@ -1510,8 +1532,12 @@ private:
         check("drawing shadow map");
     }
     void shadow_bind(int slot) {
-        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(slot)].data());
-        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[slot]);
+        const int view=slot/2,near=view*2;
+        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near)].data());
+        glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near+1)].data());
+        glUniform1f_(shadow_split_location_,shadow_splits_[static_cast<std::size_t>(view)]);
+        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near]);
+        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near+1]);
     }
     void upload_texture(const Texture& source,GLuint& name) {
         if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
@@ -1613,8 +1639,8 @@ private:
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
             if(shadow_program_ && glDeleteProgram_)glDeleteProgram_(shadow_program_);
-            if(shadow_textures_[0])glDeleteTextures(2,shadow_textures_);
-            if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,shadow_framebuffers_);
+            if(shadow_textures_[0])glDeleteTextures(4,shadow_textures_);
+            if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(4,shadow_framebuffers_);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;
     }

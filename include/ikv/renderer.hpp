@@ -128,17 +128,19 @@ inline Matrix4 camera_view_projection(const Camera& c, int width, int height, bo
 inline std::array<float, 3> enhanced_sun(const SceneLighting& l) {
     return l.source_values ? l.sun_direction : std::array<float, 3>{.48f, .78f, .4f};
 }
+inline bool original_blob_shadows_enabled(bool original_appearance) { return original_appearance; }
 // Enhanced raster shadow map (2048^2): orthographic sun view around the camera, Vulkan clip space (y down, z 0..1).
-inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun) {
+inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun, float radius) {
     Camera light = camera;
     light.yaw = std::atan2(sun[0], sun[2]); light.pitch = std::atan2(sun[1], std::sqrt(sun[0]*sun[0]+sun[2]*sun[2]));
     light.pitch = std::clamp(light.pitch, -1.54f, 1.54f);
-    light.distance = std::max(50.f, camera.distance*3); light.near_plane = .1f; light.far_plane = light.distance*4;
+    const bool far = radius>std::max(30.f,camera.distance*2);
+    light.distance = far?std::max({50.f,camera.distance*3,radius*2}):std::max(50.f,camera.distance*3);
+    light.near_plane = .1f; light.far_plane = light.distance*4;
     const auto basis = camera_basis(light);
     auto dot = [](const auto& a, const auto& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
     Matrix4 view{basis.right[0], basis.up[0], -basis.forward[0], 0, basis.right[1], basis.up[1], -basis.forward[1], 0,
         basis.right[2], basis.up[2], -basis.forward[2], 0, -dot(basis.right,basis.eye), -dot(basis.up,basis.eye), dot(basis.forward,basis.eye), 1};
-    const float radius = std::max(30.f, camera.distance*2);
     // Whole shadow-map texels only: a window following the player by fractions of a texel re-rasterised every leaf
     // shadow at a new sub-texel phase each frame (crawling shadows while walking).
     const float texel = 2*radius/2048;
@@ -147,6 +149,15 @@ inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float,
     projection[10] = 1/(light.near_plane-light.far_plane);
     projection[14] = light.near_plane/(light.near_plane-light.far_plane); projection[15] = 1;
     return multiply_matrix(projection, view);
+}
+inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun) {
+    return shadow_light_matrix(camera,sun,std::max(30.f,camera.distance*2));
+}
+struct ShadowCascades { std::array<Matrix4, 2> light; float split; };
+inline ShadowCascades shadow_light_cascades(const Camera& camera, const std::array<float, 3>& sun, float view_distance) {
+    const float near = std::max(30.f, camera.distance*2);
+    const float far = std::max(near*4, view_distance>0?view_distance:600.f);
+    return {{shadow_light_matrix(camera,sun,near),shadow_light_matrix(camera,sun,far)},near};
 }
 // Conservative culling sphere {centre xyz, radius} in mesh space: AABB centre and half-diagonal.
 // Non-finite vertices give an infinite radius, which is never culled.

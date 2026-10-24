@@ -51,8 +51,8 @@ struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HAN
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
 // clip/to_primary/clip_or: wave-16 portal views only (frame.glsl).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;std::array<std::array<float,4>,5> clip;Matrix4 to_primary;std::array<float,4> clip_or;};
-static_assert(sizeof(Frame)==640 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464 && offsetof(Frame,clip)==480 && offsetof(Frame,to_primary)==560 && offsetof(Frame,clip_or)==624);
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;std::array<std::array<float,4>,5> clip;Matrix4 to_primary;std::array<float,4> clip_or;Matrix4 far_light;std::array<float,4> shadow_params;};
+static_assert(sizeof(Frame)==720 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464 && offsetof(Frame,clip)==480 && offsetof(Frame,to_primary)==560 && offsetof(Frame,clip_or)==624 && offsetof(Frame,far_light)==640 && offsetof(Frame,shadow_params)==704);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
@@ -1312,7 +1312,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      water_color_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
      water_ready_=false;
-     shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // primary | portal view
+     shadow_=image(8192,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // primary | portal view
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      output_=image(extent_.width,extent_.height,swap_format_,display_usage|(generating_?VkImageUsageFlags{VK_IMAGE_USAGE_SAMPLED_BIT}:0u));
@@ -1352,7 +1352,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          after_views.push_back(depth_.view);
          after_fb_[i]=framebuffer(after_pass_,after_views,render_extent_);
      }
-     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,2048});
+     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{8192,2048});
      std::array post_views{output_.view};post_fb_=framebuffer(post_pass_,post_views,extent_);
      const char* scene_shader=denoise_enabled_?"scene_rt_guided.frag":rt_enabled_?"scene_rt.frag":"scene.frag";
      opaque_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false);
@@ -1769,7 +1769,7 @@ void record_geometry_uploads(SceneSet& set) {
  // items: a slice of set.draws. clip: the portal pipelines (scene_portal.vert, frame.clip) for a destination view or the
  // source half-space split. casters: this view's light volume, with near-clamped casters retained.
  void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,bool clip=false,
-                 const FrustumPlanes* casters=nullptr) {
+                 const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr) {
      const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
      if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
@@ -1794,7 +1794,7 @@ void record_geometry_uploads(SceneSet& set) {
         // extra.w packs alpha blending (1), source ocean (2) and animated draws (.5; guided history needs motion vectors).
         draw.extra={material&&!material->lightmap.empty()?1.f:0.f,item.sky?1.f:0.f,item.fog?1.f:0.f,
             (item.alpha?1.f:0.f)+(item.dynamic?.5f:0.f)+(material&&material->source_ocean?2.f:0.f)};
-         draw.scroll=item.scroll;draw.previous_model=item.previous;
+         draw.scroll=item.scroll;draw.previous_model=shadow&&light_vp?*light_vp:item.previous;
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
          auto selected=shadow?(double_sided?shadow_double_:shadow_pipeline_):
@@ -2254,13 +2254,14 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      fp.eye=point(f.eye);fp.previous_eye=point(f.previous_eye);
      fp.camera_right=direction(f.camera_right);fp.camera_up=direction(f.camera_up);fp.camera_forward=direction(f.camera_forward);
      fp.previous_forward=direction(f.previous_forward);
-     fp.light={};fp.light[14]=2;fp.light[15]=1; // no shadow map for this view: shadowVisibility = 1
-     if(shadows&&!options_.original_appearance&&!rt_enabled_) { // enhanced raster: its own atlas half around the virtual camera
+     fp.light={};fp.light[14]=2;fp.light[15]=1;fp.far_light=fp.light; // no shadow map for this view: shadowVisibility = 1
+     if(shadows&&!options_.original_appearance&&!rt_enabled_) { // enhanced raster: its own atlas columns around the virtual camera
          Camera virtual_camera=options_.camera;
          const auto target=point({options_.camera.target[0],options_.camera.target[1],options_.camera.target[2],1});
          virtual_camera.target={target[0],target[1],target[2]};
          virtual_camera.yaw=std::atan2(-fp.camera_forward[0],-fp.camera_forward[2]); // M is a yaw + translation
-         fp.light=shadow_light_matrix(virtual_camera,enhanced_sun(portal.scene->lighting));fp.fade[1]=.5f;
+         const auto cascades=shadow_light_cascades(virtual_camera,enhanced_sun(portal.scene->lighting),options_.view_distance);
+         fp.light=cascades.light[0];fp.far_light=cascades.light[1];fp.shadow_params={cascades.split,0,0,0};fp.fade[1]=.5f;
      }
      set_lighting(fp,portal.scene->lighting);
      set->touched=total_frames_;
@@ -2336,7 +2337,8 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      }
      // A set not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
      f.jitter[2]=continued?previous_jitter_[0]:f.jitter[0];f.jitter[3]=continued?previous_jitter_[1]:f.jitter[1];
-     f.light=shadow_light_matrix(options_.camera,enhanced_sun(scene.lighting));f.eye={eye[0],eye[1],eye[2],1};
+     const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
+     f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_params={shadow_cascades.split,0,0,0};f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
@@ -2383,19 +2385,23 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      // Screen-space history ping-pong: alternates every frame whichever set is primary (frame 0 ignores history).
      const unsigned current=total_frames_&1u;
      // Replacement shadows share color visibility; this is not evidence of original source shadow behavior.
-     // Enhanced raster: one 4096x2048 atlas, the primary's map in the left half, the first portal view's (around its
-     // virtual camera, destination casters) in the right half (lighting.glsl shadowVisibility, frame.fade.y).
-     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
+     // Enhanced raster: main near/far, then the first portal view's near/far, in four atlas columns.
+     begin_pass(command_,shadow_pass_,shadow_fb_,{8192,2048},true);
      // Only enhanced raster lighting samples the shadow map (lighting.glsl shadowVisibility); original appearance and
      // the RT shaders never read it, so the pass only clears it.
      if(!options_.original_appearance&&!rt_enabled_) {
-         const auto half=[&](float x){VkViewport v{x,0,2048,2048,0,1};VkRect2D r{{std::int32_t(x),0},{2048,2048}};vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);};
-         half(0);const auto primary_casters=shadow_caster_planes(f.light);
-         draw_scene(command_,true,primary,primary.draws,false,&primary_casters);
+         const auto cascade=[&](unsigned view,float x,unsigned index,SceneSet& set) {
+             VkViewport v{x,0,2048,2048,0,1};VkRect2D r{{std::int32_t(x),0},{2048,2048}};
+             vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
+             Frame& frame=view?views[0]->frame:f;
+             std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(view),&frame,sizeof(frame));
+             uniform_offset_=view_offset(view);
+             const auto casters=shadow_caster_planes(index?frame.far_light:frame.light);
+             draw_scene(command_,true,set,set.draws,false,&casters,index?&frame.far_light:&frame.light);
+         };
+         cascade(0,0,0,primary);cascade(0,2048,1,primary);
          if(view_count&&views[0]->frame.fade[1]>0) {
-             half(2048);uniform_offset_=view_offset(1);
-             const auto portal_casters=shadow_caster_planes(views[0]->frame.light);
-             draw_scene(command_,true,*views[0]->set,views[0]->set->draws,false,&portal_casters);
+             cascade(1,4096,0,*views[0]->set);cascade(1,6144,1,*views[0]->set);
              uniform_offset_=view_offset(0);
          }
      }

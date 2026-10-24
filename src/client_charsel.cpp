@@ -451,7 +451,8 @@ private:
         // 004afed0: a click while the roll is shown hides it; otherwise it (re)starts at y = screen height (004902c0).
         if (value == "credits") { credits_ = !credits_; credits_since_ = std::chrono::steady_clock::now(); return; }
         if (!creating_) {
-            if (value == "new") begin_create();
+            if (value == "quit") quit_ = true;
+            else if (value == "new") begin_create();
             else if (value == "delete") {
                 if (selected_ < 0) notice("Silmek için bir karakter seçmelisiniz.");
                 else { message_ = "Karakterinizi silmek istediğinizden emin misiniz?"; confirm_ = "delete"; audio_.play_event("ui\\alert.raw"); }
@@ -771,6 +772,7 @@ private:
         if (creating_) paint_creation();
         else {
             paint_selection();
+            text_button(width_ * 1860 / 1920 - 2 * U(135) - U(6), height_ * 1068 / 1080 - U(22), "ÇIKIŞ", "quit", {});
             text_button(width_ * 1860 / 1920 - U(135), height_ * 1068 / 1080 - U(22), "HAZIRLAYANLAR", "credits", {});
             label(width_ * 48 / 1920, height_ * 1059 / 1080 - ui_->line_height() / 2, "Sürüm : 6.0.0");
         }

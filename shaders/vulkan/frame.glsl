@@ -32,6 +32,9 @@ layout(set=0,binding=0,std140) uniform Frame {
     mat4 toPrimary;
     // Split-mode source OR plane: gl_ClipDistance[1] = max(dot(world, clip[1]), dot(world, clipOr)); (0,0,0,-1e9) = none.
     vec4 clipOr;
+    mat4 farLightVP;
+    // x: near eye-distance limit.
+    vec4 shadowParams;
 } frame;
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
 // Applied once to display values on every present path (scene in post.frag, HUD in overlay.frag), fullscreen only.

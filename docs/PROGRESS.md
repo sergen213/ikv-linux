@@ -208,6 +208,16 @@ User reports: Sinirsiz draw distance was slow, and faithful RT lighting was wron
 
 Verification: `build-full`, `build-gl-only`, `build-full-sanitized` **19/19** each, warning-free (232.1 s / 232.3 s / 303.5 s), each with `--output-on-failure --parallel 1`; sanitized ran alone. RT smoke **5/5** (`ok`, errors empty; faithful full/half logs `diffuseGI=1 denoise=1 reflections=0`), enhanced Antrepo portal walk-throughs passed on Vulkan and OpenGL, and signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required faithful) PASSED (`analysis/porting-wave22/Verify/`). `build-release` rebuilt. The historical sanitizer shutdown timeout stays open (not seen in this run).
 
+## Character-selection exit and enhanced raster shadows
+
+User reports: character selection had no Exit control, and enhanced OpenGL/Vulkan raster shadows were clipped or overlapped.
+
+- Character selection now has a native `ÇIKIŞ` button beside `HAZIRLAYANLAR`, using the existing clean client-shutdown path without logging out. Real clicks passed with zero characters on OpenGL and Vulkan.
+- Enhanced raster now uses near/far shadow cascades. The near map is byte-identical to the old transform; the far map follows finite view distance or covers 600 units when unlimited. OpenGL uses four main/portal maps; Vulkan uses four tiles in one 8192×2048 atlas with the cascade matrix passed directly to the shadow vertex shader. Legacy blob particles attach only in original appearance, removing duplicate enhanced actor shadows without changing original or RT policy.
+- Inspected motion-view captures on both backends show the previously missing distant building shadows, and enhanced Antrepo walk-throughs pass on both. Live creature captures retain one projected shadow rather than blob + projected overlap. `render-math` covers finite/unlimited radii, near-matrix identity, texel snapping, depth, and blob-mode policy.
+
+Verification: `build-full` **17/17** (189.4 s) and `build-gl-only` **19/19** (195.1 s), all with `--output-on-failure`. All 19 `build-full-sanitized` tests passed with `-fsanitize=address,undefined`; two outer 300-second task timeouts required retries, not test failures. Character Exit and enhanced motion/portal scenarios passed as above. Khronos 1.4.363 render-pass compatibility VUIDs were also present on the unmodified binary and are not attributed to this change.
+
 ## Status and evidence vocabulary
 
 [Goal](../Goal) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.

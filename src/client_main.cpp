@@ -4884,7 +4884,7 @@ private:
         else if (world_dirty_) { paint_world(); present_hud(); }
         if (effects_) {
             effects_->update(dt,poses_);
-            for (const auto& actor:actors_) if (!actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);
+            for (const auto& actor:actors_) if (ikv::original_blob_shadows_enabled(options_.appearance=="original") && !actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);
             // 004315c0 (WEAR 0x4a94d0): the slot-11 weapon (004301b0 finds the worn item with slot 0xb) attaches its two prefixes'
             // prefixes.dat effect_name (wp_* weapon_gfx_psystem, 00495810) to the weapon's render node while its Eskime is above
             // zero (the server only sends prefixes then); armour prefixes carry no glow. Taking it off detaches it.
