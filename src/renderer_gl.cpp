@@ -1532,12 +1532,12 @@ private:
         check("drawing shadow map");
     }
     void shadow_bind(int slot) {
-        const int view=slot/2,near=view*2;
-        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near)].data());
-        glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near+1)].data());
+        const int view=slot/2,near_slot=view*2;
+        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near_slot)].data());
+        glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near_slot+1)].data());
         glUniform1f_(shadow_split_location_,shadow_splits_[static_cast<std::size_t>(view)]);
-        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near]);
-        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near+1]);
+        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near_slot]);
+        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near_slot+1]);
     }
     void upload_texture(const Texture& source,GLuint& name) {
         if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
