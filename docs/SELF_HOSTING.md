@@ -232,4 +232,4 @@ python3 analysis/native_systemd_smoke.py --source "$PWD" --build-dir "$PWD/build
 
 ## Offline tools and distribution
 
-`ikv-assets` and `ikv-original-inspect` are separate read-only research utilities, not network services and not included in the server image. [README](../README.md) gives their commands and original-wire limits. Asset-free release artifacts and Ed25519 signed updates require the user's explicit repository/channel/trust root; no public release or production signing key has been created by this deployment definition. Original installation/assets/settings remain outside executable release replacement.
+`ikv-assets` and `ikv-original-inspect` are separate read-only research utilities, not network services and not included in the server image. [Development](DEVELOPMENT.md#offline-original-data-research) gives their commands and original-wire limits. Asset-free release artifacts and Ed25519 signed updates require the user's explicit repository/channel/trust root; no public release or production signing key has been created by this deployment definition. Original installation/assets/settings remain outside executable release replacement.

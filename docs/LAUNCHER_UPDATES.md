@@ -88,7 +88,7 @@ bin/ikv-updater rollback --trust /path/to/operator-public.pem \
 
 ## Publishing a release
 
-`python3 tools/release.py X.Y.Z` (see [README](../README.md#portable-appimage)) builds the AppImage, packs `ikv-linux-x86_64-X.Y.Z.tar.gz` (only `bin/ikv-linux.AppImage`), signs `manifest.json` + `manifest.sig` (schema 2, channel `experimental`, the next per-channel sequence from the operator's local ledger) with `tools/sign_manifest.py` and the private key matching `packaging/ikv-release-public.pem`, and publishes the `vX.Y.Z` GitHub prerelease with the AppImage, its `.sha256`/`.json`, the package and the signed manifest. Signing happens only on the operator machine; there is no CI signing or publication workflow. The signer uses the OpenSSL executable and never generates a key. By hand:
+`python3 tools/release.py X.Y.Z` (see [Development](DEVELOPMENT.md#portable-appimage)) builds the AppImage, packs `ikv-linux-x86_64-X.Y.Z.tar.gz` (only `bin/ikv-linux.AppImage`), signs `manifest.json` + `manifest.sig` (schema 2, channel `experimental`, the next per-channel sequence from the operator's local ledger) with `tools/sign_manifest.py` and the private key matching `packaging/ikv-release-public.pem`, and publishes the `vX.Y.Z` GitHub prerelease with the AppImage, its `.sha256`/`.json`, the package and the signed manifest. Signing happens only on the operator machine; there is no CI signing or publication workflow. The signer uses the OpenSSL executable and never generates a key. By hand:
 
 ```sh
 python3 tools/sign_manifest.py --root payload \

@@ -220,7 +220,7 @@ Verification: `build-full` **17/17** (189.4 s) and `build-gl-only` **19/19** (19
 
 ## Status and evidence vocabulary
 
-[Goal](../Goal) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.
+The private project goal document (not published) remains the complete contract, including all18 completion criteria. **Current integration acceptance is complete at the documented native independent/NONCANONICAL compatibility target permitted by Goal§20:** all3current builds/42tests, current full/half raw-guided RT, both fresh signed packages and scoped Source/UI/deployment proofs passed. This is not original online protocol/server/full visual parity or an unsupported production/publication claim. The earlier sanitizer timeout remains historical intermittent/unattributed; a new pass neither erases it nor establishes its cause.
 
 The initial anonymous v1 transport/client and one-service deployment were removed, not retained as an insecure compatibility mode. Old pass logs and grid-marker screenshots are preserved below **only as historical evidence**. They cannot verify current authentication, state, assets, Vulkan/RT, launcher or deployment.
 

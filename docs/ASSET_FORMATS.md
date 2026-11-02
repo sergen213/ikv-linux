@@ -159,13 +159,13 @@ Separate selected-regression status remains explicit: Debug `asset-boundaries` t
 Parent verification handoff (not executed here): first freshly build the native assets library, then run the existing decoder entrypoint above and the corrected full-corpus runner below. The runner privately includes `scene.cpp`; animation/resources compile directly, without linking `libikv-scene.a`.
 
 ```sh
-/usr/bin/c++ -std=c++20 -O2 -I/mnt/2nd4TB/IKV/include \
-  /mnt/2nd4TB/IKV/analysis/native_corpus_probe.cpp \
-  /mnt/2nd4TB/IKV/src/scene_animation.cpp \
-  /mnt/2nd4TB/IKV/src/scene_resources.cpp \
-  /mnt/2nd4TB/IKV/build-full/libikv-assets-lib.a -lz \
-  -o /tmp/ikv-native-corpus-probe && \
-  timeout 930s /tmp/ikv-native-corpus-probe /mnt/2nd4TB/IKV/original/app/base
+/usr/bin/c++ -std=c++20 -O2 -I$PWD/include \
+  $PWD/analysis/native_corpus_probe.cpp \
+  $PWD/src/scene_animation.cpp \
+  $PWD/src/scene_resources.cpp \
+  $PWD/build-full/libikv-assets-lib.a -lz \
+  -o build-full/ikv-native-corpus-probe && \
+  timeout 930s build-full/ikv-native-corpus-probe $PWD/original/app/base
 ```
 
 ### Zone grids versus audio
