@@ -66,13 +66,14 @@ def assets(version: str) -> list[Path]:
 
 
 def preflight(args) -> None:
-    if not KEY.is_file():
-        die(f"signing key missing: {KEY}")
-    if not PUBLIC.is_file():
-        die(f"trust root missing: {PUBLIC}")
-    derived = run("openssl", "pkey", "-in", KEY, "-pubout", capture=True)
-    if derived.strip() != PUBLIC.read_text().strip():
-        die(f"{PUBLIC.relative_to(ROOT)} is not the public half of {KEY}")
+    key, public = args.signing_key, args.verify_public
+    if not key.is_file():
+        die(f"signing key missing: {key}")
+    if not public.is_file():
+        die(f"trust root missing: {public}")
+    derived = run("openssl", "pkey", "-in", key, "-pubout", capture=True)
+    if derived.strip() != public.read_text().strip():
+        die(f"{public} is not the public half of {key}")
     tag = "v" + args.version
     if subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"], cwd=ROOT,
                       stdout=subprocess.DEVNULL).returncode == 0:
@@ -144,9 +145,10 @@ def pack(image: Path, package: Path, payload: Path) -> None:
         archive.addfile(info, source)
 
 
-def updater_install(appdir: Path, manifest: Path, signature: Path, package: Path, root: Path, image: Path) -> None:
+def updater_install(appdir: Path, manifest: Path, signature: Path, package: Path, root: Path, image: Path,
+                    trust: Path) -> None:
     run(appdir / "AppRun", "ikv-updater", "install", "--manifest", manifest, "--signature", signature,
-        "--package", package, "--trust", PUBLIC, "--root", root)
+        "--package", package, "--trust", trust, "--root", root)
     if sha256(root / "current" / PAYLOAD) != sha256(image):
         die("ikv-updater installed a different AppImage")
 
@@ -156,6 +158,10 @@ def main() -> None:
     parser.add_argument("version")
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--notes", type=Path)
+    # Key rotation only: sign with the previous key (and check with its public half) so installed launchers
+    # accept a release that compiles in the new packaging/ikv-release-public.pem.
+    parser.add_argument("--signing-key", type=Path, default=KEY)
+    parser.add_argument("--verify-public", type=Path, default=PUBLIC)
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version):
         die("version must be X.Y.Z")
@@ -175,8 +181,8 @@ def main() -> None:
         sequence = int(ledger.get(CHANNEL, INITIAL_SEQUENCE)) + 1
         run(sys.executable, ROOT / "tools/sign_manifest.py", "--root", temp / "payload", "--package", package,
             "--version", version, "--sequence", sequence, "--channel", CHANNEL, "--output", manifest,
-            "--signature", signature, "--key-file", KEY)
-        updater_install(appdir, manifest, signature, package, temp / "install", image)
+            "--signature", signature, "--key-file", args.signing_key)
+        updater_install(appdir, manifest, signature, package, temp / "install", image, args.verify_public)
         ledger[CHANNEL] = sequence
         written = LEDGER.with_suffix(".tmp")
         written.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
@@ -207,7 +213,7 @@ def main() -> None:
                 die(f"downloaded {path.name} differs from {path}")
         run("sha256sum", "-c", image.name + ".sha256", cwd=back)
         updater_install(appdir, back / manifest.name, back / signature.name, back / package.name,
-                        temp / "install-download", back / image.name)
+                        temp / "install-download", back / image.name, args.verify_public)
         print(f"published and verified https://github.com/{REPO}/releases/tag/v{version}")
 
 
