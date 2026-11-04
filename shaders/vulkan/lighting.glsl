@@ -153,59 +153,45 @@ vec4 sourceOceanSurface() {
     if(frame.params.x>.5)result=pow(max(result,vec3(0)),vec3(2.2));
     return vec4(result,1);
 }
-// NONCANONICAL: enhanced source ocean after the Joan of Arc port's stylised water (pbr_shade.glsl shade_water): the
-// opaque scene behind the surface (renderer_vk.cpp copy_water: colour + depth copied before the water draws) refracted by
-// two scrolling layers of the original ocean_bump normal map, depth absorption teal -> deep blue, a soft shoreline foam
-// band, Fresnel sky (RT physical: mirror ray against the scene TLAS) reflection and sun glints. The v_ocean vertex
-// displacement is kept. frame.fade.z: 0 when this view has no copy (portal views): deep water, no refraction.
+// NONCANONICAL: enhanced source ocean, OpenUnderworld's (Tomb Raider: Underworld port) water (water.glsl): the opaque
+// scene behind the surface (renderer_vk.cpp copy_water: colour + depth copied before the water draws) traced-refracted
+// with caustics on the bed and absorbed, SSR (RT physical: a mirror ray against the scene TLAS), afl_ext sea waves and
+// Godot normal layers, GGX glints, edge foam. The v_ocean vertex displacement is kept. frame.fade.z: 0 when this view
+// has no copy (portal views): deep water, no refraction or SSR.
 layout(set=0,binding=12) uniform sampler2D waterColor;
 layout(set=0,binding=13) uniform sampler2D waterDepth;
-float waterHash(vec2 c){return fract(sin(dot(mod(c,289.),vec2(12.9898,78.233)))*43758.5453);}
-float waterNoise(vec2 x){vec2 i=floor(x),f=fract(x);f=f*f*(3-2*f);return mix(mix(waterHash(i),waterHash(i+vec2(1,0)),f.x),mix(waterHash(i+vec2(0,1)),waterHash(i+1),f.x),f.y);}
-vec3 waterWorld(mat4 inv,vec2 uv){vec4 p=inv*vec4(uv*2-1,textureLod(waterDepth,uv,0).r,1);return p.xyz/p.w;}
-vec3 waterSurface(){
-    const mat2 rot=mat2(.8,.6,-.6,.8);
-    vec3 p=worldPosition,v=normalize(frame.eye.xyz-p),l=normalize(frame.sun.xyz);float t=frame.sourceTime.y,dist=distance(frame.eye.xyz,p);
-    // World-anchored layers: broad swell and finer crossing ripples (Joan 900/260 units at ~4 Joan units per IKV unit).
-    vec3 ta=texture(normalMap,p.xz/225+t*vec2(.016,.009)).rgb*2-1,tb=texture(normalMap,rot*p.xz/65+t*vec2(-.03,.041)).rgb*2-1;
-    // ocean_bump is far steeper than Joan's Lake1 map: its slopes are scaled down so the Fresnel sky does not streak white.
-    vec2 s=.15*ta.xy/max(ta.z,.5)+.12*(transpose(rot)*tb.xy)/max(tb.z,.5);
-    vec3 n=normalize(vec3(s.x,1,s.y));float nv=max(dot(n,v),1e-3);
-    vec2 uv=gl_FragCoord.xy/frame.viewport.xy;mat4 inv=inverse(frame.vp);
-    bool copy=frame.fade.z>.5;
-    float depth=copy?max(p.y-waterWorld(inv,uv).y,0):1e4;
-    vec2 ruv=uv+s*(.025*smoothstep(0,20,depth)/(1+dist/375));
-    vec3 bed=copy?waterWorld(inv,ruv):p-v*1e4;
-    if(copy&&bed.y>p.y){ruv=uv;bed=waterWorld(inv,uv);} // offset sample above the water (shore, foreground): straight through
-    vec3 below=copy?textureLod(waterColor,ruv,0).rgb:vec3(0);
-    float path=distance(p,bed),bedDepth=max(p.y-bed.y,0);
-    // Absorption (red first: teal shallows) and in-scattering from teal to deep blue, lit like the original water.
-    vec3 light=frame.sun.w>.5?pow(min(frame.ambient.rgb+frame.diffuse.rgb*max(l.y,0),vec3(1)),vec3(2.2)):vec3(1);
-    vec3 tr=exp(-vec3(.032,.0104,.0076)*path);
-    vec3 c=below*tr+mix(vec3(.05,.32,.30),vec3(.006,.05,.11),smoothstep(5,65,bedDepth))*light*(1-tr);
-    // Fresnel reflection and sun glints fade in over the first units of depth: the waterline stays soft.
-    float edge=smoothstep(0,2.5,depth);
-    vec3 r=reflect(-v,n);r.y=abs(r.y);
-    vec3 fog=pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2));
+vec3 waterSceneColor(vec2 uv){return textureLod(waterColor,uv,0).rgb;}
+float waterSceneDepth(vec2 uv){return textureLod(waterDepth,uv,0).r;}
+float waterNdcZ(float depth){return depth;}
+float waterBedSun(vec3 p){
 #ifdef IKV_RT
-    vec3 mirror=frame.params.x<1.5?
-        rtIncoming(p+vec3(0,.6,0),vec3(0,1,0),normalize(vec3(r.x,max(r.y,.02),r.z)),l):
-        mix(fog,sky(r)*enhancedAmbientScale()*2,smoothstep(0,.4,r.y));
+    return rtSunVisibilityMasked(p+vec3(0,.6,0),vec3(0,1,0),normalize(frame.sun.xyz),3u,0u); // ocean (mask 4) never shadows
+#else
+    vec4 c=frame.lightVP*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
+    bool nearValid=distance(frame.eye.xyz,p)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&q.z>=0&&q.z<=1;
+    return nearValid?shadowPcf(c,frame.fade.y,vec3(0,1,0)):shadowPcf(frame.farLightVP*vec4(p,1),.25+frame.fade.y,vec3(0,1,0));
+#endif
+}
+bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){
+#ifdef IKV_RT
+    if(frame.params.x<1.5){colour=rtIncoming(origin,vec3(0,1,0),normalize(vec3(direction.x,max(direction.y,.02),direction.z)),normalize(frame.sun.xyz));return true;}
+#endif
+    return false;
+}
+#include "water.glsl"
+vec3 waterSurface(){
+    vec3 p=worldPosition,l=normalize(frame.sun.xyz),sunScale=enhancedSunScale();
+    vec3 light=frame.sun.w>.5?pow(min(frame.ambient.rgb+frame.diffuse.rgb*max(l.y,0),vec3(1)),vec3(2.2)):vec3(1);
+#ifdef IKV_RT
     float sun=frame.params.x<1.5?rtSunVisibility(p+vec3(0,.6,0),vec3(0,1,0),l,0u):
         sceneRoofed()?0:rtSunVisibilityMasked(p+vec3(0,.6,0),vec3(0,1,0),l,3u,0u);
 #else
-    vec3 mirror=mix(fog,sky(r)*enhancedAmbientScale()*2,smoothstep(0,.4,r.y));
     float sun=sceneRoofed()?0:shadowVisibility(vec3(0,1,0));
 #endif
-    c=mix(c,mirror,(.02+.98*pow(1-nv,5))*edge);
-    vec3 h=normalize(l+v);float nl=max(dot(n,l),0),nh=max(dot(n,h),0),a2=.07*.07*.07*.07,k=.035;
-    float spec=a2/(PI*pow(nh*nh*(a2-1)+1,2))/(4*(nv*(1-k)+k)*(nl*(1-k)+k))*nl*(.02+.98*pow(1-max(dot(v,h),0),5));
-    c+=min(spec,64.)*vec3(2.8,2.55,2.2)*enhancedSunScale()*sun*edge;
-    // Shoreline foam: a band over the shallow bed, broken into drifting lace.
-    float lace=.6*waterNoise(p.xz/3+t*vec2(.25,-.15))+.4*waterNoise(p.xz/1.25-t*vec2(.2,.3));
-    float foam=(1-smoothstep(0,3,depth))*smoothstep(.55,.8,lace);
-    c=mix(c,light*.85,foam*.7*smoothstep(0,.3,depth));
-    if(frame.fogColor.w>.5&&draw.extra.z>.5)c=mix(fog,c,clamp(sourceFog,0,1));
+    float caustic=sceneRoofed()?0:.8*min(max(sunScale.r,max(sunScale.g,sunScale.b)),1);
+    vec3 c=waterShade(p,frame.eye.xyz,frame.vp,gl_FragCoord.xy/frame.viewport.xy,frame.sourceTime.y,l,light,
+        frame.fogColor.rgb,vec3(2.8,2.55,2.2)*sunScale,sun,caustic,frame.fade.z>.5);
+    if(frame.fogColor.w>.5&&draw.extra.z>.5)c=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),c,clamp(sourceFog,0,1));
     return max(c,vec3(0));
 }
 void main(){

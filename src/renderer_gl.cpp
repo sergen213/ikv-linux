@@ -1,4 +1,5 @@
 #include "ikv/renderer.hpp"
+#include "ikv_gl_water.h" // generated from shaders/vulkan/water.glsl (CMakeLists.txt): #define IKV_GL_WATER
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
@@ -285,46 +286,38 @@ vec4 original_surface(vec4 surface,float sun_visibility) {
 // Vulkan frame.glsl enhancedSunScale/enhancedAmbientScale (NONCANONICAL wave 19): clock record relative to noon, linear.
 vec3 enhanced_sun_scale(){return source_lighting?pow(max(diffuse_multiplier*(255.0/vec3(126.0,105.0,110.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
 vec3 enhanced_ambient_scale(){return source_lighting?pow(max(ambient_multiplier*(255.0/vec3(200.0,157.0,142.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
-// NONCANONICAL: enhanced source ocean, Vulkan lighting.glsl waterSurface (the Joan of Arc port's stylised water): the
-// opaque scene copy (water_*_map, blitted before the water draws) refracted, depth absorption, shoreline foam, Fresnel
-// sky reflection, sun glints. The copy holds tonemapped display colour: inverted to linear before mixing.
+// NONCANONICAL: enhanced source ocean, the shared OpenUnderworld water (shaders/vulkan/water.glsl, embedded at build time
+// as IKV_GL_WATER) over the opaque scene copy (water_*_map, blitted before the water draws). The copy holds tonemapped
+// display colour: inverted to linear before mixing.
 uniform sampler2D water_color_map;
 uniform sampler2D water_depth_map;
 uniform bool water_refraction;
 uniform mat4 view_projection;
 uniform vec4 source_time;
-float water_hash(vec2 c){return fract(sin(dot(mod(c,289.0),vec2(12.9898,78.233)))*43758.5453);}
-float water_noise(vec2 x){vec2 i=floor(x),f=fract(x);f=f*f*(3.0-2.0*f);return mix(mix(water_hash(i),water_hash(i+vec2(1.0,0.0)),f.x),mix(water_hash(i+vec2(0.0,1.0)),water_hash(i+1.0),f.x),f.y);}
-vec3 water_world(mat4 inv,vec2 uv){vec4 p=inv*vec4(uv*2.0-1.0,textureLod(water_depth_map,uv,0.0).r*2.0-1.0,1.0);return p.xyz/p.w;}
+uniform mat4 light_view_projection;
+uniform mat4 far_light_view_projection;
 vec3 water_linear(vec3 y){y=min(pow(y,vec3(2.2)),vec3(0.99));vec3 a=2.43*y-2.51,b=0.59*y-0.03,c=0.14*y;return (-b-sqrt(b*b-4.0*a*c))/(2.0*a)/exposure;}
+vec3 waterSceneColor(vec2 uv){return water_linear(textureLod(water_color_map,uv,0.0).rgb);}
+float waterSceneDepth(vec2 uv){return textureLod(water_depth_map,uv,0.0).r;}
+float waterNdcZ(float depth){return depth*2.0-1.0;}
+float waterBedSun(vec3 p){
+    vec3 l=normalize(sun_direction),up=vec3(0.0,1.0,0.0);
+    vec4 c=light_view_projection*vec4(p,1.0);vec3 near=c.xyz/c.w;vec2 uv=near.xy*0.5+0.5;
+    bool near_valid=distance(camera_position,p)<=shadow_split&&all(greaterThanEqual(uv,vec2(0.0)))&&all(lessThanEqual(uv,vec2(1.0)))&&near.z>=0.0&&near.z<=1.0;
+    if(near_valid)return shadow_pcf(shadow_map,near,up,l);
+    vec4 f=far_light_view_projection*vec4(p,1.0);
+    return shadow_pcf(shadow_far_map,f.xyz/f.w,up,l);
+}
+bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){return false;}
+)GLSL" IKV_GL_WATER R"GLSL(
 vec3 water_surface() {
-    const mat2 rot=mat2(0.8,0.6,-0.6,0.8);
-    vec3 p=fragment_position,v=normalize(camera_position-p),l=normalize(sun_direction);float t=source_time.y,dist=distance(camera_position,p);
-    vec3 ta=texture(normal_map,p.xz/225.0+t*vec2(0.016,0.009)).rgb*2.0-1.0,tb=texture(normal_map,rot*p.xz/65.0+t*vec2(-0.03,0.041)).rgb*2.0-1.0;
-    vec2 s=0.15*ta.xy/max(ta.z,0.5)+0.12*(transpose(rot)*tb.xy)/max(tb.z,0.5);
-    vec3 n=normalize(vec3(s.x,1.0,s.y));float nv=max(dot(n,v),1e-3);
-    vec2 uv=gl_FragCoord.xy/vec2(textureSize(water_depth_map,0));mat4 inv=inverse(view_projection);
-    float depth=water_refraction?max(p.y-water_world(inv,uv).y,0.0):1e4;
-    vec2 ruv=uv+s*(0.025*smoothstep(0.0,20.0,depth)/(1.0+dist/375.0));
-    vec3 bed=water_refraction?water_world(inv,ruv):p-v*1e4;
-    if(water_refraction&&bed.y>p.y){ruv=uv;bed=water_world(inv,uv);}
-    vec3 below=water_refraction?water_linear(textureLod(water_color_map,ruv,0.0).rgb):vec3(0.0);
-    float path=distance(p,bed),bed_depth=max(p.y-bed.y,0.0);
+    vec3 p=fragment_position,l=normalize(sun_direction),sun_scale=enhanced_sun_scale();
     vec3 light=source_lighting?pow(min(ambient_multiplier+diffuse_multiplier*max(l.y,0.0),vec3(1.0)),vec3(2.2)):vec3(1.0);
-    vec3 tr=exp(-vec3(0.032,0.0104,0.0076)*path);
-    vec3 c=below*tr+mix(vec3(0.05,0.32,0.30),vec3(0.006,0.05,0.11),smoothstep(5.0,65.0,bed_depth))*light*(1.0-tr);
-    float edge=smoothstep(0.0,2.5,depth);
-    vec3 r=reflect(-v,n);r.y=abs(r.y);
-    vec3 fog=pow(max(fog_color,vec3(0.0)),vec3(2.2));
-    vec3 mirror=mix(fog,mix(vec3(0.055,0.07,0.09),vec3(0.32,0.44,0.62),clamp(r.y*0.5+0.5,0.0,1.0))*enhanced_ambient_scale()*2.0,smoothstep(0.0,0.4,r.y));
-    c=mix(c,mirror,(0.02+0.98*pow(1.0-nv,5.0))*edge);
-    vec3 h=normalize(l+v);float nl=max(dot(n,l),0.0),nh=max(dot(n,h),0.0),a2=0.07*0.07*0.07*0.07,k=0.035,dd=nh*nh*(a2-1.0)+1.0;
-    float spec=a2/(PI*dd*dd)/(4.0*(nv*(1.0-k)+k)*(nl*(1.0-k)+k))*nl*(0.02+0.98*pow(1.0-max(dot(v,h),0.0),5.0));
-    c+=min(spec,64.0)*vec3(2.8,2.55,2.2)*enhanced_sun_scale()*(scene_roofed?0.0:shadow_visibility(vec3(0.0,1.0,0.0),l))*edge;
-    float lace=0.6*water_noise(p.xz/3.0+t*vec2(0.25,-0.15))+0.4*water_noise(p.xz/1.25-t*vec2(0.2,0.3));
-    float foam=(1.0-smoothstep(0.0,3.0,depth))*smoothstep(0.55,0.8,lace);
-    c=mix(c,light*0.85,foam*0.7*smoothstep(0.0,0.3,depth));
-    c=mix(fog,max(c,vec3(0.0)),clamp(fog_blend,0.0,1.0));
+    float sun=scene_roofed?0.0:shadow_visibility(vec3(0.0,1.0,0.0),l);
+    float caustic=scene_roofed?0.0:0.8*min(max(sun_scale.r,max(sun_scale.g,sun_scale.b)),1.0);
+    vec3 c=waterShade(p,camera_position,view_projection,gl_FragCoord.xy/vec2(textureSize(water_depth_map,0)),source_time.y,l,light,
+        fog_color,vec3(2.8,2.55,2.2)*sun_scale,sun,caustic,water_refraction);
+    c=mix(pow(max(fog_color,vec3(0.0)),vec3(2.2)),c,clamp(fog_blend,0.0,1.0));
     c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
     return pow(c,vec3(1.0/2.2));
 }

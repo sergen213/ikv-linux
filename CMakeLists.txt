@@ -77,6 +77,15 @@ if(IKV_BUILD_CLIENT)
     add_library(ikv-renderers STATIC src/renderer_gl.cpp src/image_write.cpp)
     target_link_libraries(ikv-renderers PUBLIC ikv-scene ikv-protocol SDL3::SDL3 OpenGL::GL PRIVATE PkgConfig::TurboJPEG)
     target_compile_definitions(ikv-renderers PUBLIC IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
+    # NONCANONICAL enhanced water: one GLSL source for both backends (Vulkan #includes it, OpenGL embeds it).
+    set(ikv_gl_water "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv_gl_water.h")
+    add_custom_command(OUTPUT "${ikv_gl_water}"
+        COMMAND "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl -DOUTPUT=${ikv_gl_water}
+            -DNAME=IKV_GL_WATER -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        VERBATIM)
+    target_sources(ikv-renderers PRIVATE "${ikv_gl_water}")
+    target_include_directories(ikv-renderers PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(IKV_BUILD_VULKAN)
         target_sources(ikv-renderers PRIVATE src/renderer_vk.cpp src/vulkan_rt.cpp)
         target_link_libraries(ikv-renderers PUBLIC Vulkan::Vulkan)
@@ -98,7 +107,8 @@ if(IKV_BUILD_CLIENT)
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl")
             endif()
             if(shader STREQUAL "scene.frag" OR shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
-                list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/lighting.glsl")
+                list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/lighting.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl")
             endif()
             if(shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/rt_lighting.glsl")
