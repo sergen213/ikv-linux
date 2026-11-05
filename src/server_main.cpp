@@ -387,7 +387,7 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     peer.sequence = message.sequence;
                     if (message.type == ikv::Type::input) world.input(peer.id, message.dx, message.dy, message.sequence);
                     else if (peer.routed) { peer.held_route = message; peer.route_held = true; }
-                    else { peer.routed = true; peer.route_held = false; world.destination(peer.id, message.x, message.y, message.sequence, message.id); }
+                    else { peer.routed = true; peer.route_held = false; world.destination(peer.id, message.x, message.y, message.sequence); }
                 } else if (message.type == ikv::Type::action) {
                     const auto now = Clock::now();
                     if (now - peer.action_window >= std::chrono::seconds(1)) { peer.actions = 0; peer.action_window = now; }
@@ -629,7 +629,7 @@ int run(const Options& opts) {
                 if (!peer.id || peer.closing || peer.socket.get() < 0) continue;
                 try {
                     peer.routed = std::exchange(peer.route_held, false);
-                    if (peer.routed) world.destination(peer.id, peer.held_route.x, peer.held_route.y, peer.held_route.sequence, peer.held_route.id);
+                    if (peer.routed) world.destination(peer.id, peer.held_route.x, peer.held_route.y, peer.held_route.sequence);
                     send_state(peer, world);
                     if (peer.closing || peer.socket.get() < 0) continue;
                     ikv::Message snapshot{ikv::Type::snapshot}; snapshot.tick = world.tick(); snapshot.players = world.snapshot(peer.id);

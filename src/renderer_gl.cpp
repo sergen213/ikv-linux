@@ -4,7 +4,6 @@
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
 #include <algorithm>
-#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <fstream>
@@ -61,10 +60,6 @@ uniform vec4 source_time;
 uniform vec4 source_scroll;
 uniform mat4 light_view_projection;
 uniform mat4 far_light_view_projection;
-// Wave 16 portal view (NONCANONICAL): world-space clip planes; (0,0,0,1) always passes. Enabled only for portal draws.
-// clip_planes[5] widens plane 1 to a union (distance = max of both); (0,0,0,-1e9) leaves plane 1 alone.
-uniform vec4 clip_planes[6];
-out float gl_ClipDistance[5];
 out vec3 fragment_position;
 out vec4 shadow_position;
 out vec4 far_shadow_position;
@@ -84,8 +79,6 @@ out float fade_blend;
 void main() {
     if(source_ocean) {
         vec4 world_position=object_matrix*vec4(position,1.0);
-        for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(clip_planes[i],world_position);
-        gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
         world_position=source_ocean_position(world_position);
         gl_Position=view_projection*world_position;
         fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position; // enhanced water_surface
@@ -101,8 +94,6 @@ void main() {
         return;
     }
     vec4 world_position=object_matrix*vec4(position,1.0);
-    for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(clip_planes[i],world_position);
-    gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(clip_planes[5],world_position));
     gl_Position=view_projection*world_position;
     fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position;
     if(!original_appearance&&!sky) {
@@ -291,7 +282,6 @@ vec3 enhanced_ambient_scale(){return source_lighting?pow(max(ambient_multiplier*
 // display colour: inverted to linear before mixing.
 uniform sampler2D water_color_map;
 uniform sampler2D water_depth_map;
-uniform bool water_refraction;
 uniform mat4 view_projection;
 uniform vec4 source_time;
 uniform mat4 light_view_projection;
@@ -316,7 +306,7 @@ vec3 water_surface() {
     float sun=scene_roofed?0.0:shadow_visibility(vec3(0.0,1.0,0.0),l);
     float caustic=scene_roofed?0.0:0.8*min(max(sun_scale.r,max(sun_scale.g,sun_scale.b)),1.0);
     vec3 c=waterShade(p,camera_position,view_projection,gl_FragCoord.xy/vec2(textureSize(water_depth_map,0)),source_time.y,l,light,
-        fog_color,vec3(2.8,2.55,2.2)*sun_scale,sun,caustic,water_refraction);
+        fog_color,vec3(2.8,2.55,2.2)*sun_scale,sun,caustic);
     c=mix(pow(max(fog_color,vec3(0.0)),vec3(2.2)),c,clamp(fog_blend,0.0,1.0));
     c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
     return pow(c,vec3(1.0/2.2));
@@ -453,7 +443,6 @@ void main(){
     if(mode==0)c=c*0.45+texture(second,texcoord).rgb*0.55;
     else if(mode==1)c=(0.25+step_gain.z)*(texture(first,texcoord-step_gain.xy).rgb+texture(first,texcoord+step_gain.xy).rgb)+0.5*c;
     else if(mode==2)c*=0.8;
-    else if(mode==4){output_color=vec4(0.0,0.0,0.0,step_gain.w);return;} // NONCANONICAL seamless door fade
     else c=min(pow(c,vec3(1.0/1.2))*1.005,vec3(1.0)); // mode 3: fullscreen gamma ramp 0x467030(1,1,1.2), final pass
     output_color=vec4(clamp(c,0.0,1.0),1.0);
 }
@@ -515,20 +504,6 @@ out vec4 output_color;
 void main(){
     output_color=vec4(grayscale?vec3(dot(contour,vec3(0.299,0.587,0.114))):contour,0.2);
 }
-)GLSL";
-// Wave 16 portal seal (NONCANONICAL): the opening (two quads, corners 0-3 then 4-7; the later wins where they overlap)
-// writes its own depth over the destination view, colour masked, so source geometry behind it fails the depth test.
-constexpr const char* seal_vertex = R"GLSL(#version 330 core
-uniform mat4 view_projection;
-uniform vec3 corners[8];
-void main(){
-    const int order[12]=int[12](0,1,2,0,2,3,4,5,6,4,6,7);
-    gl_Position=view_projection*vec4(corners[order[gl_VertexID]],1.0);
-}
-)GLSL";
-constexpr const char* seal_fragment = R"GLSL(#version 330 core
-out vec4 output_color;
-void main(){output_color=vec4(0.0);}
 )GLSL";
 
 class GlRenderer final : public Renderer {
@@ -598,10 +573,10 @@ class GlRenderer final : public Renderer {
     std::vector<ContourDraw> contours_;
     GLuint framebuffer_=0,color_=0,depth_=0;
     GLuint glow_program_=0,glow_textures_[2]{},glow_framebuffers_[2]{}; // [0]=bb38, [1]=bb3c
-    // Enhanced appearance only: near/far 2048^2 maps for the main and portal views.
-    GLuint shadow_program_=0,shadow_textures_[4]{},shadow_framebuffers_[4]{};
-    std::array<Matrix4,4> shadow_lights_{};
-    std::array<float,2> shadow_splits_{};
+    // Enhanced appearance only: near/far 2048^2 sun depth maps.
+    GLuint shadow_program_=0,shadow_textures_[2]{},shadow_framebuffers_[2]{};
+    std::array<Matrix4,2> shadow_lights_{};
+    float shadow_split_=0;
     GLint light_location_=-1,far_light_location_=-1,shadow_split_location_=-1,shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
     GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
     GLint glow_mode_location_=-1,glow_step_location_=-1;
@@ -613,21 +588,15 @@ class GlRenderer final : public Renderer {
     GLint sky_b_location_=-1,sky_c_location_=-1,lightmap_strength_location_=-1;
     GLint sky_location_=-1,sky_blend_location_=-1;
     GLint fade_location_=-1,height_location_=-1;
-    GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1,clip_location_=-1,roofed_location_=-1;
+    GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1,roofed_location_=-1;
     GLuint water_framebuffer_=0,water_textures_[2]{}; // NONCANONICAL enhanced water scene copy: colour, depth
-    GLint water_location_=-1; // water_refraction: the primary view's water samples the copy
-    GLuint seal_program_=0;
-    GLint seal_vp_location_=-1,seal_corners_location_=-1;
     bool overlay_present_=false,rendered_=false,grayscale_=false;
-    float fade_=0;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
     bool source_presented_=false;
-    // Wave 16 (NONCANONICAL): one GPU resource set per Scene address: the primary plus up to 2 resident portal/instant-door
-    // destinations (LRU). Switching primary to a ready set loads nothing.
+    // GPU resources of the last render()'s Scene; a different Scene address frees them and uploads in full.
     struct GlSet {
         const Scene* key=nullptr;
-        std::uint64_t used=0; // frame_ of last use (LRU)
-        bool planned=false,ready=false; // ready: fully uploaded once for this Scene address
+        bool planned=false;
         std::uint64_t geometry_revision=0;
         std::vector<std::uint64_t> mesh_keys; // Scene mesh keys as last planned; actor attach/detach remaps meshes by them.
         std::uint64_t mesh_key=0; // Scene::mesh_key as last planned: any actor (re)assembly since then re-plans.
@@ -640,10 +609,8 @@ class GlRenderer final : public Renderer {
         SourceScrollState scroll;
     };
     struct View { std::vector<Draw> sky,opaque,alpha; };
-    std::vector<std::unique_ptr<GlSet>> sets_,retired_; // retired_: evicted, freed by retire()
-    GlSet* primary_=nullptr; // set of the last render()'s primary Scene
-    std::uint64_t frame_=0;
-    View view_,portal_view_;
+    GlSet set_;
+    View view_;
 public:
     GlRenderer(SDL_Window* window, const RendererOptions& options) : window_(window), options_(options) {
         if (!window_) throw std::invalid_argument("OpenGL requires an SDL window");
@@ -702,16 +669,13 @@ public:
             fade_location_=uniform(program_,"has_fade_map");height_location_=uniform(program_,"has_height_map");
             ocean_location_=uniform(program_,"source_ocean");time_location_=uniform(program_,"source_time");
             scroll_location_=uniform(program_,"source_scroll");
-            clip_location_=uniform(program_,"clip_planes");roofed_location_=uniform(program_,"scene_roofed");
-            seal_program_=link(seal_vertex,seal_fragment);
-            seal_vp_location_=uniform(seal_program_,"view_projection");seal_corners_location_=uniform(seal_program_,"corners");
+            roofed_location_=uniform(program_,"scene_roofed");
             glUseProgram_(program_); glUniform1i_(uniform(program_,"diffuse_map"),0);
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
             glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
             glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
             glUniform1i_(uniform(program_,"shadow_far_map"),9);
-            water_location_=uniform(program_,"water_refraction");
             light_location_=uniform(program_,"light_view_projection");
             far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
@@ -752,8 +716,8 @@ public:
                 shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
                 shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
-                glGenTextures(4,shadow_textures_);glGenFramebuffers_(4,shadow_framebuffers_);
-                for(int i=0;i<4;++i) {
+                glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
+                for(int i=0;i<2;++i) {
                     glBindTexture(GL_TEXTURE_2D,shadow_textures_[i]);
                     glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
                     // Bilinear comparison (hardware PCF): without it the 3x3 kernel's hard texel steps show as jagged
@@ -812,7 +776,6 @@ public:
         progress();
     }
     void set_grayscale(bool on) override { grayscale_=on; }
-    void set_fade(float black) override { fade_=std::clamp(black,0.f,1.f); }
     void set_view_distance(float distance) override {
         if(!std::isfinite(distance)||distance<0)throw std::invalid_argument("view distance requires a finite value >= 0");
         options_.view_distance=distance;
@@ -860,22 +823,13 @@ public:
         particle_batches_=frame.batches;
         check("uploading particles");
     }
-    void make_resident(const Scene& scene) override { current(); acquire(scene); }
-    // GL 3.3 core always has 8 clip distances, so every ready set can be drawn as a portal.
-    bool resident(const Scene& scene) const override { const auto* set=find(scene); return set&&set->ready; }
-    void evict(const Scene& scene) override { if(auto* set=find(scene)){current();drop(*set);} }
-    void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t self,float dt,std::span<const PortalView> portals) override {
+    void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t self,float dt) override {
         (void)self;
         if(!std::isfinite(dt) || dt<0) throw std::invalid_argument("invalid render delta");
         current();
-        ++frame_;
-        for(const auto& portal:portals)if(portal.scene)if(auto* set=find(*portal.scene))set->used=frame_;
-        auto& set=acquire(scene);primary_=&set;
-        stream(set,scene,never); // a Scene that is not resident loads in full here (fade fallback)
-        // ponytail: fixed 2 ms/frame upload budget shared by the incomplete other sets; ready ones only sync actor deltas.
-        const auto budget=std::chrono::steady_clock::now()+std::chrono::milliseconds(2);
-        for(const auto& other:sets_)if(other.get()!=&set)stream(*other,*other->key,other->ready?never:budget);
-        retire(std::chrono::steady_clock::now()+std::chrono::milliseconds(1));
+        auto& set=set_;
+        if(set.key!=&scene){release(set);set.key=&scene;}
+        upload(set,scene);
         refresh(set,scene);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
         glDisable(GL_SCISSOR_TEST);glDisable(GL_CULL_FACE);glDisable(GL_BLEND);glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LESS);glDepthMask(GL_TRUE);
@@ -885,7 +839,6 @@ public:
         glUseProgram_(program_);
         const auto vp=camera_view_projection(options_.camera,width_,height_);
         glUniform1i_(original_location_,options_.original_appearance?1:0);glUniform1f_(exposure_location_,options_.exposure);
-        glUniform1i_(water_location_,0); // portal views: no scene copy
         glUniform1i_(uniform(program_,"grayscale"),grayscale_?1:0);
         const auto& light=scene.lighting;
         validate_lighting(light);
@@ -894,33 +847,19 @@ public:
         glUniform4fv_(time_location_,1,source_time.data());
         contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
-        build(view_,set,scene,entities,vp,eye,nullptr,true);
+        build(view_,set,scene,entities,vp,eye);
         if(shadow_program_) {
             const auto cascades=shadow_light_cascades(options_.camera,enhanced_sun(light),options_.view_distance);
-            shadow_splits_[0]=cascades.split;
+            shadow_split_=cascades.split;
             shadow_pass(0,set,scene,view_,cascades.light[0]);shadow_pass(1,set,scene,view_,cascades.light[1]);
         }
-        Clip source_clip=no_clip;
-        view_uniforms(scene,vp,eye,source_clip);
+        view_uniforms(scene,vp,eye);
         glDepthMask(GL_FALSE);
         for(const auto& draw:view_.sky) {
             if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
             else glDisable(GL_BLEND);
             draw_instance(set,scene,draw);
         }
-        // Wave 16 see-through doorways: each destination view and its seal go between the source sky and source geometry.
-        bool split=false;
-        for(const auto& portal:portals) {
-            if(!portal.scene||portal.scene==&scene)continue;
-            auto* destination=find(*portal.scene);
-            if(!destination||!destination->ready)continue; // not resident: the closed source wall shows
-            const auto open=opening(portal,eye,frustum_planes(vp));
-            if(!open)continue;
-            draw_portal(portal,*destination,*open,vp,eye);
-            if(open->split&&!split){source_clip=open->source;split=true;}
-        }
-        if(!portals.empty())view_uniforms(scene,vp,eye,source_clip);
-        clip_distances(split);
         glDisable(GL_BLEND);glDepthMask(GL_TRUE);
         // NONCANONICAL enhanced water: source ocean draws after the rest of the opaque scene, which is copied first
         // (colour + depth) for its refraction and depth absorption (scene_fragment water_surface).
@@ -932,13 +871,11 @@ public:
             glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);
             glActiveTexture_(GL_TEXTURE6);glBindTexture(GL_TEXTURE_2D,water_textures_[0]);
             glActiveTexture_(GL_TEXTURE7);glBindTexture(GL_TEXTURE_2D,water_textures_[1]);
-            glUniform1i_(water_location_,1);
             for(const auto& draw:view_.opaque) if(draw.visible&&water(draw)) draw_instance(set,scene,draw);
         }
         std::sort(view_.alpha.begin(),view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
         for(const auto& draw:view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
-        clip_distances(false);
         // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input); 0046cbe0 draws AfterHDR ones after
         // the glow composite (0046fdb0 @470aed/@47183f, or straight after 0046ccf0 without glow @471977).
         const auto draw_particles=[&](bool after_hdr) {
@@ -1013,12 +950,6 @@ public:
         }
         draw_particles(true);
         glDepthMask(GL_TRUE);
-        if(fade_>0) { // below the HUD, like Vulkan's post.frag fade
-            glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-            glUseProgram_(glow_program_);glBindVertexArray_(overlay_vao_);
-            const std::array<float,4> black{0,0,0,fade_};
-            glUniform1i_(glow_mode_location_,4);glUniform4fv_(glow_step_location_,1,black.data());glDrawArrays(GL_TRIANGLES,0,3);
-        }
         if(overlay_present_) {
             glDisable(GL_CULL_FACE);
             glDisable(GL_DEPTH_TEST);glUseProgram_(overlay_program_);glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,overlay_texture_);
@@ -1162,48 +1093,7 @@ private:
     void release(GlSet& set) noexcept {
         for(auto& mesh:set.meshes)release(mesh);
         if(!set.textures.empty())glDeleteTextures(static_cast<GLsizei>(set.textures.size()),set.textures.data());
-        GlSet empty;empty.key=set.key;empty.used=set.used;set=std::move(empty);
-    }
-    // Evicted sets are freed a slice per frame by retire(), starting 3 frames later: deleting a whole zone's ~9k GL objects
-    // at once took 7.4 ms, and the driver's deferred buffer frees land in the next swap (~4 ms per ~200 MB measured).
-    void drop(GlSet& set) noexcept {
-        if(primary_==&set)primary_=nullptr;
-        set.used=frame_;
-        const auto p=std::find_if(sets_.begin(),sets_.end(),[&](const auto& s){return s.get()==&set;});
-        retired_.push_back(std::move(*p));sets_.erase(p);
-    }
-    // ponytail: fixed 1 ms / 32 MB of meshes / 16 textures per frame; tune if a bigger zone still hitches.
-    void retire(std::chrono::steady_clock::time_point deadline) noexcept {
-        std::size_t bytes=0;
-        while(!retired_.empty()&&retired_.front()->used+3<=frame_&&bytes<(32U<<20)&&std::chrono::steady_clock::now()<deadline) {
-            auto& set=*retired_.front();
-            if(!set.meshes.empty()) {
-                const auto& mesh=set.meshes.back();bytes+=mesh.vertex_count*sizeof(Vertex)+static_cast<std::size_t>(mesh.count)*4;
-                release(set.meshes.back());set.meshes.pop_back();continue;
-            }
-            if(const auto n=std::min<std::size_t>(set.textures.size(),16)) {
-                glDeleteTextures(static_cast<GLsizei>(n),set.textures.data()+set.textures.size()-n);
-                set.textures.resize(set.textures.size()-n);break;
-            }
-            retired_.erase(retired_.begin());
-        }
-    }
-    void release_scene() noexcept override { if(primary_)drop(*primary_); }
-    GlSet* find(const Scene& scene) const {
-        for(const auto& set:sets_)if(set->key==&scene)return set.get();
-        return nullptr;
-    }
-    // Resident cap: primary + 2; the least recently used other set is freed first.
-    GlSet& acquire(const Scene& scene) {
-        auto* set=find(scene);
-        if(!set){sets_.push_back(std::make_unique<GlSet>());set=sets_.back().get();set->key=&scene;}
-        set->used=frame_;
-        while(sets_.size()>3) {
-            GlSet* oldest=nullptr;
-            for(const auto& other:sets_)if(other.get()!=set&&other.get()!=primary_&&(!oldest||other->used<oldest->used))oldest=other.get();
-            drop(*oldest);
-        }
-        return *set;
+        GlSet empty;empty.key=set.key;set=std::move(empty);
     }
     // Upload plan for the Scene's current structure. Actor attach/detach/replacement keeps every other mesh (moved by key)
     // and every texture; only a shrunk texture table reloads the set.
@@ -1221,7 +1111,7 @@ private:
             throw std::invalid_argument("too many scene textures");
         set.material_usage=scene_material_usage(scene);
         progress();
-        set.textures.resize(scene.textures.size()); // names stay 0 from next_texture on until streamed
+        set.textures.resize(scene.textures.size()); // names stay 0 from next_texture on until uploaded
         set.materials.assign(scene.materials.size(),GpuMaterial{});set.next_material=0;
         set.meshes.resize(scene.meshes.size());
         set.mesh_plan.assign(scene.meshes.size(),0);set.next_mesh=0;
@@ -1242,19 +1132,12 @@ private:
         set.mesh_keys.resize(scene.meshes.size());for(std::size_t i=0;i<scene.meshes.size();++i)set.mesh_keys[i]=scene.meshes[i].key;
         set.mesh_key=scene.mesh_key;set.planned=true;
     }
-    static constexpr auto never=std::chrono::steady_clock::time_point::max();
-    // Uploads textures, then materials, then meshes until deadline (never: to completion). The item that crosses the
-    // deadline still finishes, so one item bounds the hitch. True when the set is complete.
-    bool stream(GlSet& set,const Scene& scene,std::chrono::steady_clock::time_point deadline) {
+    // Uploads what the Scene still lacks: new textures, then materials, then meshes (retained ones stay).
+    void upload(GlSet& set,const Scene& scene) {
         try {
             if(!set.planned||set.mesh_key!=scene.mesh_key||set.meshes.size()!=scene.meshes.size()||
                set.textures.size()!=scene.textures.size()||set.materials.size()!=scene.materials.size())plan(set,scene);
-            const auto due=[&]{
-                if(deadline==never||std::chrono::steady_clock::now()<deadline)return false;
-                glBindVertexArray_(0);check("streaming original asset scene");return true;
-            };
             for(;set.next_texture<set.textures.size();++set.next_texture) {
-                if(due())return false;
                 const auto i=set.next_texture;
                 // Derived parallax relief (Material::height) is never bound unless enhanced parallax is on: not uploaded.
                 if(scene.textures[i].name.ends_with("#parallax")&&(options_.original_appearance||!options_.parallax))continue;
@@ -1265,17 +1148,14 @@ private:
             for(;set.next_material<set.materials.size();++set.next_material) {
                 const auto i=set.next_material;
                 if(!set.material_usage[i]){validate_material(scene.materials[i]);continue;}
-                if(due())return false;
                 upload_material(set,scene,i);
             }
             for(;set.next_mesh<set.meshes.size();++set.next_mesh) {
                 const auto i=set.next_mesh;
                 if(!set.mesh_plan[i]||set.meshes[i].vao)continue; // Retained meshes were validated on upload.
-                if(due())return false;
                 if(set.mesh_plan[i]==1)validate_mesh(scene,i);else upload_mesh(set,scene,i);
             }
             glBindVertexArray_(0);check("uploading original asset scene");
-            set.ready=true;return true;
         }catch(...){release(set);throw;}
     }
     // Skinned meshes whose vertices moved since their upload (Scene::geometry_revision).
@@ -1305,10 +1185,8 @@ private:
         if(!std::isfinite(light.lightmap_strength))throw std::invalid_argument("non-finite source lightmap multiplier");
         if(!std::isfinite(light.sky_blend)||!std::isfinite(light.sky_rotation))throw std::invalid_argument("non-finite source sky parameters");
     }
-    using Clip=std::array<std::array<float,4>,6>;
-    static constexpr Clip no_clip{{{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,1},{0,0,0,-1e9f}}};
-    // Per-view scene uniforms (program_ bound): camera, the Scene's own lighting/fog/sky constants and clip planes.
-    void view_uniforms(const Scene& scene,const Matrix4& vp,const std::array<float,3>& eye,const Clip& clip) {
+    // Scene uniforms (program_ bound): camera and the Scene's own lighting/fog/sky constants.
+    void view_uniforms(const Scene& scene,const Matrix4& vp,const std::array<float,3>& eye) {
         const auto& light=scene.lighting;
         // Enhanced lighting needs a sun even without source constants; original paths only read it with them.
         const auto sun=enhanced_sun(light);
@@ -1321,13 +1199,10 @@ private:
         glUniform1f_(lightmap_strength_location_,light.lightmap_strength);
         glUniform1f_(sky_blend_location_,light.sky_blend);glUniform1i_(roofed_location_,light.roofed?1:0);
         glUniform3fv_(camera_location_,1,eye.data());
-        glUniform4fv_(clip_location_,6,clip[0].data());
     }
-    static void clip_distances(bool on) { for(GLenum i=0;i<5;++i)(on?glEnable:glDisable)(GL_CLIP_DISTANCE0+i); }
-    // Draw lists of one view. source: the primary view (hover contours). Enhanced keeps off-screen opaque draws for the
-    // shadow map. clip: extra culling planes (portal pyramid in this Scene's coordinates).
+    // Draw lists of the view (and its hover contours). Enhanced keeps off-screen opaque draws for the shadow map.
     void build(View& view,GlSet& set,const Scene& scene,std::span<const RenderEntity> entities,const Matrix4& vp,
-               const std::array<float,3>& eye,const FrustumPlanes* clip,bool source) {
+               const std::array<float,3>& eye) {
         view.sky.clear();view.opaque.clear();view.alpha.clear();
         view.opaque.reserve(scene.instances.size());view.alpha.reserve(scene.instances.size());
         const auto& light=scene.lighting;
@@ -1364,7 +1239,7 @@ private:
             // Culled alpha draws stay in alpha so its distance sort sees the unculled list.
             const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
                 (sphere_within(eye,matrix,set.meshes[instance.mesh].bounds,options_.view_distance)&&
-                 sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds)&&(!clip||sphere_visible(*clip,matrix,set.meshes[instance.mesh].bounds)));
+                 sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds));
             // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
             if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
             bool fog=false;
@@ -1380,129 +1255,14 @@ private:
             // NONCANONICAL enhanced water (authored alpha-blended) is drawn opaque with depth over the scene copy.
             const bool alpha=scene.materials[material].alpha&&(options_.original_appearance||!scene.materials[material].source_ocean);
             (instance.sky?view.sky:(alpha?view.alpha:view.opaque)).push_back(draw);
-            if(!visible||!source)continue;
+            if(!visible)continue;
             if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
                 for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
                 contours_.push_back({instance.mesh,matrix,entity->contour});
             }
         }
     }
-    struct Opening { Clip clip; std::array<std::array<float,3>,8> seal; Clip source; bool split=false; };
-    // Wave 16 doorway seen from eye (primary world). Quad normal cross(q1-q0,q3-q0) points into the destination.
-    // seal: the quad pulled `pull` toward the eye; it hides source geometry near the threshold plane (Doorways: gate
-    // porch/arch/posters lie at -0.58..+0.04 u) and the door wall behind it.
-    // clip: the 4 pyramid sides eye→seal edges plus the seal plane, so the destination floor meets the source floor with
-    // no gap; the destination's own door wall sits there too but faces away (back-face culled).
-    // Eye within max(.25, 2·near, pull+.25) of the plane and inside the opening: half-space split (the pyramid
-    // degenerates), no seal. The scenes meet exactly at the plane (floors continuous); the source also drops its
-    // geometry within `pull` of the plane above the floor strip (the clutter the seal hides otherwise). Destination
-    // geometry on the source side of the plane is dropped: it sits at the eye (Umut Dergisi's karakoy door filler 0.49 u
-    // inside the room covered the whole screen). nullopt: eye beyond the plane, or the quad is off-screen.
-    std::optional<Opening> opening(const PortalView& portal,const std::array<float,3>& eye,const FrustumPlanes& frustum) const {
-        using V=std::array<float,3>;
-        const auto& q=portal.quad;
-        for(const auto& c:q)for(float v:c)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal quad");
-        for(float v:portal.to_primary)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal transform");
-        const auto sub=[](const V& a,const V& b){return V{a[0]-b[0],a[1]-b[1],a[2]-b[2]};};
-        const auto cross=[](const V& a,const V& b){return V{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};};
-        const auto dot=[](const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];};
-        const auto unit=[&](V v){const float l=std::sqrt(dot(v,v));if(!(l>1e-6f))return V{};for(auto& x:v)x/=l;return v;};
-        const auto n=unit(cross(sub(q[1],q[0]),sub(q[3],q[0])));
-        if(n==V{})throw std::invalid_argument("degenerate portal quad");
-        for(const auto& p:frustum)
-            if(std::all_of(q.begin(),q.end(),[&](const V& c){return p[0]*c[0]+p[1]*c[1]+p[2]*c[2]+p[3]<0;}))return {};
-        constexpr float pull=.7f; // same constant in renderer_vk.cpp
-        const float s=dot(n,sub(eye,q[0])),band=std::max({.25f,2*options_.camera.near_plane,pull+.25f});
-        bool inside=true;
-        for(unsigned i=0;i<4;++i)inside=inside&&dot(cross(sub(q[(i+1)%4],q[i]),sub(eye,q[i])),n)>=0;
-        Opening o{no_clip,{},no_clip};
-        o.clip[4]={n[0],n[1],n[2],-dot(n,q[0])+pull};
-        // Two-part seal: the bottom `pull` strip stays on the plane (0.02 toward the eye), so floor rays that would cross
-        // the destination clip short of the plane still meet the source floor in front of it (the destination often has no
-        // floor there: reverse Balıkpazarı showed a 4-px sky band); the rest is pulled the full `pull`.
-        const auto up=unit(sub(q[3],q[0]));const float strip=std::min(pull,std::sqrt(dot(sub(q[3],q[0]),sub(q[3],q[0]))));
-        const auto at=[&](const V& p,float rise,float back){return V{p[0]+up[0]*rise-n[0]*back,p[1]+up[1]*rise-n[1]*back,p[2]+up[2]*rise-n[2]*back};};
-        o.seal={at(q[0],0,.02f),at(q[1],0,.02f),at(q[1],strip,.02f),at(q[0],strip,.02f),at(q[0],strip,pull),at(q[1],strip,pull),at(q[2],0,pull),at(q[3],0,pull)};
-        if(inside&&std::abs(s)<band) {
-            // Both meet at n·q0 - 0.02 (the strip seal's plane): the source wall coplanar with the opening (no authored
-            // hole) is dropped, floors stay continuous. Source: n·x <= n·q0 - .02 and (n·x <= n·q0 - pull or
-            // height <= strip), the union being plane pair 1/5.
-            o.split=true;o.clip[4][3]=.02f-dot(n,q[0]);
-            o.source[0]={-n[0],-n[1],-n[2],dot(n,q[0])-.02f};o.source[1]={-n[0],-n[1],-n[2],dot(n,q[0])-pull};
-            o.source[5]={-up[0],-up[1],-up[2],dot(up,q[0])+strip};
-            return o;
-        }
-        if(s>=0)return {};
-        const V centre{(q[0][0]+q[1][0]+q[2][0]+q[3][0])/4,(q[0][1]+q[1][1]+q[2][1]+q[3][1])/4,(q[0][2]+q[1][2]+q[2][2]+q[3][2])/4};
-        // Sides through the seal's outline (its screen footprint) with 0.01 outward slack, so no seal pixel lacks the
-        // destination; source geometry covers any slack outside the seal. Each side takes whichever of its strip/pulled
-        // edges keeps all 8 seal corners inside. Near the seal (s >= -2·pull) the plain quad edges are used.
-        static constexpr std::array<std::array<unsigned,4>,4> sides{{{0,1,4,5},{1,2,5,6},{6,7,6,7},{3,0,7,4}}};
-        for(unsigned i=0;i<4;++i) {
-            float best=-INFINITY;
-            for(unsigned c=0;c<4;c+=2) {
-                const auto& p0=s<-2*pull?o.seal[sides[i][c]]:q[i];const auto& p1=s<-2*pull?o.seal[sides[i][c+1]]:q[(i+1)%4];
-                auto side=unit(cross(sub(p0,eye),sub(p1,eye)));
-                if(dot(side,sub(centre,eye))<0)for(auto& x:side)x=-x;
-                float worst=INFINITY;
-                for(const auto& corner:o.seal)worst=std::min(worst,dot(side,sub(corner,eye)));
-                if(worst>best){best=worst;o.clip[i]={side[0],side[1],side[2],.01f-dot(side,eye)};}
-            }
-        }
-        return o;
-    }
-    // Destination view through one doorway: its own coordinates, virtual camera vp·M (eye M⁻¹·eye), its own lighting/fog/
-    // sky and (enhanced) its own shadow map around the virtual camera. Then the seal: the quad's depth over the opening,
-    // colour masked.
-    void draw_portal(const PortalView& portal,GlSet& set,const Opening& open,const Matrix4& vp,const std::array<float,3>& eye) {
-        const auto& scene=*portal.scene;const auto& m=portal.to_primary;
-        validate_lighting(scene.lighting);
-        const auto portal_vp=multiply_matrix(vp,m);
-        const auto inverse=[&](const std::array<float,3>& p){ // rigid M: Rᵀ(p − t)
-            std::array<float,3> r{};
-            for(unsigned i=0;i<3;++i)for(unsigned k=0;k<3;++k)r[i]+=m[i*4+k]*(p[k]-m[12+k]);
-            return r;
-        };
-        const auto portal_eye=inverse(eye);
-        Clip clip{};FrustumPlanes cull{}; // planes·M: primary-world planes in destination coordinates
-        for(unsigned i=0;i<6;++i)for(unsigned c=0;c<4;++c)for(unsigned r=0;r<4;++r)clip[i][c]+=open.clip[i][r]*m[c*4+r];
-        for(unsigned i=0;i<5;++i)cull[i]=clip[i];
-        cull[5]=cull[4];
-        refresh(set,scene);
-        build(portal_view_,set,scene,portal.entities,portal_vp,portal_eye,&cull,false);
-        if(shadow_program_) {
-            Camera virtual_camera=options_.camera;virtual_camera.target=inverse(options_.camera.target);
-            const auto cascades=shadow_light_cascades(virtual_camera,enhanced_sun(scene.lighting),options_.view_distance);
-            shadow_splits_[1]=cascades.split;
-            shadow_pass(2,set,scene,portal_view_,cascades.light[0]);shadow_pass(3,set,scene,portal_view_,cascades.light[1]);
-        }
-        view_uniforms(scene,portal_vp,portal_eye,clip);
-        clip_distances(true);
-        glDepthMask(GL_FALSE);
-        for(const auto& draw:portal_view_.sky) {
-            if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
-            else glDisable(GL_BLEND);
-            draw_instance(set,scene,draw);
-        }
-        glDisable(GL_BLEND);glDepthMask(GL_TRUE);
-        for(const auto& draw:portal_view_.opaque) if(draw.visible) draw_instance(set,scene,draw);
-        std::sort(portal_view_.alpha.begin(),portal_view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
-        glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
-        for(const auto& draw:portal_view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
-        clip_distances(false);glDisable(GL_BLEND);glDepthMask(GL_TRUE);
-        if(shadow_program_)shadow_bind(0);
-        if(open.split){check("drawing portal view");return;}
-        // Seal: depth ALWAYS (plus a slope/units pull toward the eye against coplanar source wall faces at range).
-        glUseProgram_(seal_program_);glUniformMatrix4fv_(seal_vp_location_,1,GL_FALSE,vp.data());
-        glUniform3fv_(seal_corners_location_,8,open.seal[0].data());
-        glDisable(GL_CULL_FACE);glColorMask(GL_FALSE,GL_FALSE,GL_FALSE,GL_FALSE);glDepthFunc(GL_ALWAYS);
-        glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(-1.f,-4.f);
-        glBindVertexArray_(overlay_vao_);glDrawArrays(GL_TRIANGLES,0,12);
-        glDisable(GL_POLYGON_OFFSET_FILL);glDepthFunc(GL_LESS);glColorMask(GL_TRUE,GL_TRUE,GL_TRUE,GL_TRUE);
-        glUseProgram_(program_);
-        check("drawing portal view");
-    }
-    // Enhanced sun shadow slots: 0/1 main near/far, 2/3 portal near/far; leaves both bound for program_.
+    // Enhanced sun shadow slots 0/1: near/far; leaves both bound for program_.
     void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp) {
         shadow_lights_[static_cast<std::size_t>(slot)]=light_vp;
         glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glViewport(0,0,2048,2048);
@@ -1521,16 +1281,15 @@ private:
                sphere_visible(caster_planes,draw.matrix,set.meshes[draw.instance->mesh].bounds))draw_shadow(set,scene,draw);
         glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
-        glUseProgram_(program_);shadow_bind(slot);
+        glUseProgram_(program_);shadow_bind();
         check("drawing shadow map");
     }
-    void shadow_bind(int slot) {
-        const int view=slot/2,near_slot=view*2;
-        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near_slot)].data());
-        glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[static_cast<std::size_t>(near_slot+1)].data());
-        glUniform1f_(shadow_split_location_,shadow_splits_[static_cast<std::size_t>(view)]);
-        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near_slot]);
-        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[near_slot+1]);
+    void shadow_bind() {
+        glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[0].data());
+        glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[1].data());
+        glUniform1f_(shadow_split_location_,shadow_split_);
+        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[0]);
+        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[1]);
     }
     void upload_texture(const Texture& source,GLuint& name) {
         if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
@@ -1612,9 +1371,8 @@ private:
         if(!context_)return;
         if(SDL_GL_MakeCurrent(window_,context_)){
             // Before entry points are loaded the context itself owns all remaining allocations.
-            if(glDeleteBuffers_ && glDeleteVertexArrays_){for(auto* list:{&sets_,&retired_})for(auto& set:*list)release(*set);sets_.clear();retired_.clear();primary_=nullptr;}
+            if(glDeleteBuffers_ && glDeleteVertexArrays_)release(set_);
             if(program_ && glDeleteProgram_)glDeleteProgram_(program_);
-            if(seal_program_ && glDeleteProgram_)glDeleteProgram_(seal_program_);
             if(overlay_program_ && glDeleteProgram_)glDeleteProgram_(overlay_program_);
             if(particle_program_ && glDeleteProgram_)glDeleteProgram_(particle_program_);
             if(contour_program_ && glDeleteProgram_)glDeleteProgram_(contour_program_);
@@ -1632,8 +1390,8 @@ private:
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
             if(shadow_program_ && glDeleteProgram_)glDeleteProgram_(shadow_program_);
-            if(shadow_textures_[0])glDeleteTextures(4,shadow_textures_);
-            if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(4,shadow_framebuffers_);
+            if(shadow_textures_[0])glDeleteTextures(2,shadow_textures_);
+            if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,shadow_framebuffers_);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;
     }

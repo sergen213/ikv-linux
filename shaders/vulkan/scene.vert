@@ -30,9 +30,6 @@ layout(location=13) out vec4 motionPrevious;
 layout(location=14) out vec3 sourceAmbientTerm;
 layout(location=15) out vec3 sourceSunTerm;
 layout(location=16) out vec4 farShadowPosition;
-#ifdef IKV_PORTAL_CLIP
-out gl_PerVertex { vec4 gl_Position; float gl_ClipDistance[5]; };
-#endif
 void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
@@ -64,10 +61,6 @@ void main(){
         farShadowPosition+=frame.farLightVP*vec4(worldNormal*farTexel*2.*(1.-max(dot(worldNormal,normalize(frame.sun.xyz)),0.)),0);
     }
     gl_Position=frame.vp*world;
-#ifdef IKV_PORTAL_CLIP
-    for(int i=0;i<5;++i)gl_ClipDistance[i]=dot(vec4(world.xyz,1),frame.clip[i]);
-    gl_ClipDistance[1]=max(gl_ClipDistance[1],dot(vec4(world.xyz,1),frame.clipOr));
-#endif
     motionCurrent=vec4(gl_Position.xy-frame.jitter.xy*gl_Position.w,gl_Position.zw);
     // Ocean displacement is evaluated at this frame's time for both: only the transform moves the water.
     vec4 previousWorld=draw.previousModel*vec4(previousPosition,1);

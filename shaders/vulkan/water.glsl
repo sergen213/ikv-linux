@@ -177,8 +177,8 @@ float waterGgxSpec(vec3 n,vec3 v,vec3 l,float a){
 }
 // The surface colour (linear, before the scene fog) at p. eye, vp: camera; uv: screen uv of this pixel; t seconds;
 // l toward the sun; light: ambient + sun on a level surface (linear); fogGamma: the fog (sky) colour as authored;
-// sunColor: sun radiance; sunVisibility at the surface; caustic strength; copy: the scene copy exists (else deep water).
-vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 fogGamma,vec3 sunColor,float sunVisibility,float caustic,bool copy){
+// sunColor: sun radiance; sunVisibility at the surface; caustic strength.
+vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 fogGamma,vec3 sunColor,float sunVisibility,float caustic){
     gWaterVP=vp;gWaterInv=inverse(vp);gWaterEye=eye;
     float dist=distance(eye,p),footprint=length(fwidth(p.xz));
     // OpenUnderworld's default look (Coastal Thailand): surface / deep colour, full fog at 100000 TRU units.
@@ -197,7 +197,7 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     vec3 v=normalize(eye-p);
     float cosI=max(dot(n,v),1e-3);
     // Contact depth: depth plus a metre where the bed is no shore (a hull or an outline over a deeper bed).
-    float sd0=copy?waterSceneDepth(uv):1.0;
+    float sd0=waterSceneDepth(uv);
     bool open=sd0>=0.999999;
     vec3 bed0=waterWorld(uv,sd0);
     float depth=open?1e5:max(p.y-bed0.y,0.0);
@@ -214,19 +214,19 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     bool traced=false;
     vec2 ruv=uv;
     vec3 rd=refract(-v,n,1.0/kWaterIor);
-    if(copy&&!open&&waterTrace(p,rd,30.0*kWaterM,1.5*kWaterM,huv,ht)&&waterWorld(huv,waterSceneDepth(huv)).y<p.y+2.0*kWaterU){traced=true;ruv=huv;path=ht;}
+    if(!open&&waterTrace(p,rd,30.0*kWaterM,1.5*kWaterM,huv,ht)&&waterWorld(huv,waterSceneDepth(huv)).y<p.y+2.0*kWaterU){traced=true;ruv=huv;path=ht;}
     if(!traced){
         float ds=open?1e5:distance(bed0,eye);
         ruv=uv+s*(0.6*clamp((ds-dist)/max(ds,kWaterU),0.0,0.25));
-        float sd=copy?waterSceneDepth(ruv):1.0;
+        float sd=waterSceneDepth(ruv);
         vec3 bed=waterWorld(ruv,sd);
         if(sd<0.999999&&bed.y>p.y){ruv=uv;sd=sd0;bed=bed0;} // the offset reached the shore
         path=sd>=0.999999?1e5:distance(p,bed);
     }
-    float rsd=copy?waterSceneDepth(ruv):1.0;
+    float rsd=waterSceneDepth(ruv);
     vec3 rbed=waterWorld(ruv,rsd);
     float down=rsd>=0.999999?1e5:max(p.y-rbed.y,0.0);
-    vec3 seen=copy?waterSceneColor(ruv):vec3(0.0);
+    vec3 seen=waterSceneColor(ruv);
     if(rsd<0.999999)seen*=waterCausticLight(rbed,bn,down,length(abs(bx.xz)+abs(by.xz)),t,l,sunColor,caustic);
     vec3 tr=exp(-sigma*min(path,1e5));
     vec3 c=seen*tr*exp(-sigma*min(down,1e5))+deepColor*light*(1.0-tr);
@@ -235,7 +235,7 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     float fresnel=waterSchlick(cosI);
     vec3 refl=skyColor;
     vec3 ro=p+vec3(0.0,2.0*kWaterU,0.0);
-    if(!waterRayReflection(ro,rs,refl)&&copy&&waterTrace(ro,rs,40.0*kWaterM,2.0*kWaterM,huv,ht)){
+    if(!waterRayReflection(ro,rs,refl)&&waterTrace(ro,rs,40.0*kWaterM,2.0*kWaterM,huv,ht)){
         float conf=waterEdgeFade(huv,0.08)*(1.0-smoothstep(0.6,1.0,ht/(40.0*kWaterM)));
         refl=mix(skyColor,waterSceneColor(huv),conf);
     }
@@ -249,6 +249,6 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     float foam=smoothstep(-0.05,0.05,e*e-cdepth/(0.15*kWaterM));
     c=mix(c,light*0.9,foam*0.65);
     // Soft waterline: the bed shows through the last few units.
-    if(copy)c=mix(waterSceneColor(uv),c,smoothstep(0.0,6.0*kWaterU,cdepth));
+    c=mix(waterSceneColor(uv),c,smoothstep(0.0,6.0*kWaterU,cdepth));
     return max(c,vec3(0.0));
 }

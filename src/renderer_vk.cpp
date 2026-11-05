@@ -16,7 +16,6 @@
 #include <exception>
 #include <fstream>
 #include <functional>
-#include <future>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -50,9 +49,8 @@ struct MemoryPool {
 struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
-// clip/to_primary/clip_or: wave-16 portal views only (frame.glsl).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter,fade;std::array<std::array<float,4>,5> clip;Matrix4 to_primary;std::array<float,4> clip_or;Matrix4 far_light;std::array<float,4> shadow_params;};
-static_assert(sizeof(Frame)==720 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,fade)==464 && offsetof(Frame,clip)==480 && offsetof(Frame,to_primary)==560 && offsetof(Frame,clip_or)==624 && offsetof(Frame,far_light)==640 && offsetof(Frame,shadow_params)==704);
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params;};
+static_assert(sizeof(Frame)==544 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
@@ -82,7 +80,7 @@ class VulkanRenderer final:public Renderer {
  Image hdr_[2],raw_hdr_,guide_[2],depth_,shadow_,output_,overlay_,white_,flat_normal_,glow_chain_[2];
 // NONCANONICAL enhanced water (lighting.glsl waterSurface): the scene colour/depth copied before the source ocean draws
 // (copy_water, bindings 12/13), and water_pass_ continuing the scene pass with writable depth. water_ready_: in a sampled
-// layout (portal-view water reads them before any copy).
+// layout (every scene draw binds them, also before the first copy).
 Image water_color_,water_depth_;VkRenderPass water_pass_=VK_NULL_HANDLE;bool water_ready_=false;
 static constexpr std::uint32_t scene_images=14; // combined image samplers per frame/material descriptor set
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
@@ -102,19 +100,17 @@ static constexpr std::uint32_t scene_images=14; // combined image samplers per f
 Image rt_diffuse_,rt_reflection_,diffuse_history_[2],reflection_history_[2],atrous_[4];
 VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot][A/B target], [slot][iteration]
  std::uint64_t jitter_frame_=0;std::chrono::steady_clock::time_point last_render_{};bool fsr_reset_=true; // reset: new targets/scene
- std::array<float,2> previous_jitter_{}; // the last frame's jitter (every view of a frame shares it)
- // IKV_GPU_TIMING: per slot 4 timestamps (scene pass begin, after source sky, after portal views+seals, scene pass end);
- // averages logged every 30 frames. timed_[slot]: that slot's last frame wrote them.
- VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};double timing_sum_[2]{};unsigned timing_count_=0,timing_portals_=0;
- // Frame uniforms: per slot, one aligned region per view (primary, then portal views) behind the dynamic binding 0 of
- // every set (uniform_offset_ while recording).
- static constexpr unsigned max_portals=2,view_slots=1+max_portals;
+ std::array<float,2> previous_jitter_{}; // the last frame's jitter
+ // IKV_GPU_TIMING: per slot 2 timestamps (scene pass begin/end); the average is logged every 30 frames. timed_[slot]:
+ // that slot's last frame wrote them.
+ VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};double timing_sum_=0;unsigned timing_count_=0;
+ // Frame uniforms: one aligned region per slot behind the dynamic binding 0 of every set (uniform_offset_ while recording).
  Buffer uniform_;std::uint32_t uniform_stride_=0,uniform_offset_=0;
  struct ViewsLess {bool operator()(const std::array<VkImageView,6>& a,const std::array<VkImageView,6>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
  struct ContourItem {std::uint32_t mesh,material;Matrix4 model;std::array<float,3> color;};
  std::vector<ContourItem> contours_;
- // NONCANONICAL wave-16 resident scene set: everything one Scene uploads, its RT scene and its temporal history, keyed
- // by Scene address. sets_ holds the primary and at most max_portals more (portal destinations, instant-door targets).
+ // Everything one Scene uploads: its GPU resources, its RT scene and its temporal history. render() frees it (after a
+ // device wait) when called with a different Scene and loads that one in full.
  struct SceneSet {
      const Scene* scene=nullptr;
      std::vector<Image> textures;std::unordered_map<std::string,std::size_t> texture_lookup;std::vector<Geometry> geometry;
@@ -125,37 +121,17 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      std::unique_ptr<VulkanRtScene> rt;VkDescriptorPool rt_pool=VK_NULL_HANDLE;VkDescriptorSet rt_set=VK_NULL_HANDLE;
      bool rt_stale=false; // a retained reload left the RT scene for render() to update in-frame
      SourceScrollState source_scroll;
-     // History: the Frame of this set's last view (primary or portal) at serial `drawn`; frame = consecutive views.
+     // History: the Frame of its last frame (serial `drawn`); frame = consecutive frames with history (0: none).
      Frame previous_frame{};std::uint32_t frame=0;std::uint64_t drawn=UINT64_MAX;
      std::uint64_t transform_hash=0,color_resource_hash=0,geometry_revision=0;
      std::vector<std::uint64_t> mesh_keys; // Scene mesh keys as last loaded; actor attach/detach remaps geometry by them.
      std::uint64_t mesh_key=0; // Scene::mesh_key as last loaded: any actor (re)assembly since then reloads.
      std::size_t instance_count=0;
-     bool loaded=false; // usable (load() or a completed stream)
-     // make_resident streaming: destinations sub-allocate `pool`; cursors over the textures and the unkeyed zone prefix.
-     bool streaming=false,raster_streamed=false;MemoryPool pool;std::vector<std::uint8_t> used;
-     std::size_t prefix=0,texture_cursor=0,mesh_cursor=0,stream_frames=0;VkDeviceSize stream_bytes=0;double stream_max_ms=0;
-     std::uint64_t touched=0; // LRU serial
+     bool loaded=false;
      std::vector<DrawItem> draws;
  };
- std::vector<std::unique_ptr<SceneSet>> sets_;SceneSet* primary_=nullptr;
- std::vector<std::pair<std::uint64_t,std::unique_ptr<SceneSet>>> retired_sets_; // freed once that frame completed
- // Completed retired sets are destroyed off the render thread (thousands of buffers/images/BLAS: ~1.5 ms raster,
- // 5-9 ms RT measured inline); only device-level calls on objects no frame uses. Joined before device destruction.
- std::vector<std::future<void>> reapers_;
- // Per frame slot: in-frame upload staging (streaming steps and retained reloads share stream_ring_used_ within a
- // frame), reused once the slot's previous frame completed.
- Buffer stream_ring_[2];VkDeviceSize stream_ring_used_=0;
- Buffer& frame_ring() {
-     auto& ring=stream_ring_[total_frames_&1u];
-     if(!ring.handle)ring=buffer(2*stream_budget_,VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-     return ring;
- }
- VkDeviceSize stream_budget_=8ull<<20; // bytes per frame (IKV_STREAM_MB)
- bool portals_supported_=false; // shaderClipDistance
- VkPipeline portal_pipelines_[8]{},seal_pipeline_=VK_NULL_HANDLE; // scene_portal.vert: opaque, alpha, double x2, sky[4]
+ std::unique_ptr<SceneSet> set_;
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
- float fade_=0; // NONCANONICAL seamless door fade (post.frag frame.fade.x)
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
  // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance
  // (with faithful RT: plus actor Sun-ray shadows). Enhanced appearance keeps its own direct shading, water and parallax:
@@ -203,27 +179,6 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      for(auto& t:set.textures)destroy(t);
      set.geometry.clear();set.textures.clear();
  }
- // Frames up to this serial may still bind the set (evict(), release_scene(), LRU, abandoned stream).
- void retire_set(SceneSet& set) {
-     if(primary_==&set)primary_=nullptr;
-     const auto found=std::find_if(sets_.begin(),sets_.end(),[&](const auto& s){return s.get()==&set;});
-     retired_sets_.emplace_back(total_frames_,std::move(*found));sets_.erase(found);
- }
- SceneSet* find_set(const Scene& scene)const {
-     for(const auto& set:sets_)if(set->scene==&scene)return set.get();
-     return nullptr;
- }
- // Cap: the primary and max_portals more; the least recently used other set gives way.
- SceneSet& set_for(const Scene& scene) {
-     if(auto* found=find_set(scene)){found->touched=total_frames_;return *found;}
-     while(sets_.size()>max_portals) {
-         auto lru=std::min_element(sets_.begin(),sets_.end(),[](const auto& a,const auto& b){return a->touched<b->touched;});
-         retire_set(**lru);
-     }
-     auto& set=*sets_.emplace_back(std::make_unique<SceneSet>());
-     set.scene=&scene;set.touched=total_frames_;
-     return set;
- }
  void progress()const {if(options_.progress)options_.progress();}
  void wait_fence(VkFence fence,const char* operation)const {
      for(;;) {
@@ -246,10 +201,6 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      wait_fence(s.fence,operation);s.pending=false;
      // A fence signal also covers every earlier submission, so all frames up to this serial completed.
      std::erase_if(retired_,[&](auto& entry){if(entry.first>s.serial)return false;destroy(entry.second);return true;});
-     std::erase_if(reapers_,[](auto& reaper){return reaper.wait_for(std::chrono::seconds(0))==std::future_status::ready;});
-     for(auto& entry:retired_sets_)if(entry.first<=s.serial)
-         reapers_.push_back(std::async(std::launch::async,[this,set=std::move(entry.second)]{destroy_set(*set);}));
-     std::erase_if(retired_sets_,[](const auto& entry){return !entry.second;});
  }
  void wait_serial(std::uint64_t serial,const char* operation) {
      if(slots_[serial&1u].serial==serial)wait_slot(serial&1u,operation);
@@ -598,10 +549,9 @@ void destroy(Image& i){if(i.view)vkDestroyImageView(device_,i.view,nullptr);if(i
      }
      vkDestroyFence(device_,f,nullptr);vkFreeCommandBuffers(device_,pool_,1,&c);
  }
-// frame: record into the caller's frame command buffer (retained reloads, streaming; no submit or wait); staging goes to
-// `frame_ring` (frame_ring(), cursor stream_ring_used_) while it has room, otherwise it is retired until that frame completed.
-// Otherwise own submissions, each waited, staged through one reusable buffer (`ring`); `pool` (full scene loads,
-// streaming) sub-allocates the destinations.
+// frame: record into the caller's frame command buffer (retained reloads; no submit or wait); staging buffers retire until
+// that frame completed. Otherwise own submissions, each waited, staged through one reusable buffer (`ring`); `pool`
+// (full scene loads) sub-allocates the destinations.
 struct Staged {VkBuffer handle=VK_NULL_HANDLE;VkDeviceSize offset=0;};
 struct UploadBatch {
     VulkanRenderer& renderer;
@@ -609,12 +559,12 @@ struct UploadBatch {
     VkCommandBuffer command=VK_NULL_HANDLE;
     VkFence fence=VK_NULL_HANDLE;
     std::vector<Buffer> staging;
-    Buffer ring;Buffer* frame_ring=nullptr;
+    Buffer ring;
     VkDeviceSize bytes=0,total_bytes=0;
     std::size_t submissions=0;
     bool recording=false,pending=false,frame=false;
-    explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE,MemoryPool* destinations=nullptr,Buffer* frame_staging=nullptr)
-        :renderer(r),pool(destinations),command(into),frame_ring(frame_staging),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
+    explicit UploadBatch(VulkanRenderer& r,VkCommandBuffer into=VK_NULL_HANDLE,MemoryPool* destinations=nullptr)
+        :renderer(r),pool(destinations),command(into),recording(into!=VK_NULL_HANDLE),frame(into!=VK_NULL_HANDLE){}
     ~UploadBatch() {
         if(frame){for(auto& stage:staging)renderer.retire(stage);return;}
         if(pending)renderer.drain_fence(fence);
@@ -647,14 +597,6 @@ struct UploadBatch {
         // Bound aggregate staging to one eighth of the asset cap; a larger single asset runs alone. Offsets stay 16-byte
         // aligned (BC block and texel copy offsets).
         renderer.progress();
-        if(frame_ring) {
-            auto& used=renderer.stream_ring_used_;const VkDeviceSize offset=(used+15)&~VkDeviceSize(15);
-            if(offset<=frame_ring->bytes&&size<=frame_ring->bytes-offset) {
-                renderer.copy_staging(static_cast<std::byte*>(frame_ring->mapped)+offset,data,static_cast<std::size_t>(size));
-                used=offset+size;total_bytes+=size;
-                return {frame_ring->handle,offset};
-            }
-        }
         constexpr VkDeviceSize chunk_bytes=assets::max_entry_bytes/8;
         if(bytes&&(size>chunk_bytes||((bytes+15)&~VkDeviceSize(15))>chunk_bytes-size))flush();
         if(!command) {
@@ -773,7 +715,7 @@ Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usag
  VkShaderModule shader(const char* name){auto words=shader_bytes(name);VkShaderModuleCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;c.codeSize=words.size()*4;c.pCode=words.data();VkShaderModule module;checked(vkCreateShaderModule(device_,&c,nullptr,&module),"create shader module");return module;}
 VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mesh,bool alpha,
                     bool depth,bool shadow,bool double_sided=false,bool depth_write=true,std::optional<ParticleBlend> particle={},
-                    bool contour=false,bool glow_composite=false,bool seal=false) {
+                    bool contour=false,bool glow_composite=false) {
      progress();
      VkShaderModule v=shader(vert),f=VK_NULL_HANDLE;VkPipeline result=VK_NULL_HANDLE;
      try {
@@ -781,7 +723,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          for(auto& s:stages)s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
          stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=v;stages[0].pName="main";
          stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=f;stages[1].pName="main";
-        // scene(_portal).vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
+        // scene.vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
         const bool previous_pose=std::strncmp(vert,"scene",5)==0;
         const VkVertexInputBindingDescription bindings[2]{{0,static_cast<std::uint32_t>(particle?sizeof(ParticleVertex):sizeof(Vertex)),VK_VERTEX_INPUT_RATE_VERTEX},
             {1,sizeof(Vertex),VK_VERTEX_INPUT_RATE_VERTEX}};
@@ -805,7 +747,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          VkPipelineMultisampleStateCreateInfo samples{};samples.sType=VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
          samples.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
          VkPipelineDepthStencilStateCreateInfo ds{};ds.sType=VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-         ds.depthTestEnable=depth;ds.depthWriteEnable=depth&&!alpha&&depth_write;ds.depthCompareOp=seal?VK_COMPARE_OP_ALWAYS:VK_COMPARE_OP_LESS_OR_EQUAL;
+         ds.depthTestEnable=depth;ds.depthWriteEnable=depth&&!alpha&&depth_write;ds.depthCompareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
          VkPipelineColorBlendAttachmentState blend{};
          blend.colorWriteMask=0xf;blend.blendEnable=alpha;
          blend.srcColorBlendFactor=VK_BLEND_FACTOR_SRC_ALPHA;blend.dstColorBlendFactor=VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
@@ -839,7 +781,6 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
         }
         // Without independentBlend (enabled only for denoise/FSR) every location past 0 is VK_ATTACHMENT_UNUSED.
         if(!(denoise_enabled_||fsr_supported_))std::fill(blends.begin()+1,blends.end(),blends[0]);
-        if(seal)for(auto& b:blends)b.colorWriteMask=0; // wave-16 portal seal: depth only
          VkPipelineColorBlendStateCreateInfo blending{};blending.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
          blending.attachmentCount=shadow?0:static_cast<std::uint32_t>(colors_of(pass).size());
          blending.pAttachments=shadow?nullptr:blends.data();
@@ -1053,10 +994,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      enabled.samplerAnisotropy=available.samplerAnisotropy;
      const float anisotropy=available.samplerAnisotropy?std::min(16.f,props.limits.maxSamplerAnisotropy):1.f;
      if(fsr_supported_)Fsr3Upscaler::enable_features(physical_,enabled);
-     // Wave-16 portal views clip the destination with gl_ClipDistance; without it resident() stays false (fade doors).
-     portals_supported_=available.shaderClipDistance;enabled.shaderClipDistance=available.shaderClipDistance;
      depth_clamp_=available.depthClamp;enabled.depthClamp=available.depthClamp;
-     if(!portals_supported_)std::cerr<<"Vulkan shaderClipDistance unavailable: no portal views or resident scene sets\n";
      dc.pEnabledFeatures=&enabled;
      checked(vkCreateDevice(physical_,&dc,nullptr,&device_),"create Vulkan device");
      vkGetDeviceQueue(device_,family_,0,&queue_);
@@ -1091,12 +1029,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          const float value=std::strtof(lead,nullptr);
          if(std::isfinite(value)&&value>=0&&value<=20)pacing_lead_ms_=value;
      }
-     if(const char* mb=SDL_getenv("IKV_STREAM_MB")) { // calibration knob: make_resident upload bytes per frame
-         const float value=std::strtof(mb,nullptr);
-         if(std::isfinite(value)&&value>=1&&value<=256)stream_budget_=VkDeviceSize(value*1048576);
-     }
      if(SDL_getenv("IKV_GPU_TIMING")&&props.limits.timestampComputeAndGraphics) {
-         VkQueryPoolCreateInfo q{};q.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=8;
+         VkQueryPoolCreateInfo q{};q.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=4;
          checked(vkCreateQueryPool(device_,&q,nullptr,&timing_pool_),"timestamp query pool");timestamp_period_=props.limits.timestampPeriod;
      }
      VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1141,7 +1075,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      checked(vkCreatePipelineLayout(device_,&pl,nullptr,&pipeline_layout_),"pipeline layout");
      const auto align=std::max<VkDeviceSize>(1,props.limits.minUniformBufferOffsetAlignment);
      uniform_stride_=static_cast<std::uint32_t>((sizeof(Frame)+align-1)/align*align);
-     uniform_=buffer(2*view_slots*VkDeviceSize(uniform_stride_),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+     uniform_=buffer(2*VkDeviceSize(uniform_stride_),VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT|VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
      const std::uint8_t white[4]{255,255,255,255},normal[4]{128,128,255,255},clear[4]{};
      white_=upload(1,1,white);flat_normal_=upload(1,1,normal);overlay_=upload(1,1,clear);
@@ -1174,9 +1108,6 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
     for(auto& p:sky_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:after_particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
-    for(auto& p:portal_pipelines_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
-    if(seal_pipeline_)vkDestroyPipeline(device_,seal_pipeline_,nullptr);
-    seal_pipeline_=VK_NULL_HANDLE;
      for(auto& f:scene_fb_){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
      for(auto& f:temporal_fb_){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
      for(auto& slot:atrous_fb_)for(auto& f:slot){if(f)vkDestroyFramebuffer(device_,f,nullptr);f=VK_NULL_HANDLE;}
@@ -1312,7 +1243,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      water_color_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
      water_ready_=false;
-     shadow_=image(8192,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // primary | portal view
+     shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      output_=image(extent_.width,extent_.height,swap_format_,display_usage|(generating_?VkImageUsageFlags{VK_IMAGE_USAGE_SAMPLED_BIT}:0u));
@@ -1352,7 +1283,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          after_views.push_back(depth_.view);
          after_fb_[i]=framebuffer(after_pass_,after_views,render_extent_);
      }
-     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{8192,2048});
+     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,2048});
      std::array post_views{output_.view};post_fb_=framebuffer(post_pass_,post_views,extent_);
      const char* scene_shader=denoise_enabled_?"scene_rt_guided.frag":rt_enabled_?"scene_rt.frag":"scene.frag";
      opaque_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false);
@@ -1366,11 +1297,6 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
     for(unsigned i=0;i<5;++i)after_particle_pipeline_[i]=pipeline("particle.vert","particle.frag",after_pass_,true,true,true,false,true,false,ParticleBlend(i));
     // Hilite state (0046ccf0 tail): CULLMODE CW = back-face shell, SRCALPHA/INVSRCALPHA, ZWRITE off, Z test on.
     contour_pipeline_=pipeline("contour.vert","contour.frag",scene_pass_,true,true,true,false,false,false,{},true);
-    if(portals_supported_) { // wave-16 portal views: the scene pipelines with gl_ClipDistance, and the depth-only seal
-        for(unsigned i=0;i<4;++i)portal_pipelines_[i]=pipeline("scene_portal.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0);
-        for(unsigned i=0;i<4;++i)portal_pipelines_[4+i]=pipeline("scene_portal.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0,false);
-        seal_pipeline_=pipeline("seal.vert","contour.frag",scene_pass_,false,false,true,false,false,true,{},false,false,true);
-    }
      post_pipeline_=pipeline("fullscreen.vert","post.frag",post_pass_,false,false,false,false);
      overlay_pipeline_=pipeline("fullscreen.vert","overlay.frag",post_pass_,false,true,false,false);
      if(hud_pass_)hud_pipeline_=pipeline("fullscreen.vert","overlay.frag",hud_pass_,false,true,false,false);
@@ -1392,7 +1318,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      });
     dirty_=false;rendered_=false;
     frame_descriptors();
-    for(auto& set:sets_){set->frame=0;if(set->loaded){clear_material_sets(*set);descriptors(*set);}} // material sets bind shadow_/depth_
+    if(set_){set_->frame=0;if(set_->loaded){clear_material_sets(*set_);descriptors(*set_);}} // material sets bind shadow_/depth_
     for(std::size_t i=0;i<particle_sets_.size();++i)write_set(particle_sets_[i],nullptr,0,false,false,&particle_images_[i]);
     return true;
  }
@@ -1467,7 +1393,7 @@ void clear_material_sets(SceneSet& set) {
 }
  void write_rt(SceneSet& set) {
      if(!rt_enabled_)return;
-     if(!set.rt_pool) { // one RT set per scene set: its own TLAS, triangle records and alpha-tested textures
+     if(!set.rt_pool) { // the scene's TLAS, triangle records and alpha-tested textures
          const VkDescriptorPoolSize sizes[3]{{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,1},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,rt_alpha_texture_slots}};
          VkDescriptorPoolCreateInfo p{};p.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;p.maxSets=1;p.poolSizeCount=3;p.pPoolSizes=sizes;
          checked(vkCreateDescriptorPool(device_,&p,nullptr,&set.rt_pool),"RT descriptor pool");
@@ -1564,14 +1490,14 @@ void clear_material_sets(SceneSet& set) {
      h=(h^std::bit_cast<std::uint32_t>(s.lighting.fog_end))*1099511628211ull;
      return h;
  }
- // Residency per mesh: 2 = colour-drawn (uploaded), 1 = referenced only (validated), 0 = unused. meshes: the prefix to plan.
- static std::vector<std::uint8_t> mesh_residency(const Scene& s,std::size_t meshes) {
-     std::vector<std::uint8_t> used(meshes,0);
+ // Residency per mesh: 2 = colour-drawn (uploaded), 1 = referenced only (validated), 0 = unused.
+ static std::vector<std::uint8_t> mesh_residency(const Scene& s) {
+     std::vector<std::uint8_t> used(s.meshes.size(),0);
      if(s.instances.empty()) {
-         for(std::uint32_t mesh=0;mesh<meshes;++mesh)used[mesh]=scene_source_color_draw(s,mesh)?2:1;
+         for(std::uint32_t mesh=0;mesh<s.meshes.size();++mesh)used[mesh]=scene_source_color_draw(s,mesh)?2:1;
      } else for(const auto& instance:s.instances) {
          if(instance.mesh>=s.meshes.size())throw std::runtime_error("original instance mesh index out of range");
-         if(instance.occlusion_proxy||instance.mesh>=meshes)continue;
+         if(instance.occlusion_proxy)continue;
          const std::uint8_t residency=scene_source_color_draw(s,instance.mesh,instance.material,instance.source_ordinary_color_participates)?2:1;
          used[instance.mesh]=std::max(used[instance.mesh],residency);
      }
@@ -1608,32 +1534,17 @@ void clear_material_sets(SceneSet& set) {
      g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);
      return true;
  }
- std::size_t upload_textures(SceneSet& set,UploadBatch& batch,VkDeviceSize budget=~VkDeviceSize(0)) {
-     const Scene& s=*set.scene;
-     if(s.textures.size()<set.textures.size())throw std::runtime_error("resident scene lost textures without evict");
-     set.textures.resize(s.textures.size());
-     std::size_t bytes=0;
-     for(;set.texture_cursor<s.textures.size()&&batch.total_bytes<budget;++set.texture_cursor) {
-         progress();
-         const auto& t=s.textures[set.texture_cursor];
-         // Derived parallax relief (Material::height) is never bound unless enhanced parallax is on: not uploaded.
-         if(t.name.ends_with("#parallax")&&(options_.original_appearance||!options_.parallax))continue;
-         if(!set.texture_lookup.emplace(t.name,set.texture_cursor).second)throw std::runtime_error("duplicate original texture name");
-         set.textures[set.texture_cursor]=upload_texture(t,&batch);bytes+=t.data.size();
-     }
-     return bytes;
- }
- // A Scene new to its set uploads everything in own waited submissions (no device wait: in-flight frames never bound
- // this set). An actor attach/detach (set already loaded) keeps every other mesh's buffers (moved by key) and never
+ // A new Scene (empty set) uploads everything in own waited submissions (render() waited for the device before replacing
+ // the set). An actor attach/detach (set already loaded) keeps every other mesh's buffers (moved by key) and never
  // waits: new uploads are recorded into this frame (command_, already begun), released buffers retire until the frames
  // using them completed, the RT set stays, and render() updates RT in-frame (rt_stale).
  void load(SceneSet& set,std::span<const RenderEntity> entities) {
      const auto started=std::chrono::steady_clock::now();
      const Scene& s=*set.scene;
      const bool retain=set.loaded&&s.textures.size()>=set.textures.size();
-     if(!retain&&set.loaded) { // content replaced at the same address without evict()
+     if(!retain&&set.loaded) { // content replaced at the same address
          wait_idle("scene upload wait");
-         destroy_set(set);set.texture_lookup.clear();set.texture_cursor=0;set.loaded=false;
+         destroy_set(set);set.texture_lookup.clear();set.loaded=false;
      }
      std::size_t released_meshes=0;
      if(retain) {
@@ -1647,21 +1558,29 @@ void clear_material_sets(SceneSet& set) {
      }
      const auto retained_meshes=std::count_if(set.geometry.begin(),set.geometry.end(),
          [](const Geometry& g){return g.vertices.handle!=VK_NULL_HANDLE;});
-     const auto retained_textures=set.texture_cursor;
+     const auto retained_textures=set.textures.size();
      std::size_t new_meshes=0,submissions=0,memory_blocks=0,texture_bytes=0;
      VkDeviceSize upload_bytes=0;
      set.loaded=false;
-     const auto used=mesh_residency(s,s.meshes.size());
+     const auto used=mesh_residency(s);
      set.geometry.resize(s.meshes.size());
-     // Full loads sub-allocate the set's pool; retained reloads (actor churn) stage through this frame's stream ring
-     // and allocate/retire destinations per resource.
-     UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&set.pool,retain?&frame_ring():nullptr);
+     // Full loads sub-allocate one pool; retained reloads (actor churn) allocate and retire destinations per resource.
+     MemoryPool pool;
+     UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
      for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
          if(mesh_index%1024==0)progress(); // uploads pump on their own
          new_meshes+=upload_mesh(set.geometry[mesh_index],s.meshes[mesh_index],used[mesh_index],batch);
      }
-     texture_bytes=upload_textures(set,batch);
-     batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;memory_blocks=set.pool.allocations;
+     set.textures.resize(s.textures.size());
+     for(std::size_t i=retained_textures;i<s.textures.size();++i) {
+         progress();
+         const auto& t=s.textures[i];
+         // Derived parallax relief (Material::height) is never bound unless enhanced parallax is on: not uploaded.
+         if(t.name.ends_with("#parallax")&&(options_.original_appearance||!options_.parallax))continue;
+         if(!set.texture_lookup.emplace(t.name,i).second)throw std::runtime_error("duplicate original texture name");
+         set.textures[i]=upload_texture(t,&batch);texture_bytes+=t.data.size();
+     }
+     batch.flush();submissions=batch.submissions;upload_bytes=batch.total_bytes;memory_blocks=pool.allocations;
      // Appending must not conceal pending revisions of already-retained animated meshes.
      update_geometry(set);set.geometry_revision=s.geometry_revision;
      set.mesh_keys.resize(s.meshes.size());for(std::size_t i=0;i<s.meshes.size();++i)set.mesh_keys[i]=s.meshes[i].key;set.mesh_key=s.mesh_key;
@@ -1679,42 +1598,6 @@ void clear_material_sets(SceneSet& set) {
          <<" texturesNew="<<s.textures.size()-retained_textures<<" texturesRetained="<<retained_textures
          <<" uploadBatches="<<submissions<<" uploadBytes="<<upload_bytes<<" textureBytes="<<texture_bytes
          <<" textureBC="<<(bc_supported_?1:0)<<" memoryBlocks="<<memory_blocks<<" elapsedMs="<<elapsed<<'\n';
- }
- // NONCANONICAL wave-16 make_resident streaming: one budgeted step per frame, recorded into this frame (command_)
- // through the slot's stream ring. Textures, then the unkeyed zone prefix (actor attach/detach never moves it), then
- // the RT scene in chunks; the last step builds the material/RT descriptor sets. Keyed actor meshes are uploaded by the
- // retained reload of the set's first use (mesh_key differs on purpose).
- void stream(SceneSet& set,unsigned slot) {
-     const auto started=std::chrono::steady_clock::now();
-     const Scene& s=*set.scene;
-     if(!set.streaming) {
-         while(set.prefix<s.meshes.size()&&!s.meshes[set.prefix].key)++set.prefix;
-         set.used=mesh_residency(s,set.prefix);set.geometry.resize(set.prefix);
-         if(rt_enabled_)set.rt=std::make_unique<VulkanRtScene>(physical_,device_,queue_,family_,options_.progress);
-         set.streaming=true;
-     }
-     UploadBatch batch(*this,command_,&set.pool,&frame_ring());
-     if(!set.raster_streamed) {
-         upload_textures(set,batch,stream_budget_);
-         for(;set.mesh_cursor<set.prefix&&batch.total_bytes<stream_budget_;++set.mesh_cursor)
-             upload_mesh(set.geometry[set.mesh_cursor],s.meshes[set.mesh_cursor],set.used[set.mesh_cursor],batch);
-         set.raster_streamed=set.mesh_cursor==set.prefix&&set.texture_cursor==s.textures.size();
-     } else if(rt_enabled_)set.rt->stream(s,command_,slot,stream_budget_);
-     const bool done=set.raster_streamed&&(!rt_enabled_||set.rt->acceleration_structure());
-     if(done) {
-         upload_textures(set,batch); // textures added meanwhile (actor installs)
-         set.mesh_keys.assign(set.prefix,0);set.mesh_key=~s.mesh_key; // the first use reconciles actors (retained load)
-         set.geometry_revision=~s.geometry_revision;set.history_instance_models.resize(s.instances.size());
-         set.instance_count=s.instances.size();set.transform_hash=0;set.color_resource_hash=0;set.frame=0;
-         descriptors(set);set.loaded=true;set.streaming=false;set.used.clear();
-     }
-     batch.flush();
-     const VkDeviceSize bytes=batch.total_bytes;
-     const auto ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-     ++set.stream_frames;set.stream_bytes+=bytes;set.stream_max_ms=std::max(set.stream_max_ms,ms);
-     if(done)std::cerr<<"Vulkan scene set resident source_registry_id="<<(s.source_registry_id?int(*s.source_registry_id):-1)
-         <<" streamFrames="<<set.stream_frames<<" streamBytes="<<set.stream_bytes<<" maxStepMs="<<set.stream_max_ms
-         <<" budgetBytes="<<stream_budget_<<" rt="<<rt_enabled_<<'\n';
  }
 // Stages changed skins in the current slot; record_geometry_uploads copies them in this frame's command buffer.
 void update_geometry(SceneSet& set) {
@@ -1766,9 +1649,8 @@ void record_geometry_uploads(SceneSet& set) {
     b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
- // items: a slice of set.draws. clip: the portal pipelines (scene_portal.vert, frame.clip) for a destination view or the
- // source half-space split. casters: this view's light volume, with near-clamped casters retained.
- void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,bool clip=false,
+ // items: a slice of set.draws. casters: the shadow cascade's light volume, with near-clamped casters retained.
+ void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,
                  const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr) {
      const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
      if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
@@ -1798,7 +1680,7 @@ void record_geometry_uploads(SceneSet& set) {
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
          auto selected=shadow?(double_sided?shadow_double_:shadow_pipeline_):
-             clip?portal_pipelines_[(item.sky?4:0)+variant]:item.sky?sky_pipeline_[variant]:
+             item.sky?sky_pipeline_[variant]:
              item.alpha?(double_sided?alpha_double_:alpha_):(double_sided?opaque_double_:opaque_);
          if(selected!=bound_pipeline){vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,selected);bound_pipeline=selected;}
          const auto descriptor=material_sets_[item.material<material_sets_.size()?item.material:0];
@@ -1873,15 +1755,11 @@ void copy_water(VkCommandBuffer c,const Image& color) {
                  }
              }
          } catch(...) {} // Cache persistence is optional; GPU lifetime cleanup is not.
-         for(auto& reaper:reapers_)reaper.wait();
-         reapers_.clear();
          destroy_targets();
          if(descriptor_pool_)vkDestroyDescriptorPool(device_,descriptor_pool_,nullptr);
-         for(auto& set:sets_)destroy_set(*set);
-         for(auto& entry:retired_sets_)destroy_set(*entry.second);
-         sets_.clear();retired_sets_.clear();primary_=nullptr;
+         if(set_)destroy_set(*set_);
+         set_.reset();
          for(auto& entry:retired_)destroy(entry.second);
-         for(auto& b:stream_ring_)destroy(b);
         destroy(overlay_);for(auto& b:overlay_staging_)destroy(b);destroy(white_);destroy(flat_normal_);destroy(uniform_);
         for(auto& image:particle_images_)destroy(image);
         for(auto& b:particle_buffer_)destroy(b);
@@ -1976,16 +1854,12 @@ public:
              write.descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;write.pImageInfo=&info;
              vkUpdateDescriptorSets(device_,1,&write,0,nullptr);
          };
-         for(const auto& scene_set:sets_)for(const auto& entry:scene_set->material_cache)update(entry.second);
+         if(set_)for(const auto& entry:set_->material_cache)update(entry.second);
         // Temporal sets bind reflection history at 8, not the overlay.
         for(unsigned i=0;i<2;++i)update(post_sets_[i]);
      }
  }
 void set_grayscale(bool on)override { grayscale_=on; }
-void set_fade(float black)override { fade_=std::clamp(black,0.f,1.f); }
-// The primary's set retires (freed once in-flight frames completed); the next render() fully loads the Scene. Other
-// resident sets stay.
-void release_scene()override { if(primary_)retire_set(*primary_); }
 void set_view_distance(float distance)override {
     if(!std::isfinite(distance)||distance<0)throw std::invalid_argument("view distance requires a finite value >= 0");
     options_.view_distance=distance;
@@ -2034,11 +1908,7 @@ void set_particles(const ParticleFrame& frame)override {
     if(bytes)std::memcpy(vertices.mapped,frame.vertices.data(),static_cast<std::size_t>(bytes));
     particle_batches_=frame.batches;
 }
- // Wave-16 residency (renderer.hpp): sets live until evict(), release_scene() (primary) or the LRU cap.
- void make_resident(const Scene& scene)override{if(portals_supported_)set_for(scene);}
- bool resident(const Scene& scene)const override{const auto* set=find_set(scene);return portals_supported_&&set&&set->loaded;}
- void evict(const Scene& scene)override{if(auto* set=find_set(scene))retire_set(*set);}
- // Brings a set that is drawn this frame up to its Scene: (re)load, skins, transforms and RT, recorded into this frame.
+ // Brings the scene set up to its Scene: (re)load, skins, transforms and RT, recorded into this frame.
  // Returns whether transforms or skins changed.
  bool sync(SceneSet& set,std::span<const RenderEntity> entities,unsigned slot) {
      const Scene& scene=*set.scene;
@@ -2074,7 +1944,7 @@ void set_particles(const ParticleFrame& frame)override {
          <<" loadMs="<<ms(t0,t1)<<" skinMs="<<ms(t1,t2)<<" rtMs="<<ms(t2,t3)<<" rtRebuild="<<rebuilt<<'\n';
      return changed;
  }
- // One view's draw list in set.draws (sky, then opaque nearest-first, then alpha farthest-first). Frustum culling marks
+ // The frame's draw list in set.draws (sky, then opaque nearest-first, then alpha farthest-first). Frustum culling marks
  // colour draws instead of dropping them, so the shadow pass retains off-screen casters and the sort sees the whole list.
  // Sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
  void build_draws(SceneSet& set,std::span<const RenderEntity> entities,const std::array<float,3>& eye,const FrustumPlanes& planes,
@@ -2167,120 +2037,16 @@ void set_particles(const ParticleFrame& frame)override {
      f.sky_b={lighting.sky_b[0],lighting.sky_b[1],lighting.sky_b[2],0};
      f.sky_c={lighting.sky_c[0],lighting.sky_c[1],lighting.sky_c[2],0};
  }
- // NONCANONICAL wave-16 portal view: the destination set drawn with its own Frame (virtual camera vp·M), clipped to the
- // eye→seal pyramid and beyond the seal plane; seal: the doorway quad pulled seal_pull towards the eye, depth only, so
- // source door walls/porches within that distance of the threshold plane are hidden. split: the eye is within the near
- // band inside the aperture, so the pyramid degenerates: no seal, destination and source split at the seal plane.
- // Same rules as renderer_gl.cpp.
- static constexpr float seal_pull=.7f;
-struct PortalDraw {SceneSet* set;Frame frame;std::array<Matrix4,2> seal;bool split;}; // seal: strip, then the pulled rest
-// shadows: this view gets the portal half of the enhanced-raster shadow atlas (the first portal view of a frame).
-// source_clip/source_or: the primary Frame's clip planes, set by the first split view.
-std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,const std::array<float,3>& eye,const FrustumPlanes& planes,
-                                      std::array<std::array<float,4>,5>& source_clip,std::array<float,4>& source_or,bool shadows) {
-     using V=std::array<float,3>;
-     const auto sub=[](const V& a,const V& b){return V{a[0]-b[0],a[1]-b[1],a[2]-b[2]};};
-     const auto dot=[](const V& a,const V& b){return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];};
-     const auto cross=[](const V& a,const V& b){return V{a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]};};
-     const auto unit=[&](V v){const float l=std::sqrt(dot(v,v));if(!(l>0))throw std::invalid_argument("degenerate portal quad");for(auto& x:v)x/=l;return v;};
-     for(const auto& corner:portal.quad)for(float v:corner)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal quad");
-     for(float v:portal.to_primary)if(!std::isfinite(v))throw std::invalid_argument("non-finite portal transform");
-     const auto& q=portal.quad;
-     const V n=unit(cross(sub(q[1],q[0]),sub(q[3],q[0]))); // into the destination
-     const float d0=dot(n,q[0]),s=dot(n,eye)-d0,band=std::max({.25f,2*options_.camera.near_plane,seal_pull+.25f});
-     V centre{};for(const auto& c:q)for(unsigned i=0;i<3;++i)centre[i]+=c[i]/4;
-     bool inside=true;
-     for(unsigned i=0;i<4;++i) {
-         auto m=unit(cross(n,sub(q[(i+1)&3],q[i])));
-         if(dot(m,sub(centre,q[i]))<0)for(auto& x:m)x=-x;
-         inside=inside&&dot(m,sub(eye,q[i]))>=-band;
-     }
-     const bool split=std::abs(s)<band&&inside;
-     if(s>0&&!split)return {}; // the eye is past the doorway: the caller has made the destination primary
-     auto* set=find_set(*portal.scene);
-     if(!set||!set->loaded||set==primary_||set->drawn==total_frames_)return {}; // one view per destination per frame
-     using P=std::array<float,4>;
-     // Normal mode cuts the destination at the seal plane (n·x >= n·q0 - seal_pull): the source's own door wall/porch
-     // stays on its side. Split (as GL): destination n·x >= n·q0 - .02; source n·x <= n·q0 - .02 AND (n·x <= n·q0 - P OR
-     // up·(x-q0) <= S): far-side fillers within P of the plane never cover the screen, the coplanar closed wall is dropped,
-     // and the floor strip below S stays the source's.
-     std::array<P,5> clip{P{0,0,0,1},P{0,0,0,1},P{0,0,0,1},P{0,0,0,1},P{n[0],n[1],n[2],(split?.02f:seal_pull)-d0}};
-     std::array<Matrix4,2> seal{};
-     FrustumPlanes cull=planes; // split: the camera frustum with the doorway plane for its near plane
-     const V up=unit(sub(q[3],q[0]));
-     const float height=std::sqrt(dot(sub(q[3],q[0]),sub(q[3],q[0]))),strip=std::min(seal_pull,height);
-     if(!split) {
-         // Two-part seal (as GL): a floor strip up to S = min(P, height) pulled only 0.02, so floor rays that cross the
-         // destination clip before the plane still land on the source floor, then the rest pulled P. Corners 0-3 strip,
-         // 4-7 rest; each pyramid side takes the candidate edge that keeps all 8 corners inside.
-         const auto at=[&](const V& c,float rise,float pull){return V{c[0]+up[0]*rise-n[0]*pull,c[1]+up[1]*rise-n[1]*pull,c[2]+up[2]*rise-n[2]*pull};};
-         const std::array<V,8> c{at(q[0],0,.02f),at(q[1],0,.02f),at(q[1],strip,.02f),at(q[0],strip,.02f),
-                                 at(q[0],strip,seal_pull),at(q[1],strip,seal_pull),at(q[2],0,seal_pull),at(q[3],0,seal_pull)};
-         for(unsigned part=0;part<2;++part)for(unsigned i=0;i<4;++i){for(unsigned k=0;k<3;++k)seal[part][i*4+k]=c[part*4+i][k];seal[part][i*4+3]=1;}
-         if(s<-2*seal_pull) {
-             V mid{};for(const auto& v:c)for(unsigned i=0;i<3;++i)mid[i]+=v[i]/8;
-             constexpr unsigned edges[4][2][2]{{{0,1},{4,5}},{{1,2},{5,6}},{{6,7},{6,7}},{{3,0},{7,4}}};
-             for(unsigned side=0;side<4;++side)for(const auto& e:edges[side]) {
-                 auto m=unit(cross(sub(c[e[0]],eye),sub(c[e[1]],eye)));
-                 if(dot(m,sub(mid,eye))<0)for(auto& x:m)x=-x;
-                 clip[side]={m[0],m[1],m[2],-dot(m,eye)+.01f};
-                 if(std::all_of(c.begin(),c.end(),[&](const V& v){return dot(m,sub(v,eye))>=-1e-4f;}))break;
-             }
-         } else for(unsigned i=0;i<4;++i) { // pyramid sides through the eye and the quad, 0.01 outward slack
-             auto m=unit(cross(sub(q[i],eye),sub(q[(i+1)&3],eye)));
-             if(dot(m,sub(centre,eye))<0)for(auto& x:m)x=-x;
-             clip[i]={m[0],m[1],m[2],-dot(m,eye)+.01f};
-         }
-         for(unsigned i=0;i<4;++i)cull[i]=clip[i];
-     } else if(source_clip[0]==P{0,0,0,1}) {
-         source_clip[0]={-n[0],-n[1],-n[2],d0-.02f};source_clip[1]={-n[0],-n[1],-n[2],d0-seal_pull};
-         source_or={-up[0],-up[1],-up[2],dot(up,q[0])+strip}; // scene.vert: ClipDistance[1] = max(clip[1], clipOr)
-     }
-     cull[4]=clip[4];
-     // Primary-space planes to destination space: P_dest = P·M.
-     const auto& M=portal.to_primary;
-     const auto to_dest=[&](const P& p){P r{};for(unsigned c=0;c<4;++c)for(unsigned k=0;k<4;++k)r[c]+=p[k]*M[c*4+k];return r;};
-     PortalDraw view{set,f,seal,split};
-     auto& fp=view.frame;
-     for(unsigned i=0;i<5;++i)fp.clip[i]=to_dest(clip[i]);
-     for(auto& p:cull)p=to_dest(p);
-     fp.to_primary=M;fp.clip_or={0,0,0,-1e9f};
-     fp.vp=multiply_matrix(f.vp,M);fp.previous_vp=multiply_matrix(f.previous_vp,M);
-     // Rigid inverse: Mᵀ rotation, -Rᵀt.
-     Matrix4 inverse{M[0],M[4],M[8],0,M[1],M[5],M[9],0,M[2],M[6],M[10],0,0,0,0,1};
-     for(unsigned r=0;r<3;++r)inverse[12+r]=-(inverse[r]*M[12]+inverse[4+r]*M[13]+inverse[8+r]*M[14]);
-     const auto point=[&](const std::array<float,4>& v){std::array<float,4> r{0,0,0,v[3]};for(unsigned i=0;i<3;++i)r[i]=inverse[i]*v[0]+inverse[4+i]*v[1]+inverse[8+i]*v[2]+inverse[12+i];return r;};
-     const auto direction=[&](const std::array<float,4>& v){std::array<float,4> r{0,0,0,v[3]};for(unsigned i=0;i<3;++i)r[i]=inverse[i]*v[0]+inverse[4+i]*v[1]+inverse[8+i]*v[2];return r;};
-     fp.eye=point(f.eye);fp.previous_eye=point(f.previous_eye);
-     fp.camera_right=direction(f.camera_right);fp.camera_up=direction(f.camera_up);fp.camera_forward=direction(f.camera_forward);
-     fp.previous_forward=direction(f.previous_forward);
-     fp.light={};fp.light[14]=2;fp.light[15]=1;fp.far_light=fp.light; // no shadow map for this view: shadowVisibility = 1
-     if(shadows&&!options_.original_appearance&&!rt_enabled_) { // enhanced raster: its own atlas columns around the virtual camera
-         Camera virtual_camera=options_.camera;
-         const auto target=point({options_.camera.target[0],options_.camera.target[1],options_.camera.target[2],1});
-         virtual_camera.target={target[0],target[1],target[2]};
-         virtual_camera.yaw=std::atan2(-fp.camera_forward[0],-fp.camera_forward[2]); // M is a yaw + translation
-         const auto cascades=shadow_light_cascades(virtual_camera,enhanced_sun(portal.scene->lighting),options_.view_distance);
-         fp.light=cascades.light[0];fp.far_light=cascades.light[1];fp.shadow_params={cascades.split,0,0,0};fp.fade[1]=.5f;
-     }
-     set_lighting(fp,portal.scene->lighting);
-     set->touched=total_frames_;
-     if(set->drawn+1!=total_frames_)set->frame=0;
-     build_draws(*set,portal.entities,{fp.eye[0],fp.eye[1],fp.eye[2]},cull,nullptr);
-     return view;
- }
- void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float,std::span<const PortalView> portals)override {
+ void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float)override {
      const unsigned slot=total_frames_&1u;
      wait_slot(slot,"frame wait"); // frame total_frames_-2: its command buffer, uniforms and staging are reusable
-     stream_ring_used_=0;
      if(timing_pool_&&std::exchange(timed_[slot],false)) {
-         std::uint64_t t[4]{};
-         if(vkGetQueryPoolResults(device_,timing_pool_,slot*4,4,sizeof(t),t,sizeof(t[0]),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
-             timing_sum_[0]+=double(t[3]-t[0])*timestamp_period_*1e-6;timing_sum_[1]+=double(t[2]-t[1])*timestamp_period_*1e-6;
+         std::uint64_t t[2]{};
+         if(vkGetQueryPoolResults(device_,timing_pool_,slot*2,2,sizeof(t),t,sizeof(t[0]),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
+             timing_sum_+=double(t[1]-t[0])*timestamp_period_*1e-6;
              if(++timing_count_==30) {
-                 std::cerr<<"Vulkan gpu timing frames=30 scenePassMs="<<timing_sum_[0]/30<<" portalViewsMs="<<timing_sum_[1]/30
-                     <<" framesWithPortal="<<timing_portals_<<'\n';
-                 timing_sum_[0]=timing_sum_[1]=0;timing_count_=timing_portals_=0;
+                 std::cerr<<"Vulkan gpu timing frames=30 scenePassMs="<<timing_sum_/30<<'\n';
+                 timing_sum_=0;timing_count_=0;
              }
          }
      }
@@ -2305,25 +2071,19 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
      checked(vkBeginCommandBuffer(command_,&begin),"begin frame");
      if(overlay_upload_)record_overlay_upload(command_);
-     // A resident set becomes primary without a load; an unfinished stream is dropped for today's full load (fade path).
-     if(auto* found=find_set(scene);found&&found->streaming)retire_set(*found);
-     auto& primary=set_for(scene);
-     // Eye crossing: last frame's portal destination keeps FSR/motion history; any other switch is a camera cut.
-     const bool continued=primary.drawn+1==total_frames_;
-     if(primary_!=&primary) {
-         if(!continued)fsr_reset_=true;
-         if(primary_)std::cerr<<"Vulkan primary scene switch source_registry_id="<<(scene.source_registry_id?int(*scene.source_registry_id):-1)
-             <<" history="<<(continued?"continued":"reset")<<" frame="<<total_frames_<<'\n';
-         primary_=&primary;
-     }
-     const bool scene_changed=sync(primary,entities,slot);
-     if(!continued)primary.frame=0;
+     // A different Scene (the loading screen's empty scene, then the next zone) frees the previous scene's GPU and RT
+     // resources once the device is idle; sync() then loads the new one in full (fsr_reset_, history reset).
+     if(set_&&set_->scene!=&scene){wait_idle("scene switch wait");destroy_set(*set_);set_.reset();}
+     if(!set_){set_=std::make_unique<SceneSet>();set_->scene=&scene;}
+     auto& scene_set=*set_;
+     const bool continued=scene_set.drawn+1==total_frames_;
+     const bool scene_changed=sync(scene_set,entities,slot);
      const auto basis=camera_basis(options_.camera);
      auto eye=basis.eye;
      const auto source_ticks=static_cast<std::uint32_t>(SDL_GetTicks());
      contours_.clear();
      const auto planes=frustum_planes(camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true));
-     build_draws(primary,entities,eye,planes,&contours_);
+     build_draws(scene_set,entities,eye,planes,&contours_);
      Frame f{};
      f.vp=camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true);
      std::array<float,2> fsr_jitter{};
@@ -2335,7 +2095,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
          // No negative texture mip bias (AMD suggests log2(render/display)-1): measured, it raised FSR leaf and ground
          // flicker in motion (analysis/porting-wave11/Foliage/report.md).
      }
-     // A set not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
+     // A scene not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
      f.jitter[2]=continued?previous_jitter_[0]:f.jitter[0];f.jitter[3]=continued?previous_jitter_[1]:f.jitter[1];
      const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
      f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_params={shadow_cascades.split,0,0,0};f.eye={eye[0],eye[1],eye[2],1};
@@ -2343,17 +2103,16 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
     // seconds, so gradual drift (2% per frame) is left to the resolve's variance clip and the deterministic Sun ray.
-    // Per set: an eye crossing compares against the destination's own last (portal) view.
     const auto jumped=[](const std::array<float,4>& a,const std::array<float,4>& b) {
         for(std::size_t i=0;i<4;++i)if(std::abs(a[i]-b[i])>.02f*std::max({1.f,std::abs(a[i]),std::abs(b[i])}))return true;
         return false;
     };
-    const auto& last=primary.previous_frame;
-    if(primary.frame&&(jumped(f.sun,last.sun)||jumped(f.ambient,last.ambient)||jumped(f.diffuse,last.diffuse)||
+    const auto& last=scene_set.previous_frame;
+    if(scene_set.frame&&(jumped(f.sun,last.sun)||jumped(f.ambient,last.ambient)||jumped(f.diffuse,last.diffuse)||
        jumped(f.fog_color,last.fog_color)||jumped(f.fog,last.fog)||jumped(f.sky_b,last.sky_b)||jumped(f.sky_c,last.sky_c)))
-        primary.frame=0;
+        scene_set.frame=0;
      f.params={original_lighting_?0.f:rt_enabled_&&!physical_rt_?2.f:1.f,options_.exposure, // lighting.glsl params.x
-         denoise_enabled_&&primary.frame>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
+         denoise_enabled_&&scene_set.frame>0?1.f:0.f,options_.antialiasing&&!fsr_?1.f:0.f}; // FSR replaces the FXAA resolve
      f.viewport={float(render_extent_.width),float(render_extent_.height),float(total_frames_%16777216u),denoise_enabled_?1.f:0.f};
      const float tangent=std::tan(options_.camera.fov*.008726646259971648f);
      f.camera_right={basis.right[0],basis.right[1],basis.right[2],tangent*float(extent_.width)/float(extent_.height)};
@@ -2364,88 +2123,47 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
      // w: original fullscreen gamma ramp 0x467030(1,1,1.2) (post.frag/overlay.frag); D3D9 SetGammaRamp is fullscreen-only.
      f.source_time={float(source_ticks),float(source_ticks)*.001f,grayscale_?1.f:0.f,
          (SDL_GetWindowFlags(window_)&SDL_WINDOW_FULLSCREEN)?1.f:0.f};
-     f.fade={fade_,0,0,0};
-     f.clip.fill({0,0,0,1});f.to_primary=Transform{}.matrix;f.clip_or={0,0,0,-1e9f};
-     std::array<std::optional<PortalDraw>,max_portals> views{};unsigned view_count=0;
-     if(portals_supported_)for(const auto& portal:portals) {
-         if(view_count==max_portals)break;
-         if(!portal.scene)throw std::invalid_argument("portal without destination scene");
-         if(portal.scene==&scene||!find_set(*portal.scene)||!find_set(*portal.scene)->loaded)continue;
-         // Before the view: the destination's actor/skin changes upload into this frame.
-         sync(*find_set(*portal.scene),portal.entities,slot);
-         if((views[view_count]=portal_view(portal,f,eye,planes,f.clip,f.clip_or,view_count==0)))views[view_count++]->set->drawn=total_frames_;
-     }
-    f.fade[2]=1; // after the portal frames: only the primary view's water reads the scene copy (lighting.glsl waterSurface)
-     // Background residency: one budgeted step of one set per frame (never the primary or a set drawn this frame).
-     if(portals_supported_)for(auto& set:sets_)if(!set->loaded){stream(*set,slot);break;}
-     const auto view_offset=[&](unsigned view){return (slot*view_slots+view)*uniform_stride_;};
-     std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(0),&f,sizeof(f));
-     for(unsigned i=0;i<view_count;++i)std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(1+i),&views[i]->frame,sizeof(Frame));
-     uniform_offset_=view_offset(0);
-     // Screen-space history ping-pong: alternates every frame whichever set is primary (frame 0 ignores history).
+     uniform_offset_=slot*uniform_stride_;
+     std::memcpy(static_cast<std::byte*>(uniform_.mapped)+uniform_offset_,&f,sizeof(f));
+     // Screen-space history ping-pong: alternates every frame (frame 0 ignores history).
      const unsigned current=total_frames_&1u;
      // Replacement shadows share color visibility; this is not evidence of original source shadow behavior.
-     // Enhanced raster: main near/far, then the first portal view's near/far, in four atlas columns.
-     begin_pass(command_,shadow_pass_,shadow_fb_,{8192,2048},true);
+     // Enhanced raster: the near and far cascade in two atlas columns.
+     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
      // Only enhanced raster lighting samples the shadow map (lighting.glsl shadowVisibility); original appearance and
      // the RT shaders never read it, so the pass only clears it.
-     if(!options_.original_appearance&&!rt_enabled_) {
-         const auto cascade=[&](unsigned view,float x,unsigned index,SceneSet& set) {
-             VkViewport v{x,0,2048,2048,0,1};VkRect2D r{{std::int32_t(x),0},{2048,2048}};
-             vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
-             Frame& frame=view?views[0]->frame:f;
-             std::memcpy(static_cast<std::byte*>(uniform_.mapped)+view_offset(view),&frame,sizeof(frame));
-             uniform_offset_=view_offset(view);
-             const auto casters=shadow_caster_planes(index?frame.far_light:frame.light);
-             draw_scene(command_,true,set,set.draws,false,&casters,index?&frame.far_light:&frame.light);
-         };
-         cascade(0,0,0,primary);cascade(0,2048,1,primary);
-         if(view_count&&views[0]->frame.fade[1]>0) {
-             cascade(1,4096,0,*views[0]->set);cascade(1,6144,1,*views[0]->set);
-             uniform_offset_=view_offset(0);
-         }
+     if(!options_.original_appearance&&!rt_enabled_)for(unsigned index=0;index<2;++index) {
+         VkViewport v{float(index*2048),0,2048,2048,0,1};VkRect2D r{{std::int32_t(index*2048),0},{2048,2048}};
+         vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
+         const Matrix4& light=index?f.far_light:f.light;
+         const auto casters=shadow_caster_planes(light);
+         draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light);
      }
      vkCmdEndRenderPass(command_);
-     if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*4,4);timed_[slot]=true;timing_portals_+=view_count>0;}
-    if(!water_ready_) { // portal-view water may sample the copy before the first copy_water
+     if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*2,2);timed_[slot]=true;}
+    if(!water_ready_) { // draws before the first copy_water bind the copy too
         barrier(command_,water_color_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         barrier(command_,water_depth_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
         water_ready_=true;
     }
      begin_pass(command_,scene_pass_,scene_fb_[current],render_extent_,true);
-     if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timing_pool_,slot*4);
-    // Source sky, portal views (destination, then its seal), then the rest of the source: source geometry in front of a
-    // doorway covers it, source geometry behind it fails against the seal.
-    const std::span<const DrawItem> source{primary.draws};
+     if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timing_pool_,slot*2);
+    // Sky, then the rest. NONCANONICAL enhanced water: the opaque scene is copied before the source ocean (sorted after
+    // the other opaque draws, build_draws), which then continues the pass with the alpha list in water_pass_.
+    const std::span<const DrawItem> source{scene_set.draws};
     const auto sky_end=std::size_t(std::find_if(source.begin(),source.end(),[](const DrawItem& d){return !d.sky;})-source.begin());
-    draw_scene(command_,false,primary,source.first(sky_end));
-    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+1);
-    for(unsigned i=0;i<view_count;++i) {
-        uniform_offset_=view_offset(1+i);
-        draw_scene(command_,false,*views[i]->set,views[i]->set->draws,true);
-        uniform_offset_=view_offset(0);
-        if(views[i]->split)continue;
-        vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,seal_pipeline_);
-        for(const auto& quad:views[i]->seal) { // floor strip, then the pulled rest
-            const auto clip_corners=multiply_matrix(f.vp,quad); // seal.vert takes clip-space corners
-            vkCmdPushConstants(command_,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(Matrix4),&clip_corners);
-            vkCmdDraw(command_,6,1,0,0);
-        }
-    }
-    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+2);
-    // NONCANONICAL enhanced water: the opaque scene is copied before the source ocean (sorted after the other opaque
-    // draws, build_draws), which then continues the pass with the alpha list in water_pass_.
-    const auto rest=source.subspan(sky_end);const bool source_clip=f.clip[0]!=std::array<float,4>{0,0,0,1};
+    draw_scene(command_,false,scene_set,source.first(sky_end));
+    const auto rest=source.subspan(sky_end);
     const auto is_water=[&](const DrawItem& d){return d.material<scene.materials.size()&&scene.materials[d.material].source_ocean;};
     std::size_t water_begin=rest.size();
     if(!options_.original_appearance&&std::any_of(rest.begin(),rest.end(),[&](const DrawItem& d){return d.visible&&is_water(d);}))
         water_begin=std::size_t(std::find_if(rest.begin(),rest.end(),[&](const DrawItem& d){return d.alpha||is_water(d);})-rest.begin());
-    draw_scene(command_,false,primary,rest.first(water_begin),source_clip);
+    draw_scene(command_,false,scene_set,rest.first(water_begin));
     if(water_begin<rest.size()) {
         vkCmdEndRenderPass(command_);
         copy_water(command_,denoise_enabled_?raw_hdr_:hdr_[current]);
         begin_pass(command_,water_pass_,scene_fb_[current],render_extent_,false);
-        draw_scene(command_,false,primary,rest.subspan(water_begin),source_clip);
+        draw_scene(command_,false,scene_set,rest.subspan(water_begin));
     }
     // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input), then the hilite; 0046cbe0 draws
     // AfterHDR particles after the glow composite (0046fdb0 @470aed/@47183f).
@@ -2470,16 +2188,16 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
         for(int shell=3;shell>=1;--shell)for(const auto& item:contours_) {
             Draw draw{};draw.model=item.model;draw.color={item.color[0],item.color[1],item.color[2],pulse+float(shell)*.02f};
             // Same frame-uniform set as the instance's own scene draw; contour shaders read no images.
-            bind_set(primary.material_sets[item.material<primary.material_sets.size()?item.material:0]);
+            bind_set(scene_set.material_sets[item.material<scene_set.material_sets.size()?item.material:0]);
             vkCmdPushConstants(command_,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(draw),&draw);
-            auto& g=primary.geometry[item.mesh];VkDeviceSize offset=0;
+            auto& g=scene_set.geometry[item.mesh];VkDeviceSize offset=0;
             vkCmdBindVertexBuffers(command_,0,1,&g.vertices.handle,&offset);
             vkCmdBindIndexBuffer(command_,g.indices.handle,0,VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(command_,g.count,1,0,0,0);
         }
     }
     vkCmdEndRenderPass(command_);
-    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*4+3);
+    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*2+1);
      if(denoise_enabled_) {
          // Temporal accumulation (stride 0), then a-trous strides 1/2/4: history -> A -> B -> A.
          vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,temporal_pipeline_);
@@ -2606,8 +2324,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
          if(f.params[2]>0){++history_eligible_frames_;if(scene_changed)++history_retained_dirty_frames_;}
          else ++history_reset_events_;
      }
-     primary.previous_frame=f;++primary.frame;primary.drawn=total_frames_;
-     for(unsigned i=0;i<view_count;++i){auto& set=*views[i]->set;set.previous_frame=views[i]->frame;++set.frame;}
+     scene_set.previous_frame=f;++scene_set.frame;scene_set.drawn=total_frames_;
      previous_jitter_={f.jitter[0],f.jitter[1]};rendered_=true;
      ++total_frames_;
      if(total_frames_<=2||total_frames_%300==0) {
@@ -2618,8 +2335,7 @@ std::optional<PortalDraw> portal_view(const PortalView& portal,const Frame& f,co
          std::cerr<<"Vulkan submitted frame="<<total_frames_<<" provider=vulkan appearance="
             <<(options_.original_appearance?"original":"enhanced")<<" rtStyle="<<(options_.rt_style==RtStyle::faithful?"faithful":"physical")
             <<" lighting="<<(original_lighting_?"original":physical_rt_?"physical":"enhanced")<<" hardwareRayQueries="<<rt_enabled_
-            <<" accelerationStructure="<<(rt_enabled_&&primary.rt->acceleration_structure()!=VK_NULL_HANDLE)
-            <<" sceneSets="<<sets_.size()<<" portalViews="<<view_count
+            <<" accelerationStructure="<<(rt_enabled_&&scene_set.rt->acceleration_structure()!=VK_NULL_HANDLE)
             <<" reflections="<<physical_rt_<<" shadows="<<rt_enabled_<<" diffuseGI="<<(rt_enabled_&&!original_lighting_)<<" renderedFrameMs="<<frame_ms_avg
              <<" historyEligible="<<int(f.params[2])<<" historyEligibleFrames="<<history_eligible_frames_
              <<" historyResetEvents="<<history_reset_events_<<" historyRetainedDirtyFrames="<<history_retained_dirty_frames_

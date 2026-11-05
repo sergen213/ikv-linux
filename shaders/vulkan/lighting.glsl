@@ -40,10 +40,10 @@ layout(set=0,binding=9) uniform sampler2D originalLightmap;
 const float PI=3.14159265359;
 vec3 sky(vec3 direction) { return mix(vec3(.055,.07,.09),vec3(.32,.44,.62),clamp(direction.y*.5+.5,0,1)); }
 vec3 environment(vec3 direction) { if(draw.flags.y<.5)return sky(direction);return textureLod(environmentMap,vec2(atan(direction.z,direction.x)/(2*PI)+.5,acos(clamp(direction.y,-1,1))/PI),0).rgb; }
-// Shadow atlas (8192x2048): main near/far, then portal near/far, in four columns.
+// Shadow atlas (4096x2048): near, then far cascade, in two columns.
 layout(location=16) in vec4 farShadowPosition;
-float shadowPcf(vec4 clip,float offset,vec3 n){vec3 p=clip.xyz/clip.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;uv.x=uv.x*.25+offset;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));vec2 lo=vec2(offset+t.x*.5,0),hi=vec2(offset+.25-t.x*.5,1);float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(uv+vec2(x,y)*t,lo,hi),p.z-bias));return visible/9;}
-float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;bool nearValid=distance(frame.eye.xyz,worldPosition)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&p.z>=0&&p.z<=1;if(nearValid)return shadowPcf(shadowPosition,frame.fade.y,n);return shadowPcf(farShadowPosition,.25+frame.fade.y,n);}
+float shadowPcf(vec4 clip,float offset,vec3 n){vec3 p=clip.xyz/clip.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;uv.x=uv.x*.5+offset;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));vec2 lo=vec2(offset+t.x*.5,0),hi=vec2(offset+.5-t.x*.5,1);float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(uv+vec2(x,y)*t,lo,hi),p.z-bias));return visible/9;}
+float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;bool nearValid=distance(frame.eye.xyz,worldPosition)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&p.z>=0&&p.z<=1;if(nearValid)return shadowPcf(shadowPosition,0,n);return shadowPcf(farShadowPosition,.5,n);}
 // NONCANONICAL parallax occlusion (enhanced): static zone materials get a relief texture derived from their diffuse
 // (scene.cpp derive_parallax_heights: r height, 1 = surface; g/b central differences + .5); others bind the 1x1 white.
 // Zone meshes carry no usable tangents: the frame comes from screen derivatives (exact per planar triangle, linear UVs).
@@ -156,8 +156,7 @@ vec4 sourceOceanSurface() {
 // NONCANONICAL: enhanced source ocean, OpenUnderworld's (Tomb Raider: Underworld port) water (water.glsl): the opaque
 // scene behind the surface (renderer_vk.cpp copy_water: colour + depth copied before the water draws) traced-refracted
 // with caustics on the bed and absorbed, SSR (RT physical: a mirror ray against the scene TLAS), afl_ext sea waves and
-// Godot normal layers, GGX glints, edge foam. The v_ocean vertex displacement is kept. frame.fade.z: 0 when this view
-// has no copy (portal views): deep water, no refraction or SSR.
+// Godot normal layers, GGX glints, edge foam. The v_ocean vertex displacement is kept.
 layout(set=0,binding=12) uniform sampler2D waterColor;
 layout(set=0,binding=13) uniform sampler2D waterDepth;
 vec3 waterSceneColor(vec2 uv){return textureLod(waterColor,uv,0).rgb;}
@@ -169,7 +168,7 @@ float waterBedSun(vec3 p){
 #else
     vec4 c=frame.lightVP*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
     bool nearValid=distance(frame.eye.xyz,p)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&q.z>=0&&q.z<=1;
-    return nearValid?shadowPcf(c,frame.fade.y,vec3(0,1,0)):shadowPcf(frame.farLightVP*vec4(p,1),.25+frame.fade.y,vec3(0,1,0));
+    return nearValid?shadowPcf(c,0,vec3(0,1,0)):shadowPcf(frame.farLightVP*vec4(p,1),.5,vec3(0,1,0));
 #endif
 }
 bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){
@@ -190,7 +189,7 @@ vec3 waterSurface(){
 #endif
     float caustic=sceneRoofed()?0:.8*min(max(sunScale.r,max(sunScale.g,sunScale.b)),1);
     vec3 c=waterShade(p,frame.eye.xyz,frame.vp,gl_FragCoord.xy/frame.viewport.xy,frame.sourceTime.y,l,light,
-        frame.fogColor.rgb,vec3(2.8,2.55,2.2)*sunScale,sun,caustic,frame.fade.z>.5);
+        frame.fogColor.rgb,vec3(2.8,2.55,2.2)*sunScale,sun,caustic);
     if(frame.fogColor.w>.5&&draw.extra.z>.5)c=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),c,clamp(sourceFog,0,1));
     return max(c,vec3(0));
 }
@@ -208,8 +207,7 @@ vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
 #ifdef IKV_RT_GUIDED
 // rtUnit: zero/NaN source normals (degenerate meshes) would put NaN in the guide, which history and the a-trous
 // passes then spread over the screen as a growing black block.
-// Portal views store primary-world normals, so the resolve treats them like the primary's own surfaces.
-vec3 guideNormal=rtUnit(mat3(frame.toPrimary)*worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
+vec3 guideNormal=rtUnit(worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
 float rtArtwork=0;
 #endif
 if(draw.extra.w>=2) {

@@ -1,7 +1,7 @@
 // Real-content reachability (wave 19, the quest audit's fix.py fixpoint): every configured quest is completable on foot from the
 // Eminönü spawn, and every door arrival walks back to its zone's spawn. Regions are the 4-connected walkable components of each
 // zone's original support grid (World routes take a diagonal only when both orthogonals pass); a door joins each region within
-// interaction_range of it to its arrival's region; a quest-gated door is open once its quest is taken or done (door_gate) and
+// interaction_range of it to its arrival's region; a quest-gated door is open once its quest is taken or done (interact gate) and
 // required_death doors count as open. A quest is taken once its prerequisites are done and its giver is reached (auto quests at
 // once), done once every spot (giver, turn-in, use props, kill/collect spawns within 20 units, visit spot) is reached with it taken.
 //   quest-reachability-test config/gameplay.json   (original/app/base beside config/; skipped without the grids)

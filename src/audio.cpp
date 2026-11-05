@@ -392,24 +392,6 @@ void GameAudio::frontend(bool credits) {
     // 004573e0 with DAT_005ea950 == 0: 8 while the credits window 0x77d604 (built by 004afed0) is visible (+0xd4), else 2.
     if (!override_) choose(credits ? 8 : 2, 0);
 }
-// 00419a40: musicNN.raw / soundNN.raw are 2048x2048 byte grids; a missing file is all zero.
-static std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> read_grids(const std::filesystem::path& base, unsigned support) {
-    std::pair<std::vector<std::uint8_t>, std::vector<std::uint8_t>> grids;
-    for (auto [grid, name] : {std::pair{&grids.first, "music"}, std::pair{&grids.second, "sound"}}) {
-        char file[32];
-        std::snprintf(file, sizeof file, "%s%02u.raw", name, support);
-        grid->assign(grid_bytes, 0);
-        std::ifstream input(base / file, std::ios::binary);
-        if (input) input.read(reinterpret_cast<char*>(grid->data()), static_cast<std::streamsize>(grid_bytes));
-    }
-    return grids;
-}
-void GameAudio::preload(unsigned support) {
-    if (support >= 18 || support == grid_zone_ || support == next_zone_) return;
-    if (next_grids_.valid() && next_grids_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
-    next_zone_ = support;
-    next_grids_ = std::async(std::launch::async, read_grids, base_, support);
-}
 void GameAudio::frame(const Scene& scene, std::span<const RenderEntity> poses, std::uint32_t self,
                       const CameraBasis& listener) {
     mixer.listener(listener.eye, listener.right);
@@ -420,9 +402,14 @@ void GameAudio::frame(const Scene& scene, std::span<const RenderEntity> poses, s
     const auto* player = pose(self);
     if (!override_ && player && scene.source_support < 18) {
         if (grid_zone_ != scene.source_support) {
-            auto grids = next_zone_ == scene.source_support && next_grids_.valid() ? next_grids_.get() : read_grids(base_, scene.source_support);
-            if (next_zone_ == scene.source_support) next_zone_ = UINT32_MAX;
-            music_grid_ = std::move(grids.first); sound_grid_ = std::move(grids.second);
+            // 00419a40: musicNN.raw / soundNN.raw are 2048x2048 byte grids; a missing file is all zero.
+            for (auto [grid, name] : {std::pair{&music_grid_, "music"}, std::pair{&sound_grid_, "sound"}}) {
+                char file[32];
+                std::snprintf(file, sizeof file, "%s%02u.raw", name, scene.source_support);
+                grid->assign(grid_bytes, 0);
+                std::ifstream input(base_ / file, std::ios::binary);
+                if (input) input.read(reinterpret_cast<char*>(grid->data()), static_cast<std::streamsize>(grid_bytes));
+            }
             grid_zone_ = scene.source_support;
             trace("zone", std::to_string(grid_zone_), "music/sound grids");
         }
