@@ -718,7 +718,7 @@ private:
     QJsonArray bots_now_;
     std::function<void()> afterStop_;
     Mode mode_ = Mode::Idle;
-    bool polling_ = false, wasRunning_ = false, ours_ = false, settingsDirty_ = false, creating_ = false;
+    bool polling_ = false, wasRunning_ = false, ours_ = false, settingsDirty_ = false, creating_ = false, upgradeTried_ = false;
     int lockFd_ = -1, ticks_ = 0, currentStep_ = -1, players_now_ = -1;
     qint64 logOffset_ = -1;
     QDeadlineTimer startDeadline_;
@@ -1423,9 +1423,20 @@ private:
         setWindowTitle(admin && !creating_ ? "Sunucu Yönetimi" : "Sunucu Kur");
         const QString phaseText = phase == "database" ? "veritabanı" : phase == "auth" || phase == "bootstrap" ? "hesap servisi" : phase == "register" ? "yönetici kaydı" : phase == "world" ? "dünya yükleniyor" : phase;
         // A supervisor started by an older launcher (state.json without or with another version, e.g. autostart just
-        // before a self-update) keeps that release's ikv-auth/ikv-server and web panel until a full stop and start.
+        // before a self-update, or keep-alive across an update) keeps that release's ikv-auth/ikv-server and web panel until a
+        // full stop and start, so the launcher restarts it once onto its own release (the world saves on stop).
         const auto serverVersion = state.value("version").toString();
-        const QString stale = running && serverVersion != QLatin1String(ikv::release::version)
+        const bool staleServer = running && serverVersion != QLatin1String(ikv::release::version);
+        if (staleServer && mode_ == Mode::Idle && !upgradeTried_) {
+            upgradeTried_ = true;
+            guarded([&] {
+                info(QString("Sunucu %1 ile çalışıyor; v%2 ile yeniden başlatılıyor…")
+                         .arg(serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion, QString::fromLatin1(ikv::release::version)));
+                afterStop_ = [this] { startServer(); };
+                stopServer();
+            });
+        }
+        const QString stale = staleServer
             ? QString(" — DİKKAT: sunucu %1 ile çalışıyor (başlatıcı v%2); yeni özellikler için Durdur, sonra Başlat")
                   .arg(serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion, QString::fromLatin1(ikv::release::version))
             : QString();

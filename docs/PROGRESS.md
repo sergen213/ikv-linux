@@ -233,6 +233,15 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-05 wave 25: the launcher moves an older hosted server onto its release
+
+User report: the 0.11.0 client crashed near Mısır Çarşısı; "launcher should update everything". The hosted server was still the 0.10.6 supervisor (`server/state.json` `"version": "0.10.6"`) started before the launcher self-updated: a supervisor outlives launcher updates and keeps its release's ikv-auth/ikv-server/web panel. A 0.10.6 world still runs the wave-16 portal walk (players on doorway aprons the plain walk grid has no ground for, linked-zone rows), which the 0.11.0 client rejects at "authoritative visible entity has no source-grid support" and exits [INFERENCE: user's client output not captured; matches the reported place and the `tls_read` drops in `server.log`].
+
+- **Fix:** the Sunucu Yönetimi status tick restarts a running supervisor whose `state.json` version differs from the launcher's own once per launcher session (graceful stop: the world saves, then start from the current AppImage), logging "Sunucu vX ile çalışıyor; vY ile yeniden başlatılıyor…". The manual "Durdur, sonra Başlat" warning stays as the fallback.
+- `launcher-gui-smoke` host mode gained a stale-version stage (age `state.json` to 0.0.0 after keep-alive reattach → new supervisor pid with the current version).
+
+Verification: host-server smoke PASSED with the restart stage (`analysis/porting-wave25/Verify/host-upgrade/`, log.png shows stop with `ikv-server çıktı: kod=0` and restart); `build-full`, `build-gl-only` **19/19** (190.9 s / 194.2 s) and `build-full-sanitized` **19/19** alone (306.3 s), all warning-free, `--parallel 1`; RT smoke **5/5** ok (`analysis/porting-wave25/Verify/rt/`); signed Qt launcher smoke (Vulkan ½, enhanced, RT required) PASSED (`analysis/porting-wave25/Verify/launcher-vulkan-half/`). The historical sanitizer shutdown timeout stays open.
+
 ## 2026-11-04 wave 24: original doors, no auto-opening Yardım
 
 User request: remove the seamless zones, see-through doorways and instant doors (without going back to an old version) and restore the original door interaction; stop the Yardım window opening by itself.

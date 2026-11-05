@@ -487,6 +487,17 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         waitUntil([&] { return running(); }, 30, "the new launcher to reattach");
         if (json(serverDir + "/state.json").value("pid").toInteger() != supervisorPid) throw std::runtime_error("Reattach started a different supervisor");
         waitUntil([&] { return control<QPushButton>(*launcher, "hostButton")->text().contains(QString::fromUtf8("Çalışıyor")); }, 30, "the reattached chip");
+        stage = "stale-version restart"; // a supervisor from an older release (e.g. kept alive across a self-update) is restarted once onto this one
+        {
+            auto aged = json(serverDir + "/state.json");
+            aged["version"] = "0.0.0";
+            QFile file(serverDir + "/state.json");
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(QJsonDocument(aged).toJson()) < 0) throw std::runtime_error("Cannot age state.json");
+        }
+        waitUntil([&] { const auto now = json(serverDir + "/state.json");
+                        return now.value("pid").toInteger() != supervisorPid && now.value("version").toString() == QLatin1String(ikv::release::version) && running(); },
+                  240, "the stale server to restart onto this release");
+        waitUntil([&] { return control<QPushButton>(*launcher, "hostButton")->text().contains(QString::fromUtf8("Çalışıyor")); }, 30, "the restarted chip");
         ctl(static_cast<QLineEdit*>(nullptr), "hostLoginPassword")->setText(adminPassword);
         dialog()->show();
         click("hostLogin");
