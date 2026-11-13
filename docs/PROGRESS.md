@@ -233,6 +233,16 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-13 wave 28 (character weather effects slice)
+
+User request: puddle steps must react, rain must drip off characters, characters leave footprints in snow. NONCANONICAL, enhanced weather only (`EffectSystem::set_weather` enabled); original appearance, inactive weather and roofed zones keep the pre-wave paths.
+
+- **Footsteps (`src/effects.cpp`, `EffectSystem::ground_marks()`):** every visible character within the Karakter Efektleri range and twice the precipitation column radius of the camera target leaves a `GroundMark` every 0.7 m travelled (alternating feet, foot 0.12 m off the walk line, heading from travel, none across a jump or while standing), newest first, at most `kMaxGroundMarks`, aged each update, dropped after 90 s, on a new scene or when weather is disabled. The renderer decides the puddle-ring / snow-print look.
+- **Puddle steps:** a footstep where `weather_puddle(x, z, wetness) > 0.3` under open sky bursts a ripple ring and 5–8 droplets kicked forward.
+- **Dripping clothes:** characters under open rain soak (time constant 2.3 s at full rain), dry after it in 2 s on dry ground up to 20 s on soaked ground, and drip from head, shoulder and hand height at up to 20 drips/s (short bright streaks, at most 600 alive), landing with occasional droplets and, in puddles, small rings.
+- Tests: effects self-test (stride spacing/side alternation/order, jump, cap, still-standing, 90 s ageing, disabled; puddle step splashes vs dry ground; drips in rain, after rain on wet ground, stop once dry, character range). The existing "rain splashes on heads" check now samples every step (a head splash lives ~0.3 s, so the end-state check depended on the random stream).
+- Evidence: `analysis/porting-wave28/Fx/` (capture build only: effects fed from `IKV_RENDER_WEATHER`; rain-gl-enhanced/, rain-vk-enhanced/, proof-*.png).
+
 ## 2026-11-12 wave 27: seasons, weather and wind
 
 User request: a wind system that moves water and the environment, and weather for every season; later feedback: raindrops must interact with characters, objects and water, and the lighting must change with every weather. All of it is NONCANONICAL (the original game had no weather) and visible only with the enhanced appearance; original appearance draws exactly what it drew before.

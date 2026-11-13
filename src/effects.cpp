@@ -420,6 +420,7 @@ void EffectSystem::attach_scene(const Scene& scene) {
     }
     scene_ = &scene;
     surface_ = {}; // NONCANONICAL wave 27: the weather surface grid is rebuilt for the new scene on first use
+    marks_.clear(); strides_.clear(); // NONCANONICAL wave 28: footsteps and soaked clothes belong to the old scene
 }
 
 void EffectSystem::step(Emitter& e, float dt, std::array<float, 3> from) {
@@ -669,7 +670,11 @@ namespace {
 constexpr float weather_metre = 4, weather_radius = 34, weather_top = 32, weather_bottom = -8;
 constexpr float actor_top = 7, actor_radius = 1.1f; // a source actor stands ~7.5 units; drops end on heads and shoulders
 constexpr std::size_t splash_cap = 3500;
-enum : std::uint8_t { splash_droplet, splash_ring, splash_settled, splash_mist };
+enum : std::uint8_t { splash_droplet, splash_ring, splash_settled, splash_mist, splash_drip };
+// NONCANONICAL wave 28 character weather: a footstep every 0.7 m, foot 0.12 m off the walk line, kept 90 s; a step into a
+// puddle (weather_puddle above .3) splashes; soaked characters drip from head, shoulders and hands.
+constexpr float stride_length = .7f * weather_metre, foot_offset = .12f * weather_metre, mark_lifetime = 90, puddle_splash = .3f;
+constexpr std::size_t drip_cap = 600;
 bool falls_as_rain(WeatherKind k) { return k == WeatherKind::rain || k == WeatherKind::storm; }
 // Procedural RGBA8 textures: the original fx art has no single-drop/flake/ripple sprite with usable alpha (yagmur.dds is a sheet
 // of streaks, particle02/13 are opaque-alpha additive blobs), so a soft vertical streak, a round flake and a ripple ring are
@@ -787,15 +792,26 @@ void EffectSystem::weather_update(float dt) {
         const std::array<float, 3> local{r0[0] * drift[0] + r0[2] * drift[1], r1[0] * drift[0] + r1[2] * drift[1], r2[0] * drift[0] + r2[2] * drift[1]};
         for (auto& p : e.particles) for (unsigned i = 0; i < 3; ++i) p.position[i] += local[i];
     }
-    // Splashes: droplets fly under gravity, rings widen on water, settled flakes and mist fade; all end with their life.
+    // Splashes: droplets fly under gravity, rings widen on water, settled flakes and mist fade; all end with their life. Drips
+    // (wave 28) fall until they reach their floor, where some splash.
+    landed_.clear();
     for (auto& p : splashes_) {
         p.life -= dt;
         for (unsigned k = 0; k < 3; ++k) p.position[k] += p.velocity[k] * dt;
-        if (p.kind == splash_droplet) p.velocity[1] -= 40 * dt; // ~10 m/s²
+        if (p.kind == splash_droplet || p.kind == splash_drip) p.velocity[1] -= 40 * dt; // ~10 m/s²
         else if (p.kind == splash_ring) p.size += 1.6f * dt;
         else if (p.kind == splash_mist) p.size += .6f * dt;
+        if (p.kind == splash_drip && p.position[1] <= p.floor) { p.life = 0; landed_.push_back({p.position[0], p.floor, p.position[2]}); }
     }
     std::erase_if(splashes_, [](const Splash& p) { return p.life <= 0; });
+    if (weather_enabled_) for (const auto& at : landed_) {
+        if (weather_rand() > .45f || splashes_.size() >= splash_cap) continue;
+        const float life = .16f + .1f * weather_rand();
+        splashes_.push_back({{at[0], at[1] + .04f, at[2]}, {(weather_rand() * 2 - 1) * 1.5f, 1.5f + 2 * weather_rand(), (weather_rand() * 2 - 1) * 1.5f}, life, life, .035f, splash_droplet});
+        if (weather_puddle(at[0], at[2], w.wetness) > puddle_splash && splashes_.size() < splash_cap)
+            splashes_.push_back({{at[0], at[1] + .03f, at[2]}, {}, .35f, .35f, .05f, splash_ring});
+    }
+    character_weather(dt, wind);
     // Precipitation column around the camera target: count ∝ precipitation (capped); every drop ends on the first surface it
     // meets (zone surface grid, actor heads/shoulders) with a splash, a ripple on water or a settling flake, then respawns at
     // the top until the weather changes kind, stops or the column shrinks.
@@ -867,6 +883,68 @@ void EffectSystem::weather_update(float dt) {
     }
 }
 
+// NONCANONICAL wave 28 (enhanced weather only): footsteps, puddle splashes and dripping clothes of the characters around the
+// camera target (within the Karakter Efektleri range ranges_[1] and twice the precipitation column radius).
+void EffectSystem::character_weather(float dt, std::array<float, 2> wind) {
+    if (!weather_enabled_) { marks_.clear(); strides_.clear(); return; }
+    for (auto& m : marks_) m.age += dt;
+    std::erase_if(marks_, [](const GroundMark& m) { return !(m.age <= mark_lifetime); });
+    const auto& w = weather_;
+    const bool raining = falls_as_rain(w.kind) && w.precipitation > 0;
+    const float intensity = raining ? std::clamp(w.precipitation, 0.f, 1.f) : 0, wetness = std::clamp(w.wetness, 0.f, 1.f);
+    const float reach = std::min(ranges_[1], 4 * weather_radius * weather_radius); // squared
+    std::size_t drips = static_cast<std::size_t>(std::count_if(splashes_.begin(), splashes_.end(), [](const Splash& p) { return p.kind == splash_drip; }));
+    const auto add = [&](const Splash& p) { if (splashes_.size() < splash_cap) splashes_.push_back(p); };
+    for (auto& entry : strides_) entry.second.seen = false;
+    for (const auto& e : entities_) {
+        const float fx = e.x - focus_[0], fz = e.z - focus_[2];
+        if (!(fx * fx + fz * fz <= reach)) continue;
+        // Open sky above the character: the surface grid top is its ground, not a roof or arcade overhead.
+        float top = 0; bool water = false;
+        const bool exposed = !surface_at(e.x, e.z, top, water) || top < e.ground_y + actor_top + 1;
+        auto [it, fresh] = strides_.try_emplace(e.id);
+        auto& s = it->second; s.seen = true;
+        const float dx = e.x - s.x, dz = e.z - s.z, moved = std::hypot(dx, dz);
+        if (fresh) s.soak = exposed && raining ? .5f + .5f * intensity : 0; // already out in the rain when first seen
+        if (fresh || !(moved <= 2 * weather_metre + 10 * weather_metre * dt)) { s.x = e.x; s.z = e.z; s.travelled = 0; } // first sight or a jump: no prints across
+        else if (moved > 1e-4f) {
+            const float ux = dx / moved, uz = dz / moved, heading = std::atan2(dx, dz);
+            float along = stride_length - s.travelled; // distance into this movement of the next footstep
+            for (; along <= moved; along += stride_length, s.side = -s.side) {
+                // Foot position: side +1 lies along (cos heading, -sin heading) of the walk line.
+                const float px = s.x + ux * along + uz * foot_offset * s.side, pz = s.z + uz * along - ux * foot_offset * s.side;
+                marks_.insert(marks_.begin(), GroundMark{px, pz, 0, heading, s.side});
+                if (!exposed || wetness <= 0 || weather_puddle(px, pz, wetness) <= puddle_splash) continue;
+                // Stepping into a puddle: a ripple ring and a burst of droplets kicked forward.
+                add({{px, e.ground_y + .03f, pz}, {}, .7f, .7f, .2f, splash_ring});
+                for (int n = 5 + static_cast<int>(3 * wetness); n > 0; --n) {
+                    const float a = weather_rand() * 6.2831855f, life = .3f + .15f * weather_rand(), out = .8f + 1.6f * weather_rand();
+                    add({{px, e.ground_y + .06f, pz}, {std::cos(a) * out + ux * 1.2f, 2.5f + 2.5f * weather_rand(), std::sin(a) * out + uz * 1.2f}, life, life, .07f, splash_droplet});
+                }
+            }
+            s.travelled = moved - (along - stride_length);
+            s.x = e.x; s.z = e.z;
+        }
+        // Soaking under open rain (time constant 2.3 s at full rain, 10 s in a drizzle), drying after it at 2 s (dry ground) ..
+        // 20 s (soaked ground).
+        if (raining && exposed) s.soak += (1 - s.soak) * (1 - std::exp(-dt * (.3f + intensity) / 3));
+        else s.soak *= std::exp(-dt / (2 + 18 * wetness));
+        if (s.soak < .05f) { s.drip = 0; continue; }
+        s.drip = std::min(3.f, s.drip + s.soak * (6 + 14 * intensity) * dt);
+        for (; s.drip >= 1 && drips < drip_cap && splashes_.size() < splash_cap; s.drip -= 1, ++drips) {
+            const float r = weather_rand(), a = weather_rand() * 6.2831855f;
+            const auto [height, radius] = r < .3f ? std::pair{6.3f + .5f * weather_rand(), .55f}  // head / hat brim
+                                        : r < .7f ? std::pair{5.2f + .4f * weather_rand(), 1.f}   // shoulders
+                                                  : std::pair{3.3f + .6f * weather_rand(), 1.15f}; // hands
+            const float y = e.ground_y + height, vy = -.3f - .5f * weather_rand();
+            const float life = (-vy + std::sqrt(vy * vy + 80 * height)) / 40 + .1f; // time to fall to the ground under 40 units/s², bounded
+            add({{e.x + std::cos(a) * radius, y, e.z + std::sin(a) * radius}, {std::cos(a) * .4f + wind[0] * .04f, vy, std::sin(a) * .4f + wind[1] * .04f}, life, life, .035f, splash_drip, e.ground_y + .02f});
+        }
+    }
+    std::erase_if(strides_, [](const auto& entry) { return !entry.second.seen; });
+    if (marks_.size() > kMaxGroundMarks) marks_.resize(kMaxGroundMarks);
+}
+
 void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
     if (drops_.empty() && splashes_.empty()) return;
     for (unsigned k = 0; k < 3; ++k) if (weather_textures_[k] == UINT32_MAX) {
@@ -901,18 +979,21 @@ void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
         frame_.batches.back().count = static_cast<std::uint32_t>(frame_.vertices.size()) - frame_.batches.back().first;
         if (!frame_.batches.back().count) frame_.batches.pop_back();
     };
-    batch(0, [&] { // rain: a streak along the velocity (~40 ms of travel), facing the eye
-        for (const auto& d : drops_) {
-            if (d.snow) continue;
-            const std::array<float, 3> rel{d.position[0] - b.eye[0], d.position[1] - b.eye[1], d.position[2] - b.eye[2]};
-            const float v = std::sqrt(d.velocity[0] * d.velocity[0] + d.velocity[1] * d.velocity[1] + d.velocity[2] * d.velocity[2]), half = std::clamp(v * .04f, .6f, 3.f) * .5f;
-            std::array<float, 3> u{}, r{};
-            for (unsigned i = 0; i < 3; ++i) u[i] = -d.velocity[i] / v * half;
-            const auto side = cross(u, rel); const float s = std::sqrt(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
-            if (s < 1e-6f) continue;
-            for (unsigned i = 0; i < 3; ++i) r[i] = side[i] / s * .04f;
-            quad(d.position, r, u, rain_color);
-        }
+    // A streak along the velocity (~40 ms of travel, half length clamped to [lo, hi]) of the given half width, facing the eye.
+    const auto streak = [&](const std::array<float, 3>& at, const std::array<float, 3>& velocity, float lo, float hi, float width, const std::array<float, 4>& color) {
+        const std::array<float, 3> rel{at[0] - b.eye[0], at[1] - b.eye[1], at[2] - b.eye[2]};
+        const float v = std::sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2]), half = std::clamp(v * .04f, lo, hi) * .5f;
+        if (v < 1e-6f) return;
+        std::array<float, 3> u{}, r{};
+        for (unsigned i = 0; i < 3; ++i) u[i] = -velocity[i] / v * half;
+        const auto side = cross(u, rel); const float s = std::sqrt(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
+        if (s < 1e-6f) return;
+        for (unsigned i = 0; i < 3; ++i) r[i] = side[i] / s * width;
+        quad(at, r, u, color);
+    };
+    batch(0, [&] { // rain streaks; wave 28 drips falling off characters (shorter, brighter)
+        for (const auto& d : drops_) if (!d.snow) streak(d.position, d.velocity, .6f, 3.f, .04f, rain_color);
+        for (const auto& p : splashes_) if (p.kind == splash_drip) streak(p.position, p.velocity, .45f, 1.4f, .05f, {.9f * light, .93f * light, light, .9f});
     });
     batch(1, [&] { // snowflakes, settled flakes, splash droplets and storm mist
         for (const auto& d : drops_) if (d.snow) billboard(d.position, d.size, snow_color);
@@ -1116,9 +1197,10 @@ void EffectSystem::self_test() {
         pond.attach_scene(yard);
         SceneWeather rain; rain.active = true; rain.kind = WeatherKind::rain; rain.precipitation = 1;
         const RenderEntity passer{9, -5, 0, 0, 0};
-        bool sheltered = true, above_ground = true, clear_head = true;
+        bool sheltered = true, above_ground = true, clear_head = true, head_splash = false; // a head splash lives ~0.3 s: seen at any step
         for (int i = 0; i < 40; ++i) {
             pond.set_weather(rain, true, {0, 0, 0}); pond.update(.05f, std::span(&passer, 1));
+            head_splash = head_splash || std::any_of(pond.splashes_.begin(), pond.splashes_.end(), [](const Splash& s) { return s.kind == splash_droplet && std::abs(s.position[0] + 5) < 2 && s.position[1] > actor_top - .5f; });
             for (const auto& drop : pond.drops_) {
                 if (drop.position[0] > 11 && drop.position[0] < 99) sheltered = sheltered && drop.position[1] > 12;
                 above_ground = above_ground && drop.position[1] > 0;
@@ -1128,7 +1210,7 @@ void EffectSystem::self_test() {
         const auto any = [&](auto&& f) { return std::any_of(pond.splashes_.begin(), pond.splashes_.end(), f); };
         require(sheltered && above_ground && clear_head && pond.surface_.built && pond.surface_.top.size() > 1, "rain never falls through roofs, ground or actors");
         require(any([](const Splash& s) { return s.kind == splash_ring && std::abs(s.position[1] - 1.03f) < 1e-3f && s.position[0] < -12; }), "rain on water leaves ripple rings at the water surface");
-        require(any([](const Splash& s) { return s.kind == splash_droplet && std::abs(s.position[0] + 5) < 2 && s.position[1] > actor_top - .5f; }), "rain splashes on heads");
+        require(head_splash, "rain splashes on heads");
         require(any([](const Splash& s) { return s.kind == splash_droplet && s.position[0] > 10 && s.position[1] > 11.5f; }), "rain splashes on the roof");
         require(pond.splash_count() <= splash_cap && pond.frame(Camera{}).batches.size() >= 2, "splash budget and batches");
         auto snow = rain; snow.kind = WeatherKind::snow;
@@ -1136,6 +1218,86 @@ void EffectSystem::self_test() {
         require(any([](const Splash& s) { return s.kind == splash_settled && s.velocity == std::array<float, 3>{} && s.position[1] >= .03f; }), "snowflakes settle on surfaces");
         for (int i = 0; i < 100; ++i) { pond.set_weather(snow, false, {0, 0, 0}); pond.update(.1f, std::span(&passer, 1)); }
         require(pond.weather_count() == 0 && pond.splash_count() == 0, "disabled weather leaves no drops or splashes");
+    }
+    // NONCANONICAL wave 28: a footstep every 0.7 m on alternating feet, newest first, ageing out after 90 s, none across a jump,
+    // capped at kMaxGroundMarks and none while disabled; a step into a puddle splashes; soaked characters drip from head,
+    // shoulder and hand height, keep dripping briefly after the rain on wet ground, and only within the character range.
+    {
+        EffectSystem walk(std::filesystem::path{}, {}, {});
+        SceneWeather dull; dull.active = true; dull.kind = WeatherKind::cloudy;
+        RenderEntity strider{5, 0, 0, 0, 0};
+        const auto stride = [&](const SceneWeather& w, bool enabled, float dz, float dt, int n) {
+            for (int i = 0; i < n; ++i) { strider.z += dz; walk.set_weather(w, enabled, {strider.x, 0, strider.z}); walk.update(dt, std::span(&strider, 1)); }
+        };
+        stride(dull, true, 0, .05f, 1); stride(dull, true, .3f, .05f, 199); // 59.7 units: 21 strides of 2.8
+        const auto marks = walk.ground_marks();
+        bool alternate = true, ordered = true, on_line = true;
+        for (std::size_t i = 0; i < marks.size(); ++i) {
+            on_line = on_line && std::abs(std::abs(marks[i].x) - foot_offset) < 1e-3f && std::abs(marks[i].heading) < 1e-4f && std::abs(marks[i].z - stride_length * static_cast<float>(marks.size() - i)) < 1e-2f;
+            if (i) { alternate = alternate && marks[i].side == -marks[i - 1].side && marks[i].x * marks[i].side > 0; ordered = ordered && marks[i].age >= marks[i - 1].age; }
+        }
+        require(marks.size() == 21 && alternate && ordered && on_line, "footsteps every 0.7 m on alternating feet, newest first");
+        stride(dull, true, 940, .05f, 1); stride(dull, true, .3f, .05f, 20);
+        require(std::none_of(walk.marks_.begin(), walk.marks_.end(), [](const GroundMark& m) { return m.z > 70 && m.z < 999; }) && walk.marks_.size() == 23, "no footsteps across a jump");
+        stride(dull, true, .3f, .05f, 400);
+        require(walk.ground_marks().size() == kMaxGroundMarks && walk.marks_.front().age < walk.marks_.back().age, "at most kMaxGroundMarks footsteps");
+        stride(dull, true, 0, .5f, 179);
+        require(!walk.ground_marks().empty() && walk.marks_.front().age > 89, "standing still adds no footsteps");
+        stride(dull, true, 0, .5f, 4);
+        require(walk.ground_marks().empty(), "footsteps age out after 90 s");
+        stride(dull, false, .3f, .05f, 100);
+        require(walk.ground_marks().empty() && walk.splash_count() == 0, "no footsteps while the weather is disabled");
+    }
+    {
+        // A walk line x = 0.5 crossing a deep puddle (both feet inside for 3 units around z0) at full wetness.
+        float z0 = NAN;
+        for (float z = 0; z < 4000 && std::isnan(z0); z += 1) {
+            bool deep = true;
+            for (float dz = -3; dz <= 3 && deep; dz += .5f) for (float x : {.5f - foot_offset, .5f + foot_offset}) deep = deep && weather_puddle(x, z + dz, 1) > .6f;
+            if (deep) z0 = z;
+        }
+        require(!std::isnan(z0), "a puddle along the test walk");
+        const auto cross_puddle = [&](float wetness) {
+            EffectSystem walk(std::filesystem::path{}, {}, {});
+            SceneWeather wet; wet.active = true; wet.kind = WeatherKind::cloudy; wet.wetness = wetness;
+            RenderEntity crosser{5, .5f, 0, z0 - 12, 0};
+            const auto near_puddle = [&](const Splash& s) { return std::abs(s.position[2] - z0) < 4.5f && std::abs(s.position[0] - .5f) < 3; };
+            std::ptrdiff_t rings = 0, droplets = 0; // most seen at once while crossing
+            for (int i = 0; i < 80; ++i) {
+                crosser.z += .3f; walk.set_weather(wet, true, {crosser.x, 0, crosser.z}); walk.update(.05f, std::span(&crosser, 1));
+                rings = std::max(rings, std::count_if(walk.splashes_.begin(), walk.splashes_.end(), [&](const Splash& s) { return s.kind == splash_ring && near_puddle(s) && std::abs(s.position[1] - .03f) < 1e-3f; }));
+                droplets = std::max(droplets, std::count_if(walk.splashes_.begin(), walk.splashes_.end(), [&](const Splash& s) { return s.kind == splash_droplet && near_puddle(s); }));
+            }
+            return std::pair{rings, droplets};
+        };
+        const auto [rings, droplets] = cross_puddle(1);
+        const auto [dry_rings, dry_droplets] = cross_puddle(0);
+        require(rings >= 1 && droplets >= 5 && dry_rings == 0 && dry_droplets == 0, "a step into a puddle splashes, dry ground does not");
+    }
+    {
+        EffectSystem coat(std::filesystem::path{}, {}, {});
+        SceneWeather rain; rain.active = true; rain.kind = WeatherKind::rain; rain.precipitation = 1;
+        const RenderEntity stander{7, 20, 0, 0, 0};
+        const auto drips = [&] { return std::count_if(coat.splashes_.begin(), coat.splashes_.end(), [](const Splash& s) { return s.kind == splash_drip; }); };
+        bool from_body = true, above_floor = true; std::size_t seen = 0, landed_droplets = 0;
+        for (int i = 0; i < 60; ++i) {
+            coat.set_weather(rain, true, {20, 0, 0}); coat.update(.05f, std::span(&stander, 1));
+            for (const auto& s : coat.splashes_) {
+                const float r = std::hypot(s.position[0] - 20, s.position[2]);
+                if (s.kind == splash_drip) { ++seen; above_floor = above_floor && s.position[1] >= -.5f && s.position[1] < 7; from_body = from_body && r > .4f && r < 1.6f; }
+                if (s.kind == splash_droplet && s.position[1] < 1 && r < 1.6f) ++landed_droplets;
+            }
+        }
+        require(seen > 100 && from_body && above_floor && landed_droplets > 0 && static_cast<std::size_t>(drips()) <= drip_cap, "characters drip in the rain");
+        SceneWeather after = rain; after.kind = WeatherKind::cloudy; after.precipitation = 0; after.wetness = .9f;
+        for (int i = 0; i < 40; ++i) { coat.set_weather(after, true, {20, 0, 0}); coat.update(.05f, std::span(&stander, 1)); }
+        require(drips() > 0, "soaked clothes keep dripping after the rain");
+        after.wetness = .1f;
+        for (int i = 0; i < 300; ++i) { coat.set_weather(after, true, {20, 0, 0}); coat.update(.1f, std::span(&stander, 1)); }
+        require(drips() == 0, "drips stop once dry");
+        coat.set_ranges(INFINITY, 1, INFINITY);
+        for (int i = 0; i < 40; ++i) { coat.set_weather(rain, true, {0, 0, 0}); coat.update(.05f, std::span(&stander, 1)); }
+        require(drips() == 0 && coat.ground_marks().empty(), "no drips beyond the character effect range");
     }
 }
 

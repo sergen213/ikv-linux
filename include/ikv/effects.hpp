@@ -84,6 +84,9 @@ public:
     void set_weather(const SceneWeather& weather, bool enabled, std::array<float, 3> focus) { weather_ = weather; weather_enabled_ = enabled && weather.active; focus_ = focus; }
     std::size_t weather_count() const { return drops_.size(); }
     std::size_t splash_count() const { return splashes_.size(); }
+    // NONCANONICAL wave 28 (enhanced weather only): recent footsteps of visible characters near the camera target, newest first,
+    // at most kMaxGroundMarks, aged every update(); empty while the weather is disabled and cleared on a new scene.
+    std::span<const GroundMark> ground_marks() const { return marks_; }
     void update(float dt,std::span<const RenderEntity> entities);
     const ParticleFrame& frame(const Camera&);
     std::size_t particle_count() const;
@@ -116,12 +119,19 @@ private:
     std::array<float,3> ranges_{INFINITY,INFINITY,INFINITY}; // squared scene units: zone emitters, entity/projectile emitters, fog far
     std::uint32_t random_=1,now_ms_=0,next_projectile_=1;
     struct Drop { std::array<float,3> position,velocity; float size,phase; bool snow; };
-    struct Splash { std::array<float,3> position,velocity; float life,total,size; std::uint8_t kind; }; // droplet, ripple ring, settled flake, mist
+    // droplet, ripple ring, settled flake, mist, drip (wave 28: falls off a character until it reaches `floor`)
+    struct Splash { std::array<float,3> position,velocity; float life,total,size; std::uint8_t kind; float floor=0; };
+    // NONCANONICAL wave 28 per-character weather state: last position, distance since the last footstep, next foot, how soaked
+    // the clothes are (0..1) and the drip accumulator.
+    struct Stride { float x=0,z=0,travelled=0,side=1,soak=0,drip=0; bool seen=false; };
+    std::unordered_map<std::uint32_t,Stride> strides_;
+    std::vector<GroundMark> marks_;
+    void character_weather(float dt,std::array<float,2> wind);
     // Coarse top-down surface grid (highest drawn static geometry per cell, water flag); see build_surface().
     struct Surface { float x0=0,z0=0,cell=1; std::uint32_t width=0,depth=0; std::vector<float> top; std::vector<std::uint8_t> water; bool built=false; };
     std::vector<Splash> splashes_;
     Surface surface_;
-    std::vector<std::array<float,3>> near_; // actor head points near the column, per update
+    std::vector<std::array<float,3>> near_,landed_; // actor head points near the column; drips that reached their floor (per update)
     void build_surface();
     bool surface_at(float x,float z,float& height,bool& water) const;
     SceneWeather weather_{};
