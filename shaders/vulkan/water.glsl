@@ -149,13 +149,14 @@ bool waterBehind(vec3 q,out vec2 uv,out bool inside){ // q lies behind the opaqu
 }
 // Quadratic steps out to maxT, then 5 bisections; fails off screen, at maxT, or `thick` behind the surface found. The last
 // sets gWaterOccluded: the ray passed behind something closer to the eye (a character on the shore in front of the surf)
-// that hides whatever it reaches.
-bool gWaterOccluded;
+// that hides whatever it reaches; gWaterOccluderY is that surface's height. At grazing views the bed itself also trips
+// it: one pixel of a shallow bed spans more depth than `thick`.
+bool gWaterOccluded;float gWaterOccluderY;
 bool waterTrace(vec3 p,vec3 d,float maxT,float thick,out vec2 hitUv,out float hitT){
     float prev=0.0;
     bool inside;
     vec2 uv;
-    hitUv=vec2(0.0);hitT=0.0;gWaterOccluded=false;
+    hitUv=vec2(0.0);hitT=0.0;gWaterOccluded=false;gWaterOccluderY=-1e30;
     for(int i=1;i<=14;++i){
         float s=float(i)/14.0,t=s*s*maxT;
         bool behind=waterBehind(p+d*t,uv,inside);
@@ -168,7 +169,8 @@ bool waterTrace(vec3 p,vec3 d,float maxT,float thick,out vec2 hitUv,out float hi
             }
             vec3 h=p+d*hi;
             hitUv=waterScreenUv(h,inside);
-            if(distance(h,gWaterEye)-distance(waterWorld(hitUv,waterSceneDepth(hitUv)),gWaterEye)>thick+0.05*hi){gWaterOccluded=true;return false;}
+            vec3 front=waterWorld(hitUv,waterSceneDepth(hitUv));
+            if(distance(h,gWaterEye)-distance(front,gWaterEye)>thick+0.05*hi){gWaterOccluded=true;gWaterOccluderY=front.y;return false;}
             hitT=hi;
             return inside;
         }
@@ -259,7 +261,11 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     bool traced=false;
     vec2 ruv=uv;
     vec3 rd=refract(-v,n,1.0/kWaterIor);
-    bool hit=!open&&waterTrace(p,rd,30.0*kWaterM,1.5*kWaterM,huv,ht),occluded=!open&&!hit&&gWaterOccluded;
+    // Only an occluder standing at least 1 m out of the water counts (characters, the obelisk; NONCANONICAL wave 28): the
+    // bed's own false occlusions at grazing views covered most of the shallow Sivri Ada lagoon, and the estimate's short
+    // refracted path there turned it into a white sheet of reflected sky at 10 m/s (and paler in calm and gale). Those
+    // pixels keep the normal-offset fallback, as before wave 28.
+    bool hit=!open&&waterTrace(p,rd,30.0*kWaterM,1.5*kWaterM,huv,ht),occluded=!open&&!hit&&gWaterOccluded&&gWaterOccluderY>p.y+kWaterM;
     if(hit&&waterWorld(huv,waterSceneDepth(huv)).y<p.y+2.0*kWaterU){traced=true;ruv=huv;path=ht;}
     float estDown=-1.0; // >= 0: the occluded estimate below set the bed depth
     if(!traced&&weatherActive&&occluded){
@@ -268,9 +274,8 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
         // water along the view ray, far deeper than the refracted rays of the traced pixels around: a column of deep sea
         // ran up the surf above the player. Instead the refracted ray crosses the bed grid's heightfield (waterShoreField,
         // world space, so nothing on screen hides it) to the depth and path a traced hit would see; the colour is the bed
-        // straight behind this pixel. The grid's 2-unit cells put a shallow lagoon's bed at the surface, so the path is at
-        // least the refracted ray's to the depth behind this pixel on screen (else the lagoon read as a white sheet of
-        // reflection at 10 m/s); behind characters the march is the longer one.
+        // straight behind this pixel. The grid's 2-unit cells can put a shallow bed at the surface, so the path is at least
+        // the refracted ray's to the depth behind this pixel on screen.
         float lo=0.0,hi=-1.0;
         for(int i=1;i<=12;++i){
             float tt=float(i*i)*(30.0*kWaterM/144.0);vec3 q=p+rd*tt;
@@ -329,16 +334,17 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
         // rises out of water at least ~1 m deep and steeper than ~1 in 3 throws it (the bed's depth over the distance to
         // land, both from the grid): beaches and shallow lagoons keep their surf above. Waves breaking on a wall throw foam
         // back out to sea: solid at the wall, laced further out, surging out with each incoming crest (waveRise) in moving
-        // tongues, ~1.5-4.5 m wide at ~3/4 strength at 10 m/s, ~3-10 m at full strength in a gale (an eye above the
-        // Eminönü quay sees the water only from ~3.5 m past its edge), none in still air.
+        // tongues, ~2.5-7 m wide at ~3/4 strength at 10 m/s (the width grows with the square root of the wind, so 10 m/s
+        // already reaches past the ~3.5 m of water an eye above the Eminönü quay cannot see), ~3-10 m at full strength in
+        // a gale, none in still air.
         vec3 shoreField=waterShoreField(p.xz);
         float wall=shoreField.x;
         if(wall<60.0){ // the widest band, crest and tongues included, ends before the field's 64-unit range: open water skips it
             float steep=smoothstep(0.5*kWaterM,1.5*kWaterM,shoreField.z)*smoothstep(0.2,0.45,shoreField.z/max(wall,2.0));
-            float wallBand=kWaterM*(0.6+5.0*min(ws,1.2))*(0.5+waveRise)*(1.0+0.5*waveCrest);
+            float wallBand=kWaterM*(0.6+6.0*sqrt(min(ws,1.0)))*(0.5+waveRise)*(1.0+0.5*waveCrest);
             float wallWash=waterNoiseD(p.xz/(1.6*kWaterM)+t*vec2(0.12,-0.2)).x;
             float wallR=(wall+(wallWash-0.5)*0.6*wallBand)/wallBand; // 0 at the wall .. 1 at the band's edge
-            foam=max(foam,(1.0-smoothstep(0.5,1.0,wallR))*smoothstep(0.1,0.7,ws)*steep*mix(1.0,smoothstep(0.2,0.65,e),smoothstep(0.15,0.75,wallR)));
+            foam=max(foam,(1.0-smoothstep(0.5,1.0,wallR))*smoothstep(0.08,0.65,ws)*steep*mix(1.0,smoothstep(0.2,0.65,e),smoothstep(0.15,0.75,wallR)));
         }
     }
     c=mix(c,light*0.9,foam*0.65);

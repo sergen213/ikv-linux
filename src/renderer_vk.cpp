@@ -864,8 +864,10 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
  }
 // colors: one format per fragment output location, VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED; attachments are the defined
 // colours in location order, then depth. load: continue a finished scene target (colour SHADER_READ_ONLY, read-only
-// depth) for the AfterHDR particle pass; depth_write: the continued depth stays writable (water_pass_).
-VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bool depth,bool load=false,bool depth_write=false) {
+// depth) for the AfterHDR particle pass; depth_write: the continued depth stays writable (water_pass_). continued: a load
+// pass continues this one with its framebuffer and pipelines (scene_pass_ -> water_pass_), so it takes the load pass's
+// dependencies (render pass compatibility, VUID-VkRenderPassBeginInfo-renderPass-00904).
+VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bool depth,bool load=false,bool depth_write=false,bool continued=false) {
      std::array<VkAttachmentDescription,9> attachments{};
      std::array<VkAttachmentReference,8> refs{};
      VkAttachmentReference depth_ref{};
@@ -897,7 +899,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      dependencies[0].dstStageMask=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
      dependencies[0].srcAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_TRANSFER_READ_BIT;
      dependencies[0].dstAccessMask=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-     if(load) { // Earlier scene/temporal attachment writes are blended against and depth-tested.
+     if(load||continued) { // Earlier scene/temporal attachment writes are blended against and depth-tested.
          dependencies[0].srcStageMask|=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
          dependencies[0].srcAccessMask|=VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
          dependencies[0].dstAccessMask|=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
@@ -1320,7 +1322,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          generated_[i]=image(extent_.width,extent_.height,swap_format_,display_usage|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_STORAGE_BIT);
          real_[i]=image(extent_.width,extent_.height,swap_format_,VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_SAMPLED_BIT);
      }
-     scene_pass_=render_pass(scene_colors_,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,true);
+     scene_pass_=render_pass(scene_colors_,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,true,false,false,true);
      water_pass_=render_pass(scene_colors_,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,true,true,true);
      shadow_pass_=render_pass({},VK_IMAGE_LAYOUT_UNDEFINED,true);
      const VkFormat post_colors[]{swap_format_};
