@@ -173,7 +173,7 @@ float waterBedSun(vec3 p){
 }
 bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){
 #ifdef IKV_RT
-    if(frame.params.x<1.5){colour=rtIncoming(origin,vec3(0,1,0),normalize(vec3(direction.x,max(direction.y,.02),direction.z)),normalize(frame.sun.xyz));return true;}
+    if(frame.params.x<1.5){colour=rtIncoming(origin,vec3(0,1,0),normalize(vec3(direction.x,max(direction.y,.02),direction.z)),normalize(frame.sun.xyz),0u);return true;}
 #endif
     return false;
 }
@@ -287,7 +287,9 @@ float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot
 // params.x 1: physical RT (traced sun, GI, reflections). 2: faithful RT with enhanced appearance: enhanced direct
 // shading and diffuse GI below, with a deterministic Sun ray (scenery + actors, mask 3; ocean mask 4 casts none).
 if(frame.params.x<1.5){
-RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
+// Blended draws (extra.w 1, 1.5): foliage and grass trace their GI and reflection rays opaque (rt_lighting.glsl rtDiffuseLighting).
+uint secondaryFlags=draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u;
+RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags);
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
 rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):texel.rgb);
@@ -313,7 +315,8 @@ bool fogged=frame.fogColor.w>.5&&draw.extra.z>.5&&sourceFog<=0.;
 float sunShadow=!roofed&&!fogged&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,facet,l,3u,0u):1.;
 if(!roofed) {
     vec3 smoothNormal=rtUnit(dot(worldNormal,facet)<0?-worldNormal:worldNormal);
-    vec3 diffuse=fogged?vec3(0):rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
+    vec3 diffuse=fogged?vec3(0):rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,
+        draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u); // foliage: opaque GI rays (rtDiffuseLighting)
     ambient=albedo*diffuse;
 #ifdef IKV_RT_GUIDED
     // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.

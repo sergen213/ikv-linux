@@ -233,6 +233,15 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-13 wave 28: frame rate when looking at the horizon (Vulkan RT)
+
+User report: the wave-27 performance pass did not help and the frame rate drops sharply when looking at the horizon. Wave 27 only measured the default camera.
+
+- **Measurement** (`analysis/porting-wave28/Horizon/`, `bench.py`/`matrix.sh`/`variants.sh`): the user's launcher settings (Vulkan, RT physical, FSR3 balanced, frame generation, view distance 7, 2743×1543), plus Vulkan RT faithful, Vulkan enhanced raster and GL enhanced. Sivri Ada beach and the Eminönü park (`--at 386,935`), camera pitch 0.49 (the user's) vs 0.08 (horizon), GPU timing medians, one run at a time under the bench lock. Raster and CPU do not degrade (GL ≤ 2.5 ms, Vulkan raster ≤ 6.7 ms, CPU ≤ 2.3 ms). Only RT does: scene pass at Sivri Ada 6.3 → 18.5 ms (faithful) and 6.6 → 16.0 ms (physical, no FG); in the park 19.1 → 32.6 ms and 12.2 → 19.4 ms.
+- **Root cause** (shader-variant attribution, horizon): diffuse GI rays are most of it (no GI: park faithful 32.6 → 8.6 ms). Ray length is not the cause (a 2000-unit ray cap changed nothing). GI started from blended alpha-tested draws (foliage, grass) costs 17 ms of the park's 32.6. Those rays begin inside a canopy or grass clump and run the alpha-test any-hit (`rtAlphaOpaque`) on every leaf and blade they pass. The 0.08 pitch brings near grass and stacks of distant canopies into the view, and blended foliage has no depth writes, so every layer is shaded.
+- **Fix (NONCANONICAL, `rt_lighting.glsl`/`lighting.glsl`):** GI and glossy-reflection rays started from blended draws (`draw.extra.w` 1/1.5) use `gl_RayFlagsOpaqueEXT`, so nearby leaf quads occlude as whole quads. The Sun ray keeps the alpha test, so leaf-shaped shadows are unchanged. All rays started from opaque surfaces are unchanged. Side-by-side grass and canopy crops match: image difference is at the run-to-run noise floor.
+- **Considered, not shipped:** a depth prepass for blended draws saved another 1.3–6.6 ms. It also changed tree trunks visibly: the inner faces that blended trunks show today, depending on triangle order, disappear. An exact form needs a per-pixel draw-order owner buffer; that is left for a later wave.
+
 ## 2026-11-13 wave 28 (surfaces): fewer puddles, footsteps in puddles and snow
 
 User request: puddles were far too widespread and walking through them caused nothing; characters should leave footprints in snow cover. NONCANONICAL, enhanced appearance only; inactive weather, original appearance and roofed zones keep the exact pre-wave paths.
