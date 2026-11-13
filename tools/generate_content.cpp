@@ -88,6 +88,40 @@ const std::string& get(const Attributes& a, const char* key) { static const std:
 double number(const Attributes& a, const char* key, double fallback = 0) { const auto& s = get(a, key); try { return s.empty() ? fallback : std::stod(s); } catch (...) { return fallback; } }
 int integer(const Attributes& a, const char* key, int fallback = 0) { return int(std::lround(number(a, key, fallback))); }
 int clamp(double v, int lo, int hi) { return std::clamp(int(std::lround(v)), lo, hi); }
+// NONCANONICAL wave 29 idle walk speed (scene units/s) of the actor attached to `scene` (its only actor): the ground speed at
+// which its walk clip (first animation.dat state-2 clip, as the client's npc_gait) keeps the feet planted. The clip plays at
+// the authored 30 fps through the production actor path and every limb end (porting-wave1/Motion/stride_probe.cpp: Foot,
+// Toe0, Hand nodes whose lowest point is within 10 cm of the actor's floor) counts while within 5 cm of its own lowest point.
+// The stride is used when it lies within [0.3, 1.5] x the clip's forwardspeed (gliding ghosts, crawling snakes and flyers
+// have no foot contact); otherwise the forwardspeed. Capped at the PC Walk_* forwardspeed 7.5 u/s (Fly/Crawl clips are
+// authored at 18-30 u/s). No walk clip: nullopt (the NPC stands).
+std::optional<double> walk_stride(ikv::Scene& scene) {
+    if (scene.actors.empty() || scene.actors[0].library >= scene.actor_tables.libraries.size()) return std::nullopt;
+    const auto& clips = scene.actor_tables.libraries[scene.actors[0].library].clips;
+    const auto clip = std::find_if(clips.begin(), clips.end(), [](const ikv::ActorClip& c) { return c.state == 2; });
+    if (clip == clips.end()) return std::nullopt;
+    const double forward = clip->forward_speed;
+    ikv::set_actor_action(scene, 1, clip->id, 0, true);
+    std::map<std::string, std::vector<std::array<float, 3>>> path; // limb end -> world position per frame
+    for (int frame = 0; frame <= 40; ++frame) {
+        ikv::update_scene(scene, float(frame) / 30.f);
+        for (const auto& n : scene.nodes)
+            if ((n.name.find("Foot") != std::string::npos || n.name.find("Toe0") != std::string::npos || n.name.find("Hand") != std::string::npos) &&
+                n.name.find("Footsteps") == std::string::npos && n.name.find("Nub") == std::string::npos)
+                path[n.name].push_back({n.world.matrix[12], n.world.matrix[13], n.world.matrix[14]});
+    }
+    float floor = 1e9f; for (const auto& [name, p] : path) for (const auto& q : p) floor = std::min(floor, q[1]);
+    double distance = 0; int steps = 0;
+    for (const auto& [name, p] : path) {
+        float low = 1e9f; for (const auto& q : p) low = std::min(low, q[1]);
+        if (low > floor + .10f) continue;
+        for (size_t f = 1; f < p.size(); ++f)
+            if (p[f][1] < low + .05f && p[f - 1][1] < low + .05f) { distance += std::hypot(p[f][0] - p[f - 1][0], p[f][2] - p[f - 1][2]); ++steps; }
+    }
+    const double stride = steps ? distance * 30 / steps : 0;
+    const double speed = stride >= .3 * forward && stride <= 1.5 * forward ? stride : forward;
+    return speed > 0 ? std::optional{std::min(speed, 7.5)} : std::nullopt;
+}
 
 struct Grid {
     std::string name; unsigned registry = 0; ikv::Zone zone; std::vector<int32_t> label; std::vector<size_t> sizes;
@@ -160,39 +194,60 @@ int main(int argc, char** argv) try {
     // ---- <loc> records: zone, centre and door footprint ----
     std::map<unsigned, Attributes> locs; Ordered extract_locs = Ordered::array();
     std::map<unsigned, Trigger> triggers_by_uid;
+    // Footprint: the smallest radius <= the original arearadius (20-50 units, an interaction distance that overlaps
+    // neighbouring crystals) reaching walkable support. The door entity stands there; arrivals and NPCs keep clear of it.
+    const auto footprint = [](Trigger& t, Grid* g) {
+        for (double range = std::min(t.radius, 4.0); range <= t.radius + 1e-9; range += 1.5) {
+            bool reachable = false;
+            for (int y = cell(t.y - range); y <= cell(t.y + range) && !reachable; ++y)
+                for (int x = cell(t.x - range); x <= cell(t.x + range) && !reachable; ++x)
+                    reachable = g->block(x, y, 1) && dist(units(x), units(y), t.x, t.y) <= range;
+            if (reachable) { t.grid = g; t.range = range; return true; }
+        }
+        return false;
+    };
+    struct LocRow { unsigned uid; Ordered entry; std::optional<Trigger> t; bool named = false; };
+    std::vector<LocRow> loc_rows;
     for (const auto& r : classes) {
         if (r.tag != "loc") continue;
         const unsigned uid = unsigned(integer(r.attributes, "uid")); locs[uid] = r.attributes;
-        Ordered entry = {{"source_uid", uid}, {"name", get(r.attributes, "name")}, {"locationname", get(r.attributes, "locationname")},
+        LocRow row{uid, {{"source_uid", uid}, {"name", get(r.attributes, "name")}, {"locationname", get(r.attributes, "locationname")},
                          {"locationtypename", get(r.attributes, "locationtypename")}, {"gamezonename", get(r.attributes, "gamezonename")},
-                         {"requiredquestid", integer(r.attributes, "requiredquestid", -1)}, {"gmonly", integer(r.attributes, "gmonly")}};
+                         {"requiredquestid", integer(r.attributes, "requiredquestid", -1)}, {"gmonly", integer(r.attributes, "gmonly")}}, std::nullopt};
         std::istringstream center(get(r.attributes, "areacenter")); std::string part; std::vector<double> c;
         while (std::getline(center, part, ',')) c.push_back(std::stod(part));
         if (c.size() >= 3) {
             Trigger t; t.uid = uid; t.x = c[0]; t.y = c[2]; t.radius = number(r.attributes, "arearadius", 5); t.quest = integer(r.attributes, "requiredquestid", -1);
-            // Zone: gamezonename first, otherwise the grid that has walkable support inside the original area radius.
+            // Zone: gamezonename first (a zone's sub-grids follow it: "Karakoy" locs inside Karaköy İç Mekan).
             auto zone_name = lower(get(r.attributes, "gamezonename"));
             for (const auto& [override_uid, override_zone] : loc_zone_overrides) if (override_uid == uid) zone_name = override_zone;
-            // A zone's sub-grids follow it ("Karakoy" locs inside Karaköy İç Mekan), then every other grid.
-            std::vector<Grid*> candidates; if (grids.contains(zone_name)) candidates.push_back(&grids.at(zone_name));
-            for (auto& [name, g] : grids) if (!zone_name.empty() && name != zone_name && name.starts_with(zone_name)) candidates.push_back(&g);
-            for (auto& [name, g] : grids) if (std::find(candidates.begin(), candidates.end(), &g) == candidates.end()) candidates.push_back(&g);
-            for (auto* g : candidates) {
-                // Footprint: the smallest radius <= the original arearadius (20-50 units, an interaction distance that overlaps
-                // neighbouring crystals) reaching walkable support. The door entity stands there; arrivals and NPCs keep clear of it.
-                for (double range = std::min(t.radius, 4.0); range <= t.radius + 1e-9; range += 1.5) {
-                    bool reachable = false;
-                    for (int y = cell(t.y - range); y <= cell(t.y + range) && !reachable; ++y)
-                        for (int x = cell(t.x - range); x <= cell(t.x + range) && !reachable; ++x)
-                            reachable = g->block(x, y, 1) && dist(units(x), units(y), t.x, t.y) <= range;
-                    if (reachable) { t.grid = g; t.range = range; break; }
-                }
-                if (t.grid) break;
-            }
-            entry["areacenter"] = {c[0], c[2]}; entry["arearadius"] = t.radius;
-            if (t.grid) { entry["zone"] = t.grid->name; entry["at"] = {int32_t(std::lround(t.x * 1000)), int32_t(std::lround(t.y * 1000))}; triggers_by_uid[uid] = t; }
+            if (grids.contains(zone_name)) row.named = footprint(t, &grids.at(zone_name));
+            for (auto& [name, g] : grids) if (!t.grid && !zone_name.empty() && name != zone_name && name.starts_with(zone_name)) row.named = footprint(t, &g);
+            row.entry["areacenter"] = {c[0], c[2]}; row.entry["arearadius"] = t.radius;
+            row.t = t;
         }
-        extract_locs.push_back(std::move(entry));
+        loc_rows.push_back(std::move(row));
+    }
+    for (auto& row : loc_rows) {
+        if (!row.t || row.t->grid) continue;
+        // No gamezonename, or no support there. NONCANONICAL wave 29: first the zones of locs placed by their gamezonename within
+        // 10 units (the same room: Oyuncak At beside the Sığınaklar Piano, the Gizli Havalandırma and Çemberlitaş Kapı on the
+        // Çemberlitaş vent pocket dummies), nearest first; then every grid with walkable support inside the original area radius
+        // (before wave 29 only this: the alphabetically first grid with support, which put those props on Sivri Ada).
+        std::vector<std::pair<double, Grid*>> near;
+        for (const auto& other : loc_rows)
+            if (other.named && dist(other.t->x, other.t->y, row.t->x, row.t->y) <= 10) near.push_back({dist(other.t->x, other.t->y, row.t->x, row.t->y), other.t->grid});
+        std::sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        std::vector<Grid*> candidates; for (const auto& [d, g] : near) if (std::find(candidates.begin(), candidates.end(), g) == candidates.end()) candidates.push_back(g);
+        for (auto& [name, g] : grids) if (std::find(candidates.begin(), candidates.end(), &g) == candidates.end()) candidates.push_back(&g);
+        for (auto* g : candidates) if (footprint(*row.t, g)) break;
+    }
+    for (auto& row : loc_rows) {
+        if (row.t && row.t->grid) {
+            const auto& t = *row.t;
+            row.entry["zone"] = t.grid->name; row.entry["at"] = {int32_t(std::lround(t.x * 1000)), int32_t(std::lround(t.y * 1000))}; triggers_by_uid[row.uid] = t;
+        }
+        extract_locs.push_back(std::move(row.entry));
     }
     std::vector<Trigger> triggers; std::vector<std::pair<unsigned, unsigned>> edges;
     std::vector<Pair> pairs(std::begin(loc_pairs), std::end(loc_pairs)); for (const Pair& p : appended_pairs) pairs.push_back(p); // GCC 16 -O3 -Warray-bounds false positive on range insert
@@ -461,12 +516,11 @@ int main(int argc, char** argv) try {
     };
 
     // ---- NPC and monster definitions ----
-    std::map<std::string, int> clip_speed, walk_speed; // animation.dat cliplist classid -> run (state 1) else walk (state 2) forwardspeed; walk only
+    std::map<std::string, int> clip_speed; // animation.dat cliplist classid -> run (state 1) else walk (state 2) forwardspeed
     for (const auto& list : animation) {
         double run = 0, walk = 0;
         for (const auto& clip : list.children) { const auto state = get(clip.attributes, "state"); if (state == "1" && !run) run = number(clip.attributes, "forwardspeed"); if (state == "2" && !walk) walk = number(clip.attributes, "forwardspeed"); }
         if (run || walk) clip_speed.emplace(get(list.attributes, "classid"), clamp((run ? run : walk) * 50, 1, 100000));
-        if (walk) walk_speed.emplace(get(list.attributes, "classid"), clamp(walk * 50, 1, 100000));
     }
     std::map<unsigned, Attributes> actors; Ordered extract_actors = Ordered::array();
     // classes.dat monster combat stats in original units (World land_npc / NPC bites): attack/defense ratings, dmgmin-dmgmax,
@@ -517,16 +571,31 @@ int main(int argc, char** argv) try {
     };
     // Models the client cannot assemble (original biped/binding mismatches) are left out of the population.
     ikv::Scene probe; std::map<unsigned, bool> assembles, dresses; // dresses: actor uid -> its rhweaponid/lhweaponid dress
+    // NONCANONICAL wave 29: an idle stroll (classes.dat idlewalktend, World::idle_walk) moves at the speed its walk clip shows
+    // (walk_gait, wire units per tick) instead of the animation.dat forwardspeed alone, which often disagrees with the clip
+    // (Fare_Walk forwardspeed 6.0 but its feet plant at 2.3 u/s, porting-wave1/Motion).
+    std::map<unsigned, std::optional<int>> gaits;
+    const auto walk_gait = [&](unsigned uid) -> std::optional<int> {
+        if (const auto found = gaits.find(uid); found != gaits.end()) return found->second;
+        auto& gait = gaits[uid];
+        ikv::Scene scratch;
+        try { ikv::attach_source_npc(scratch, base, uid, 1); } catch (const std::exception&) { return gait; }
+        if (const auto stride = walk_stride(scratch)) gait = clamp(*stride * 50, 1, 100000);
+        return gait;
+    };
     // classes.dat idlewalktend (server field, see World::idle_walk) replaces the NONCANONICAL patrol wherever the record has
-    // one (0 = stands); walkers move at their animation.dat walk speed.
+    // one (0 = stands); spawn-group monsters without the field stroll with idlewalktend 50 (set by the spawn groups below).
     const auto add_npc = [&](Ordered n, const std::string& zone, std::pair<int, int> at) {
         n["id"] = first_npc_id + uint32_t(npcs.size()); n["zone"] = zone; n["x"] = wire(at.first); n["y"] = wire(at.second);
         if (!n.contains("quests")) n["quests"] = Ordered::array();
         if (!n.contains("shop")) n["shop"] = Ordered::array();
-        if (const auto a = n.contains("source_uid") ? actors.find(n.at("source_uid").get<unsigned>()) : actors.end(); a != actors.end() && a->second.contains("idlewalktend")) {
-            const int tend = clamp(number(a->second, "idlewalktend"), 0, 100); const auto walk = walk_speed.find(get(a->second, "classid"));
-            n["idlewalktend"] = walk != walk_speed.end() ? tend : 0; // no walk clip: stands
-            if (walk != walk_speed.end() && tend) n["walk_speed"] = walk->second;
+        const auto record = n.contains("source_uid") ? actors.find(n.at("source_uid").get<unsigned>()) : actors.end();
+        const bool listed = record != actors.end() && record->second.contains("idlewalktend");
+        if (listed || n.contains("idlewalktend")) {
+            const int tend = listed ? clamp(number(record->second, "idlewalktend"), 0, 100) : n.at("idlewalktend").get<int>();
+            const auto gait = record != actors.end() ? walk_gait(record->first) : std::nullopt;
+            n["idlewalktend"] = gait ? tend : 0; // no walk clip: stands
+            if (gait && tend) n["walk_speed"] = std::min(*gait, n.value("speed", *gait)); else n.erase("walk_speed");
             if (n.contains("patrol")) n["patrol"] = Ordered::array();
         }
         Ordered ordered = {{"id", n.at("id")}}; ordered.update(n);
@@ -633,16 +702,6 @@ int main(int argc, char** argv) try {
         if (!at) throw std::runtime_error("no free walkable placement for NPC " + std::to_string(t.uid) + " in " + zone);
         add_npc(std::move(n), zone, *at);
     }
-    // Short straight patrol (every sample keeps 3x3 support, so the world's segment trace stays on support).
-    const auto patrol_from = [](const Grid& g, std::pair<int, int> at, int member) {
-        Ordered patrol = Ordered::array();
-        for (int direction = 0; direction < 8 && patrol.empty(); ++direction) {
-            const double d = (45.0 * direction + 90 * member) * M_PI / 180; bool clear = true;
-            for (double s = 0; s <= 6 && clear; s += 0.5) clear = g.block(cell(units(at.first) + s * std::cos(d)), cell(units(at.second) + s * std::sin(d)), 1);
-            if (clear) patrol = {{wire(at.first), wire(at.second)}, {wire(cell(units(at.first) + 6 * std::cos(d))), wire(cell(units(at.second) + 6 * std::sin(d)))}};
-        }
-        return patrol;
-    };
     // ---- monster spawn groups (placements.json "spawns", replacing the former 3x3 level bands): family uid, zone, centre, radius
     // (units), count, respawn (seconds) and provenance. Members spread over the disc on a Vogel spiral, each on the free cell
     // nearest its spiral point (5 units apart, 10 units off door footprints).
@@ -657,7 +716,10 @@ int main(int argc, char** argv) try {
             const auto at = place_at(zone, {cx + r * std::cos(angle), cy + r * std::sin(angle)}, radius + 10, 5, 10);
             if (!at) continue;
             Ordered n = enemy(actors.at(uid)); n["loot"] = Ordered::array(); n["drops"] = drops(n.at("level").get<int>());
-            n["respawn"] = std::clamp(group.at("respawn").get<int>() * 20, 20, 72000); n["patrol"] = patrol_from(grids.at(zone), *at, i);
+            // NONCANONICAL wave 29: members stroll around their spot (World::idle_walk at walk_gait, idlewalktend 50 = the most
+            // common classes.dat value) unless their record sets idlewalktend. The former 6-unit two-point patrol walked at the run
+            // speed without a pause, so rats paced back and forth about once a second.
+            n["respawn"] = std::clamp(group.at("respawn").get<int>() * 20, 20, 72000); n["patrol"] = Ordered::array(); n["idlewalktend"] = 50;
             // "rescue": trapped quest NPCs (Kurtarıcımız: Biçare Folklor Cini, classes.dat interactable, attack 0) are freed by Kullan
             // (World::quest_use), never fought; a freed one leaves until its respawn. NONCANONICAL dialogue.
             if (group.contains("rescue")) n = {{"source_uid", uid}, {"source_class", n.at("source_class")}, {"name", n.at("name")}, {"hp", 1}, {"kind", "prop"},
@@ -1207,10 +1269,12 @@ int main(int argc, char** argv) try {
     config["provenance"] = "NONCANONICAL playable world generated by tools/generate_content.cpp. Original classes.dat: NPC/monster names, model UIDs, "
         "levels, combat stats (scaled by 100/383, VOD level-2 Enerji 383 = native 100 HP), weapon/armour stats, slots, class/sex limits, icons, prices, "
         "durability, rarity and fixed prefix1/prefix2; prefixes.dat potion names/amounts and Efsun prefixes (attribute ids per client 004338f0/00402f60); "
-        "animation.dat run/walk speeds; classes.dat idlewalktend (idle walk percent; replaces the patrol where a record has it); <loc> door/crystal models, "
+        "animation.dat run/walk speeds and walk clips; classes.dat idlewalktend (idle walk percent); <loc> door/crystal models, "
         "centres, requiredquestid and gmonly. Zone registry/support grids and instance rows are original. "
-        "NONCANONICAL: loc pairings (inferred from names), door footprints, per-group instances, NPC/monster placement, shop stock, drop tables, potion prices, dialogue, "
-        "quest and respawn timers, idle walk timing/radius. Distances are wire units (1000 = one source scene unit; a source actor is ~7.5 units tall).";
+        "NONCANONICAL: loc pairings (inferred from names), door footprints, per-group instances, NPC/monster placement, the zone of <loc> records "
+        "without a usable gamezonename (co-located locs), shop stock, drop tables, potion prices, dialogue, quest and respawn timers, idle walk "
+        "timing/radius, idlewalktend 50 for spawn-group monsters without one, the idle walk speed (planted-foot speed of the walk clip, at most 7.5 u/s). "
+        "Distances are wire units (1000 = one source scene unit; a source actor is ~7.5 units tall).";
     config["defaults"] = std::move(defaults); config["zones"] = std::move(zones); config["items"] = std::move(used); config["prefixes"] = std::move(used_prefixes);
     config["quests"] = std::move(quests); config["npcs"] = std::move(npcs); config["recipes"] = std::move(recipes);
 

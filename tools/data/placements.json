@@ -5,7 +5,7 @@
     "1001": {"zone": "eminonu", "map": [771, 518], "source": "VOD 52:40/34:20 minimap (771,518)-(772,519): Agah Efendi by the şadırvan in the Yeni Cami courtyard; OFF-R 'bu caminin avlusunda'"},
     "1038": {"zone": "eminonu", "map": [786, 522], "source": "W-AGL lv7 Umut 'Agah Efendi'nin yanındaki çocuk'; VOD 02:40 Umut (1) in the courtyard"},
     "1039": {"zone": "eminonu", "map": [640, 465], "source": "VOD 41:50/44:45 minimap (639-642,463-468) Jandarma Ali; W-AGL lv1 'Mısır Çarşısı önünde bulunan Türk Bayrağı'nın altında'"},
-    "1037": {"zone": "eminonu", "map": [628, 474], "source": "Bayrak (flag): W-AGL lv1 'Mısır Çarşısı önünde bulunan Türk Bayrağı' beside Jandarma Ali (VOD 41:50 tall pole); spot NONCANONICAL"},
+    "1037": {"zone": "eminonu", "map": [640, 465], "source": "Bayrak (flag): W-AGL lv1 Jandarma Ali 'Mısır Çarşısı önünde bulunan Türk Bayrağı'nın altında'; VOD 08:55/17:15 the tall white pole stands right beside Ali at the tip of the tree island. Spot = Ali's readout; the generator keeps it 4 units off him (wave 29: was (628,474), 18 units away from Ali, NONCANONICAL)"},
     "1012": {"zone": "eminonu", "map": [1005, 740], "source": "VOD 18:30/35:35 minimap ≈(1000-1010,739-740) Bankacı at the TÜRKİYE İŞ BANKASI portico; zone00 'Bankacı' POI"},
     "1000": {"zone": "eminonu", "map": [985, 728], "source": "OFF-R İş Bankası 'guarded by Jandarma'; VOD 18:30 guards on the bank street; spot NONCANONICAL"},
     "1040": {"zone": "eminonu", "map": [1030, 760], "source": "OFF-R İş Bankası 'guarded by Jandarma' (Jandarma Bekçi); VOD 18:30/37:40 bank street guards; spot NONCANONICAL"},
