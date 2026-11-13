@@ -16,30 +16,37 @@
 namespace ikv {
 namespace {
 // Independently written GLSL. Original shader evidence is documented in GRAPHICS_ROADMAP.
-// NONCANONICAL wave 28 (enhanced weather): the wind sea, a copy of Vulkan frame.glsl oceanWindSwell (keep identical):
-// height (units) and world x/z gradient of up to three downwind crests travelling with the wind phase; zero while
-// inactive. The scene vertex shader displaces the (subdivided) ocean by the two longest, water.glsl shades all three.
+// NONCANONICAL wave 28 (enhanced weather): the wind sea's Gerstner waves, a copy of Vulkan frame.glsl oceanWindWaves (keep
+// identical): displacement, world x/z height gradient and crest compression; zero while inactive. The scene vertex shader
+// displaces the (subdivided) ocean by the three longest, water.glsl shades all five.
 #define IKV_GL_OCEAN_WIND R"GLSL(
-vec3 oceanWindSwell(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves){
+vec3 oceanWindWaves(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves,out vec2 slope,out float crest){
+    slope=vec2(0.0);crest=0.0;
     if(misc.w<=0.5||wind.z<=0.0)return vec3(0.0);
-    float s=clamp(wind.z/25.0,0.0,1.0),a=4.5*s*s*(1.0+0.5*misc.y),d=distance(eye.xz,xz);
+    float s=clamp(wind.z/25.0,0.0,1.0),g=1.0+0.5*misc.y,a=7.0*s*s*g,q=0.85*smoothstep(0.1,0.7,s*g),d=distance(eye.xz,xz);
     vec2 w=normalize(wind.xy+vec2(1e-6,0.0));
-    vec3 r=vec3(0.0);
+    vec3 o=vec3(0.0);vec2 grad=vec2(0.0);float j=0.0;
     for(int i=0;i<waves;++i){
-        float k=float(i),lambda=160.0/(1.0+0.55*k),turn=k==1.0?0.35:k==2.0?-0.45:0.0;
+        float k=float(i);
+        float lambda=k==0.0?240.0:k==1.0?170.0:k==2.0?120.0:k==3.0?85.0:60.0;
+        float turn=k==0.0?0.0:k==1.0?0.42:k==2.0?-0.36:k==3.0?0.78:-0.66;
+        float amp=a*(k==0.0?1.0:k==1.0?0.62:k==2.0?0.4:k==3.0?0.26:0.17)*(1.0-smoothstep(4.0*lambda,8.0*lambda,d));
+        float cycles=k==0.0?7.0:k==1.0?9.0:k==2.0?11.0:k==3.0?13.0:16.0;
         vec2 dir=mat2(cos(turn),sin(turn),-sin(turn),cos(turn))*w;
-        float amp=a*(k==0.0?1.0:k==1.0?0.55:0.35)*(1.0-smoothstep(5.0*lambda,12.0*lambda,d));
-        float x=6.28318530718*(dot(xz,dir)/lambda-wind.w*(8.0+3.0*k)/1024.0);
-        float e=exp(sin(x)-1.0);
-        r+=amp*vec3(e-0.47,e*cos(x)*(6.28318530718/lambda)*dir);
+        float kw=6.28318530718/lambda,x=kw*dot(xz,dir)-6.28318530718*wind.w*cycles/1024.0;
+        float qa=min(q/5.0,2.5*kw*amp);
+        float c=cos(x),sn=sin(x);
+        o+=vec3(qa/kw*dir.x*c,amp*sn,qa/kw*dir.y*c);
+        grad+=dir*(kw*amp*c);j+=qa*sn;
     }
-    return r;
+    slope=grad/max(1.0-j,0.25);crest=clamp(j/max(q,1e-3),0.0,1.0);
+    return o;
 }
 )GLSL"
 // Independently expressed v_ocean.vsh EXPP fraction and authored polynomial (Vulkan frame.glsl sourceOceanPosition):
 // scene vertex shader; needs uniforms camera_position and source_time.
 #define IKV_GL_SOURCE_OCEAN R"GLSL(
-vec4 source_ocean_position(vec4 world_position) {
+vec4 source_ocean_position(vec4 world_position,vec2 lightmap) {
     float phase=fract((world_position.x/32.0+world_position.y/13.0+source_time.y)*0.15915494-0.25);
     vec3 squared=vec3(0.0,0.5,1.0)-phase;
     squared*=squared;
@@ -51,9 +58,9 @@ vec4 source_ocean_position(vec4 world_position) {
     float first=phase<0.25?1.0:0.0,third=phase>=0.75?1.0:0.0;
     float wave=-dot(polynomial,vec3(first,1.0-first-third,third));
     // NONCANONICAL wave 27/28 (enhanced weather, Vulkan frame.glsl): the swell eases to x0.6 in still air and grows to
-    // ~x2.8 in a gusting gale; the wind sea (oceanWindSwell, IKV_GL_OCEAN_WIND, two longest crests) rises over it.
+    // ~x2.8 in a gusting gale; the wind sea (oceanWindWaves, three longest waves) rises over it, scaled by the shore factor.
     if(abs(camera_position.y-world_position.y)<100.0)world_position.y+=wave*0.5*(weatherOn(weather_misc)?0.6+2.0*weatherWindStrength(weather_wind,weather_misc):1.0);
-    if(weatherOn(weather_misc))world_position.y+=oceanWindSwell(world_position.xz,camera_position,weather_wind,weather_misc,2).x;
+    if(weatherOn(weather_misc)){vec2 slope;float crest;world_position.xyz+=(lightmap.x<-0.5?lightmap.y:1.0)*oceanWindWaves(world_position.xz,camera_position,weather_wind,weather_misc,3,slope,crest);}
     return world_position;
 }
 )GLSL"
@@ -108,7 +115,7 @@ uniform vec4 weather_sway;
 void main() {
     if(source_ocean) {
         vec4 world_position=object_matrix*vec4(position,1.0);
-        world_position=source_ocean_position(world_position);
+        world_position=source_ocean_position(world_position,uv_lightmap); // NONCANONICAL wave 28: uv_lightmap carries the shore factor
         gl_Position=view_projection*world_position;
         fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position; // enhanced water_surface
         texcoord=uv+source_scroll.xy;
@@ -704,7 +711,8 @@ class GlRenderer final : public Renderer {
         std::vector<GLuint> textures;
         std::unordered_map<std::string,GLuint> texture_names;
         std::vector<std::uint8_t> material_usage,mesh_plan; // mesh_plan 0: dormant/proxy, 1: referenced no-color, 2: upload
-        std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced also uploads these subdivided (renderer.hpp subdivide_ocean_mesh)
+        std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced also uploads these subdivided (renderer.hpp ocean_wave_mesh)
+        std::optional<OceanBed> ocean_bed; // their shore factors' bed grid, built on the first wave mesh upload
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -1292,7 +1300,8 @@ private:
         };
         // NONCANONICAL wave 28: the subdivided ocean copy first, so the source mesh's VAO stays bound for the skin stream.
         if(index<set.ocean_meshes.size()&&set.ocean_meshes[index]) {
-            const Mesh fine=subdivide_ocean_mesh(source);
+            if(!set.ocean_bed)set.ocean_bed=ocean_bed(scene);
+            const Mesh fine=ocean_wave_mesh(scene,index,*set.ocean_bed);
             static_buffers(gpu.wave_vao,gpu.wave_vertices,gpu.wave_indices,fine);gpu.wave_count=static_cast<GLsizei>(fine.indices.size());
         }
         static_buffers(gpu.vao,gpu.vertices,gpu.indices,source);
@@ -1353,7 +1362,7 @@ private:
         set.materials.assign(scene.materials.size(),GpuMaterial{});set.next_material=0;
         set.meshes.resize(scene.meshes.size());
         set.mesh_plan.assign(scene.meshes.size(),0);set.next_mesh=0;
-        set.ocean_meshes=options_.original_appearance?std::vector<bool>(scene.meshes.size(),false):ocean_wave_meshes(scene);
+        set.ocean_meshes=options_.original_appearance?std::vector<bool>(scene.meshes.size(),false):ocean_wave_meshes(scene);set.ocean_bed.reset();
         if(scene.instances.empty()) {
             for(std::uint32_t i=0;i<scene.meshes.size();++i) {
                 if((i&1023U)==0)progress();

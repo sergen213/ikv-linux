@@ -50,30 +50,40 @@ vec3 enhancedAmbientScale(){return (frame.sun.w>.5?pow(max(frame.ambient.rgb*(25
 float frameShadowSoftness(){return weatherShadowSoftness(frame.weather,frame.weatherMisc);}
 // frame.ambient.w: 1 in a roofed zone (SceneLighting::roofed): enhanced keeps the original baked light, no shadow-mapped sun.
 bool sceneRoofed(){return frame.ambient.w>.5;}
-// NONCANONICAL wave 28 (enhanced weather; renderer_gl.cpp IKV_GL_OCEAN_WIND keeps a copy): the wind sea over the source
-// swell, displacing the ocean (the renderers upload it subdivided to <= 32-unit edges, renderer.hpp subdivide_ocean_mesh)
-// and shading it (water.glsl). Three peaked crests (40, 26 and 19 m) run downwind, their height rising with the square of
-// the wind (the longest about 1 m crest to trough in a 22 m/s gusting gale, ~20 cm at 10 m/s, none in still air). They
-// travel with the wind phase (wind.w, wrapping at 1024 m: 8, 11 and 14 crests per wrap, so no jump) and fade with eye
-// distance. waves: how many (the vertices take the two the subdivided mesh resolves, the shading all three). Returns
-// height (units) and its world x/z gradient; 0 inactive.
-vec3 oceanWindSwell(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves){
+// NONCANONICAL wave 28 (enhanced weather; renderer_gl.cpp IKV_GL_OCEAN_WIND keeps a copy): the wind sea, summed Gerstner
+// waves spread around the wind (60, 42, 30, 21 and 15 m) that displace the subdivided ocean (renderer.hpp
+// ocean_wave_mesh) and shade it (water.glsl). Height grows with the square of the wind: in a 22 m/s gusting gale the
+// longest is ~1.9 m high (crest to trough ~3.8 m, the sum higher), at 10 m/s ~0.3 m, in still air nothing. Steepness rises
+// with the wind, pulling the water toward the crests (sharp crests, flat troughs). The waves travel downwind with the
+// wind phase (wind.w, wrapping at 1024 m: 7, 9, 11, 13 and 16 crests per wrap, so no jump) and fade out with eye distance
+// by 8 wavelengths (renderer.hpp kOceanWaveRange). waves: how many (vertices the 3 longest the mesh resolves, shading
+// all 5). Returns the displacement (units); slope: the surface's world x/z height gradient; crest: 0 flat .. 1 the water
+// compressed into a breaking crest (Gerstner Jacobian over its maximum). All zero while inactive.
+vec3 oceanWindWaves(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves,out vec2 slope,out float crest){
+    slope=vec2(0);crest=0.;
     if(misc.w<=.5||wind.z<=0.)return vec3(0);
-    float s=clamp(wind.z/25.,0.,1.),a=4.5*s*s*(1.+.5*misc.y),d=distance(eye.xz,xz);
+    float s=clamp(wind.z/25.,0.,1.),g=1.+.5*misc.y,a=7.*s*s*g,q=.85*smoothstep(.1,.7,s*g),d=distance(eye.xz,xz);
     vec2 w=normalize(wind.xy+vec2(1e-6,0));
-    vec3 r=vec3(0);
+    vec3 o=vec3(0);vec2 grad=vec2(0);float j=0.;
     for(int i=0;i<waves;++i){
-        float k=float(i),lambda=160./(1.+.55*k),turn=k==1.?.35:k==2.?-.45:0.;
+        float k=float(i);
+        float lambda=k==0.?240.:k==1.?170.:k==2.?120.:k==3.?85.:60.;
+        float turn=k==0.?0.:k==1.?.42:k==2.?-.36:k==3.?.78:-.66;
+        float amp=a*(k==0.?1.:k==1.?.62:k==2.?.4:k==3.?.26:.17)*(1.-smoothstep(4.*lambda,8.*lambda,d));
+        float cycles=k==0.?7.:k==1.?9.:k==2.?11.:k==3.?13.:16.;
         vec2 dir=mat2(cos(turn),sin(turn),-sin(turn),cos(turn))*w;
-        float amp=a*(k==0.?1.:k==1.?.55:.35)*(1.-smoothstep(5.*lambda,12.*lambda,d));
-        float x=6.28318530718*(dot(xz,dir)/lambda-wind.w*(8.+3.*k)/1024.);
-        float e=exp(sin(x)-1.); // afl_ext's peaked crest shape (water.glsl); .47 its mean, so the sea level stays
-        r+=amp*vec3(e-.47,e*cos(x)*(6.28318530718/lambda)*dir);
+        float kw=6.28318530718/lambda,x=kw*dot(xz,dir)-6.28318530718*wind.w*cycles/1024.;
+        float qa=min(q/5.,2.5*kw*amp); // steepness x k x amplitude, summed < 1: no looping crests
+        float c=cos(x),sn=sin(x);
+        o+=vec3(qa/kw*dir.x*c,amp*sn,qa/kw*dir.y*c);
+        grad+=dir*(kw*amp*c);j+=qa*sn;
     }
-    return r;
+    slope=grad/max(1.-j,.25);crest=clamp(j/max(q,1e-3),0.,1.);
+    return o;
 }
-// Independently expressed v_ocean.vsh EXPP fraction and authored polynomial.
-vec4 sourceOceanPosition(vec4 world) {
+// Independently expressed v_ocean.vsh EXPP fraction and authored polynomial. lightmap: the vertex's second UV; on the
+// subdivided wave copy (x = -1) y is its shore factor (renderer.hpp ocean_wave_mesh), elsewhere the wind sea is full.
+vec4 sourceOceanPosition(vec4 world,vec2 lightmap) {
     float phase=fract((world.x/32+world.y/13+frame.sourceTime.y)*.15915494-.25);
     vec3 q=vec3(0,.5,1)-phase;
     q*=q;
@@ -86,9 +96,9 @@ vec4 sourceOceanPosition(vec4 world) {
     float first=phase<.25?1:0,third=phase>=.75?1:0;
     float displacement=-dot(wave,vec3(first,1-first-third,third));
     // NONCANONICAL wave 27/28 (enhanced weather): the swell eases to x0.6 in still air and grows to ~x2.8 in a gusting gale;
-    // the wind sea (oceanWindSwell, its two longest crests) rises over it, everywhere (it fades with eye distance).
+    // the wind sea (oceanWindWaves, its three longest waves) rises over it, dying out toward the shore.
     if(abs(frame.eye.y-world.y)<100)world.y+=displacement*.5*(weatherOn(frame.weatherMisc)?.6+2.*weatherWindStrength(frame.wind,frame.weatherMisc):1.);
-    if(weatherOn(frame.weatherMisc))world.y+=oceanWindSwell(world.xz,frame.eye.xyz,frame.wind,frame.weatherMisc,2).x;
+    if(weatherOn(frame.weatherMisc)){vec2 slope;float crest;world.xyz+=(lightmap.x<-.5?lightmap.y:1.)*oceanWindWaves(world.xz,frame.eye.xyz,frame.wind,frame.weatherMisc,3,slope,crest);}
     return world;
 }
 #endif

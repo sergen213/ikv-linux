@@ -1612,13 +1612,15 @@ void clear_material_sets(SceneSet& set) {
      UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
      // NONCANONICAL wave 28: enhanced also uploads each source ocean mesh subdivided, to carry the wind sea (renderer.hpp).
      const auto ocean=options_.original_appearance?std::vector<bool>{}:ocean_wave_meshes(s);
+     std::optional<OceanBed> bed; // the wave copies' shore factors (renderer.hpp ocean_wave_mesh), built on first use
      for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
          if(mesh_index%1024==0)progress(); // uploads pump on their own
          auto& g=set.geometry[mesh_index];
          new_meshes+=upload_mesh(g,s.meshes[mesh_index],used[mesh_index],batch);
          if(!ocean.empty()&&ocean[mesh_index]&&used[mesh_index]==2&&!g.wave_vertices.handle) {
              Geometry wave;
-             if(upload_mesh(wave,subdivide_ocean_mesh(s.meshes[mesh_index]),2,batch)) {
+             if(!bed)bed=ocean_bed(s);
+             if(upload_mesh(wave,ocean_wave_mesh(s,mesh_index,*bed),2,batch)) {
                  g.wave_vertices=std::exchange(wave.vertices,Buffer{});g.wave_indices=std::exchange(wave.indices,Buffer{});g.wave_count=wave.count;
              }
          }
