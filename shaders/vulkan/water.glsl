@@ -327,14 +327,14 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
         // rises out of water at least ~1 m deep and steeper than ~1 in 3 throws it (the bed's depth over the distance to
         // land, both from the grid): beaches and shallow lagoons keep their surf above. Waves breaking on a wall throw foam
         // back out to sea: solid at the wall, laced further out, surging out with each incoming crest (waveRise) in moving
-        // tongues, ~1-3 m wide at 10 m/s and ~2-6.5 m in a gale (an eye above a quay sees the water from ~3 m past its
-        // edge), none in still air.
+        // tongues, ~1.5-4.5 m wide and half strength at 10 m/s, ~3-10 m at full strength in a gale (an eye above the
+        // Eminönü quay sees the water only from ~3.5 m past its edge), none in still air.
         vec3 shoreField=waterShoreField(p.xz);
         float wall=shoreField.x,steep=smoothstep(0.5*kWaterM,1.5*kWaterM,shoreField.z)*smoothstep(0.2,0.45,shoreField.z/max(wall,2.0));
-        float wallBand=kWaterM*(0.5+3.2*min(ws,1.2))*(0.5+waveRise)*(1.0+0.5*waveCrest);
+        float wallBand=kWaterM*(0.6+5.0*min(ws,1.2))*(0.5+waveRise)*(1.0+0.5*waveCrest);
         float wallWash=waterNoiseD(p.xz/(1.6*kWaterM)+t*vec2(0.12,-0.2)).x;
         float wallR=(wall+(wallWash-0.5)*0.6*wallBand)/wallBand; // 0 at the wall .. 1 at the band's edge
-        foam=max(foam,(1.0-smoothstep(0.35,1.0,wallR))*smoothstep(0.12,0.4,ws)*steep*mix(1.0,smoothstep(0.2,0.65,e),smoothstep(0.1,0.6,wallR)));
+        foam=max(foam,(1.0-smoothstep(0.5,1.0,wallR))*smoothstep(0.12,0.9,ws)*steep*mix(1.0,smoothstep(0.2,0.65,e),smoothstep(0.15,0.75,wallR)));
     }
     c=mix(c,light*0.9,foam*0.65);
     if(weatherActive){
