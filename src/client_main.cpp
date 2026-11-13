@@ -652,7 +652,10 @@ class Application {
     int skill_slot_=-1; std::array<int,15> skill_pending_{}; // Yetenekler selection (+0x1d90) and per-slot pending points (+0x19b4)
     std::map<std::string,int> stat_pending_; // Karakter Bilgisi pending Dirençler/Üretim/Toplama points (+0x3b4..+0x4cc), sent by ✓ 00402a80
     int craft_page_=0; std::string craft_selected_,bank_selected_; bool bank_session_=false; // Üretim page/recipe; Banka selection and open session
-    std::vector<std::pair<unsigned,int>> source_item_icons_;
+    // classes.dat facts of each catalog item's source UID: icon selector, suitableslot (item +0x24) and objecttype.
+    struct SourceItemInfo { unsigned uid=0; int icon=-1,slot=-1; std::string type; };
+    std::vector<SourceItemInfo> source_items_;
+    int vendor_tab_=0; std::string vendor_hover_; // Satıcı page (0042e800) and the cell under the pointer this frame
     std::map<std::uint32_t,std::vector<std::string>> glows_; // attached prefix effect_name glows per actor
     int help_image_page_=0;
     bool original_ui_cached_=false;
@@ -1171,6 +1174,7 @@ private:
         // 0042e970: original window toggles play ui\windowclose.raw / ui\windowopen.raw.
         if (found!=windows_.end()) { if (!keep_open) { windows_.erase(found); audio_->play_event("ui\\windowclose.raw"); } return; }
         windows_.push_back(id); scroll_[static_cast<std::size_t>(id)]=0;
+        if (id==win_vendor) vendor_tab_=0; // 0043c8a0 shows the first page
         audio_->play_event("ui\\windowopen.raw");
     }
     // An entity's "kind" without copying it (per-frame loops; value("kind",std::string{}) allocates a string each call).
@@ -1662,15 +1666,33 @@ private:
         const auto* source=found==skill_catalog().end()?nullptr:source_skill(*found);
         return source?source->icon:-1;
     }
+    const SourceItemInfo* source_item(const std::string& item) const {
+        const auto catalogs=state_.find("catalogs");
+        if (catalogs==state_.end() || !catalogs->contains("items")) return nullptr;
+        const auto& items=catalogs->at("items");
+        const auto definition=items.find(item);
+        if (definition==items.end() || !definition->contains("source_uid")) return nullptr;
+        const auto source=definition->at("source_uid").get<unsigned>();
+        const auto found=std::find_if(source_items_.begin(),source_items_.end(),[&](const auto& entry){return entry.uid==source;});
+        return found!=source_items_.end()?&*found:nullptr;
+    }
+    // Item icon selector (classes.dat icon by source_uid; pouch 62 for native items without one). A potion's icon comes
+    // from 004313d0, not its record: the first effect attribute Enerji (4: 99..103) or Kudret (5: 104..108), else
+    // 109..113, stepped by item level at 10/20/30/100 (0x58d7d0, 0x590fd4, 0x58d784, 0x58d7a4); an effect-less potion
+    // keeps its record icon. Native potions are instances of the "potionprototype" record 14001 (whose own icon 108 is
+    // the prototype's); their heal/mana stand for the Enerji/Kudret effect.
     int item_icon(const std::string& item) const {
-        int icon=62; // Original pouch icon for native items without a source icon.
-        const auto& items=state_.contains("catalogs")?state_.at("catalogs").value("items",Json::object()):Json::object();
-        if (const auto definition=items.find(item);definition!=items.end() && definition->contains("source_uid")) {
-            const auto source=definition->at("source_uid").get<unsigned>();
-            const auto found=std::find_if(source_item_icons_.begin(),source_item_icons_.end(),[&](const auto& entry){return entry.first==source;});
-            if (found!=source_item_icons_.end() && found->second>=0) icon=found->second;
+        const auto* source=source_item(item);
+        if (!source) return 62;
+        if (source->type=="potion" || source->type=="potionprototype") {
+            const auto& d=state_.at("catalogs").at("items").at(item);
+            if (d.contains("heal") || d.contains("mana")) {
+                const double level=d.value("level",1.0);
+                const int step=level<=10?0:level<=20?1:level<=30?2:level<=100?3:4;
+                return (d.contains("heal")?99:104)+step;
+            }
         }
-        return icon;
+        return source->icon>=0?source->icon:62;
     }
     Json skill_action(const std::string& id) const {
         auto action=target_action("skill"); action["skill"]=id;
@@ -1914,6 +1936,7 @@ private:
         if (id==win_quests) return S(223);
         if (id==win_craft) return S(224);
         if (id==win_bank) return S(290);
+        if (id==win_vendor) return S(232);
         if (id==win_admin) return S(360);
         if (id==win_skills) return S(130); // original root 130x274 (0044e070)
         if (id==win_help) return std::min(available,S(900));
@@ -1944,6 +1967,7 @@ private:
             else if (id==win_quests) paint_quests(x,top,st);
             else if (id==win_craft) paint_craft(x,top,st);
             else if (id==win_bank) paint_bank(x,top,h,st);
+            else if (id==win_vendor) paint_vendor(x,top+S(12),st); // below its tab strip (2,-12)
             else if (id==win_skills) paint_skills(x,top,st);
             else if (id==win_admin) paint_admin(frame(id,x,top,w,h,"Yönetici Paneli"));
             else paint_panel(id,frame(id,x,top,w,h,window_title(id)),st);
@@ -1952,6 +1976,7 @@ private:
         if (is_open(win_trade) && trade_.active()) paint_trade((width_-S(304))/2,S(160));
         // The selected item's tooltip is topmost: windows painted after the bag (Satıcı, Yardım) must not cover it.
         if (const Json* selected=bag_x>=0?inventory_item(st,selected_uid_):nullptr) paint_item_tooltip(bag_x,top,*selected,st,state_);
+        for (const auto& [id,rect]:window_rects_) if (id==win_vendor && !vendor_hover_.empty()) paint_item_tooltip(rect[0],top,Json{{"item",vendor_hover_}},st,state_);
     }
     // NONCANONICAL Yönetici Paneli: an in-game front end for the server's admin commands (the original GM tools were chat
     // commands such as "|tele"). Painted only while the authoritative state carries "admin"; the server checks every request.
@@ -2438,7 +2463,7 @@ private:
         for (std::size_t i=0;i<std::min<std::size_t>(9,items.size());++i) {
             if (!items[i].is_object()) continue;
             const float sx=9+33.f*static_cast<float>(i%3),sy=26+33.f*static_cast<float>(i/3);
-            source_icon(static_cast<float>(px)+sx*s_,static_cast<float>(py)+sy*s_,32*s_,catalog_icon(items[i].value("item",std::string{})));
+            source_icon(static_cast<float>(px)+sx*s_,static_cast<float>(py)+sy*s_,32*s_,item_icon(items[i].value("item",std::string{})));
             if (const int count=items[i].value("quantity",1); count>1) label(px+S(sx+2),py+S(sy+31)-lh(),std::to_string(count));
             hits_.push_back({px+S(sx),py+S(sy),S(32),S(32),nullptr,-1,"loot-slot:"+std::to_string(i)});
         }
@@ -2578,15 +2603,61 @@ private:
         }
         ui_->set_pixel_size(px);
     }
-    // Catalog item -> original icon selector (classes.dat icon by source_uid; pouch 62 when unknown).
-    int catalog_icon(const std::string& item) const {
-        if (!state_.contains("catalogs") || !state_.at("catalogs").contains("items")) return 62;
+    // 0042dff0 (vendor cell tint): suitableslot 1/6 never fit; classlimit/sexlimit must match; a component always fits; a
+    // recipe fits when its item level is within the crafttype's Üretim level; anything else when it is within the level.
+    bool item_usable(const std::string& item,const Json& st) const {
+        const auto& d=state_.at("catalogs").at("items").at(item);
+        const auto* source=source_item(item);
+        if (source && (source->slot==1 || source->slot==6)) return false;
+        const auto& own=state_.at("character");
+        if (d.contains("class") && d.at("class").get<int>()+1!=own.value("class_id",0)) return false;
+        if (d.contains("sex") && d.at("sex")!=own.value("appearance",Json::object()).value("sex",1)) return false;
+        if (source && source->type=="component") return true;
+        if (source && source->type=="recipe") {
+            // NONCANONICAL wave 29: the scroll's crafttype is known to the client only once learned (catalogs.recipes);
+            // an unlearned scroll's crafttype is not sent, so it is never tinted.
+            const auto recipes=state_.at("catalogs").find("recipes");
+            if (recipes==state_.at("catalogs").end() || !recipes->contains(item)) return true;
+            return d.value("level",0)<=st.value("crafts",Json::object()).value(recipes->at(item).value("craft",std::string{}),0);
+        }
+        return d.value("level",1)<=st.value("level",1);
+    }
+    // Original Satıcı window 0043c8a0: UI2 538,0 232x374 with 60 32-px cells per page at 16+33c,31+33.5r (6 columns,
+    // 0x592018/0x58dce0, 0x592634/0x592630) and the Silahlar/Zırhlar/Diğer tab strip UI2 598,727+23·tab 200x20 at 2,-12
+    // (0042e800) over three invisible 55x16 hotspots at 7/76/143,-8. Goods split by suitableslot (item +0x24): 11 on
+    // Silahlar, 2..7 and 12 on Zırhlar, the rest on Diğer. Cells are tinted 0xeeff2222 where 0042dff0 refuses; a cell
+    // buys (00431700) and its hover shows the item tooltip (0x437590). × 210,10 (0042e130) closes.
+    void paint_vendor(int x,int y,const Json& st) {
+        const float fx=static_cast<float>(x),fy=static_cast<float>(y);
+        ui_atlas(original_ui2_,fx,fy,0,0,232,374,538,0,232,374);
+        ui_atlas(original_ui2_,fx,fy,2,-12,200,20,598,727.f+23.f*static_cast<float>(vendor_tab_),200,20);
+        hits_.push_back({x,y,S(232),S(374),nullptr,-1,{}});
+        window_rects_.push_back({win_vendor,{x,y,S(232),S(374)}});
+        hits_.push_back({x+S(210),y+S(10),S(16),S(16),nullptr,win_vendor,{}});
+        static constexpr std::array<float,3> tabs{7,76,143};
+        for (std::size_t tab=0;tab<tabs.size();++tab) hits_.push_back({x+S(tabs[tab]),y-S(8),S(55),S(16),nullptr,-1,"vendor-tab:"+std::to_string(tab)});
+        const Json* subject=entity(target_);
+        if (!subject || !subject->contains("shop") || !state_.contains("catalogs") || !state_.at("catalogs").contains("items")) return;
         const auto& items=state_.at("catalogs").at("items");
-        const auto definition=items.find(item);
-        if (definition==items.end() || !definition->contains("source_uid")) return 62;
-        const auto source=definition->at("source_uid").get<unsigned>();
-        const auto found=std::find_if(source_item_icons_.begin(),source_item_icons_.end(),[&](const auto& entry){return entry.first==source;});
-        return found!=source_item_icons_.end() && found->second>=0?found->second:62;
+        std::vector<const std::string*> page;
+        for (const auto& entry:subject->at("shop")) {
+            if (!entry.is_string() || !items.contains(entry.get_ref<const std::string&>())) continue;
+            const auto* source=source_item(entry.get_ref<const std::string&>());
+            const int slot=source?source->slot:-1;
+            if ((slot==11?0:(slot>=2 && slot<=7) || slot==12?1:2)==vendor_tab_) page.push_back(&entry.get_ref<const std::string&>());
+        }
+        // NONCANONICAL wave 29: the original page holds 60 goods; longer native catalogues (Şevket Bey's 90) scroll by
+        // rows with the mouse wheel instead of dropping the rest.
+        auto& scroll=scroll_[win_vendor];
+        scroll=std::clamp(scroll,0,std::max(0,static_cast<int>(page.size()+5)/6-10));
+        for (std::size_t i=static_cast<std::size_t>(6*scroll),cell=0;i<page.size() && cell<60;++i,++cell) {
+            const auto& item=*page[i];
+            const float sx=16+33.f*static_cast<float>(cell%6),sy=31+33.5f*static_cast<float>(cell/6);
+            source_icon(fx+sx*s_,fy+sy*s_,32*s_,item_icon(item),item_usable(item,st)?0xffffffffu:0xeeff2222u);
+            const int ix=x+S(sx),iy=y+S(sy);
+            hits_.push_back({ix,iy,S(32),S(32),nullptr,-1,"buy:"+item}); // client checks 00431700 first
+            if (hovered(ix,iy,S(32),S(32))) vendor_hover_=item;
+        }
     }
     // Original Üretim window (UI2 542,376 224x346, help Üretim strings 0x592864..0x5928d8): ←/→ profession page
     // (crafttype table 0x5d6150), learned recipe list, ↑/↓ scroll, trash "Seçili reçeteyi hafızamdan sil", anvil "Seçili reçetedekini üret".
@@ -2617,7 +2688,7 @@ private:
         if (shown.empty()) paragraph(left,ry,right-left,y+S(180),"Bu meslekte bildiğiniz reçete yok. Reçeteyi Eşyalar'da seçip Kullan'a basın.",dim_rgba);
         for (std::size_t i=static_cast<std::size_t>(scroll);i<shown.size() && ry+row<=y+S(180);++i,ry+=row) {
             const auto& recipe=recipes.at(shown[i]); const auto product=recipe.value("product",std::string{});
-            source_icon(static_cast<float>(left),static_cast<float>(ry),20*s_,catalog_icon(product));
+            source_icon(static_cast<float>(left),static_cast<float>(ry),20*s_,item_icon(product));
             ui_->text(left+S(24),ry+(S(20)-lh())/2,fit(item_name(state_,product)+" (Sv "+std::to_string(recipe.value("level",0))+")",right-left-S(26)),
                 shown[i]==craft_selected_?gold_rgba:recipe.value("level",0)<=level?text_rgba:dim_rgba);
             hits_.push_back({left,ry,right-left,row,nullptr,-1,"recipe:"+shown[i]});
@@ -2631,7 +2702,7 @@ private:
                 const auto item=c.value("item",std::string{}); int have=0;
                 for (const auto& entry:st.value("inventory",Json::array())) if (entry.value("item",std::string{})==item) have+=entry.value("quantity",0);
                 const int need=c.value("quantity",0);
-                source_icon(static_cast<float>(left),static_cast<float>(dy),16*s_,catalog_icon(item));
+                source_icon(static_cast<float>(left),static_cast<float>(dy),16*s_,item_icon(item));
                 ui_->text(left+S(20),dy+(S(16)-lh())/2,fit(item_name(state_,item)+" "+std::to_string(have)+"/"+std::to_string(need),right-left-S(22)),have>=need?text_rgba:Rgba{230,90,80,255});
                 dy+=S(18);
             }
@@ -2662,7 +2733,7 @@ private:
                 if (index>=64) break;
                 const float sx=16+33.3f*static_cast<float>(index%8),sy=27+33.1f*static_cast<float>(index/8); ++index;
                 const auto uid=entry.value("uid",std::string{});
-                source_icon(fx+sx*s_,fy+sy*s_,28*s_,catalog_icon(entry.value("item",std::string{})));
+                source_icon(fx+sx*s_,fy+sy*s_,28*s_,item_icon(entry.value("item",std::string{})));
                 const int ix=x+S(sx),iy=y+S(sy);
                 if (entry.value("quantity",0)>1) label(ix+S(2),iy+S(28)-lh(),std::to_string(entry.value("quantity",0)));
                 if (uid==bank_selected_) outline(ix,iy,S(28),S(28),{255,220,90,255});
@@ -2745,29 +2816,7 @@ private:
         const int width=right-left;
         int y=top;
         auto& scroll=scroll_[static_cast<std::size_t>(id)];
-        if (id==win_vendor) {
-            const Json* subject=entity(target_);
-            if (!subject || !subject->contains("shop") || subject->at("shop").empty()) {
-                paragraph(left,y,width,bottom,"Bir satıcıyı hedefleyin (sağ tık: İşlemler → Satıcı). Satmak için Eşyalar'da eşya seçip Sat'a basın.",dim_rgba);
-                return;
-            }
-            ui_->text(left,y,fit(subject->value("name",std::string{}),width),gold_rgba); y+=lh()+S(4);
-            int index=0;
-            for (const auto& entry:subject->at("shop")) {
-                if (!entry.is_string() || index++<scroll) continue;
-                if (y+lh()+S(8)>bottom) break;
-                const auto item=entry.get<std::string>();
-                std::string text="Satın al: "+item_name(state_,item);
-                if (state_.contains("catalogs") && state_.at("catalogs").contains("items") && state_.at("catalogs").at("items").contains(item)) {
-                    const auto& d=state_.at("catalogs").at("items").at(item);
-                    text+=" — "+(d.contains("akce_price")?std::to_string(d.at("akce_price").get<int>())+" Akçe":std::to_string(d.value("price",0))+" Lira"+
-                        (d.contains("clan_price")?" / "+std::to_string(d.at("clan_price").get<int>())+" Klan Parası":std::string{}));
-                }
-                button(left,y,text,nullptr,-1,"buy:"+item,width); // client checks 00431700 first
-                y+=lh()+S(10);
-            }
-            paragraph(left,y+S(4),width,bottom,"Satmak için Eşyalar'da eşya seçip Sat'a basın.",dim_rgba);
-        } else if (id==win_group) {
+        if (id==win_group) {
             Flow f{left,right,left,y};
             flow(f,"Hedefi davet et",target_action("group_invite"));
             flow(f,"Daveti kabul et",Json{{"action","group_accept"}});
@@ -3246,7 +3295,7 @@ private:
     }
     void present_hud() { if (const auto changed=ui_->compose(); !changed.empty()) renderer_->set_overlay(ui_->overlay(),changed); }
     void paint_hud() {
-        ui_->begin(width_,height_); hits_.clear(); label_hits_=0; drags_.clear(); window_rects_.clear(); tip_.clear();
+        ui_->begin(width_,height_); hits_.clear(); label_hits_=0; drags_.clear(); window_rects_.clear(); tip_.clear(); vendor_hover_.clear();
         const auto& st=character_state(state_);
         std::string name="Karakter doğrulanıyor";
         if (session_ && state_.contains("character")) name=state_.at("character").value("name",name);
@@ -3283,10 +3332,12 @@ private:
         for (const auto& item:catalogs.at("items")) {
             if (!item.contains("source_uid")) continue;
             const auto uid=item.at("source_uid").get<unsigned>();
-            if (std::any_of(source_item_icons_.begin(),source_item_icons_.end(),[&](const auto& entry){return entry.first==uid;})) continue;
+            if (std::any_of(source_items_.begin(),source_items_.end(),[&](const auto& entry){return entry.uid==uid;})) continue;
             const auto& record=ikv::source_actor_record(scene_,uid);
-            // Source potion icons depend on original instance effects, not native healing amounts.
-            source_item_icons_.emplace_back(uid,record.object_type=="potion"?-1:record.icon);
+            int slot=-1;
+            if (!record.suitable_slot.empty() && record.suitable_slot.size()<4 && std::all_of(record.suitable_slot.begin(),record.suitable_slot.end(),[](char c){return c>='0' && c<='9';}))
+                slot=std::stoi(record.suitable_slot);
+            source_items_.push_back({uid,record.icon,slot,record.object_type});
             hud_dirty_=true;
         }
     }
@@ -4322,6 +4373,7 @@ private:
             else if (d.contains("akce_price")) ask(buy,"Satın almak istediğinizden emin misiniz?"); // 004b8230 box, 0x591050
             else send(buy);
         }
+        else if (value.starts_with("vendor-tab:")) { vendor_tab_=value.back()-'0'; scroll_[win_vendor]=0; } // 0042e800
         else if (value=="map-toggle") map_open_=!map_open_;
         else if (value=="bank-open") send(target_action("bank_open")); // the window opens when the server reports the session
         else if (value=="craft-page+" || value=="craft-page-") { craft_page_=(craft_page_+(value.back()=='+'?1:5))%6; scroll_[win_craft]=0; }
