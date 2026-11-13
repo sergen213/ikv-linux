@@ -123,11 +123,14 @@ private:
     std::array<float,3> ranges_{INFINITY,INFINITY,INFINITY}; // squared scene units: zone emitters, entity/projectile emitters, fog far
     std::uint32_t random_=1,now_ms_=0,next_projectile_=1;
     struct Drop { std::array<float,3> position,velocity; float size,phase; bool snow; };
-    // droplet, ripple ring, settled flake, mist, drip (wave 28: falls off a character until it reaches `floor`)
-    struct Splash { std::array<float,3> position,velocity; float life,total,size; std::uint8_t kind; float floor=0; };
+    // droplet, ripple ring, settled flake, mist, drip (wave 28: a bead that clings to a character's silhouette edge for `hold`
+    // seconds, sliding down and moving with `owner`, then drops until it reaches `floor`)
+    struct Splash { std::array<float,3> position,velocity; float life,total,size; std::uint8_t kind; float floor=0,hold=0; std::uint32_t owner=0; };
     // NONCANONICAL wave 28 per-character weather state: last position, distance since the last footstep, next foot, how soaked
-    // the clothes are (0..1) and the drip accumulator.
-    struct Stride { float x=0,z=0,travelled=0,side=1,soak=0,drip=0; bool seen=false; };
+    // the clothes are (0..1), the drip accumulator and the position at the previous update (clinging beads move with it).
+    struct Stride { float x=0,z=0,travelled=0,side=1,soak=0,drip=0,lx=0,lz=0; bool seen=false; };
+    std::vector<std::pair<std::uint32_t,std::array<float,2>>> moves_; // per update: character id, x/z moved (scratch)
+    std::array<float,2> view_right_{1,0}; // camera right (x/z) of the last frame(): drips start at the silhouette edges
     std::unordered_map<std::uint32_t,Stride> strides_;
     std::vector<GroundMark> marks_;
     std::vector<std::uint32_t> props_; // set_weather_props(); a handful of ids, searched linearly

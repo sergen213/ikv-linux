@@ -671,9 +671,11 @@ constexpr float weather_metre = 4, weather_radius = 34, weather_top = 32, weathe
 constexpr float actor_top = 7, actor_radius = 1.1f; // a source actor stands ~7.5 units; drops end on heads and shoulders
 constexpr std::size_t splash_cap = 3500;
 enum : std::uint8_t { splash_droplet, splash_ring, splash_settled, splash_mist, splash_drip };
-// NONCANONICAL wave 28 character weather: a footstep every 0.7 m, foot 0.12 m off the walk line, kept 90 s; a step into a
-// puddle (weather_puddle above .3) splashes; soaked characters drip from head, shoulders and hands.
-constexpr float stride_length = .7f * weather_metre, foot_offset = .12f * weather_metre, mark_lifetime = 90, puddle_splash = .3f;
+// NONCANONICAL wave 28 character weather: a footstep every 0.7 m, foot 7.5 cm off the walk line (a 15 cm track), kept 90 s;
+// a step into a puddle (weather_puddle above .3) splashes; soaked characters grow beads at their silhouette edges (head,
+// shoulders, arms, jacket hem) that cling and slide briefly, then drop.
+constexpr float stride_length = .7f * weather_metre, foot_offset = .075f * weather_metre, mark_lifetime = 90, puddle_splash = .3f;
+constexpr float bead_fall_limit = 4 * weather_metre; // a small drop's terminal speed, ~4 m/s
 constexpr std::size_t drip_cap = 600;
 bool falls_as_rain(WeatherKind k) { return k == WeatherKind::rain || k == WeatherKind::storm; }
 // Procedural RGBA8 textures: the original fx art has no single-drop/flake/ripple sprite with usable alpha (yagmur.dds is a sheet
@@ -793,12 +795,19 @@ void EffectSystem::weather_update(float dt) {
         for (auto& p : e.particles) for (unsigned i = 0; i < 3; ++i) p.position[i] += local[i];
     }
     // Splashes: droplets fly under gravity, rings widen on water, settled flakes and mist fade; all end with their life. Drips
-    // (wave 28) fall until they reach their floor, where some splash.
+    // (wave 28) cling and slide down the clothes for `hold` seconds, then fall (drag-limited) until they reach their floor, where
+    // some splash.
     landed_.clear();
     for (auto& p : splashes_) {
         p.life -= dt;
+        if (p.kind == splash_drip && p.hold > 0) { // clinging: slides down only; character_weather() moves it with its owner
+            p.hold -= dt; p.position[1] += p.velocity[1] * dt;
+            if (p.hold <= 0) p.velocity[1] = -.5f * weather_metre; // lets go
+            continue;
+        }
         for (unsigned k = 0; k < 3; ++k) p.position[k] += p.velocity[k] * dt;
-        if (p.kind == splash_droplet || p.kind == splash_drip) p.velocity[1] -= 40 * dt; // ~10 m/s²
+        if (p.kind == splash_droplet) p.velocity[1] -= 40 * dt; // ~10 m/s²
+        else if (p.kind == splash_drip) p.velocity[1] = std::max(p.velocity[1] - 40 * dt, -bead_fall_limit);
         else if (p.kind == splash_ring) p.size += 1.6f * dt;
         else if (p.kind == splash_mist) p.size += .6f * dt;
         if (p.kind == splash_drip && p.position[1] <= p.floor) { p.life = 0; landed_.push_back({p.position[0], p.floor, p.position[2]}); }
@@ -896,6 +905,9 @@ void EffectSystem::character_weather(float dt, std::array<float, 2> wind) {
     std::size_t drips = static_cast<std::size_t>(std::count_if(splashes_.begin(), splashes_.end(), [](const Splash& p) { return p.kind == splash_drip; }));
     const auto add = [&](const Splash& p) { if (splashes_.size() < splash_cap) splashes_.push_back(p); };
     for (auto& entry : strides_) entry.second.seen = false;
+    moves_.clear();
+    const float edge = std::atan2(view_right_[1], view_right_[0]); // camera right in x/z: the silhouette's left/right edges
+    const std::size_t earlier = splashes_.size(); // beads formed below already stand at this update's character position
     for (const auto& e : entities_) {
         const float fx = e.x - focus_[0], fz = e.z - focus_[2];
         if (!(fx * fx + fz * fz <= reach) || weather_prop(e.id)) continue; // props: no footsteps, no drips
@@ -904,6 +916,8 @@ void EffectSystem::character_weather(float dt, std::array<float, 2> wind) {
         const bool exposed = !surface_at(e.x, e.z, top, water) || top < e.ground_y + actor_top + 1;
         auto [it, fresh] = strides_.try_emplace(e.id);
         auto& s = it->second; s.seen = true;
+        if (!fresh) moves_.push_back({e.id, {e.x - s.lx, e.z - s.lz}});
+        s.lx = e.x; s.lz = e.z;
         const float dx = e.x - s.x, dz = e.z - s.z, moved = std::hypot(dx, dz);
         if (fresh) s.soak = exposed && raining ? .5f + .5f * intensity : 0; // already out in the rain when first seen
         if (fresh || !(moved <= 2 * weather_metre + 10 * weather_metre * dt)) { s.x = e.x; s.z = e.z; s.travelled = 0; } // first sight or a jump: no prints across
@@ -932,20 +946,33 @@ void EffectSystem::character_weather(float dt, std::array<float, 2> wind) {
         if (s.soak < .05f) { s.drip = 0; continue; }
         s.drip = std::min(3.f, s.drip + s.soak * (6 + 14 * intensity) * dt);
         for (; s.drip >= 1 && drips < drip_cap && splashes_.size() < splash_cap; s.drip -= 1, ++drips) {
-            const float r = weather_rand(), a = weather_rand() * 6.2831855f;
-            const auto [height, radius] = r < .3f ? std::pair{6.3f + .5f * weather_rand(), .55f}  // head / hat brim
-                                        : r < .7f ? std::pair{5.2f + .4f * weather_rand(), 1.f}   // shoulders
-                                                  : std::pair{3.3f + .6f * weather_rand(), 1.15f}; // hands
-            const float y = e.ground_y + height, vy = -.3f - .5f * weather_rand();
-            const float life = (-vy + std::sqrt(vy * vy + 80 * height)) / 40 + .1f; // time to fall to the ground under 40 units/s², bounded
-            add({{e.x + std::cos(a) * radius, y, e.z + std::sin(a) * radius}, {std::cos(a) * .4f + wind[0] * .04f, vy, std::sin(a) * .4f + wind[1] * .04f}, life, life, .035f, splash_drip, e.ground_y + .02f});
+            // A bead forms at the silhouette edge seen from the camera (either side, ±20°): shoulders, arms, jacket hem or
+            // head, clings and slides down 0.2-0.5 s, then lets go.
+            const float r = weather_rand(), a = edge + (weather_rand() < .5f ? 0 : 3.1415927f) + (weather_rand() - .5f) * .7f;
+            const auto [height, radius] = r < .35f ? std::pair{5.25f + .4f * weather_rand(), 1.f}   // shoulders
+                                        : r < .7f  ? std::pair{3.7f + 1.2f * weather_rand(), 1.15f} // outer arms
+                                        : r < .9f  ? std::pair{3.1f + .5f * weather_rand(), 1.05f}  // jacket hem / hands
+                                                   : std::pair{6.3f + .4f * weather_rand(), .5f};   // head
+            const float hold = .2f + .3f * weather_rand(), slide = -(.8f + .8f * weather_rand());
+            add({{e.x + std::cos(a) * radius, e.ground_y + height, e.z + std::sin(a) * radius},
+                 {std::cos(a) * .3f + wind[0] * .04f, slide, std::sin(a) * .3f + wind[1] * .04f}, hold + 2, hold + 2, .09f + .035f * weather_rand(),
+                 splash_drip, e.ground_y + .02f, hold, e.id});
         }
+    }
+    // Clinging beads move with their character; one whose character left (out of range, a prop, gone) or jumped lets go.
+    for (std::size_t i = 0; i < earlier; ++i) {
+        auto& p = splashes_[i];
+        if (p.kind != splash_drip || p.hold <= 0) continue;
+        const auto m = std::find_if(moves_.begin(), moves_.end(), [&](const auto& move) { return move.first == p.owner; });
+        if (m == moves_.end() || !(std::hypot(m->second[0], m->second[1]) <= 2 * weather_metre + 10 * weather_metre * dt)) { p.hold = 0; p.velocity[1] = -.5f * weather_metre; continue; }
+        p.position[0] += m->second[0]; p.position[2] += m->second[1];
     }
     std::erase_if(strides_, [](const auto& entry) { return !entry.second.seen; });
     if (marks_.size() > kMaxGroundMarks) marks_.resize(kMaxGroundMarks);
 }
 
 void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
+    if (const float h = std::hypot(b.right[0], b.right[2]); h > 1e-4f) view_right_ = {b.right[0] / h, b.right[2] / h}; // wave 28 bead edges
     if (drops_.empty() && splashes_.empty()) return;
     for (unsigned k = 0; k < 3; ++k) if (weather_textures_[k] == UINT32_MAX) {
         textures_.push_back(weather_texture(k)); weather_textures_[k] = static_cast<std::uint32_t>(textures_.size() - 1);
@@ -991,17 +1018,23 @@ void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
         for (unsigned i = 0; i < 3; ++i) r[i] = side[i] / s * width;
         quad(at, r, u, color);
     };
-    batch(0, [&] { // rain streaks; wave 28 drips falling off characters (shorter, brighter)
+    batch(0, [&] { // rain streaks
         for (const auto& d : drops_) if (!d.snow) streak(d.position, d.velocity, .6f, 3.f, .04f, rain_color);
-        for (const auto& p : splashes_) if (p.kind == splash_drip) streak(p.position, p.velocity, .45f, 1.4f, .05f, {.9f * light, .93f * light, light, .9f});
     });
-    batch(1, [&] { // snowflakes, settled flakes, splash droplets and storm mist
+    batch(1, [&] { // snowflakes, settled flakes, splash droplets, storm mist and (wave 28) beads dripping off characters
         for (const auto& d : drops_) if (d.snow) billboard(d.position, d.size, snow_color);
+        const std::array<float, 4> bead_color{light, light, light, .95f}; // bright round water beads, unlike the grey rain streaks
         for (const auto& p : splashes_) {
             const float fade = p.life / p.total;
             if (p.kind == splash_settled) billboard(p.position, p.size, {snow_color[0], snow_color[1], snow_color[2], snow_color[3] * std::min(1.f, fade * 2)});
             else if (p.kind == splash_droplet) billboard(p.position, p.size, {rain_color[0], rain_color[1], rain_color[2], .7f * fade});
             else if (p.kind == splash_mist) billboard(p.position, p.size, {.8f * light, .82f * light, .86f * light, .16f * fade});
+            else if (p.kind == splash_drip && p.hold > 0) // clinging: a round bead, slightly pear-shaped
+                quad(p.position, {b.right[0] * p.size, b.right[1] * p.size, b.right[2] * p.size}, {b.up[0] * p.size * 1.3f, b.up[1] * p.size * 1.3f, b.up[2] * p.size * 1.3f}, bead_color);
+            else if (p.kind == splash_drip) { // falling: the same bead, stretched at most 2x along its fall
+                const float speed = std::hypot(p.velocity[0], p.velocity[1], p.velocity[2]), length = 2 * p.size * (1 + std::min(speed * .06f, 1.f));
+                streak(p.position, p.velocity, length, length, p.size, bead_color);
+            }
         }
     });
     batch(2, [&] { // ripple rings lying on the water surface
@@ -1279,16 +1312,31 @@ void EffectSystem::self_test() {
         SceneWeather rain; rain.active = true; rain.kind = WeatherKind::rain; rain.precipitation = 1;
         const RenderEntity stander{7, 20, 0, 0, 0};
         const auto drips = [&] { return std::count_if(coat.splashes_.begin(), coat.splashes_.end(), [](const Splash& s) { return s.kind == splash_drip; }); };
-        bool from_body = true, above_floor = true; std::size_t seen = 0, landed_droplets = 0;
+        bool from_body = true, above_floor = true, at_edges = true, slow = true; std::size_t seen = 0, clinging = 0, falling = 0, landed_droplets = 0;
         for (int i = 0; i < 60; ++i) {
             coat.set_weather(rain, true, {20, 0, 0}); coat.update(.05f, std::span(&stander, 1));
             for (const auto& s : coat.splashes_) {
                 const float r = std::hypot(s.position[0] - 20, s.position[2]);
                 if (s.kind == splash_drip) { ++seen; above_floor = above_floor && s.position[1] >= -.5f && s.position[1] < 7; from_body = from_body && r > .4f && r < 1.6f; }
+                // Beads cling at the silhouette edges seen along the default camera right (+x): |z| ≤ sin(20°)·r; they slide
+                // slowly, and fall no faster than a small drop's terminal speed.
+                if (s.kind == splash_drip && s.hold > 0) { ++clinging; at_edges = at_edges && std::abs(s.position[2]) <= .35f * r + 1e-3f; slow = slow && s.velocity[1] < 0 && s.velocity[1] > -1.7f; }
+                if (s.kind == splash_drip && s.hold <= 0) { ++falling; slow = slow && s.velocity[1] >= -bead_fall_limit - 1e-3f; }
                 if (s.kind == splash_droplet && s.position[1] < 1 && r < 1.6f) ++landed_droplets;
             }
         }
-        require(seen > 100 && from_body && above_floor && landed_droplets > 0 && static_cast<std::size_t>(drips()) <= drip_cap, "characters drip in the rain");
+        require(seen > 100 && clinging > 20 && falling > 20 && from_body && above_floor && at_edges && slow && landed_droplets > 0 &&
+                static_cast<std::size_t>(drips()) <= drip_cap, "characters drip in the rain: beads cling at the silhouette edges, then fall");
+        {   // A clinging bead moves with its walking character.
+            RenderEntity wearer{8, -20, 0, 0, 0};
+            EffectSystem coat2(std::filesystem::path{}, {}, {});
+            bool riding = true; std::size_t held = 0;
+            for (int i = 0; i < 40; ++i) {
+                wearer.x += .3f; coat2.set_weather(rain, true, {wearer.x, 0, 0}); coat2.update(.05f, std::span(&wearer, 1));
+                for (const auto& s : coat2.splashes_) if (s.kind == splash_drip && s.hold > 0) { ++held; riding = riding && std::hypot(s.position[0] - wearer.x, s.position[2]) < 1.3f; }
+            }
+            require(held > 10 && riding, "clinging beads move with their character");
+        }
         SceneWeather after = rain; after.kind = WeatherKind::cloudy; after.precipitation = 0; after.wetness = .9f;
         for (int i = 0; i < 40; ++i) { coat.set_weather(after, true, {20, 0, 0}); coat.update(.05f, std::span(&stander, 1)); }
         require(drips() > 0, "soaked clothes keep dripping after the rain");
