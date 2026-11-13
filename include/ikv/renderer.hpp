@@ -158,6 +158,24 @@ inline std::array<float, 3> weather_backdrop(const WeatherUniforms& u, const Sce
     }
     return clear;
 }
+// NONCANONICAL wave 28 (GL/Vulkan fog parity): the enhanced scene clear colour as linear HDR (what Vulkan clears its
+// HDR target to; weather_backdrop under weather) and its display colour after the enhanced post.frag exposure, ACES and
+// gamma. GL has no HDR target: it clears to enhanced_display(...) so its backdrop passes the same tonemap as the
+// record/weather-fogged land meeting it at the horizon (until wave 28 GL cleared to the untonemapped colour, darker).
+inline std::array<float, 3> enhanced_backdrop_linear(const WeatherUniforms& u, const SceneLighting& l) {
+    std::array<float, 3> c{.04f, .05f, .065f};
+    if (!u.active()) return c;
+    const auto b = weather_backdrop(u, l, {std::pow(c[0], 1/2.2f), std::pow(c[1], 1/2.2f), std::pow(c[2], 1/2.2f)});
+    for (unsigned i = 0; i < 3; ++i) c[i] = std::pow(b[i], 2.2f);
+    return c;
+}
+inline std::array<float, 3> enhanced_display(std::array<float, 3> c, float exposure) {
+    for (auto& v : c) {
+        const float x = std::max(v, 0.f) * exposure;
+        v = std::pow(std::clamp((x*(2.51f*x + .03f))/(x*(2.43f*x + .59f) + .14f), 0.f, 1.f), 1/2.2f);
+    }
+    return c;
+}
 // Wind phase after one frame: integrated (continuous when the speed changes), never speed*time.
 inline double advance_wind_phase(double phase, const SceneLighting& l, bool original_appearance, float dt) {
     if (!l.weather.active || original_appearance || l.roofed || !std::isfinite(dt) || dt <= 0) return phase;

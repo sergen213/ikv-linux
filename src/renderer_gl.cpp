@@ -392,6 +392,9 @@ void main() {
         vec3 clouds=surface.rgb*(1.0-clamp(sky_blend,0.0,1.0))+second*sky_blend;
         surface=vec4(mix(fog_color,clouds*source_vertex_light+vec3(sky_scatter),surface.a),1.0);
         if(weather)surface.rgb=weatherSky(surface.rgb,weatherFogColor(fog_color,scene_fog,weather_state,weather_misc),weather_state,weather_misc,source_time.y);
+        // Enhanced: the sky takes the linear HDR path and ACES tonemap like every other enhanced surface (Vulkan lighting.glsl
+        // sky + post.frag), so the horizon meets the record/weather-fogged land in the same colour (NONCANONICAL wave 28 fix).
+        if(!original_appearance){vec3 c=pow(max(surface.rgb,vec3(0.0)),vec3(2.2))*exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);surface.rgb=pow(c,vec3(1.0/2.2));}
     } else if(original_appearance) {
         if(!source_normal_path()&&!has_environment_map&&has_fade_map)surface=mix(texture(fade_map,texcoord),surface,fade_blend);
         surface=original_surface(surface,1.0);
@@ -1021,7 +1024,10 @@ public:
          wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
          weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);}
         ocean_waves_=ocean_waves_on(weather_,ocean_waves_); // NONCANONICAL wave 28 (renderer.hpp)
-        const auto backdrop=weather_backdrop(weather_,light,{0.045f,0.065f,0.085f}); // wave 27: skyless zones under weather
+        // Skyless zones: original clears to its display colour; enhanced to Vulkan's linear backdrop (weather_backdrop under
+        // weather) after the enhanced tonemap, as the fogged land beside it (renderer.hpp enhanced_backdrop_linear).
+        const auto backdrop=options_.original_appearance?std::array<float,3>{0.045f,0.065f,0.085f}:
+            enhanced_display(enhanced_backdrop_linear(weather_,light),options_.exposure);
         glClearColor(backdrop[0],backdrop[1],backdrop[2],1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         const auto ticks=static_cast<std::uint32_t>(SDL_GetTicks());
         const std::array<float,4> source_time{static_cast<float>(ticks),static_cast<float>(ticks)*0.001f,0.0f,0.0f}; // v_ocean c38
@@ -1096,7 +1102,7 @@ public:
             glEnable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glEnable(GL_BLEND);
             glDisable(GL_CULL_FACE);glUseProgram_(particle_program_);glUniformMatrix4fv_(particle_vp_location_,1,GL_FALSE,vp.data());
             glUniform1i_(particle_grayscale_location_,grayscale_?1:0);
-            glUniform1i_(particle_fog_enabled_location_,options_.original_appearance&&light.fog_enabled?1:0);
+            glUniform1i_(particle_fog_enabled_location_,light.fog_enabled?1:0); // both appearances, as Vulkan particle.vert
             glUniform1f_(particle_fog_start_location_,light.fog_start);glUniform1f_(particle_fog_end_location_,light.fog_end);
             glBindVertexArray_(particle_vao_);glActiveTexture_(GL_TEXTURE0);
             for(const auto& batch:particle_batches_) {
@@ -1497,8 +1503,10 @@ private:
                  sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds));
             // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
             if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
+            // Record fog in both appearances (enhanced: in linear, scene_fragment; Vulkan computes it for every draw too).
+            // Until wave 28 enhanced GL fogged only the source ocean, so its far land stayed clear where Vulkan fogged it.
             bool fog=false;
-            if(visible&&(options_.original_appearance||scene.materials[material].source_ocean)&&light.fog_enabled&&!instance.sky) {
+            if(visible&&light.fog_enabled&&!instance.sky) {
                 if(instance.node>=scene.nodes.size())throw std::runtime_error("source fog requires original model bounds");
                 const auto center=entity?
                     entity_source_bounds_center(scene,instance,entity->x,entity->ground_y,entity->z,entity->yaw):

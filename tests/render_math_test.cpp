@@ -207,6 +207,14 @@ int main() {
         assert(ikv::advance_wind_phase(7,light,true,.5f)==7);
         light.roofed=true;assert(zero(ikv::weather_uniforms(light,false,5))&&ikv::advance_wind_phase(7,light,false,.5f)==7);
         light.roofed=false;
+        { // wave 28 fog parity: GL clears to Vulkan's linear backdrop after the enhanced tonemap
+            const auto quiet=ikv::enhanced_backdrop_linear(ikv::weather_uniforms(ikv::SceneLighting{},false,5),light);
+            assert(quiet==(std::array<float,3>{.04f,.05f,.065f}));
+            const auto storm=ikv::enhanced_backdrop_linear(u,light),expected=ikv::weather_backdrop(u,light,{std::pow(.04f,1/2.2f),std::pow(.05f,1/2.2f),std::pow(.065f,1/2.2f)});
+            for(unsigned i=0;i<3;++i)assert(std::abs(std::pow(storm[i],1/2.2f)-expected[i])<1e-5f);
+            const auto shown=ikv::enhanced_display({0,.18f,4},1);
+            assert(shown[0]==0&&shown[1]>.5f&&shown[1]<.6f&&shown[2]>.95f&&shown[2]<=1); // ACES(.18)^(1/2.2) ~ .55
+        }
         ikv::Material leaf;leaf.alpha_cutoff=.3f;leaf.diffuse="textures/AgacYeni.dds";
         const ikv::Matrix4 unit{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
         const auto sway=ikv::weather_sway(u,leaf,unit,{2,22},false);

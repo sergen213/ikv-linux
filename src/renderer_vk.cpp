@@ -2208,9 +2208,7 @@ void set_particles(const ParticleFrame& frame)override {
       wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
       weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);
       ocean_waves_=ocean_waves_on(weather_,ocean_waves_);
-      backdrop_={.04f,.05f,.065f};
-      if(weather_.active()){const auto b=weather_backdrop(weather_,lighting,{std::pow(.04f,1/2.2f),std::pow(.05f,1/2.2f),std::pow(.065f,1/2.2f)});
-          for(unsigned i=0;i<3;++i)backdrop_[i]=std::pow(b[i],2.2f);}}
+      backdrop_=enhanced_backdrop_linear(weather_,lighting);}
      const auto planes=frustum_planes(camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true));
      build_draws(scene_set,entities,eye,planes,&contours_);
      Frame f{};
