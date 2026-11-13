@@ -24,6 +24,8 @@ layout(set=0,binding=10) uniform sampler2D currentGuide;
 layout(set=0,binding=11) uniform sampler2D previousGuide;
 
 bool inside(ivec2 p, ivec2 size) { return all(greaterThanEqual(p,ivec2(0))) && all(lessThan(p,size)); }
+// pow(c,16.) by squaring (wave 27 perf: four multiplies instead of exp2/log2 per tap).
+float pow16(float c) { c*=c; c*=c; c*=c; return c*c; }
 vec3 viewRay(vec2 at) {
     return frame.cameraForward.xyz + frame.cameraRight.xyz*((at.x*2-1)*frame.cameraRight.w) +
         frame.cameraUp.xyz*((1-at.y*2)*frame.cameraUp.w);
@@ -49,6 +51,12 @@ void main() {
     float planeScale=1./(.02+depth*.004);
     float stride=draw.color.x;
     vec3 diffuse,reflection;
+    // Wave 27 perf: viewRay is affine in the pixel, so a neighbour's plane distance is depth' * (n.ray + x*n.dx + y*n.dy)
+    // - depth * n.ray; faithful RT (params.x 2) has no reflection term (lighting.glsl writes zero), so its taps skip it.
+    float rayN=dot(normal,ray);
+    float stepN=dot(normal,frame.cameraRight.xyz)*(2.*frame.cameraRight.w/float(size.x));
+    float stepM=-dot(normal,frame.cameraUp.xyz)*(2.*frame.cameraUp.w/float(size.y));
+    bool reflections=frame.params.x<1.5;
     if(stride>0) {
         // A-trous iteration: B3 taps at this stride, plane-distance and vertex-normal edge stopping (never across
         // silhouettes/creases). Short history leans on the (converged) neighbours; long history keeps its own value.
@@ -65,12 +73,13 @@ void main() {
             vec4 d=texelFetch(previousDiffuse,q,0);
             float w=taps[abs(x)]*taps[abs(y)];
             if(x!=0 || y!=0) {
-                float plane=abs(dot(normal,neighbor.w*viewRay((vec2(q)+.5)/vec2(size))-depth*ray))*planeScale/stride;
-                w*=exp(-plane)*pow(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1),16.)*
+                vec2 o=vec2(q-p);
+                float plane=abs(neighbor.w*(rayN+o.x*stepN+o.y*stepM)-depth*rayN)*planeScale/stride;
+                w*=exp(-plane)*pow16(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1))*
                     clamp(max(d.a,1)/own,.25,4.)*clamp(8./own,.125,1.);
             }
             sumDiffuse+=d.rgb*w;
-            sumReflection+=texelFetch(previousReflection,q,0).rgb*w;
+            if(reflections)sumReflection+=texelFetch(previousReflection,q,0).rgb*w;
             weight+=w;
         }
         diffuse=sumDiffuse/weight;reflection=sumReflection/weight;
@@ -133,11 +142,11 @@ void main() {
         if(!inside(q,size))continue;
         vec4 neighbor=texelFetch(currentGuide,q,0);
         if(!(neighbor.w>0) || !(neighbor.z>0))continue;
-        float plane=abs(dot(normal,neighbor.w*viewRay((vec2(q)+.5)/vec2(size))-depth*ray))*planeScale;
-        float g=exp(-plane)*pow(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1),16.);
+        float plane=abs(neighbor.w*(rayN+float(x)*stepN+float(y)*stepM)-depth*rayN)*planeScale;
+        float g=exp(-plane)*pow16(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1));
         if(!(g>=1e-3))continue;
         float w=g*exp(-.5*float(x*x+y*y)/1.5);
-        vec3 d=texelFetch(currentDiffuse,q,0).rgb,r=texelFetch(currentReflection,q,0).rgb;
+        vec3 d=texelFetch(currentDiffuse,q,0).rgb,r=reflections?texelFetch(currentReflection,q,0).rgb:vec3(0);
         sumDiffuse+=d*w;
         sumReflection+=r*w;
         weight+=w;
