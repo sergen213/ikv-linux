@@ -208,16 +208,16 @@ int main() {
         light.roofed=true;assert(zero(ikv::weather_uniforms(light,false,5))&&ikv::advance_wind_phase(7,light,false,.5f)==7);
         light.roofed=false;
         ikv::Material leaf;leaf.alpha_cutoff=.3f;leaf.diffuse="textures/AgacYeni.dds";
-        const ikv::Matrix4 identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-        const auto sway=ikv::weather_sway(u,leaf,identity,{2,22},false);
+        const ikv::Matrix4 unit{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        const auto sway=ikv::weather_sway(u,leaf,unit,{2,22},false);
         assert(sway[0]==2&&std::abs(sway[1]-.05f)<1e-6f&&std::abs(sway[2]-.7f)<1e-5f);
-        assert(ikv::weather_sway(u,leaf,identity,{2,22},true)[2]==0&&ikv::weather_sway(u,leaf,identity,{0,200},false)[2]==0);
-        assert(ikv::weather_sway(u,ikv::Material{},identity,{2,22},false)[2]==0);
+        assert(ikv::weather_sway(u,leaf,unit,{2,22},true)[2]==0&&ikv::weather_sway(u,leaf,unit,{0,200},false)[2]==0);
+        assert(ikv::weather_sway(u,ikv::Material{},unit,{2,22},false)[2]==0);
         ikv::Material wall;wall.alpha_cutoff=.3f;wall.diffuse="textures/yenicami_duvar.dds";
-        assert(ikv::weather_sway(u,wall,identity,{2,22},false)[2]==0); // alpha-tested but not foliage/cloth
-        bool rejected=false;
-        try{ikv::parse_weather_override("kind=hail");}catch(const std::invalid_argument&){rejected=true;}
-        assert(rejected&&!ikv::parse_weather_override(nullptr)&&!ikv::parse_weather_override(""));
+        assert(ikv::weather_sway(u,wall,unit,{2,22},false)[2]==0); // alpha-tested but not foliage/cloth
+        bool override_rejected=false;
+        try{ikv::parse_weather_override("kind=hail");}catch(const std::invalid_argument&){override_rejected=true;}
+        assert(override_rejected&&!ikv::parse_weather_override(nullptr)&&!ikv::parse_weather_override(""));
     }
     return 0;
 }
