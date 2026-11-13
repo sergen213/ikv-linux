@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
+#include <time.h>
 #include <deque>
 #include <iterator>
 #include <utility>
@@ -40,6 +41,33 @@
 namespace {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
+namespace {
+// NONCANONICAL diagnostics (wave 27 perf): IKV_CPU_TIMING=1 logs, every 120 frames, the mean milliseconds per frame phase
+// of main-thread CPU (CLOCK_THREAD_CPUTIME_ID: presentation/vsync waits excluded) and of wall time (<phase>Wall, which
+// includes work handed to other threads), plus the whole frame's wall time and process CPU (all threads).
+struct CpuTiming {
+    enum Phase { network, scene, place, labels, hud, effects, skins, render, count };
+    static constexpr const char* names[count]{"network","scene","place","labels","hud","effects","reskin","render"};
+    bool enabled=std::getenv("IKV_CPU_TIMING")!=nullptr;
+    std::array<double,count> cpu{},wall{}; double frame_sum=0,cpu_sum=0,process_sum=0; unsigned frames=0;
+    double last_cpu=0,last_wall=0,start_cpu=0,start_wall=0,start_process=0;
+    static double ms(clockid_t id) { timespec t{}; clock_gettime(id,&t); return double(t.tv_sec)*1e3+double(t.tv_nsec)*1e-6; }
+    void begin() { if (enabled) { start_cpu=last_cpu=ms(CLOCK_THREAD_CPUTIME_ID); start_wall=last_wall=ms(CLOCK_MONOTONIC); start_process=ms(CLOCK_PROCESS_CPUTIME_ID); } }
+    void mark(Phase phase) {
+        if (!enabled) return;
+        const double c=ms(CLOCK_THREAD_CPUTIME_ID),w=ms(CLOCK_MONOTONIC);
+        cpu[phase]+=c-last_cpu; wall[phase]+=w-last_wall; last_cpu=c; last_wall=w;
+    }
+    void end() {
+        if (!enabled) return;
+        frame_sum+=ms(CLOCK_MONOTONIC)-start_wall; cpu_sum+=ms(CLOCK_THREAD_CPUTIME_ID)-start_cpu; process_sum+=ms(CLOCK_PROCESS_CPUTIME_ID)-start_process;
+        if (++frames<120) return;
+        std::cerr<<"cpu timing frames="<<frames<<" frameMs="<<frame_sum/frames<<" cpuMs="<<cpu_sum/frames<<" processCpuMs="<<process_sum/frames;
+        for (unsigned i=0;i<count;++i) std::cerr<<' '<<names[i]<<"Ms="<<cpu[i]/frames<<' '<<names[i]<<"WallMs="<<wall[i]/frames;
+        std::cerr<<'\n'; cpu={}; wall={}; frame_sum=cpu_sum=process_sum=0; frames=0;
+    }
+};
+}
 class ProgressConnectionError final:public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -398,28 +426,55 @@ float dot(const std::array<float,3>& a,const std::array<float,3>& b) { return a[
 // 'nocamera' blocker counts only from its walk side (determinant<0; Mısır's closed shell, walk cells inside, has positive
 // volume, so the D3D clockwise winding's cross(ab,ac) faces away from where the camera target stands): a target behind or
 // inside a collider (admin teleport, summon) no longer pulls the eye into the body on the hull's far wall.
+// World-space corners (3 per triangle, source order) of one collider class, cached across frames: per-frame picks and
+// camera rays transformed every vertex of every collider (~7k camera + walk-set triangles) each query. NONCANONICAL
+// performance (wave 27); the cache is exact: it is rebuilt when the zone, the instance/mesh lists or any collider
+// instance's mesh, transform or mesh revision differ from the snapshot it was built from.
+struct ColliderTriangles {
+    std::optional<unsigned> registry; std::size_t instances=SIZE_MAX,meshes=SIZE_MAX;
+    std::vector<std::uint32_t> sources; std::vector<std::uint32_t> source_meshes; std::vector<std::array<float,16>> transforms; std::vector<std::uint64_t> revisions;
+    std::vector<std::array<float,3>> corners;
+};
+const ColliderTriangles& collider_triangles(const ikv::Scene& scene,bool support) {
+    static std::array<ColliderTriangles,2> caches;
+    auto& c=caches[support];
+    bool valid=c.registry==scene.source_registry_id && c.instances==scene.instances.size() && c.meshes==scene.meshes.size();
+    for (std::size_t k=0; valid && k<c.sources.size(); ++k) {
+        const auto& instance=scene.instances[c.sources[k]];
+        valid=instance.mesh==c.source_meshes[k] && instance.transform.matrix==c.transforms[k] && scene.meshes[instance.mesh].revision==c.revisions[k];
+    }
+    if (valid) return c;
+    c.registry=scene.source_registry_id; c.instances=scene.instances.size(); c.meshes=scene.meshes.size();
+    c.sources.clear(); c.source_meshes.clear(); c.transforms.clear(); c.revisions.clear(); c.corners.clear();
+    for (std::size_t n=0; n<scene.instances.size(); ++n) {
+        const auto& instance=scene.instances[n];
+        if (instance.entity_id || !(support?instance.source_support:instance.source_nocamera) || instance.mesh>=scene.meshes.size()) continue;
+        const auto& mesh=scene.meshes[instance.mesh];
+        c.sources.push_back(static_cast<std::uint32_t>(n)); c.source_meshes.push_back(instance.mesh);
+        c.transforms.push_back(instance.transform.matrix); c.revisions.push_back(mesh.revision);
+        for (std::size_t i=0;i+2<mesh.indices.size();i+=3) {
+            if (mesh.indices[i]>=mesh.vertices.size() || mesh.indices[i+1]>=mesh.vertices.size() || mesh.indices[i+2]>=mesh.vertices.size()) continue;
+            for (unsigned k=0; k<3; ++k) c.corners.push_back(transform_point(instance.transform,mesh.vertices[mesh.indices[i+k]]));
+        }
+    }
+    return c;
+}
 template<class Accept>
 std::optional<float> source_ray(const ikv::Scene& scene,bool support,const std::array<float,3>& origin,const std::array<float,3>& ray,Accept accept) {
     float nearest=std::numeric_limits<float>::max();
     std::optional<float> result;
     // ponytail: O(triangles) per query (clicks, one ~7k-triangle camera ray per frame); spatial ray index if profiling demands it.
-    for (const auto& instance:scene.instances) {
-        if (instance.entity_id || !(support?instance.source_support:instance.source_nocamera) || instance.mesh>=scene.meshes.size()) continue;
-        const auto& mesh=scene.meshes[instance.mesh];
-        for (std::size_t i=0;i+2<mesh.indices.size();i+=3) {
-            if (mesh.indices[i]>=mesh.vertices.size() || mesh.indices[i+1]>=mesh.vertices.size() || mesh.indices[i+2]>=mesh.vertices.size()) continue;
-            const auto a=transform_point(instance.transform,mesh.vertices[mesh.indices[i]]);
-            const auto b=transform_point(instance.transform,mesh.vertices[mesh.indices[i+1]]);
-            const auto c=transform_point(instance.transform,mesh.vertices[mesh.indices[i+2]]);
-            const auto ab=subtract(b,a),ac=subtract(c,a);
-            const auto p=cross(ray,ac); const float determinant=dot(ab,p);
-            if (std::abs(determinant)<1e-8f || (!support && determinant>0)) continue;
-            const float inverse=1/determinant; const auto t=subtract(origin,a);
-            const float u=dot(t,p)*inverse; if (u<0 || u>1) continue;
-            const auto q=cross(t,ab); const float v=dot(ray,q)*inverse; if (v<0 || u+v>1) continue;
-            const float distance=dot(ac,q)*inverse;
-            if (distance>=0 && distance<nearest && accept(distance)) { nearest=distance; result=distance; }
-        }
+    const auto& corners=collider_triangles(scene,support).corners;
+    for (std::size_t i=0;i+2<corners.size();i+=3) {
+        const auto& a=corners[i];
+        const auto ab=subtract(corners[i+1],a),ac=subtract(corners[i+2],a);
+        const auto p=cross(ray,ac); const float determinant=dot(ab,p);
+        if (std::abs(determinant)<1e-8f || (!support && determinant>0)) continue;
+        const float inverse=1/determinant; const auto t=subtract(origin,a);
+        const float u=dot(t,p)*inverse; if (u<0 || u>1) continue;
+        const auto q=cross(t,ab); const float v=dot(ray,q)*inverse; if (v<0 || u+v>1) continue;
+        const float distance=dot(ac,q)*inverse;
+        if (distance>=0 && distance<nearest && accept(distance)) { nearest=distance; result=distance; }
     }
     return result;
 }
@@ -464,6 +519,7 @@ float unoccluded_distance(const ikv::Scene& scene,const ikv::Camera& camera) {
 
 class Application {
     Options options_;
+    CpuTiming cpu_timing_;
     const Secret& secret_;
     ikv::Scene scene_;
     SDL_Window* window_=nullptr;
@@ -676,6 +732,7 @@ public:
             // rate must not stretch Death (4.8 s) across the whole Canlanma Süresi countdown.
             const float dt=std::min(real,.1f); elapsed_+=real;
             input(dt);
+            cpu_timing_.begin();
             if (interrupted && !quit_) leave();
             if (reconnect_ && !quit_) { reconnect_=false; connect(); }
             if (session_ && !disconnected_) {
@@ -688,7 +745,9 @@ public:
                     disconnect(std::string("Bağlantı hatası: ")+e.what());
                 }
             }
+            cpu_timing_.mark(CpuTiming::network);
             ikv::update_scene(scene_,elapsed_);
+            cpu_timing_.mark(CpuTiming::scene);
             audio_->update();
             try { draw(dt); }
             catch (const ProgressConnectionError& e) {
@@ -698,6 +757,7 @@ public:
                 // Recreate the same configured provider; never reuse partially committed GPU state.
                 reset_renderer();
             }
+            cpu_timing_.end();
             if (quit_ && session_ && session_->drained() && !pending_presentation()) break;
             // Presentation (vsync/FIFO) paces frames; only cap a non-blocking present at 250 fps. A fixed sleep here added
             // 8 ms to every frame and pushed 60 Hz frames past the vblank.
@@ -1112,6 +1172,11 @@ private:
         windows_.push_back(id); scroll_[static_cast<std::size_t>(id)]=0;
         audio_->play_event("ui\\windowopen.raw");
     }
+    // An entity's "kind" without copying it (per-frame loops; value("kind",std::string{}) allocates a string each call).
+    static std::string_view kind_of(const Json& e) {
+        const auto found=e.find("kind");
+        return found!=e.end() && found->is_string()?std::string_view(found->get_ref<const std::string&>()):std::string_view{};
+    }
     const Json* entity(std::uint32_t id) const {
         if (session_ && state_.contains("entities")) for (const auto& e:state_.at("entities"))
             if (e.value("id",0u)==id) return &e;
@@ -1381,7 +1446,7 @@ private:
                 if (!head || !feet || !tag) continue;
                 const Json* e=entity(pose.id);
                 const float dx=pose.x-self->x,dy=pose.ground_y-self->ground_y,dz=pose.z-self->z;
-                const auto kind=e?e->value("kind",std::string{}):std::string{};
+                const auto kind=e?kind_of(*e):std::string_view{};
                 const bool npc=kind=="questgiver" || kind=="merchant" || kind=="enemy" || kind=="summon";
                 const bool name=(kind=="player" || (npc && e->value("alive",true))) && dx*dx+dy*dy+dz*dz<170.f*170.f;
                 // 00471dfa: lift = boundy (root +0x128) · 0.3 · (1 − sz)·2997; the name line's top is 14 px above the lift.
@@ -3053,7 +3118,7 @@ private:
         else if (hit->value.starts_with("target:")) id=static_cast<std::uint32_t>(std::strtoul(hit->value.c_str()+7,nullptr,10));
         if (hit==hits_.rend() && !id && session_ && session_->self) { std::optional<std::array<float,3>> ground; id=entity_at(x,y,ground); }
         const Json* hovered=entity(id);
-        hover_=hovered && hovered->value("kind",std::string{})=="enemy" && !hovered->value("alive",true) && !hovered->value("looted",true)?id-sack_offset:id;
+        hover_=hovered && kind_of(*hovered)=="enemy" && !hovered->value("alive",true) && !hovered->value("looted",true)?id-sack_offset:id;
         if (id>=sack_offset && id<2*sack_offset && !hovered) id+=sack_offset; // a sack shows its corpse's cursor
         int kind=cursor_point;
         if (const Json* e=session_ && id!=session_->self?entity(id):nullptr) {
@@ -4537,7 +4602,7 @@ private:
         // Ganimet sack (classes.dat object 90002 items\id_item_box.adf; VOD 16:30) beside each unlooted corpse.
         std::vector<std::uint32_t> sacks;
         if (session_ && state_.contains("entities")) for (const auto& e:state_.at("entities")) {
-            if (e.value("kind",std::string{})!="enemy" || e.value("alive",true) || e.value("looted",true)) continue;
+            if (kind_of(e)!="enemy" || e.value("alive",true) || e.value("looted",true)) continue;
             const auto id=e.at("id").get<std::uint32_t>();
             const auto* corpse=pose(id);
             if (!corpse || id<2*sack_offset) continue;
@@ -4562,7 +4627,9 @@ private:
             });
         }
         audio_->frame(scene_,poses_,session_?session_->self:0,ikv::camera_basis(renderer_->camera()));
+        cpu_timing_.mark(CpuTiming::place);
         update_labels();
+        cpu_timing_.mark(CpuTiming::labels);
         hud_frame();
         if (!flash_.empty() && Clock::now()>=flash_until_) { flash_.clear(); hud_dirty_=true; }
         if (Clock::now()<cooldown_until_+std::chrono::milliseconds(300) && Clock::now()>=cooldown_repaint_) { hud_dirty_=true; cooldown_repaint_=Clock::now()+std::chrono::milliseconds(250); }
@@ -4577,6 +4644,7 @@ private:
             if (!hud_click(x,y) && !over_window(x,y) && session_ && session_->self) pick(x,y);
             if (hud_dirty_) paint_hud();
         }
+        cpu_timing_.mark(CpuTiming::hud);
         ikv::ease_weather(weather_shown_,weather_target_,dt); scene_.lighting.weather=weather_shown_; // NONCANONICAL wave 27
         if (effects_) effects_->set_weather(weather_shown_,options_.appearance=="enhanced" && !scene_.lighting.roofed,renderer_->camera().target);
         if (effects_) {
@@ -4587,8 +4655,10 @@ private:
             // zero (the server only sends prefixes then); armour prefixes carry no glow. Taking it off detaches it.
             for (const auto& actor:actors_) {
                 std::vector<std::string> want;
-                for (const auto& item:actor.binding.is_object()?actor.binding.value("equipment",Json::array()):Json::array()) if (item.value("slot",0)==11)
-                    for (const auto& p:item.value("prefixes",Json::array()))
+                // By reference: value("equipment",Json::array()) copied the whole equipment array per actor per frame.
+                const auto equipment=actor.binding.is_object()?actor.binding.find("equipment"):actor.binding.end();
+                if (equipment!=actor.binding.end() && equipment->is_array()) for (const auto& item:*equipment) if (item.value("slot",0)==11)
+                    if (const auto prefixes=item.find("prefixes"); prefixes!=item.end() && prefixes->is_array()) for (const auto& p:*prefixes)
                         if (const auto f=source_prefixes.find(p.get<int>()); f!=source_prefixes.end() && !f->second.effect.empty()) want.push_back(f->second.effect);
                 auto& had=glows_[actor.id];
                 for (const auto& name:had) if (std::find(want.begin(),want.end(),name)==want.end()) effects_->detach(name,actor.id);
@@ -4623,6 +4693,7 @@ private:
             }
             renderer_->set_particles(effects_->frame(renderer_->camera()));
         }
+        cpu_timing_.mark(CpuTiming::effects);
         renderer_->set_grayscale(dead()); // VOD 34:00: the dead player's world view is grayscale, HUD stays in colour
         // 004b3ba0 hover pick: the single entity under the cursor gets the contour shell, red for actors (473f17) and green for
         // the Ganimet box (4a9c3b); never self, dead hostiles or while Alt is held (DIK_LMENU/RMENU 0x5d7eb1/0x5d7f31).
@@ -4632,11 +4703,13 @@ private:
             if (alt || !hover_ || pose.id!=hover_ || (session_ && pose.id==session_->self)) continue;
             if (pose.id>=sack_offset && pose.id<2*sack_offset) { pose.contour={0,1,0}; continue; }
             const Json* e=entity(pose.id);
-            if (e && !(e->value("kind",std::string{})=="enemy" && !e->value("alive",true))) pose.contour={1,0,0};
+            if (e && !(kind_of(*e)=="enemy" && !e->value("alive",true))) pose.contour={1,0,0};
         }
         // Next frame's update_scene skips actors out of view; one that came into view now is skinned before it is drawn.
         if (hold_offscreen_skins()) ikv::update_scene(scene_,elapsed_);
+        cpu_timing_.mark(CpuTiming::skins);
         renderer_->render(scene_,poses_,session_?session_->self:0,dt);
+        cpu_timing_.mark(CpuTiming::render);
         if (trade_pending_present_) {
             if (trade_.active() && trade_.revision()==trade_painted_revision_) {
                 trade_seen_rows_|=trade_pending_rows_;
