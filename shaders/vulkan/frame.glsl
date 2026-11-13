@@ -56,8 +56,8 @@ bool sceneRoofed(){return frame.ambient.w>.5;}
 // longest is ~1.9 m high (crest to trough ~3.8 m, the sum higher), at 10 m/s ~0.3 m, in still air nothing. Steepness rises
 // with the wind, pulling the water toward the crests (sharp crests, flat troughs). The waves travel downwind with the
 // wind phase (wind.w, wrapping at 1024 m: 7, 9, 11, 13 and 16 crests per wrap, so no jump) and fade out with eye distance
-// by 8 wavelengths (renderer.hpp kOceanWaveRange). waves: how many (vertices the 3 longest the mesh resolves, shading
-// all 5). Returns the displacement (units); slope: the surface's world x/z height gradient; crest: 0 flat .. 1 the water
+// by 8 wavelengths (renderer.hpp kOceanWaveRange). waves: how many (vertices and shading take the 3 longest the mesh
+// resolves; 5 exist). Returns the displacement (units); slope: the surface's world x/z height gradient; crest: 0 flat .. 1 the water
 // compressed into a breaking crest (Gerstner Jacobian over its maximum). All zero while inactive.
 vec3 oceanWindWaves(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves,out vec2 slope,out float crest){
     slope=vec2(0);crest=0.;

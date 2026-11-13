@@ -487,6 +487,14 @@ inline bool ocean_waves_on(const WeatherUniforms& w, bool was_on) { return w.act
 // effects.cpp's rain surface (cells whose centre a triangle covers, else its vertices' cells).
 struct OceanBed {
     float x0 = 0, z0 = 0, cell = 1; std::uint32_t width = 0, depth = 0; std::vector<float> top;
+    // Horizontal distance (units) from each cell to the nearest land: bed within 1 unit of the water level or above.
+    std::vector<float> shore;
+    float shore_at(float x, float z) const {
+        if (shore.empty()) return INFINITY;
+        const auto ix = std::clamp<std::int64_t>(std::int64_t(std::floor((x - x0) / cell)), 0, std::int64_t(width) - 1);
+        const auto iz = std::clamp<std::int64_t>(std::int64_t(std::floor((z - z0) / cell)), 0, std::int64_t(depth) - 1);
+        return shore[std::size_t(iz) * width + std::size_t(ix)];
+    }
     // Highest bed within one cell around (x, z); -inf where nothing lies under the water.
     float near(float x, float z) const {
         if (top.empty()) return -INFINITY;
@@ -547,12 +555,34 @@ inline OceanBed ocean_bed(const Scene& s) {
             if (!covered) for (const auto& p : {a, b, c}) stamp(cell_of(p[0], g.x0, g.width), cell_of(p[2], g.z0, g.depth), p[1]);
         }
     }
+    // Distance to shore: land cells at the highest ocean placement's level, then a two-pass chamfer distance transform.
+    float level = -INFINITY;
+    for (const auto& in : s.instances) if (in.mesh < s.meshes.size() && ocean_draw(in)) for (const auto& v : s.meshes[in.mesh].vertices) level = std::max(level, world(in.transform.matrix, v)[1]);
+    if (!std::isfinite(level)) return g;
+    const float straight = g.cell, diagonal = g.cell * 1.41421356f;
+    g.shore.assign(g.top.size(), INFINITY);
+    for (std::size_t i = 0; i < g.top.size(); ++i) if (g.top[i] >= level - 1) g.shore[i] = 0;
+    const auto relax = [&](std::int64_t x, std::int64_t z, std::int64_t dx, std::int64_t dz, float w) {
+        const auto nx = x + dx, nz = z + dz;
+        if (nx < 0 || nz < 0 || nx >= std::int64_t(g.width) || nz >= std::int64_t(g.depth)) return;
+        auto& d = g.shore[std::size_t(z) * g.width + std::size_t(x)];
+        d = std::min(d, g.shore[std::size_t(nz) * g.width + std::size_t(nx)] + w);
+    };
+    for (std::int64_t z = 0; z < std::int64_t(g.depth); ++z) for (std::int64_t x = 0; x < std::int64_t(g.width); ++x) {
+        relax(x, z, -1, 0, straight); relax(x, z, 0, -1, straight); relax(x, z, -1, -1, diagonal); relax(x, z, 1, -1, diagonal);
+    }
+    for (std::int64_t z = std::int64_t(g.depth) - 1; z >= 0; --z) for (std::int64_t x = std::int64_t(g.width) - 1; x >= 0; --x) {
+        relax(x, z, 1, 0, straight); relax(x, z, 0, 1, straight); relax(x, z, 1, 1, diagonal); relax(x, z, -1, 1, diagonal);
+    }
     return g;
 }
 // The subdivided wave copy of ocean mesh `mesh` (first ocean placement's transform) with each vertex's shore factor in
-// uv1 = (-1, factor): 0 where the bed reaches the surface, 1 from kOceanShoreDepth of water (frame.glsl sourceOceanPosition
-// scales the wind waves by it; the -1 marks the copy, whose lightmap UVs no water draw reads).
-constexpr float kOceanShoreDepth = 16.f; // units (4 m): full wind waves from this depth
+// uv1 = (-1, factor): 0 where the bed reaches the surface or land is near, 1 from kOceanShoreDepth of water and
+// kOceanShoreReach from land (frame.glsl sourceOceanPosition scales the wind waves by it, so swells shoal and die before
+// the beach instead of rising above it in narrow deep channels; the -1 marks the copy, whose lightmap UVs no water draw
+// reads).
+constexpr float kOceanShoreDepth = 16.f;  // units (4 m): full wind waves from this depth
+constexpr float kOceanShoreReach = 200.f; // units (50 m): ... and this far from land
 inline Mesh ocean_wave_mesh(const Scene& s, std::size_t mesh, const OceanBed& bed) {
     Mesh fine = subdivide_ocean_mesh(s.meshes[mesh]);
     const Matrix4* model = nullptr;
@@ -565,8 +595,8 @@ inline Mesh ocean_wave_mesh(const Scene& s, std::size_t mesh, const OceanBed& be
     const Matrix4& m = model ? *model : identity;
     for (auto& v : fine.vertices) {
         const float x = m[0]*v.x + m[4]*v.y + m[8]*v.z + m[12], y = m[1]*v.x + m[5]*v.y + m[9]*v.z + m[13], z = m[2]*v.x + m[6]*v.y + m[10]*v.z + m[14];
-        const float d = y - bed.near(x, z), f = std::clamp(d / kOceanShoreDepth, 0.f, 1.f);
-        v.uv1 = {-1.f, std::isfinite(d) ? f * f * (3 - 2 * f) : 1.f};
+        const float d = y - bed.near(x, z), f = std::clamp(d / kOceanShoreDepth, 0.f, 1.f), r = std::clamp(bed.shore_at(x, z) / kOceanShoreReach, 0.f, 1.f);
+        v.uv1 = {-1.f, (std::isfinite(d) ? f * f * (3 - 2 * f) : 1.f) * r * r * (3 - 2 * r)};
     }
     return fine;
 }

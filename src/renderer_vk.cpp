@@ -81,6 +81,9 @@ class VulkanRenderer final:public Renderer {
  // the identical invariant depth), so every pixel runs the expensive fragment shader (ray queries; parallax and PCF)
  // once instead of once per overdrawn layer. Same image.
  VkPipeline prepass_pipeline_=VK_NULL_HANDLE,prepass_double_=VK_NULL_HANDLE,opaque_prepassed_=VK_NULL_HANDLE,opaque_prepassed_double_=VK_NULL_HANDLE;
+ // NONCANONICAL wave 28: enhanced water draws (DrawItem::water) use these, the scene fragment shader specialised with
+ // lighting.glsl kWaterPipeline, so every other draw's pipeline compiles without the water/wind-sea/foam code.
+ VkPipeline water_pipeline_=VK_NULL_HANDLE,water_double_=VK_NULL_HANDLE;
  bool prepass_=false;
  // shadow_ready_: the atlas was cleared once since create_targets (modes that never sample it skip the pass after that).
  bool shadow_ready_=false;
@@ -743,7 +746,7 @@ Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usag
  VkShaderModule shader(const char* name){auto words=shader_bytes(name);VkShaderModuleCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;c.codeSize=words.size()*4;c.pCode=words.data();VkShaderModule module;checked(vkCreateShaderModule(device_,&c,nullptr,&module),"create shader module");return module;}
 VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mesh,bool alpha,
                     bool depth,bool shadow,bool double_sided=false,bool depth_write=true,std::optional<ParticleBlend> particle={},
-                    bool contour=false,bool glow_composite=false) {
+                    bool contour=false,bool glow_composite=false,bool water=false) {
      progress();
      // frag null: depth only (no fragment stage, no colour writes): depth prepass and opaque shadow casters.
      VkShaderModule v=shader(vert),f=VK_NULL_HANDLE;VkPipeline result=VK_NULL_HANDLE;
@@ -753,6 +756,11 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          for(auto& s:stages)s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
          stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=v;stages[0].pName="main";
          stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=f;stages[1].pName="main";
+         // water: lighting.glsl constant_id 0 (kWaterPipeline). Scene shaders declare it; other shaders ignore the entry.
+         const VkBool32 water_value=water?VK_TRUE:VK_FALSE;
+         const VkSpecializationMapEntry water_entry{0,0,sizeof(VkBool32)};
+         const VkSpecializationInfo water_info{1,&water_entry,sizeof(VkBool32),&water_value};
+         if(frag&&std::strncmp(frag,"scene",5)==0)stages[1].pSpecializationInfo=&water_info;
         // scene.vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
         const bool previous_pose=std::strncmp(vert,"scene",5)==0;
         const VkVertexInputBindingDescription bindings[2]{{0,static_cast<std::uint32_t>(particle?sizeof(ParticleVertex):sizeof(Vertex)),VK_VERTEX_INPUT_RATE_VERTEX},
@@ -1133,7 +1141,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
  void destroy_targets() {
      for(auto* p:{&opaque_,&alpha_,&shadow_pipeline_,&post_pipeline_,&overlay_pipeline_,&hud_pipeline_,
                  &opaque_double_,&alpha_double_,&shadow_double_,&temporal_pipeline_,&contour_pipeline_,&glow_pipeline_,&glow_composite_pipeline_,
-                 &shadow_depth_,&shadow_depth_double_,&prepass_pipeline_,&prepass_double_,&opaque_prepassed_,&opaque_prepassed_double_}) {
+                 &shadow_depth_,&shadow_depth_double_,&prepass_pipeline_,&prepass_double_,&opaque_prepassed_,&opaque_prepassed_double_,
+                 &water_pipeline_,&water_double_}) {
          if(*p)vkDestroyPipeline(device_,*p,nullptr);
          *p=VK_NULL_HANDLE;
      }
@@ -1323,6 +1332,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      alpha_=pipeline("scene.vert",scene_shader,scene_pass_,true,true,true,false);
      shadow_pipeline_=pipeline("shadow.vert","shadow.frag",shadow_pass_,true,false,true,true);
      opaque_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true);
+     water_pipeline_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,false,true,{},false,false,true);
+     water_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true,true,{},false,false,true);
      alpha_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,true,true,false,true);
      shadow_double_=pipeline("shadow.vert","shadow.frag",shadow_pass_,true,false,true,true,true);
      shadow_depth_=pipeline("shadow.vert",nullptr,shadow_pass_,true,false,true,true);
@@ -1750,6 +1761,7 @@ void record_geometry_uploads(SceneSet& set) {
          auto selected=shadow?(draw.flags[3]>0?(double_sided?shadow_double_:shadow_pipeline_):(double_sided?shadow_depth_double_:shadow_depth_)):
              prepass?(double_sided?prepass_double_:prepass_pipeline_):
              item.sky?sky_pipeline_[variant]:
+             item.water?(double_sided?water_double_:water_pipeline_):
              item.alpha?(double_sided?alpha_double_:alpha_):
              prepassed(scene,item)?(double_sided?opaque_prepassed_double_:opaque_prepassed_):(double_sided?opaque_double_:opaque_);
          if(selected!=bound_pipeline){vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,selected);bound_pipeline=selected;}

@@ -184,6 +184,9 @@ vec3 weatherFogLinear(){
     return frame.fogColor.w>.5?c:c*min(enhancedAmbientScale(),vec3(1));
 }
 #include "water.glsl"
+// NONCANONICAL wave 28: true only in renderer_vk.cpp water_pipeline_/water_double_ (enhanced water draws). Every other
+// pipeline specialises it false, so the driver drops the water, wind-sea and foam code from them (register pressure).
+layout(constant_id=0) const bool kWaterPipeline=false;
 vec3 waterSurface(){
     vec3 p=worldPosition,l=normalize(frame.sun.xyz),sunScale=enhancedSunScale();
     vec3 light=frame.sun.w>.5?pow(min(frame.ambient.rgb+frame.diffuse.rgb*max(l.y,0),vec3(1)),vec3(2.2)):vec3(1);
@@ -219,7 +222,7 @@ vec3 guideNormal=rtUnit(worldNormal),rtDiffuse=vec3(0),rtReflection=vec3(0);
 float rtArtwork=0;
 #endif
 if(draw.extra.w>=2) {
-    outputColor=frame.params.x>.5?vec4(waterSurface(),1):sourceOceanSurface();
+    outputColor=kWaterPipeline&&frame.params.x>.5?vec4(waterSurface(),1):sourceOceanSurface();
     if(draw.flags.w>0&&outputColor.a<=draw.flags.w)discard;
 #ifdef IKV_RT_GUIDED
     // Moving water has no displacement motion vectors: spatial guide only, never history or decomposition.

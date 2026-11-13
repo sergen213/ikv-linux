@@ -18,7 +18,7 @@ namespace {
 // Independently written GLSL. Original shader evidence is documented in GRAPHICS_ROADMAP.
 // NONCANONICAL wave 28 (enhanced weather): the wind sea's Gerstner waves, a copy of Vulkan frame.glsl oceanWindWaves (keep
 // identical): displacement, world x/z height gradient and crest compression; zero while inactive. The scene vertex shader
-// displaces the (subdivided) ocean by the three longest, water.glsl shades all five.
+// displaces the (subdivided) ocean by the three longest, water.glsl shades with the same three.
 #define IKV_GL_OCEAN_WIND R"GLSL(
 vec3 oceanWindWaves(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves,out vec2 slope,out float crest){
     slope=vec2(0.0);crest=0.0;
