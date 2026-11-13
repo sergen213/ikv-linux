@@ -30,9 +30,16 @@ struct SceneNode { std::uint32_t id=0; std::int32_t parent=-1; Transform local,w
 struct Zone { std::uint32_t width=0,height=0; std::vector<std::uint8_t> cells; std::vector<float> heights; std::string source; float cell_size=1.5f; };
 struct HelpParagraph { std::string text; std::uint32_t color=0xffffffff; };
 struct HelpPage { std::string book,header; std::vector<HelpParagraph> paragraphs; };
+// NONCANONICAL wave 27: server-authoritative season/weather/wind (snapshot clock.weather); the original had none.
+// active stays false until the server sends clock.weather; renderers and effects then draw no weather at all.
+// wind_direction: unit world X/Z the wind blows toward; wind_speed m/s (0..25); gust, precipitation (rain, or snow when
+// kind is snow), cloud_cover, fog_density (extra weather fog), wetness (lags rain) and snow_cover (lags snowfall, melts) 0..1.
+enum class Season : std::uint8_t { spring, summer, autumn, winter };
+enum class WeatherKind : std::uint8_t { clear, cloudy, rain, storm, snow, fog };
+struct SceneWeather { bool active=false; Season season=Season::summer; WeatherKind kind=WeatherKind::clear; std::array<float,2> wind_direction{1,0}; float wind_speed=0,gust=0,precipitation=0,cloud_cover=0,fog_density=0,wetness=0,snow_cover=0,temperature=15; };
 // fog_record: original fog start/end distances (game-state record +0xec/+0xf0) before the Görüş Mesafesi scale;
 // fog_start/fog_end/fog_far are the applied values (set_scene_fog).
-struct SceneLighting { bool source_values=false; std::array<float,3> sun_direction{},ambient_multiplier{},diffuse_multiplier{},sky_b{},sky_c{}; bool fog_enabled=false; std::array<float,3> fog_color{}; std::array<float,2> fog_record{}; float fog_start=0,fog_end=0,fog_far=0,source_minute=749,lightmap_strength=0,sky_blend=0,sky_rotation=0,source_hour=-1,glow=0; unsigned source_zone=0; bool roofed=false; }; // source_hour: server clock (original thgf), -1 until received; glow: record HDR glow byte/255 (c308)
+struct SceneLighting { bool source_values=false; std::array<float,3> sun_direction{},ambient_multiplier{},diffuse_multiplier{},sky_b{},sky_c{}; bool fog_enabled=false; std::array<float,3> fog_color{}; std::array<float,2> fog_record{}; float fog_start=0,fog_end=0,fog_far=0,source_minute=749,lightmap_strength=0,sky_blend=0,sky_rotation=0,source_hour=-1,glow=0; unsigned source_zone=0; bool roofed=false; SceneWeather weather; }; // source_hour: server clock (original thgf), -1 until received; glow: record HDR glow byte/255 (c308)
 struct SourceSurfaceCorner { std::uint32_t mesh=0,vertex=0,next=UINT32_MAX; };
 struct SourceSurface {
  std::vector<std::uint32_t> heads,indices,unweighted_corners;
