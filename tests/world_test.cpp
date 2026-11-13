@@ -1271,6 +1271,93 @@ void progression_rules(ikv::Json config) {
         check(own(1).at("x")==3000 && own(1).at("y")==0,"resurrection at the nearest safe point (a Ruh Taşı arrival)");
     }
 }
+// NONCANONICAL web/in-game administration (World::admin, World::handle "admin"): item/currency/XP grants, heal, listings,
+// and the in-game Yönetici Paneli channel. Grants reach only online characters and commit like player actions.
+void admin_rules(ikv::Json config) {
+    config["inventory_slots"]=4;
+    for(int i=100;i<160;++i)config["items"]["bulk_"+std::to_string(i)]={{"name","Toplu Eşya "+std::to_string(i)},{"stack",5},{"price",1},{"level",1}};
+    std::vector<ikv::CharacterSave> saved;
+    ikv::World world(config,[&](std::span<const ikv::CharacterSave> states){saved.assign(states.begin(),states.end());});
+    world.add(1,1,11,record(1),true);world.add(2,2,12,record(2));
+    const auto own=[&](){return world.state(2).at("character").at("state");};
+    const auto count=[](const ikv::Json& s,const char* item){int n=0;for(const auto& e:s.at("inventory"))if(e.at("item")==item)n+=e.at("quantity").get<int>();return n;};
+    const auto refused=[&](const char* command,const ikv::Json& arguments,const std::string& error){
+        try{world.admin(command,arguments);}catch(const std::invalid_argument& e){return std::string(e.what())==error;}return false;};
+    // Item search: case-insensitive (Turkish capitals too), sorted by name, at most 50 rows with the full match count.
+    {const auto r=world.admin("items",{{"search","TOPLU"}});
+     check(r.at("ok")==true && r.at("total")==60 && r.at("items").size()==50 && r.at("items")[0].at("id")=="bulk_100" && r.at("items")[0].at("stack")==5,"admin items: at most 50 sorted rows and the match total");
+     check(world.admin("items",{{"search","EŞYA 15"}}).at("total")==10,"admin items folds Turkish capitals");}
+    // give_item stacks onto the existing cell, commits live and tells the player; a bag without room leaves the state unchanged.
+    {const auto r=world.admin("give_item",{{"character_id",12},{"item","healing_tonic"},{"quantity",5}});
+     const auto frame=world.state(2);
+     check(r.at("ok")==true && r.at("player")==2 && r.at("name")=="Şifa Toniği (bağımsız)" && count(frame.at("character").at("state"),"healing_tonic")==8 &&
+           frame.at("character").at("state").at("inventory").size()==2 && event(frame,"announce") && saved.back().character_id==12,"admin give_item stacks, persists and announces");
+     check(refused("give_item",{{"character_id",12},{"item","training_blade"},{"quantity",3}},"inventory: Çantanızda yer yok!!") && own().at("inventory").size()==2 &&
+           count(own(),"training_blade")==1,"admin give_item into a full bag changes nothing");
+     check(refused("give_item",{{"character_id",999},{"item","healing_tonic"},{"quantity",1}},"offline: Character is not online in this world"),"admin grants reach online characters only");}
+    // inventory lists the live bag with worn cells; take_item refuses a worn cell and removes from a stack.
+    {const auto blade=uid(world.state(2),"training_blade");world.action(2,{{"action","equip"},{"uid",blade}});
+     const auto r=world.admin("inventory",{{"character_id",12}});bool worn=false;
+     for(const auto& e:r.at("inventory"))if(e.at("uid")==blade)worn=e.at("equipped")==true && e.at("name")=="Talım Kılıcı (bağımsız)";
+     check(r.at("name")=="Player2" && r.at("currency")==100 && r.at("level")==1 && r.at("inventory").size()==2 && worn,"admin inventory lists the live bag and worn cells");
+     check(refused("take_item",{{"character_id",12},{"uid",blade},{"quantity",1}},"equipped: Giyilen bir eşyayı önce üzerinizden çıkarın.") && count(own(),"training_blade")==1,"admin take_item refuses worn items");
+     const auto t=world.admin("take_item",{{"character_id",12},{"uid",uid(world.state(2),"healing_tonic")},{"quantity",2}});
+     check(t.at("item")=="healing_tonic" && t.at("quantity")==2 && count(own(),"healing_tonic")==6,"admin take_item removes part of a stack");}
+    // currency never drops below zero; a grant returns the new balance.
+    check(refused("currency",{{"character_id",12},{"amount",-101}},"currency: Yeterli paranız yok.") && own().at("currency")==100,"admin currency refuses a negative balance");
+    check(world.admin("currency",{{"character_id",12},{"amount",50}}).at("currency")==150 && own().at("currency")==150,"admin currency grants");
+    // give_xp ignores the administrator xp_rate and levels up normally (rat 30 + 1500 over the level-1 interval).
+    world.admin("settings",{{"xp_rate",1000},{"drop_rate",100},{"regen_rate",100},{"disabled_zones",ikv::Json::array()}});
+    {const auto r=world.admin("give_xp",{{"character_id",12},{"amount",30}});check(r.at("xp")==30 && r.at("level")==1,"admin give_xp is not scaled by xp_rate");
+     const auto up=world.admin("give_xp",{{"character_id",12},{"amount",1500}});check(up.at("level")==2 && up.at("xp")==30 && own().at("hp")==own().at("max_hp"),"admin give_xp levels up with the refill");}
+    world.admin("settings",{{"xp_rate",100},{"drop_rate",100},{"regen_rate",100},{"disabled_zones",ikv::Json::array()}});
+    // heal revives a dead character where it fell, with full Enerji and Kudret.
+    {auto dead=record(2);dead["state"]=own();dead["state"]["hp"]=0;dead["state"]["mana"]=0;world.remove(2);world.add(2,2,12,dead);
+     const auto r=world.admin("heal",{{"character_id",12}});const auto frame=world.state(2);const auto& s=frame.at("character").at("state");
+     check(r.at("ok")==true && s.at("hp")==s.at("max_hp") && s.at("mana")==s.at("max_mana") && s.at("x")==dead.at("state").at("x") && event(frame,"resurrect"),"admin heal revives in place");}
+    {const auto r=world.admin("players",ikv::Json::object());
+     check(r.at("players").size()==2 && r.at("players")[0].at("name")=="Player1" && r.at("players")[0].at("character_id")==11 && r.at("players")[1].at("entity")==2,"admin players lists online characters by name");}
+    // In-game Yönetici Paneli: administrators only, an allow-list, entity targets resolve to characters, results as events.
+    const auto result=[&](uint32_t id){const auto frame=world.state(id);for(const auto& e:frame.at("events"))if(e.at("type")=="admin_result")return e;return ikv::Json();};
+    world.action(2,{{"action","admin"},{"command","players"}});check(event(world.state(2),"error","permission"),"in-game admin commands need an administrator");
+    world.action(1,{{"action","admin"},{"command","settings"},{"args",ikv::Json::object()}});check(event(world.state(1),"error","request"),"in-game admin refuses commands outside the allow-list");
+    world.action(1,{{"action","admin"},{"command","give_item"},{"args",{{"target",2},{"item","rat_tail"},{"quantity",2}}}});
+    {const auto e=result(1);check(e.at("command")=="give_item" && e.at("result").at("ok")==true && e.at("result").at("player")==2 && count(own(),"rat_tail")==2,"in-game admin give_item resolves an entity target");}
+    world.action(1,{{"action","admin"},{"command","give_item"},{"args",{{"target",2},{"item","rat_tail"},{"quantity",0}}}});
+    {const auto e=result(1);check(e.at("result").at("ok")==false && e.at("result").at("error").get<std::string>().rfind("invalid_request: ",0)==0 && count(own(),"rat_tail")==2,"in-game admin validation failures are results");}
+    // Preset kits: per slot the best wearable item (class/sex/level filters, lonca items skipped, ties to the higher level),
+    // the strongest heal/mana items in two stacks; grants are all or nothing and equip:true wears only pieces within the
+    // character's own level.
+    {auto c=config;c["inventory_slots"]=8; // two potion stacks of each kind take 4 cells, the equipment kit 3
+     auto& items=c["items"];
+     const auto weapon=[](int cls,int level,ikv::Json damage,int cooldown){return ikv::Json{{"name","Kit Silahı"},{"stack",1},{"price",10},{"level",level},{"slot","weapon"},{"class",cls},{"damage_range",damage},{"attack_cooldown",cooldown}};};
+     items["kit_sword_l3"]=weapon(1,3,{20.0,30.0},20);items["kit_sword_slow"]=weapon(1,5,{30.0,40.0},40);items["kit_sword_c1"]=weapon(0,1,{100.0,100.0},10);items["kit_sword_l9"]=weapon(1,9,{200.0,200.0},20);
+     const auto body=[](int sex,int level,int armor){return ikv::Json{{"name","Kit Ceketi"},{"stack",1},{"price",10},{"level",level},{"slot","body"},{"sex",sex},{"armor",armor}};};
+     items["kit_body_f"]=body(0,2,50);items["kit_body_m"]=body(1,2,90);items["kit_body_tie"]=body(0,4,50);
+     items["kit_head"]={{"name","Kit Şapkası"},{"stack",1},{"price",5},{"level",1},{"slot","head"},{"armor",10}};
+     items["kit_head_guild"]={{"name","Lonca Şapkası"},{"stack",1},{"price",5},{"level",1},{"slot","head"},{"armor",99},{"guild_level",1}};
+     items["kit_potion"]={{"name","Kit İksiri"},{"stack",10},{"price",5},{"level",2},{"heal",100}};
+     items["kit_ether"]={{"name","Kit Kudreti"},{"stack",15},{"price",5},{"level",1},{"mana",60}};
+     items["kit_ether_l9"]={{"name","Büyük Kit Kudreti"},{"stack",15},{"price",5},{"level",9},{"mana",500}};
+     ikv::World kits(c,[](std::span<const ikv::CharacterSave>){});
+     auto p=record(3);p["class_id"]=2;p["appearance"]={{"sex",0}};p["state"]["level"]=5;p["state"]["inventory"]=ikv::Json::array();kits.add(3,3,13,p);
+     auto full=p;full["name"]="Player4";full["state"]["inventory"]=ikv::Json::array();for(int i=0;i<7;++i)full["state"]["inventory"].push_back({{"uid",std::string(31,'7')+char('0'+i)},{"item","rat_tail"},{"quantity",20}});kits.add(4,4,14,full);
+     const auto picks=[](const ikv::Json& rows){std::map<std::string,std::string> m;for(const auto& r:rows)m[r.contains("slot")?r.at("slot").get<std::string>():r.at("item").get<std::string>()]=r.at("item");return m;};
+     const auto preview=kits.admin("kits",{{"character_id",13}});
+     check(preview.at("class_id")==2 && preview.at("sex")==0 && preview.at("level")==5 &&
+           picks(preview.at("equipment"))==std::map<std::string,std::string>{{"body","kit_body_tie"},{"head","kit_head"},{"weapon","kit_sword_l3"}} && preview.at("equipment")[2].at("score")==1250.0,
+           "kits: class/sex/level filters, lonca items skipped, best mean hit per second, ties to the higher level");
+     check(preview.at("consumables")==ikv::Json::array({{{"item","kit_potion"},{"name","Kit İksiri"},{"quantity",20},{"level",2}},{{"item","kit_ether"},{"name","Kit Kudreti"},{"quantity",30},{"level",1}}}),"kits: strongest heal and mana items, two stacks each");
+     check(picks(kits.admin("kits",{{"character_id",13},{"level",9}}).at("equipment")).at("weapon")=="kit_sword_l9","kits: an explicit kit level admits higher items");
+     const auto bag=[&](uint32_t id){return kits.state(id).at("character").at("state");};
+     bool refused_full=false;try{kits.admin("give_kit",{{"character_id",14},{"kit","equipment"}});}catch(const std::invalid_argument& e){refused_full=std::string(e.what())=="inventory: Çantanızda yer yok!!";}
+     check(refused_full && bag(4).at("inventory").size()==7,"give_kit is all or nothing on a full bag");
+     const auto potions=kits.admin("give_kit",{{"character_id",13},{"kit","consumables"}});
+     check(potions.at("items").size()==2 && count(bag(3),"kit_potion")==20 && count(bag(3),"kit_ether")==30 && bag(3).at("inventory").size()==4 && potions.at("equipped").empty(),"give_kit consumables grants two stacks of each");
+     const auto gear=kits.admin("give_kit",{{"character_id",13},{"kit","equipment"},{"level",9},{"equip",true}});const auto worn=bag(3).at("equipment");
+     check(gear.at("items").size()==3 && gear.at("equipped")==ikv::Json::array({"body","head"}) && worn.contains("body") && worn.contains("head") && !worn.contains("weapon") && count(bag(3),"kit_sword_l9")==1,
+           "give_kit equip:true wears the pieces within the character's level; higher pieces stay in the bag");}
+}
 // The real config and original walk grids: Umut Dergisi 132061<->132178 (requiredquestid 282, q282) refuses an interact
 // without the quest and transfers to its arrival with it, both ways; its gating quest cannot be abandoned in the door's zone.
 void real_content(const ikv::Json& config, const std::filesystem::path& assets) {
@@ -1393,6 +1480,7 @@ int main(int argc, char** argv) {
         quest_rules(config);
         quest_objectives(config);
         starter_kit(config);
+        admin_rules(config);
         bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
         check(world.state(1).at("clock").at("interior")==ikv::Json::array({200,157,142,126,105,110,184,199,217,78,0}),"roofed zones get the interior_hour (noon) record at every hour");

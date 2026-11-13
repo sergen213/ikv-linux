@@ -238,7 +238,7 @@ class Services(AbstractContextManager):
         openssl = self.binary("openssl")
         self.command([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", self.root / "ca.key", "-out", self.ca, "-days", "1", "-subj", "/CN=IKV isolated integration CA", "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
         self.command([openssl, "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", self.key, "-out", self.root / "server.csr", "-subj", "/CN=localhost"])
-        extensions = self.secret_file("server.ext", "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+        extensions = self.secret_file("server.ext", "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n")
         self.command([openssl, "x509", "-req", "-in", self.root / "server.csr", "-CA", self.ca, "-CAkey", self.root / "ca.key", "-CAcreateserial", "-out", self.cert, "-days", "1", "-extfile", extensions])
         for path in self.root.iterdir():
             if path.is_file():

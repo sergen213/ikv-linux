@@ -518,6 +518,7 @@ def admin_web(services, users, characters):
     admin, alice = users["test_admin"]["session"], users["test_alice"]["session"]
     aid, bid = (character["id"] for character in characters)
     routes = [("POST", "/v1/admin/world", {"command": "announce", "message": "rbac"}),
+              ("POST", "/v1/admin/world", {"command": "give_item", "character_id": aid, "item": "healing_tonic", "quantity": 1}),
               ("POST", "/v1/admin/control", {"command": "cancel"}),
               ("POST", "/v1/admin/bots", {"action": "despawn", "all": True}),
               ("POST", "/v1/admin/settings", {"xp_rate": 100, "drop_rate": 100, "regen_rate": 100, "disabled_zones": []}),
@@ -540,6 +541,10 @@ def admin_web(services, users, characters):
     for path, body in (("/v1/admin/world", {"command": "shell", "message": "x"}), ("/v1/admin/world", {"command": "announce", "message": ""}),
                        ("/v1/admin/world", {"command": "announce", "message": "line\nbreak"}), ("/v1/admin/world", {"command": "kick"}),
                        ("/v1/admin/world", {"command": "clock", "hour": 24}), ("/v1/admin/control", {"command": "restart", "delay_seconds": 3601}),
+                       ("/v1/admin/world", {"command": "give_item", "character_id": aid, "item": "healing_tonic", "quantity": 0}),
+                       ("/v1/admin/world", {"command": "currency", "character_id": aid, "amount": 0}),
+                       ("/v1/admin/world", {"command": "give_kit", "character_id": aid, "kit": "weapons"}),
+                       ("/v1/admin/world", {"command": "give_kit", "character_id": aid, "kit": "consumables", "equip": True}),
                        ("/v1/admin/bots", {"action": "spawn", "count": 0, "behaviour": "town"}), ("/v1/admin/bots", {"action": "spawn", "count": 1, "behaviour": "cheat"}),
                        ("/v1/admin/bots", {"action": "despawn", "ids": []}), ("/v1/admin/bots", {"action": "despawn", "all": "yes"}),
                        ("/v1/admin/settings", {"xp_rate": 5, "drop_rate": 100, "regen_rate": 100, "disabled_zones": []}),
@@ -586,6 +591,12 @@ def admin_web(services, users, characters):
         assert admin_command(services, admin, "/v1/admin/world", {"command": "respawn", "zone": "nowhere"})["ok"] is False
         validated = admin_command(services, admin, "/v1/admin/world", {"command": "validate_config"})
         assert validated["ok"] and validated["zones"] >= 2, validated
+        tonics = lambda current: sum(e["quantity"] for e in current["inventory"] if e["item"] == "healing_tonic")
+        before = tonics(state(first))
+        granted = admin_command(services, admin, "/v1/admin/world", {"command": "give_item", "character_id": aid, "item": "healing_tonic", "quantity": 1})
+        assert granted["ok"] and granted["item"] == "healing_tonic" and granted["quantity"] == 1, granted
+        state(first, lambda current: tonics(current) == before + 1)
+        assert admin_command(services, admin, "/v1/admin/world", {"command": "inventory", "character_id": aid})["ok"]
         for body in ({"action": "spawn", "count": 1, "behaviour": "town", "zone": "eminonu", "level": 3}, {"action": "despawn", "all": True}):
             assert "ok" in admin_command(services, admin, "/v1/admin/bots", body)  # bot semantics are covered by the bot suite
         assert admin_command(services, admin, "/v1/admin/control", {"command": "restart", "delay_seconds": 120, "message": "owned test"})["delay_seconds"] == 120
@@ -598,7 +609,7 @@ def admin_web(services, users, characters):
         assert admin_command(services, admin, "/v1/admin/world", {"command": "kick", "character_id": bid})["ok"] is False  # already gone
     services.until(lambda: services.sql(f"SELECT count(*) FROM characters WHERE id IN ({aid},{bid}) AND lease_instance IS NOT NULL") == "0", "admin web lease release")
     audit = services.sql("SELECT string_agg(DISTINCT action, ',') FROM audit_events WHERE action LIKE 'world.%'")
-    assert {"world.announce", "world.kick", "world.teleport", "world.settings", "world.restart", "world.cancel"} <= set(audit.split(","))
+    assert {"world.announce", "world.kick", "world.teleport", "world.settings", "world.restart", "world.cancel", "world.give_item"} <= set(audit.split(","))
 
 
 def equipment_admission_invariant(services, users):

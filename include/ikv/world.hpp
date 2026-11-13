@@ -185,12 +185,14 @@ private:
     Landed land_npc(const Blow& blow, const Json& definition, const Json& debuffs) const; // classes.dat defense, dmgred K/D/E and resistances; Meteorit armor_break
     void resources(Json& state) const; // max Enerji/Kudret from the level curves plus Maksimum Enerji/Kudret Efsun (6/7)
     void wear(Json& state, bool weapon, int permille) const; // NONCANONICAL durability loss (‰ of maximum) of the weapon or every worn armour piece
+    const char* unwearable(const Json& item, const Json& character, int level) const; // the equip gate's refusal code (level/equipment/class/sex), nullptr when wearable
+    void equip(Json& state, const Json& character, const std::string& uid) const; // player equip action and admin give_kit equip:true
     Json roll_drop(const Json& definition, bool certain = false) const; // certain: always drops, first Efsun always rolled (Şef/arena prize)
     void take(Json& state, const std::string& uid, int quantity);
     Json& owned(Json& state, const std::string& uid);
     const Json& owned(const Json& state, const std::string& uid) const;
     void currency(Json& state, int64_t change) const;
-    void xp(Json& state, int amount, Json& events) const; // events: the free-reset notice when a free_resets level is reached
+    void xp(Json& state, int amount, Json& events, bool scaled = true) const; // events: the free-reset notice when a free_resets level is reached; scaled: apply the admin xp_rate
     void die(uint32_t id, Json& state) const;
     void engage(uint32_t id, Actor& a);
     // A skill's crit/multiplier land with its damage (true when it crit); auto-attack and DoT pass already-landed damage.

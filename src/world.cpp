@@ -1050,8 +1050,8 @@ void World::take(Json& s, const std::string& uid, int quantity) {
     throw Rejected{"ownership","Bu eşya size ait değil."};
 }
 void World::currency(Json& s, int64_t change) const { int64_t next = s.at("currency").get<int64_t>() + change; require(next >= 0,"currency","Yeterli paranız yok."); require(next <= config_.at("currency_cap").get<int64_t>(),"currency","En fazla 999 milyon paranız olabilir."); s["currency"] = next; }
-void World::xp(Json& s, int amount, Json& events) const {
-    amount = int(int64_t(amount) * xp_rate_ / 100); // administrator XP rate (NONCANONICAL), 100 = unchanged
+void World::xp(Json& s, int amount, Json& events, bool scaled) const {
+    if (scaled) amount = int(int64_t(amount) * xp_rate_ / 100); // administrator XP rate (NONCANONICAL), 100 = unchanged; admin give_xp grants are unscaled
     int value = s.at("xp").get<int>() + amount, level = s.at("level"); const int before = level;
     while (level < 100 && value >= xp_needed(config_,level)) { value -= xp_needed(config_,level); ++level; }
     s["xp"] = std::min(value,10000000); s["level"] = level;
@@ -1063,6 +1063,23 @@ void World::xp(Json& s, int amount, Json& events) const {
     if (!reset) return;
     s["skills"] = Json::object(); s["resistances"] = Json::object();
     events.push_back({{"type","notice"},{"text",std::to_string(reset)+" seviye olduğunuz için yeteneklerinizi/dirençlerinizi ÜCRETSİZ sıfırlandı. Tekrar dağıtabilirsiniz!"}});
+}
+// 0042dff0 refusal "Bu eşyayı giyemezsiniz." (0x591964) for every wear gate, in its order: level, slot, class (item class + 1 =
+// class_id), sex (appearance.sex, default 1).
+const char* World::unwearable(const Json& item, const Json& character, int level) const {
+    if (level < item.at("level").get<int>()) return "level";
+    if (!item.contains("slot")) return "equipment";
+    if (item.contains("class") && item.at("class").get<int>()+1 != character.at("class_id").get<int>()) return "class";
+    if (item.contains("sex") && item.at("sex") != character.at("appearance").value("sex",1)) return "sex";
+    return nullptr;
+}
+// Wearing points the slot at a bag cell; the previously worn cell stays in the bag.
+void World::equip(Json& s, const Json& character, const std::string& uid) const {
+    const auto& item = config_.at("items").at(owned(s,uid).at("item").get<std::string>());
+    if (const char* code = unwearable(item,character,s.at("level").get<int>())) throw Rejected{code,"Bu eşyayı giyemezsiniz."};
+    const auto slot = item.at("slot").get<std::string>();
+    require(s.at("equipment").contains(slot) || s.at("equipment").size()<8,"equipment","Bütün giyim yerleri dolu.");
+    s["equipment"][slot] = uid;
 }
 // VOD "Yeniden canlanma için N para kaybettiniz": N = 8/15/25 at levels 3/4/5 (34:20, 37:15, 52:15) is exactly
 // death_fee.quadratic c0 + c1·L + c2·L² (NONCANONICAL fit); guide/PlusPackage: Plus Paket holders lose a third.
@@ -1893,7 +1910,7 @@ void World::handle(uint32_t id, const Json& request) {
     require(request.is_object() && request.dump().size() <= 8192,"request","İstek çok büyük.");
     auto& a = actor(id); require(!a.kicked,"permission","Yönetici tarafından oyundan atıldınız.");
     const auto action = text(request.at("action"),32); auto& current = a.character.at("state");
-    require(current.at("hp").get<int>() > 0 || action == "resurrect" || action == "chat" || action == "trade_cancel" || action == "group_leave" || action == "quickbar", "dead", "Ölüyken bunu yapamazsınız!"); // 0x58ece4
+    require(current.at("hp").get<int>() > 0 || action == "resurrect" || action == "chat" || action == "trade_cancel" || action == "group_leave" || action == "quickbar" || action == "admin", "dead", "Ölüyken bunu yapamazsınız!"); // 0x58ece4
     const auto target = [&]() { return target_id(request.at("target")); };
     const auto ack = [&]() { emit(id,{{"type","ack"},{"action",action}}); };
     if (action == "craft" || action == "gather" || action == "recipe_forget" || action.starts_with("bank_") ||
@@ -2305,17 +2322,9 @@ void World::handle(uint32_t id, const Json& request) {
         if (action == "unequip") { auto slot = text(request.at("slot"),32); require(s.at("equipment").contains(slot),"equipment","Bu yer boş."); s["equipment"].erase(slot); }
         else {
             auto uid = text(request.at("uid"),32); const auto entry = owned(s,uid); const auto& item = config_.at("items").at(entry.at("item").get<std::string>());
-            // 0042dff0 refusal "Bu eşyayı giyemezsiniz." (0x591964) for every wear gate.
-            const char* unwearable = action == "equip" ? "Bu eşyayı giyemezsiniz." : "Bu eşyayı kullanmak için seviyeniz yetersiz.";
-            require(s.at("level").get<int>() >= item.at("level").get<int>(),"level",unwearable);
-            if (action == "equip") {
-                require(item.contains("slot"),"equipment",unwearable);const auto slot=item.at("slot").get<std::string>();
-                require(!item.contains("class") || item.at("class").get<int>()+1==a.character.at("class_id").get<int>(),"class",unwearable);
-                require(!item.contains("sex") || item.at("sex")==a.character.at("appearance").value("sex",1),"sex",unwearable);
-                require(s.at("equipment").contains(slot) || s.at("equipment").size()<8,"equipment","Bütün giyim yerleri dolu.");
-                s["equipment"][slot]=uid;
-            }
+            if (action == "equip") equip(s,a.character,uid);
             else {
+                require(s.at("level").get<int>() >= item.at("level").get<int>(),"level","Bu eşyayı kullanmak için seviyeniz yetersiz.");
                 require(item.contains("heal") || item.contains("mana"),"item","Bu eşya kullanılamaz.");
                 const bool heal=item.contains("heal") && s.at("hp").get<int>() < s.at("max_hp").get<int>(), mana=item.contains("mana") && s.at("mana").get<int>() < s.at("max_mana").get<int>();
                 require(heal || mana,"resource",item.contains("heal") ? "Enerjiniz zaten dolu." : "Kudretiniz zaten dolu."); take(s,uid,1);
@@ -2596,6 +2605,26 @@ void World::handle(uint32_t id, const Json& request) {
         else if (operation == "kick") kick(t,id);
         else throw Rejected{"request","Bilinmeyen yönetim işlemi."};
         ack(); return;
+    }
+    // NONCANONICAL in-game Yönetici Paneli: the original GM tools were chat commands handled server-side ("|tele"). Administrators
+    // send the web /v1/admin/world commands through the game connection; bounds come from the same validator as the web
+    // dashboard, and the outcome returns as an admin_result event (a refused command is a result, not a connection error).
+    if (action == "admin") {
+        require(a.admin,"permission","Bunun için yönetici yetkisi gerekir."); const auto command = text(request.at("command"),16);
+        static const std::set<std::string> allowed{"players","items","inventory","give_item","take_item","currency","give_xp","heal","kits","give_kit","teleport","summon","kick","announce","respawn","clock"};
+        require(allowed.contains(command),"request","Bu yönetici komutu oyun içinden kullanılamaz.");
+        Json result;
+        try {
+            Json args = request.contains("args") ? request.at("args") : Json::object();
+            require(args.is_object() && args.dump().size() <= 4096,"request","Komut bilgileri geçersiz.");
+            for (const auto& [entity,character] : {std::pair{"target","character_id"},std::pair{"to_target","to_character_id"}})
+                if (args.contains(entity) && !args.contains(character)) { args[character] = actor(target_id(args.at(entity))).character_id; args.erase(entity); }
+            result = admin(command,admin_world_arguments(command,args));
+        } catch (const Rejected& e) { result = {{"ok",false},{"error",e.code+": "+e.message}}; }
+          catch (const ApiError& e) { result = {{"ok",false},{"error",e.code+": "+e.what()}}; }
+          catch (const std::invalid_argument& e) { result = {{"ok",false},{"error",e.what()}}; }
+        if (result.dump().size() > 16384) result = {{"ok",false},{"error","result: Sonuç 16 KiB sınırını aşıyor."}}; // the web world_commands result bound
+        emit(id,{{"type","admin_result"},{"command",command},{"result",std::move(result)}}); return;
     }
     throw Rejected{"action","Bilinmeyen işlem."};
 }
@@ -3006,6 +3035,129 @@ Json World::admin(const std::string& command, const Json& arguments) {
             for(const auto& zone:arguments.at("disabled_zones")){auto name=text(zone,32);if(config_.at("zones").contains(name))zones.insert(name);else unknown.push_back(name);}
             xp_rate_=xp;drop_rate_=drop;regen_rate_=regen;disabled_zones_=std::move(zones);
             return {{"ok",true},{"unknown_zones",unknown}};
+        }
+        // NONCANONICAL: item/currency/XP grants, heal and player listings (the original had no web administration). Only online
+        // characters: the world holds their lease, and every change goes through commit() so the client updates live and the
+        // periodic save persists it. The player is told in game by an announce message.
+        const auto item_name=[&](const std::string& item){const auto& items=config_.at("items");return items.contains(item)?items.at(item).value("name",item):item;};
+        const auto tell=[&](uint32_t id,const std::string& message){emit(id,{{"type","announce"},{"text",message}});};
+        if(command=="players") {
+            std::vector<std::pair<std::string,uint32_t>> order;for(const auto& [id,a]:actors_)if(!a.bot&&!a.kicked)order.push_back({a.character.at("name").get<std::string>(),id});
+            // At most 200 rows and 14 KiB, so the row list fits the 16 KiB world_commands result and one game event.
+            std::sort(order.begin(),order.end());Json rows=Json::array();size_t used=0;
+            for(size_t i=0;i<order.size()&&i<200;++i){const auto id=order[i].second;const auto& a=actors_.at(id);const auto& s=a.character.at("state");
+                Json row{{"entity",id},{"character_id",a.character_id},{"name",order[i].first},{"zone",s.at("zone")},{"x",s.at("x")},{"y",s.at("y")},{"level",s.at("level")},{"hp",s.at("hp")},{"max_hp",s.at("max_hp")},{"muted",a.muted||a.externally_muted}};
+                used+=row.dump().size()+1;if(used>14336)break;
+                rows.push_back(std::move(row));}
+            return {{"ok",true},{"players",std::move(rows)},{"total",order.size()}};
+        }
+        if(command=="items") {
+            // Case-insensitive substring match on item id or name: ASCII plus Turkish capitals (İ/ı fold to i, best effort).
+            const auto fold=[](const std::string& in){std::string out;out.reserve(in.size());
+                for(size_t i=0;i<in.size();++i){const unsigned char c=static_cast<unsigned char>(in[i]),d=i+1<in.size()?static_cast<unsigned char>(in[i+1]):0;
+                    if(c>='A'&&c<='Z'){out+=char(c+32);continue;}
+                    if(c==0xC4&&(d==0xB0||d==0xB1)){out+='i';++i;continue;}
+                    if((c==0xC4||c==0xC5)&&d==0x9E){out+=char(c);out+=char(0x9F);++i;continue;} // Ğ→ğ, Ş→ş
+                    if(c==0xC3&&(d==0x9C||d==0x96||d==0x87)){out+=char(c);out+=char(d+0x20);++i;continue;} // Ü→ü, Ö→ö, Ç→ç
+                    out+=char(c);}
+                return out;};
+            const auto& search_value=arguments.contains("search")?arguments.at("search"):Json("");
+            require(search_value.is_string()&&search_value.get<std::string>().size()<=64,"request","search must be a string of at most 64 bytes");
+            const auto search=fold(search_value.get<std::string>());std::vector<std::pair<std::string,std::string>> found; // name, id
+            for(const auto& [id,definition]:config_.at("items").items()){auto name=definition.value("name",id);
+                if(search.empty()||fold(id).find(search)!=std::string::npos||fold(name).find(search)!=std::string::npos)found.push_back({std::move(name),id});}
+            std::sort(found.begin(),found.end());Json rows=Json::array();
+            for(size_t i=0;i<found.size()&&i<50;++i){const auto& definition=config_.at("items").at(found[i].second);
+                rows.push_back({{"id",found[i].second},{"name",found[i].first},{"stack",definition.at("stack")},{"level",definition.value("level",0)}});}
+            return {{"ok",true},{"items",std::move(rows)},{"total",found.size()}};
+        }
+        if(command=="inventory") {
+            const auto id=online("character_id");const auto& a=actors_.at(id);const auto& s=a.character.at("state");Json rows=Json::array();
+            for(const auto& entry:s.at("inventory")){bool worn=false;for(const auto& [slot,uid]:s.at("equipment").items()){(void)slot;worn=worn||uid==entry.at("uid");}
+                rows.push_back({{"uid",entry.at("uid")},{"item",entry.at("item")},{"name",item_name(entry.at("item").get<std::string>())},{"quantity",entry.at("quantity")},{"equipped",worn}});}
+            return {{"ok",true},{"player",id},{"name",a.character.at("name")},{"level",s.at("level")},{"currency",s.at("currency")},{"inventory",std::move(rows)}};
+        }
+        if(command=="give_item") {
+            const auto id=online("character_id");const auto item=text(arguments.at("item"),32);const int quantity=integer(arguments.at("quantity"),1,1000);
+            require(config_.at("items").contains(item),"item","Unknown item");
+            auto s=actors_.at(id).character.at("state");give(s,item,quantity);commit({{id,s}});
+            const auto name=item_name(item);tell(id,"Bir yönetici size "+std::to_string(quantity)+" × "+name+" verdi.");
+            return {{"ok",true},{"player",id},{"item",item},{"name",name},{"quantity",quantity}};
+        }
+        if(command=="take_item") {
+            const auto id=online("character_id");const auto uid=text(arguments.at("uid"),32);const int quantity=integer(arguments.at("quantity"),1,1000);
+            auto s=actors_.at(id).character.at("state");const auto item=owned(s,uid).at("item").get<std::string>();take(s,uid,quantity);commit({{id,s}});
+            cancel_trade(id); // an open exchange may have offered the removed cell
+            tell(id,"Bir yönetici çantanızdan "+std::to_string(quantity)+" × "+item_name(item)+" aldı.");
+            return {{"ok",true},{"player",id},{"item",item},{"quantity",quantity}};
+        }
+        if(command=="currency") {
+            const auto id=online("character_id");const auto& value=arguments.at("amount");
+            require(value.is_number_integer()&&value.get<int64_t>()!=0&&value.get<int64_t>()>=-999000000&&value.get<int64_t>()<=999000000,"request","amount must be a nonzero integer within ±999000000");
+            const auto amount=value.get<int64_t>();auto s=actors_.at(id).character.at("state");currency(s,amount);commit({{id,s}});
+            if(amount<0)cancel_trade(id); // an open exchange may have offered the removed Para
+            tell(id,amount>0?"Bir yönetici size "+std::to_string(amount)+" para verdi.":"Bir yönetici sizden "+std::to_string(-amount)+" para aldı.");
+            return {{"ok",true},{"player",id},{"currency",actors_.at(id).character.at("state").at("currency")}};
+        }
+        if(command=="give_xp") {
+            const auto id=online("character_id");const int amount=integer(arguments.at("amount"),1,10000000);
+            auto s=actors_.at(id).character.at("state");Json events=Json::array();xp(s,amount,events,false);commit({{id,s}});
+            for(auto& e:events)emit(id,std::move(e));
+            tell(id,"Bir yönetici size "+std::to_string(amount)+" tecrübe puanı verdi.");
+            const auto& now=actors_.at(id).character.at("state");return {{"ok",true},{"player",id},{"level",now.at("level")},{"xp",now.at("xp")}};
+        }
+        if(command=="heal") {
+            // A dead character rises where it fell, as a revive skill raises its target (no fee, no resurrection countdown).
+            const auto id=online("character_id");auto& a=actors_.at(id);auto s=a.character.at("state");const bool dead=s.at("hp").get<int>()==0;
+            resources(s);s["hp"]=s.at("max_hp");s["mana"]=s.at("max_mana");commit({{id,s}});
+            if(dead){a.resurrect_ready=tick_;a.moving=false;a.route.clear();a.dx=a.dy=0;a.engaged=0;project_event(id,{{"type","resurrect"},{"entity",id},{"source",id},{"target",id}});}
+            tell(id,dead?"Bir yönetici sizi canlandırdı.":"Bir yönetici sizi iyileştirdi.");
+            const auto& now=a.character.at("state");return {{"ok",true},{"player",id},{"hp",now.at("hp")},{"mana",now.at("mana")}};
+        }
+        // Preset kits (NONCANONICAL, computed from the catalogue): per slot the best item the character could wear at kit level L
+        // (the equip gate's class/sex rules, item level <= L, no lonca requirement), armour by "armor", weapons by the combat
+        // mean hit (damage_range mean, else damage) per second (×1000/attack_cooldown); ties prefer higher level, price, then
+        // the smaller id. Consumables: the strongest heal and mana items with level <= L, two stacks each.
+        if(command=="kits"||command=="give_kit") {
+            const auto id=online("character_id");const auto& character=actors_.at(id).character;
+            const int level=arguments.contains("level")?integer(arguments.at("level"),1,100):character.at("state").at("level").get<int>();
+            struct Pick { std::string id; double score=-1; int level=0; int64_t price=0; };
+            const auto better=[](const Pick& p,double score,int item_level,int64_t price,const std::string& item){
+                const auto key=std::tie(score,item_level,price);const auto old=std::tie(p.score,p.level,p.price);return key>old||(key==old&&item<p.id);};
+            std::map<std::string,Pick> gear;Pick heal,mana;
+            for(const auto& [item,d]:config_.at("items").items()){
+                int item_level=d.at("level").get<int>();int64_t price=d.value("price",int64_t(0));if(item_level>level)continue;
+                if(d.contains("slot")){
+                    if(d.contains("guild_level")||unwearable(d,character,level))continue;
+                    double score=d.value("armor",0);
+                    if(d.at("slot")=="weapon"){const double mean=d.contains("damage_range")?(d.at("damage_range")[0].get<double>()+d.at("damage_range")[1].get<double>())/2:d.value("damage",0.0);score=mean*1000/d.value("attack_cooldown",20);}
+                    auto& p=gear[d.at("slot").get<std::string>()];if(better(p,score,item_level,price,item))p={item,score,item_level,price};
+                }
+                else for(const auto& [key,p]:{std::pair<const char*,Pick*>{"heal",&heal},std::pair<const char*,Pick*>{"mana",&mana}})
+                    if(d.contains(key)){double score=d.at(key).get<double>();if(better(*p,score,item_level,price,item))*p={item,score,item_level,price};}
+            }
+            Json equipment=Json::array(),consumables=Json::array();
+            for(const auto& [slot,p]:gear)equipment.push_back({{"item",p.id},{"name",item_name(p.id)},{"slot",slot},{"level",p.level},{"score",p.score}});
+            for(const auto* p:{&heal,&mana})if(!p->id.empty())consumables.push_back({{"item",p->id},{"name",item_name(p->id)},{"quantity",std::min(2*config_.at("items").at(p->id).at("stack").get<int>(),1000)},{"level",p->level}});
+            if(command=="kits")return {{"ok",true},{"player",id},{"class_id",character.at("class_id")},{"sex",character.at("appearance").value("sex",1)},{"level",level},{"equipment",std::move(equipment)},{"consumables",std::move(consumables)}};
+            const auto kind=text(arguments.at("kit"),16);require(kind=="equipment"||kind=="consumables","request","kit must be equipment or consumables");
+            bool wear_kit=false;if(arguments.contains("equip")){require(arguments.at("equip").is_boolean(),"request","equip must be a boolean");wear_kit=arguments.at("equip").get<bool>();}
+            require(!wear_kit||kind=="equipment","request","equip applies to the equipment kit only");
+            const auto& rows=kind=="equipment"?equipment:consumables;require(!rows.empty(),"kit","No catalogue item fits this kit");
+            // All or nothing: every give() lands in one copy (a full bag throws and nothing changes), committed once. Wearing
+            // uses the player equip gate on the character's own level; a refused piece stays in the bag.
+            auto s=character.at("state");Json granted=Json::array(),worn=Json::array();const bool trading=trade(id)!=nullptr;
+            for(const auto& row:rows){
+                const auto item=row.at("item").get<std::string>();const int quantity=kind=="equipment"?1:row.at("quantity").get<int>();
+                const auto before=s.at("inventory").size();give(s,item,quantity);Json entry{{"item",item},{"name",row.at("name")},{"quantity",quantity}};
+                if(kind=="equipment"){entry["slot"]=row.at("slot");
+                    if(wear_kit&&!trading&&s.at("inventory").size()>before)try{equip(s,character,s.at("inventory").back().at("uid").get<std::string>());worn.push_back(row.at("slot"));}catch(const Rejected&){}}
+                granted.push_back(std::move(entry));
+            }
+            commit({{id,s}});
+            if(!worn.empty())project_event(id,{{"type","equip"},{"entity",id},{"source",id},{"target",id},{"equipment",visible_equipment(actors_.at(id).character.at("state"))}});
+            tell(id,"Bir yönetici size seviye "+std::to_string(level)+(kind=="equipment"?" ekipman seti":" iksir seti")+" verdi.");
+            return {{"ok",true},{"player",id},{"kit",kind},{"level",level},{"items",std::move(granted)},{"equipped",std::move(worn)}};
         }
         throw Rejected{"command","Unknown world command"};
     } catch (const Rejected& e) { throw std::invalid_argument(e.code+": "+e.message); }

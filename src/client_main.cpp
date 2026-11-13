@@ -1,5 +1,6 @@
 #include "ikv/audio.hpp"
 #include "ikv/effects.hpp"
+#include "ikv/client_admin.hpp"
 #include "ikv/client_charsel.hpp"
 #include "ikv/client_session.hpp"
 #include "ikv/client_mutation.hpp"
@@ -483,6 +484,7 @@ class Application {
     std::deque<PendingMutation> pending_mutations_;
     std::size_t pending_bytes_=0;
     Script script_;
+    std::deque<std::array<float,2>> script_clicks_; // --commands clicks, applied in draw() after the HUD repaint
     std::vector<Hit> hits_;
     int hover_hit_=-1; // topmost hit under the pointer at the last motion; a change (or a shown tip) repaints the HUD
     std::vector<std::pair<std::string,std::array<std::uint8_t,4>>> tip_; // hovered window's tooltip lines, drawn last
@@ -503,7 +505,7 @@ class Application {
     // removed at the user's request; Yardım opens only from F1 or a '?' button.
     std::string help_book_;
     // HUD: original 1080p atlas pixels scaled by s_; right-side windows are toggled, oldest first.
-    enum Window { win_bag=1,win_quests,win_vendor,win_trade,win_group,win_settings,win_guild,win_help,win_character,win_skills,win_craft,win_bank,win_contacts };
+    enum Window { win_bag=1,win_quests,win_vendor,win_trade,win_group,win_settings,win_guild,win_help,win_character,win_skills,win_craft,win_bank,win_contacts,win_admin };
     float s_=1;
     int ui_px_=0,context_=0,chat_scroll_=0,chat_extra_=0;
     int contacts_tab_=0,system_menu_=0; // Bağlantılar list (0 Arkadaşlar, 1 Yasaklılar); Esc menu (1 open)
@@ -511,7 +513,7 @@ class Application {
     std::string split_amount_; // digits typed into the 0042f690 split box while confirm_ is a split (sent by 004336c0 on Enter)
     std::array<float,5> prefs_saved_{}; // Ayarlar ✗ restores prefs_saved_
     std::vector<int> windows_;
-    std::array<int,win_contacts+1> scroll_{};
+    std::array<int,win_admin+1> scroll_{};
     std::vector<std::pair<int,std::array<int,4>>> window_rects_;
     std::array<int,4> chat_rect_{};
     struct LogLine { std::string text; std::array<std::uint8_t,4> color; int channel=chat_system; std::uint32_t from=0; std::string name; Json link; }; // channel: chat_channels index; from/name: chat sender (0040aad0 name menu); link: {state,entry} of a Ctrl-click item link (0040aa50)
@@ -545,6 +547,7 @@ class Application {
     ikv::ClientTrade trade_;
     std::uint64_t trade_seen_revision_=0,trade_seen_rows_=0,trade_pending_rows_=0,trade_painted_revision_=0;
     std::string trade_seen_phase_;
+    ikv::ClientAdmin admin_; // NONCANONICAL Yönetici Paneli (win_admin); shown only while state "admin" is set
     bool trade_pending_present_=false;
     Json model_map_=Json::object(),sound_map_=Json::object();
     struct ActorState {
@@ -786,8 +789,9 @@ private:
                 snapshot_source_=accepted_source_;
                 ++snapshot_revision_; ++count_;
                 if (!quit_) script_.run(count_,*session_,[&](const std::string& name){ if (scripted_effects_.size()<64) scripted_effects_.push_back(name); },
-                                        // A scripted click takes the same path as a real left click: HUD first, then the world.
-                                        [&](float x,float y){ if (!hud_click(x,y) && scene_.source_registry_id && original_ui_cached_) pick(x,y); },
+                                        // A scripted click takes the same path as a real left click (HUD first, then the world), but waits
+                                        // for draw(): there it meets a HUD painted with every earlier change, not this frame's stale hits.
+                                        [&](float x,float y){ if (script_clicks_.size()<64) script_clicks_.push_back({x,y}); },
                                         [&](const std::string& path){ screenshot_request_=path; });
                 if (options_.ticks && count_>=options_.ticks && !quit_) leave();
             }
@@ -1216,7 +1220,10 @@ private:
                 if (!group_members_.empty()) items.emplace_back("Gruptan Çık",nullptr,"group-leave");
                 else if (!st.value("kabadayi",false)) items.emplace_back("Kabadayı Moduna Geç",nullptr,"kabadayi");
                 items.emplace_back("Kasamı Göster",nullptr,"bank-open"); // 0x58ec64 'BANK', always listed; the server checks Kasa Erişimi (guide l.875-878)
-                if (state_.value("admin",false)) items.emplace_back("İsim Yansıt",nullptr,"reflect:"+std::to_string(target_));
+                if (state_.value("admin",false)) {
+                    items.emplace_back("İsim Yansıt",nullptr,"reflect:"+std::to_string(target_));
+                    items.emplace_back("Yönetici Paneli",nullptr,"admin-open"); // NONCANONICAL in-game panel (F10)
+                }
             } else player_items(items,target_,false);
         } else if (kind!="enemy" && relation(*subject)!=1) { // 0041a230 NPC branch: TALK (+0x80&0x50), BANK (+0x81&0x10), DART traders, clan items
             if (kind=="node") items.emplace_back("Topla",target_action("gather"),""); // Toplama node (classes.dat <loc> maden*)
@@ -1823,6 +1830,7 @@ private:
         if (id==win_quests) return S(223);
         if (id==win_craft) return S(224);
         if (id==win_bank) return S(290);
+        if (id==win_admin) return S(360);
         if (id==win_skills) return S(130); // original root 130x274 (0044e070)
         if (id==win_help) return std::min(available,S(900));
         return S(320);
@@ -1832,13 +1840,16 @@ private:
         const int top=S(8),bottom=bar[1]-S(6),left=S(560),available=width_-S(4)-left; // right of the target frame (300+168) and its effect grid (to 556)
         // The original Alışveriş window is not stacked: 0043b8e0 centres it at ((screen width-304)/2, 160).
         auto total=[&]{ int sum=0; for (const int id:windows_) if (id!=win_trade) sum+=window_width(id,available)+S(4); return sum; };
+        // The Yönetici Paneli exists only for an authoritative "admin" state; losing it (or the window) drops field focus.
+        if (!state_.value("admin",false) && is_open(win_admin)) windows_.erase(std::find(windows_.begin(),windows_.end(),static_cast<int>(win_admin)));
         while (windows_.size()>1u+is_open(win_trade) && total()>available)
             windows_.erase(std::find_if(windows_.begin(),windows_.end(),[](int id){return id!=win_trade;}));
+        if (!is_open(win_admin)) admin_.focus=-1;
         std::vector<int> order;
         for (const int id:{static_cast<int>(win_bag),static_cast<int>(win_character)}) if (is_open(id)) order.push_back(id);
         for (auto it=windows_.rbegin();it!=windows_.rend();++it) if (*it!=win_bag && *it!=win_character && *it!=win_trade) order.push_back(*it);
         // Yetenekler: 15 rows + detail text; Üretim/Banka: original UI2 art heights (Banka + native money/withdraw strip).
-        static constexpr std::array<int,win_contacts+1> desired{0,650,420,380,0,300,615,340,0,580,760,346,410,360}; // Ayarlar: 7 sliders + Çizim Mesafesi + Vulkan upscaler + frame generation
+        static constexpr std::array<int,win_admin+1> desired{0,650,420,380,0,300,615,340,0,580,760,346,410,360,620}; // Ayarlar: 7 sliders + Çizim Mesafesi + Vulkan upscaler + frame generation
         int x=width_-S(4),bag_x=-1;
         for (const int id:order) {
             const int w=window_width(id,available);
@@ -1850,12 +1861,206 @@ private:
             else if (id==win_craft) paint_craft(x,top,st);
             else if (id==win_bank) paint_bank(x,top,h,st);
             else if (id==win_skills) paint_skills(x,top,st);
+            else if (id==win_admin) paint_admin(frame(id,x,top,w,h,"Yönetici Paneli"));
             else paint_panel(id,frame(id,x,top,w,h,window_title(id)),st);
             x-=S(4);
         }
         if (is_open(win_trade) && trade_.active()) paint_trade((width_-S(304))/2,S(160));
         // The selected item's tooltip is topmost: windows painted after the bag (Satıcı, Yardım) must not cover it.
         if (const Json* selected=bag_x>=0?inventory_item(st,selected_uid_):nullptr) paint_item_tooltip(bag_x,top,*selected,st,state_);
+    }
+    // NONCANONICAL Yönetici Paneli: an in-game front end for the server's admin commands (the original GM tools were chat
+    // commands such as "|tele"). Painted only while the authoritative state carries "admin"; the server checks every request.
+    // A focused field (admin_.typing()) takes every key and text event, so typing never moves the camera or fires hotkeys.
+    int admin_field(int x,int y,int w,int field) {
+        const int h=lh()+S(6); const bool focused=admin_.focus==field;
+        ui_->rect(x,y,w,h,focused?Rgba{200,170,90,235}:Rgba{96,84,62,235}); ui_->rect(x+1,y+1,w-2,h-2,{10,12,14,235});
+        const auto& value=admin_.fields[static_cast<std::size_t>(field)];
+        if (value.empty() && !focused) ui_->text(x+S(4),y+(h-lh())/2,fit(ikv::ClientAdmin::hint(field),w-S(8)),dim_rgba);
+        else { // like the chat line: the tail stays visible, cut at UTF-8 scalar boundaries
+            std::string shown=value; const std::string caret=focused?"|":"";
+            while (!shown.empty() && ui_->text_width(shown+caret)>w-S(8)) {
+                do shown.erase(0,1); while (!shown.empty() && (static_cast<unsigned char>(shown.front())&0xc0)==0x80);
+            }
+            ui_->text(x+S(4),y+(h-lh())/2,shown+caret,focused?white_rgba:text_rgba);
+        }
+        hits_.push_back({x,y,w,h,nullptr,-1,"admin-field:"+std::to_string(field)});
+        return h;
+    }
+    // Server rows drawn as plain text, one clickable line each, scrolled by the window's wheel offset.
+    template<class Text> void admin_list(int left,int y,int width,int bottom,std::size_t count,int selected,const char* prefix,Text&& text) {
+        auto& scroll=scroll_[win_admin];
+        scroll=std::min(scroll,std::max(0,static_cast<int>(count)-1));
+        for (std::size_t i=static_cast<std::size_t>(scroll);i<count && y+lh()<=bottom;++i) {
+            if (static_cast<int>(i)==selected) ui_->rect(left,y,width,lh(),{90,74,40,200});
+            const auto [line,color]=text(i);
+            ui_->text(left+S(2),y,fit(line,width-S(4)),color);
+            hits_.push_back({left,y,width,lh(),nullptr,-1,prefix+std::to_string(i)});
+            y+=lh();
+        }
+    }
+    void paint_admin(const std::array<int,4>& content) {
+        using A=ikv::ClientAdmin;
+        const int left=content[0],top=content[1],right=content[2],bottom=content[3]; // named ints: the row lambdas capture them
+        const int width=right-left,row=lh()+S(10);
+        int y=top;
+        static constexpr std::array<const char*,A::tab_count> tabs{"Oyuncular","Eşya","Envanter","Karakter","Setler","Dünya"};
+        Flow f{left,right,left,y};
+        for (int i=0;i<A::tab_count;++i) {
+            const std::string name=tabs[static_cast<std::size_t>(i)];
+            flow(f,admin_.tab==i?"["+name+"]":name,nullptr,-1,"admin-tab:"+std::to_string(i));
+        }
+        y=flow_end(f)+S(2);
+        const std::string pick="Hedefi seç"; const int pw=ui_->text_width(pick)+S(16);
+        button(right-pw,y,pick,nullptr,-1,"admin-target",pw);
+        ui_->text(left,y+S(3),fit("Hedef: "+(admin_.has_target()?admin_.target_name():std::string("—")),width-pw-S(6)),admin_.has_target()?gold_rgba:dim_rgba);
+        y+=row;
+        // Two wrapped lines for the last result (paragraph cuts anything longer at the window bottom).
+        const int status_y=bottom-2*lh();
+        if (!admin_.status().empty()) paragraph(left,status_y,width,bottom,admin_.status(),original_rgba(admin_.status_ok()?0xff00ff00:0xffff7777));
+        const int list_bottom=status_y-S(6);
+        const auto field_row=[&](int at,int field,const std::string& text,const std::string& value) { // field with its button on the right
+            const int bw=ui_->text_width(text)+S(16);
+            admin_field(left,at,width-bw-S(6),field); button(right-bw,at,text,nullptr,-1,value,bw);
+        };
+        const auto quantity_row=[&](int at,const std::string& text,const std::string& value) {
+            const std::string caption="Adet:"; const int cw=ui_->text_width(caption)+S(6),bw=ui_->text_width(text)+S(16);
+            ui_->text(left,at+S(3),caption);
+            admin_field(left+cw,at,std::min(S(80),width-cw-bw-S(6)),A::field_quantity); button(right-bw,at,text,nullptr,-1,value,bw);
+        };
+        switch (admin_.tab) {
+        case A::tab_players: {
+            Flow b{left,right,left,y}; flow(b,"Yenile",nullptr,-1,"admin:players"); y=flow_end(b);
+            const auto& rows=admin_.players();
+            if (rows.empty()) paragraph(left,y,width,list_bottom,"Çevrimiçi oyuncuları listelemek için Yenile'ye basın; bir satır hedefi seçer.",dim_rgba);
+            admin_list(left,y,width,list_bottom,rows.size(),admin_.selected_player(),"admin-player:",[&](std::size_t i) {
+                const auto& p=rows[i];
+                return std::pair{p.name+" ("+std::to_string(p.level)+") · "+p.zone+" · "+std::to_string(p.hp)+"/"+std::to_string(p.max_hp)+(p.muted?" · susturulmuş":""),p.muted?dim_rgba:text_rgba};
+            });
+            break;
+        }
+        case A::tab_items: {
+            field_row(y,A::field_search,"Ara","admin:search"); y+=row;
+            const int qy=list_bottom-(lh()+S(6));
+            quantity_row(qy,"Hedefe ver","admin:give");
+            const auto& rows=admin_.items();
+            if (rows.empty()) paragraph(left,y,width,qy-S(4),"Eşya adı yazıp Ara'ya basın (en fazla 50 sonuç); bir satır eşyayı seçer.",dim_rgba);
+            admin_list(left,y,width,qy-S(4),rows.size(),admin_.selected_item,"admin-item:",[&](std::size_t i) {
+                const auto& it=rows[i];
+                return std::pair{it.name+"  ["+it.id+"]"+(it.level?" · Sv "+std::to_string(it.level):std::string{})+(it.stack>1?" · yığın "+std::to_string(it.stack):std::string{}),text_rgba};
+            });
+            break;
+        }
+        case A::tab_inventory: {
+            Flow b{left,right,left,y}; flow(b,"Hedefin envanteri",nullptr,-1,"admin:inventory"); y=flow_end(b);
+            if (admin_.inventory_loaded()) {
+                ui_->text(left,y,fit(admin_.inventory_owner()+" ("+std::to_string(admin_.inventory_level())+") · Para: "+std::to_string(admin_.inventory_currency()),width),gold_rgba);
+                y+=lh()+S(2);
+            }
+            const int qy=list_bottom-(lh()+S(6));
+            quantity_row(qy,"Seçileni al","admin:take");
+            const auto& rows=admin_.inventory();
+            if (rows.empty()) paragraph(left,y,width,qy-S(4),"Hedef seçip envanterini yükleyin; kuşanılmamış bir eşya seçip adedi kadar alabilirsiniz.",dim_rgba);
+            admin_list(left,y,width,qy-S(4),rows.size(),admin_.selected_row,"admin-uid:",[&](std::size_t i) {
+                const auto& it=rows[i];
+                return std::pair{(it.name.empty()?it.item:it.name)+" ×"+std::to_string(it.quantity)+(it.equipped?" · kuşanılmış":""),it.equipped?dim_rgba:text_rgba};
+            });
+            break;
+        }
+        case A::tab_character: {
+            admin_field(left,y,width,A::field_amount); y+=row;
+            Flow b{left,right,left,y};
+            flow(b,"Para ver/al",nullptr,-1,"admin:currency"); flow(b,"XP ver",nullptr,-1,"admin:xp");
+            flow(b,"İyileştir",nullptr,-1,"admin:heal"); flow(b,"At",nullptr,-1,"admin:kick");
+            flow(b,"Yanıma ışınla",nullptr,-1,"admin:summon"); flow(b,"Yanına git",nullptr,-1,"admin:goto");
+            y=flow_end(b)+S(4);
+            paragraph(left,y,width,list_bottom,"Komutlar seçili hedefe uygulanır. Para eksi miktarla düşer (en çok 999.000.000); XP 1–10.000.000.",dim_rgba);
+            break;
+        }
+        case A::tab_kits: { // NONCANONICAL level-appropriate class sets (server "kits"/"give_kit")
+            ui_->text(left,y,"Seviye",gold_rgba); y+=lh()+S(2);
+            const std::string equip=admin_.kit_equip?"Giydir: Açık":"Giydir: Kapalı"; const int ew=ui_->text_width(equip)+S(16);
+            admin_field(left,y,width-ew-S(6),A::field_level); button(right-ew,y,equip,nullptr,-1,"admin-equip",ew); y+=row;
+            Flow b{left,right,left,y};
+            flow(b,"Önizle",nullptr,-1,"admin:kits"); flow(b,"Ekipman seti",nullptr,-1,"admin:kit-equipment"); flow(b,"İksir seti",nullptr,-1,"admin:kit-consumables");
+            y=flow_end(b)+S(2);
+            if (!admin_.kit_loaded()) { paragraph(left,y,width,list_bottom,"Önizle hedefin sınıfına uygun ekipman ve iksir setini listeler; boş seviye hedefin seviyesini kullanır.",dim_rgba); break; }
+            // One list: "Ekipman" header, slot rows, "İksirler" header, consumable rows; not selectable.
+            const auto& gear=admin_.kit_equipment(); const auto& potions=admin_.kit_consumables();
+            const std::size_t count=gear.size()+potions.size()+2;
+            admin_list(left,y,width,list_bottom,count,-1,"admin-kit:",[&](std::size_t i) {
+                if (i==0) return std::pair{"Ekipman (Sv "+std::to_string(admin_.kit_level())+")",gold_rgba};
+                if (i<=gear.size()) { const auto& g=gear[i-1]; return std::pair{g.slot+": "+g.name+" · Sv "+std::to_string(g.level),text_rgba}; }
+                if (i==gear.size()+1) return std::pair{std::string("İksirler"),gold_rgba};
+                const auto& c=potions[i-gear.size()-2];
+                return std::pair{c.name+" ×"+std::to_string(c.quantity),text_rgba};
+            });
+            break;
+        }
+        default: { // A::tab_world
+            ui_->text(left,y,"Duyuru",gold_rgba); y+=lh()+S(2);
+            field_row(y,A::field_announce,"Gönder","admin:announce"); y+=row;
+            ui_->text(left,y,fit("Bölge (şu an: "+state_.value("zone",std::string{})+")",width),gold_rgba); y+=lh()+S(2);
+            field_row(y,A::field_zone,"Işınlan","admin:teleport"); y+=row;
+            Flow b{left,right,left,y}; flow(b,"NPC'leri canlandır",nullptr,-1,"admin:respawn"); y=flow_end(b)+S(2);
+            ui_->text(left,y,"Oyun saati (0–23)",gold_rgba); y+=lh()+S(2);
+            field_row(y,A::field_hour,"Ayarla","admin:clock"); y+=row;
+            paragraph(left,y,width,list_bottom,"Işınlan sizi bölgenin doğuş noktasına götürür. NPC canlandırma bölge alanına, alan boşsa tüm dünyaya uygulanır.",dim_rgba);
+            break;
+        }
+        }
+    }
+    void admin_command(const std::string& value) {
+        if (!state_.value("admin",false) || !session_) return;
+        const std::uint32_t self=session_->self;
+        const auto go=[&](std::optional<Json> request) { if (request) send(*request); };
+        const auto index=[&](std::size_t prefix) { return static_cast<int>(std::strtol(value.c_str()+prefix,nullptr,10)); };
+        if (value=="admin-open") {
+            toggle_window(win_admin);
+            if (!is_open(win_admin)) admin_.focus=-1;
+            else if (admin_.players().empty()) go(admin_.list_players());
+        }
+        else if (value.starts_with("admin-tab:")) { admin_.tab=std::clamp(index(10),0,ikv::ClientAdmin::tab_count-1); scroll_[win_admin]=0; }
+        else if (value.starts_with("admin-field:")) { admin_.focus=std::clamp(index(12),0,ikv::ClientAdmin::field_count-1); editing_=false; }
+        else if (value.starts_with("admin-player:")) admin_.select_player(static_cast<std::size_t>(std::max(0,index(13))));
+        else if (value.starts_with("admin-item:")) admin_.selected_item=index(11);
+        else if (value.starts_with("admin-uid:")) admin_.selected_row=index(10);
+        else if (value=="admin-target") { // the in-world selection (or yourself) as {"target": entity}
+            const Json* e=entity(target_);
+            if (target_ && target_==self) admin_.select_entity(self,state_.value("character",Json::object()).value("name",std::string{}));
+            else if (e && e->value("kind",std::string{})=="player") admin_.select_entity(target_,e->value("name",std::string{}));
+            else admin_.fail("Önce dünyada bir oyuncuyu hedefleyin.");
+        }
+        else if (value=="admin:players") go(admin_.list_players());
+        else if (value=="admin:search") go(admin_.search_items());
+        else if (value=="admin:give") go(admin_.give_item());
+        else if (value=="admin:inventory") go(admin_.load_inventory());
+        else if (value=="admin:take") go(admin_.take_item());
+        else if (value=="admin:currency") go(admin_.currency());
+        else if (value=="admin:xp") go(admin_.give_xp());
+        else if (value=="admin:heal") go(admin_.heal());
+        else if (value=="admin:kick") { if (auto request=admin_.kick()) ask(std::move(*request),"\""+admin_.target_name()+"\" oyundan atılacak. Emin misiniz?"); }
+        else if (value=="admin:summon") go(admin_.summon_here(self));
+        else if (value=="admin:goto") go(admin_.go_to(self));
+        else if (value=="admin:announce") go(admin_.announce());
+        else if (value=="admin:teleport") go(admin_.teleport_self(self));
+        else if (value=="admin:clock") go(admin_.clock());
+        else if (value=="admin:respawn") go(admin_.respawn());
+        else if (value=="admin-equip") admin_.kit_equip=!admin_.kit_equip;
+        else if (value=="admin:kits") go(admin_.preview_kits());
+        else if (value=="admin:kit-equipment") go(admin_.give_kit(false));
+        else if (value=="admin:kit-consumables") go(admin_.give_kit(true));
+    }
+    // Enter in a focused panel field presses the button beside it; the field gives up focus either way.
+    void admin_enter() {
+        using A=ikv::ClientAdmin;
+        const int field=admin_.focus; admin_.focus=-1;
+        if (field==A::field_search) admin_command("admin:search");
+        else if (field==A::field_announce) admin_command("admin:announce");
+        else if (field==A::field_zone) admin_command("admin:teleport");
+        else if (field==A::field_hour) admin_command("admin:clock");
+        else if (field==A::field_level) admin_command("admin:kits");
+        else if (field==A::field_quantity) admin_command(admin_.tab==A::tab_inventory?"admin:take":"admin:give");
     }
     static std::string window_title(int id) {
         switch (id) {
@@ -3426,6 +3631,7 @@ private:
     void ask(Json action,std::string text) { confirm_=std::move(action); confirm_text_=std::move(text); audio_->play_event("ui\\alert.raw"); }
     void connect() {
         trade_.reset(); trade_seen_rows_=0; trade_seen_revision_=0; trade_pending_present_=false; trade_items_=Json::array(); trade_currency_=0;
+        admin_.reset();
         session_.reset(); count_=0; entities_.clear(); tick_epoch_.reset(); epoch_tick_=0;
         pending_mutations_.clear(); pending_bytes_=0; accepted_actors_.clear(); accepted_source_.reset();
         state_=Json::object(); state_pending_=false; players_.clear(); has_snapshot_=false;
@@ -3695,6 +3901,11 @@ private:
             }
             else if (type=="complaint") notice("Şikayet: "+event.value("name",std::string{})+" → "+event.value("target_name",std::string{})); // administrators only
             else if (type=="announce") notice("Duyuru: "+event.value("text",std::string{})); // NONCANONICAL web-admin broadcast
+            else if (type=="admin_result") { // NONCANONICAL Yönetici Paneli answer: lists and status line; a closed panel echoes it as a notice
+                if (auto follow=admin_.receive(event)) send(*follow);
+                if (!is_open(win_admin) && !admin_.status().empty()) notice("Yönetici: "+admin_.status());
+                hud_dirty_=true;
+            }
             else if (type=="emote") { // Rol yapma gesture: RP_* clip from data/animation.dat; clip 0 ("/kalk", original 'toah') stands up
                 if (auto* actor=actor_state(event.value("entity",0u)); actor && actor->alive) {
                     const unsigned clip=event.value("clip",0u);
@@ -3741,7 +3952,7 @@ private:
                 renderer_->set_camera(camera);
             }
             if (event.type==SDL_EVENT_QUIT || event.type==SDL_EVENT_WINDOW_CLOSE_REQUESTED) leave();
-            if (event.type==SDL_EVENT_WINDOW_FOCUS_LOST) { editing_=false; drag_=nullptr; dragging_=false; }
+            if (event.type==SDL_EVENT_WINDOW_FOCUS_LOST) { editing_=false; admin_.focus=-1; drag_=nullptr; dragging_=false; }
             if (event.type==SDL_EVENT_MOUSE_MOTION && !drag_.is_null() && (event.motion.state&SDL_BUTTON_LMASK)) {
                 std::tie(drag_x_,drag_y_)=pixel(event.motion.x,event.motion.y);
                 if (!dragging_ && std::hypot(drag_x_-press_x_,drag_y_-press_y_)>static_cast<float>(S(4))) dragging_=true;
@@ -3752,7 +3963,8 @@ private:
                 if (dragging_) drop(x,y); else hud_click(press_x_,press_y_); // a press without movement is the element's click
                 drag_=nullptr; dragging_=false;
             }
-            if (event.type==SDL_EVENT_TEXT_INPUT && editing_ && input_.size()+std::char_traits<char>::length(event.text.text)<=1024) { input_+=event.text.text; chat_command(); }
+            if (event.type==SDL_EVENT_TEXT_INPUT && admin_.typing()) admin_.type(event.text.text); // a focused Yönetici Paneli field
+            else if (event.type==SDL_EVENT_TEXT_INPUT && editing_ && input_.size()+std::char_traits<char>::length(event.text.text)<=1024) { input_+=event.text.text; chat_command(); }
             // 0041c2a0 -> 00468010: releasing PrintScreen (DIK_SYSRQ) saves EKRAN_<_strdate>_<_strtime> with '/' -> '-' and
             // ':' -> '.' into the working directory: BMP with Shift, else TGA with Ctrl, else JPG.
             if (event.type==SDL_EVENT_KEY_UP && event.key.key==SDLK_PRINTSCREEN && session_) {
@@ -3774,6 +3986,10 @@ private:
                     else if (key==SDLK_ESCAPE) handle("confirm-no");
                     else if (key==SDLK_BACKSPACE) { if (!split_amount_.empty()) split_amount_.pop_back(); }
                     else if (split_amount_.size()<4) split_amount_+=static_cast<char>('0'+(key>=SDLK_0 && key<=SDLK_9?key-SDLK_0:(key-SDLK_KP_1+1)%10));
+                } else if (admin_.typing()) { // Yönetici Paneli field: every key stays in it (no chat, hotkeys or quickbar)
+                    if (key==SDLK_ESCAPE) admin_.focus=-1;
+                    else if (key==SDLK_RETURN || key==SDLK_KP_ENTER) admin_enter();
+                    else if (key==SDLK_BACKSPACE) admin_.backspace();
                 } else if ((event.key.mod&SDL_KMOD_CTRL) && (key==SDLK_C || key==SDLK_X)) {
                     if (key==SDLK_C) whisper(whisper_from_,whisper_from_name_); else whisper(whisper_to_,whisper_name_);
                     if (channel_==chat_whisper) editing_=true;
@@ -3808,6 +4024,7 @@ private:
                 }
                 else if (key==SDLK_F1) { help_book_.clear(); toggle_window(win_help); }
                 else if (key==SDLK_F4) camera_locked_=!camera_locked_;
+                else if (key==SDLK_F10 && state_.value("admin",false)) admin_command("admin-open"); // NONCANONICAL Yönetici Paneli
                 else if (key==SDLK_TAB && !labels_.empty()) {
                     const auto current=std::find_if(labels_.begin(),labels_.end(),[&](const auto& l){return l.id==target_;});
                     target_=current==labels_.end() || std::next(current)==labels_.end()?labels_.front().id:std::next(current)->id;
@@ -3835,18 +4052,18 @@ private:
                     const auto source=std::find_if(drags_.rbegin(),drags_.rend(),[&](const auto& d){return inside(d.first,x,y);});
                     if (session_ && hit!=hits_.rend() && source!=drags_.rend() && source->first==std::array<int,4>{hit->x,hit->y,hit->w,hit->h}) {
                         drag_=source->second; press_x_=drag_x_=x; press_y_=drag_y_=y; dragging_=false;
-                    } else if (!hud_click(x,y) && session_ && session_->self) {
+                    } else if (!hud_click(x,y) && !over_window(x,y) && session_ && session_->self) {
                         context_=0;
-                        editing_=false;
+                        editing_=false; admin_.focus=-1;
                         pick(x,y);
                     }
                 } else if (const auto hit=std::find_if(hits_.rbegin(),hits_.rend(),[&](const Hit& h){return inside({h.x,h.y,h.w,h.h},x,y);}); hit!=hits_.rend()) {
                     if (hit->value.starts_with("target:")) { handle(hit->value); context_=1; }
                     else if (hit->value.starts_with("slot:")) use_slot(std::stoul(hit->value.substr(5))); // helps.xml: right click uses a slot
                     else if (hit->value=="context") context_=1;
-                } else if (session_ && session_->self) {
+                } else if (session_ && session_->self && !over_window(x,y)) {
                     context_=0;
-                    editing_=false;
+                    editing_=false; admin_.focus=-1;
                     // 004b7888: a right click on an actor's body selects it and opens its menu, like its name label.
                     std::uint32_t id=label_at(x,y); std::optional<std::array<float,3>> ground;
                     if (!id) id=entity_at(x,y,ground);
@@ -3855,7 +4072,7 @@ private:
                 }
             }
         }
-        if (!editing_ && (SDL_GetWindowFlags(window_)&SDL_WINDOW_INPUT_FOCUS)) {
+        if (!editing_ && !admin_.typing() && (SDL_GetWindowFlags(window_)&SDL_WINDOW_INPUT_FOCUS)) {
             const bool* keys=SDL_GetKeyboardState(nullptr);
             auto camera=renderer_->camera();
             camera.yaw+=dt*1.5f*(static_cast<float>(keys[SDL_SCANCODE_D]||keys[SDL_SCANCODE_RIGHT])-static_cast<float>(keys[SDL_SCANCODE_A]||keys[SDL_SCANCODE_LEFT]));
@@ -4037,6 +4254,7 @@ private:
             const auto id=static_cast<std::uint32_t>(std::strtoul(value.c_str()+8,nullptr,10));
             whisper(id,name_of(id)); chat_menu_id_=0; editing_=true;
         }
+        else if (value.starts_with("admin")) admin_command(value); // NONCANONICAL Yönetici Paneli (admin-*, admin:*)
         else if (value.starts_with("reflect:")) { // SNAY 00408ad0: the name goes into the chat input line
             input_=name_of(static_cast<std::uint32_t>(std::strtoul(value.c_str()+8,nullptr,10))); chat_menu_id_=0; editing_=true;
         }
@@ -4083,6 +4301,7 @@ private:
         // 00490120/004909a0: a button with a callback plays ui\click.raw.
         if (!chosen.action.is_null() || chosen.mode>=0 || !chosen.value.empty()) audio_->play_event("ui\\click.raw");
         if (chosen.value!="context") context_=0;
+        if (!chosen.value.starts_with("admin-field:")) admin_.focus=-1; // a click elsewhere leaves a panel field
         if (!chosen.action.is_null()) send(chosen.action);
         else if (chosen.mode>=0) toggle_window(chosen.mode);
         else if (chosen.value.starts_with("target:")) { handle(chosen.value); click_entity(target_); } // a name label acts like its actor
@@ -4097,6 +4316,11 @@ private:
     }
     static bool inside(const std::array<int,4>& r,float x,float y) {
         return x>=static_cast<float>(r[0]) && x<static_cast<float>(r[0]+r[2]) && y>=static_cast<float>(r[1]) && y<static_cast<float>(r[1]+r[3]);
+    }
+    // A point over any painted window (Yönetici Paneli included) never reaches world picking or movement, even if no hit
+    // element covers it.
+    bool over_window(float x,float y) const {
+        return std::any_of(window_rects_.begin(),window_rects_.end(),[&](const auto& w){return inside(w.second,x,y);});
     }
     // Ganimet sacks (classes.dat object 90002, items\id_item_box.adf) render under the corpse's id shifted below the NPC range.
     static constexpr std::uint32_t sack_offset=0x40000000u;
@@ -4317,6 +4541,11 @@ private:
         }
         if (hud_dirty_) paint_hud();
         else if (world_dirty_) { paint_world(); present_hud(); }
+        while (!script_clicks_.empty()) { // queued scripted clicks, each against a freshly painted HUD
+            const auto [x,y]=script_clicks_.front(); script_clicks_.pop_front();
+            if (!hud_click(x,y) && !over_window(x,y) && session_ && session_->self) pick(x,y);
+            if (hud_dirty_) paint_hud();
+        }
         if (effects_) {
             effects_->update(dt,poses_);
             for (const auto& actor:actors_) if (ikv::original_blob_shadows_enabled(options_.appearance=="original") && !actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);

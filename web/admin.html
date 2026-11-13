@@ -74,6 +74,10 @@
     tr[aria-selected="true"] { background: var(--copper-dark); }
     td button { font-size: .8rem; white-space: nowrap; padding: .3rem .6rem; margin: 0 .3rem .3rem 0; }
     .selection { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .9rem; }
+    .short-table { max-height: 16rem; margin-top: .6rem; }
+    td input.qty { width: 5.5rem; padding: .3rem .4rem; margin: 0 .3rem .3rem 0; }
+    .spaced { margin-top: .8rem; }
+    #item-results tr[data-id] { cursor: pointer; }
     pre { margin: .5rem 0; font: .8rem/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
     pre.log { max-height: 30rem; overflow: auto; background: var(--bg); border: 1px solid var(--line); padding: .7rem; }
     summary { cursor: pointer; color: var(--copper); }
@@ -171,6 +175,47 @@
                   <button type="submit" name="command" value="summon" class="secondary" data-operation title="Move the character next to the target character">Yanına çağır</button>
                 </div>
               </form>
+              <div id="item-panel" class="selection">
+                <h3 title="Item and character tools for an ONLINE character (NONCANONICAL: not in the original game's tooling)">Eşyalar ve karakter</h3>
+                <div class="row">
+                  <div class="field"><label for="item-character" title="Online character id the tools below act on">Karakter ID</label><input id="item-character" type="number" min="1" step="1"></div>
+                  <button type="button" id="item-inventory" class="secondary" data-operation title="Fetch the live inventory of the online character">Envanteri getir</button>
+                  <button type="button" id="item-heal" class="secondary" data-operation title="Restore full health and mana; revives a dead character in place">İyileştir / dirilt</button>
+                </div>
+                <p id="item-character-state" class="hint">Çevrimiçi oyuncular tablosunda “Eşyalar” düğmesiyle karakter seçin.</p>
+                <form id="item-search" class="row spaced" role="search">
+                  <div class="field"><label for="item-query" title="Case-insensitive search by item id or name (empty lists all, max 50 rows)">Eşya ara</label><input id="item-query" type="search" maxlength="64" autocomplete="off"></div>
+                  <button type="submit" data-operation title="Search the world's item table">Ara</button>
+                </form>
+                <div class="table-scroll short-table"><table><caption id="item-results-caption">Eşya sonuçları (satıra tıklayarak seçin)</caption><thead><tr><th scope="col" title="Item id">ID</th><th scope="col" title="Item name">Ad</th><th scope="col" title="Maximum stack size">Yığın</th><th scope="col" title="Required level">Sv.</th><th scope="col"></th></tr></thead><tbody id="item-results"></tbody></table></div>
+                <form id="item-give" class="row spaced">
+                  <div class="field"><label for="item-id" title="Item id to give (select from the search results)">Eşya ID</label><input id="item-id" type="text" maxlength="32" autocomplete="off" required></div>
+                  <div class="field"><label for="item-quantity" title="Quantity to give (1–1000)">Adet</label><input id="item-quantity" type="number" min="1" max="1000" step="1" value="1" required></div>
+                  <button type="submit" data-operation title="Give the item to the online character (stacks; rejected if the bag is full)">Eşya ver</button>
+                </form>
+                <div class="table-scroll short-table"><table><caption id="inventory-caption">Envanter (henüz getirilmedi)</caption><thead><tr><th scope="col" title="Inventory slot uid">UID</th><th scope="col" title="Item name and id">Eşya</th><th scope="col" title="Quantity">Adet</th><th scope="col" title="Equipped items cannot be taken">Kuşanılmış</th><th scope="col" title="Take items from the character">İşlem</th></tr></thead><tbody id="inventory-results"></tbody></table></div>
+                <form id="currency-form" class="row spaced">
+                  <div class="field"><label for="currency-amount" title="Signed amount: positive adds, negative removes (balance never goes below zero)">Para (+/−)</label><input id="currency-amount" type="number" min="-999000000" max="999000000" step="1" required></div>
+                  <button type="submit" class="secondary" data-operation title="Add or remove currency">Para ekle/çıkar</button>
+                </form>
+                <form id="xp-form" class="row spaced">
+                  <div class="field"><label for="xp-amount" title="Experience to grant (1–10000000), not scaled by the XP rate">XP</label><input id="xp-amount" type="number" min="1" max="10000000" step="1" required></div>
+                  <button type="submit" class="secondary" data-operation title="Grant experience; normal level-up effects apply">XP ver</button>
+                </form>
+                <div id="kit-panel" class="spaced">
+                  <h3 title="Ready-made class/level-appropriate kits (NONCANONICAL admin tool)">Hazır setler</h3>
+                  <div class="row">
+                    <div class="field"><label for="kit-level" title="Kit level 1–100; blank uses the character's level">Seviye (boş: karakterin)</label><input id="kit-level" type="number" min="1" max="100" step="1"></div>
+                    <label class="inline" title="Equip the equipment kit immediately"><input id="kit-equip" type="checkbox"> Giydir</label>
+                    <button type="button" id="kit-preview" class="secondary" data-operation title="Preview the kits for this character without giving anything">Seti önizle</button>
+                    <button type="button" id="kit-equipment" data-operation title="Give the equipment kit (optionally equipped)">Ekipman setini ver</button>
+                    <button type="button" id="kit-consumables" data-operation title="Give the potion/consumable kit">İksir setini ver</button>
+                  </div>
+                  <p id="kit-state" class="hint">Önizleme yapılmadı.</p>
+                  <div class="table-scroll short-table"><table><caption>Ekipman</caption><thead><tr><th scope="col" title="Equipment slot">Yuva</th><th scope="col" title="Item name">Ad</th><th scope="col" title="Item id">ID</th><th scope="col" title="Required level">Sv.</th></tr></thead><tbody id="kit-equipment-results"></tbody></table></div>
+                  <div class="table-scroll short-table"><table><caption>Sarf malzemesi</caption><thead><tr><th scope="col" title="Item name">Ad</th><th scope="col" title="Item id">ID</th><th scope="col" title="Quantity">Adet</th></tr></thead><tbody id="kit-consumable-results"></tbody></table></div>
+                </div>
+              </div>
             </section>
             <section class="panel" aria-labelledby="accounts-heading">
               <div class="panel-head"><span class="section-number">04</span><h2 id="accounts-heading" title="Account moderation">Hesap yönetimi</h2></div>

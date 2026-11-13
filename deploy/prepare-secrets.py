@@ -102,7 +102,7 @@ def provision(args):
         key = directory / "tls-key"
         csr = directory / "request.csr"
         extensions = directory / "certificate.cnf"
-        write_private(extensions, "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=" + ",".join(["DNS:" + name for name in dns] + ["IP:" + value for value in ips]) + "\n")
+        write_private(extensions, "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=" + ",".join(["DNS:" + name for name in dns] + ["IP:" + value for value in ips]) + "\n")
         run(["openssl", "req", "-x509", "-newkey", "rsa:3072", "-noenc", "-sha256",
              "-days", str(args.days), "-subj", "/CN=IKV OWNED DEVELOPMENT CA - NOT PRODUCTION",
              "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign",

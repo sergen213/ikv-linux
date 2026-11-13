@@ -14,6 +14,7 @@
   let characterLoaded = false;
   let selectedAccount = '';
   let selectedCharacter = '';
+  let inventoryCharacter = 0; // character whose live inventory is shown
   let resetVisible = false;
   let zonesDirty = false;
   let latest = null; // last /v1/admin/status payload
@@ -65,7 +66,7 @@
     element('login-form').setAttribute('aria-busy', String(busy));
   }
 
-  const tables = ['account-results', 'character-results', 'log-results', 'backup-results', 'zone-summary', 'recent-commands', 'online-players', 'bot-results', 'zone-controls', 'command-history'];
+  const tables = ['account-results', 'character-results', 'log-results', 'backup-results', 'zone-summary', 'recent-commands', 'online-players', 'bot-results', 'zone-controls', 'command-history', 'item-results', 'inventory-results', 'kit-equipment-results', 'kit-consumable-results'];
   function clearSession(message, kind = 'info') {
     session = '';
     sessionVersion += 1;
@@ -78,7 +79,13 @@
     selectedCharacter = '';
     accountLoaded = false;
     characterLoaded = false;
-    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat'].forEach((id) => { element(id).value = ''; });
+    inventoryCharacter = 0;
+    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat', 'item-character', 'item-query', 'item-id', 'currency-amount', 'xp-amount', 'kit-level'].forEach((id) => { element(id).value = ''; });
+    element('kit-equip').checked = false;
+    element('kit-state').textContent = 'Önizleme yapılmadı.';
+    element('item-quantity').value = '1';
+    element('inventory-caption').textContent = 'Envanter (henüz getirilmedi)';
+    element('item-character-state').textContent = 'Çevrimiçi oyuncular tablosunda “Eşyalar” düğmesiyle karakter seçin.';
     element('create-admin').checked = false;
     tables.forEach((id) => element(id).replaceChildren());
     ['move-zone', 'bot-zone'].forEach((id) => element(id).replaceChildren());
@@ -255,6 +262,7 @@
         actionButton('İncele', 'Inspect saved character state', () => { void perform(() => inspect(player)); }),
         actionButton('Işınla', 'Fill the teleport form with this character', () => { element('move-character').value = player.character_id; element('move-zone').value = player.zone; element('move-x').focus(); }),
         actionButton('Hedef yap', 'Use as the summon target', () => { element('summon-to').value = player.character_id; element('move-character').focus(); }),
+        actionButton('Eşyalar', 'Select this character for the item and character tools', () => { element('item-character').value = player.character_id; element('item-character-state').textContent = `Seçili: ${text(player.name)} (#${text(player.character_id)})`; element('item-query').focus(); }),
         actionButton('At', 'Kick from the world', () => { void kick(player.character_id, player.name); }, 'danger'));
       row.append(actions);
       players.append(row);
@@ -359,15 +367,115 @@
     return null;
   }
 
-  async function worldCommand(path, body, label, confirmation) {
+  // onResult(command) runs only for successful results and may return a short summary that replaces the default result text.
+  async function worldCommand(path, body, label, confirmation, onResult) {
+    let recorded = null;
     await perform(async () => {
       if (confirmation && !window.confirm(confirmation)) { notice('İşlem iptal edildi.'); return; }
       const queued = await request(path, 'POST', body);
       notice(`${label}: komut #${queued.command_id} kuyruğa alındı; dünyanın yanıtı bekleniyor…`);
       const command = await awaitCommand(queued.command_id);
       if (!command) { notice(`${label}: komut #${queued.command_id} henüz işlenmedi. Dünya çalışıyor mu? Günlükler sekmesinden izleyin.`, 'error'); return; }
-      notice(`${label}: ${resultText(command)}`, command.result.ok === false ? 'error' : 'success');
+      recorded = command;
+      const failed = command.result.ok === false;
+      const summary = !failed && onResult ? onResult(command) : undefined;
+      notice(`${label}: ${summary === undefined ? resultText(command) : `tamam (${summary})`}`, failed ? 'error' : 'success');
     });
+    return recorded;
+  }
+
+  const succeeded = (command) => Boolean(command && command.result && command.result.ok !== false);
+  const utf8Length = (value) => new TextEncoder().encode(value).length;
+  const boundedInteger = (value, label, min, max) => {
+    const number = Number(value);
+    if (String(value).trim() === '' || !Number.isSafeInteger(number) || number < min || number > max) throw new Error(`${label} ${min}–${max} arasında bir tamsayı olmalıdır.`);
+    return number;
+  };
+  const itemCharacter = () => positiveId(element('item-character').value, 'Karakter ID');
+
+  function renderItems(result) {
+    const target = element('item-results');
+    target.replaceChildren();
+    const items = Array.isArray(result.items) ? result.items : [];
+    if (!items.length) emptyRow(target, 5, 'Eşleşen eşya yok.');
+    const choose = (id) => {
+      element('item-id').value = id;
+      target.querySelectorAll('tr').forEach((row) => { row.setAttribute('aria-selected', String(row.dataset.id === id)); });
+      element('item-quantity').focus();
+    };
+    items.forEach((item) => {
+      const id = String(item.id);
+      const row = node('tr');
+      row.dataset.id = id;
+      row.title = 'Select this item';
+      row.addEventListener('click', (event) => { if (!event.target.closest('button')) choose(id); });
+      const pick = node('td');
+      pick.append(actionButton('Seç', 'Select this item id for giving', () => choose(id)));
+      row.append(node('td', id), node('td', item.name), node('td', item.stack), node('td', item.level), pick);
+      target.append(row);
+    });
+    element('item-results-caption').textContent = `Eşya sonuçları: ${items.length} / ${count(result.total)} eşleşme (satıra tıklayarak seçin)`;
+    return `${items.length} / ${count(result.total)} eşleşme gösteriliyor`;
+  }
+
+  function renderInventory(character, result) {
+    inventoryCharacter = character;
+    const target = element('inventory-results');
+    target.replaceChildren();
+    const inventory = Array.isArray(result.inventory) ? result.inventory : [];
+    element('item-character-state').textContent = `${text(result.name)} (#${character}) · oyuncu ${text(result.player)} · Sv. ${text(result.level)} · para ${count(result.currency)}`;
+    element('inventory-caption').textContent = `Envanter: ${text(result.name)} (#${character}) · ${inventory.length} kalem`;
+    if (!inventory.length) emptyRow(target, 5, 'Envanter boş.');
+    inventory.forEach((entry) => {
+      const row = node('tr');
+      const actions = node('td');
+      if (entry.equipped) actions.append(node('span', 'kuşanılmış', 'muted'));
+      else {
+        const owned = Number.isSafeInteger(entry.quantity) && entry.quantity > 0 ? entry.quantity : 1;
+        const quantity = document.createElement('input');
+        quantity.type = 'number';
+        quantity.min = '1';
+        quantity.max = String(Math.min(1000, owned));
+        quantity.step = '1';
+        quantity.value = '1';
+        quantity.className = 'qty';
+        quantity.title = 'Quantity to take (1–1000)';
+        quantity.setAttribute('aria-label', `${text(entry.name)} alınacak adet`);
+        actions.append(quantity, actionButton('Al', 'Take this quantity from the character', () => { void takeItem(character, entry, quantity.value); }, 'danger'));
+      }
+      row.append(node('td', entry.uid), node('td', `${text(entry.name)} (${text(entry.item)})`), node('td', entry.quantity), node('td', entry.equipped ? 'evet' : 'hayır'), actions);
+      target.append(row);
+    });
+    return `${inventory.length} kalem`;
+  }
+
+  async function loadInventory(character, prefix = '') {
+    const command = await worldCommand('/v1/admin/world', { command: 'inventory', character_id: character }, `${prefix}Karakter ${character} envanteri`, undefined,
+      (recorded) => renderInventory(character, recorded.result));
+    if (command && !succeeded(command) && inventoryCharacter === character) {
+      inventoryCharacter = 0;
+      element('inventory-results').replaceChildren();
+      emptyRow(element('inventory-results'), 5, 'Envanter alınamadı.');
+      element('inventory-caption').textContent = 'Envanter (alınamadı)';
+    }
+    return command;
+  }
+
+  // Re-reads the shown inventory after a successful mutation of the same character, keeping the mutation's result in the notice.
+  async function afterItemChange(character, label, command) {
+    if (succeeded(command) && inventoryCharacter === character) await loadInventory(character, `${label}: ${resultText(command)}\n`);
+  }
+
+  async function takeItem(character, entry, value) {
+    try {
+      const uid = String(entry.uid ?? '');
+      if (!uid || utf8Length(uid) > 32) throw new Error('Geçersiz envanter UID.');
+      const quantity = boundedInteger(value, 'Alınacak adet', 1, Math.min(1000, Number.isSafeInteger(entry.quantity) && entry.quantity > 0 ? entry.quantity : 1000));
+      const label = `Karakter ${character}: ${text(entry.name)} alma`;
+      const command = await worldCommand('/v1/admin/world', { command: 'take_item', character_id: character, uid, quantity }, label,
+        `Karakter ${character} envanterinden ${quantity} × ${text(entry.name)} (${uid}) alınsın mı?`);
+      await afterItemChange(character, label, command);
+    } catch (error) { notice(error.message, 'error'); }
   }
 
   async function kick(characterId, name) {
@@ -722,6 +830,105 @@
       .then(() => { zonesDirty = false; });
   });
   element('respawn-all').addEventListener('click', () => { void worldCommand('/v1/admin/world', { command: 'respawn' }, 'Tüm NPC canlandırma'); });
+
+  element('item-search').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const search = element('item-query').value.trim();
+    if (utf8Length(search) > 64 || /[\u0000-\u001f\u007f]/.test(search)) { notice('Eşya araması en fazla 64 UTF-8 bayt olmalı ve kontrol karakteri içermemelidir.', 'error'); return; }
+    void worldCommand('/v1/admin/world', { command: 'items', search }, search ? `Eşya araması “${search}”` : 'Eşya listesi', undefined, (command) => renderItems(command.result));
+  });
+  element('item-give').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void (async () => {
+      try {
+        const character = itemCharacter();
+        const item = element('item-id').value.trim();
+        if (!item || utf8Length(item) > 32 || /[\u0000-\u001f\u007f]/.test(item)) throw new Error('Eşya ID 1–32 UTF-8 bayt olmalıdır; arama sonuçlarından seçin.');
+        const quantity = boundedInteger(element('item-quantity').value, 'Adet', 1, 1000);
+        const label = `Karakter ${character}: ${quantity} × ${item} verme`;
+        await afterItemChange(character, label, await worldCommand('/v1/admin/world', { command: 'give_item', character_id: character, item, quantity }, label));
+      } catch (error) { notice(error.message, 'error'); }
+    })();
+  });
+  element('item-inventory').addEventListener('click', () => {
+    try { void loadInventory(itemCharacter()); } catch (error) { notice(error.message, 'error'); }
+  });
+  element('item-heal').addEventListener('click', () => {
+    try {
+      const character = itemCharacter();
+      void worldCommand('/v1/admin/world', { command: 'heal', character_id: character }, `Karakter ${character} iyileştirme`);
+    } catch (error) { notice(error.message, 'error'); }
+  });
+  element('currency-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    void (async () => {
+      try {
+        const character = itemCharacter();
+        const amount = boundedInteger(element('currency-amount').value, 'Para miktarı', -999000000, 999000000);
+        if (amount === 0) throw new Error('Para miktarı sıfır olamaz.');
+        const label = `Karakter ${character}: para ${amount > 0 ? '+' : ''}${amount}`;
+        const command = await worldCommand('/v1/admin/world', { command: 'currency', character_id: character, amount }, label,
+          amount < 0 ? `Karakter ${character} bakiyesinden ${-amount} para çıkarılsın mı?` : undefined, (recorded) => `yeni bakiye ${count(recorded.result.currency)}`);
+        await afterItemChange(character, label, command);
+      } catch (error) { notice(error.message, 'error'); }
+    })();
+  });
+  element('xp-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    try {
+      const character = itemCharacter();
+      const amount = boundedInteger(element('xp-amount').value, 'XP miktarı', 1, 10000000);
+      void worldCommand('/v1/admin/world', { command: 'give_xp', character_id: character, amount }, `Karakter ${character}: ${amount} XP verme`, undefined,
+        (recorded) => `seviye ${text(recorded.result.level)}, xp ${count(recorded.result.xp)}`);
+    } catch (error) { notice(error.message, 'error'); }
+  });
+
+  // Optional kit level: blank means the character's own level.
+  const kitBody = (body) => {
+    const level = element('kit-level').value.trim();
+    if (level !== '') body.level = boundedInteger(level, 'Set seviyesi', 1, 100);
+    return body;
+  };
+  function renderKits(result) {
+    const equipment = Array.isArray(result.equipment) ? result.equipment : [];
+    const consumables = Array.isArray(result.consumables) ? result.consumables : [];
+    const gear = element('kit-equipment-results'), supplies = element('kit-consumable-results');
+    gear.replaceChildren();
+    supplies.replaceChildren();
+    if (!equipment.length) emptyRow(gear, 4, 'Uygun ekipman yok.');
+    equipment.forEach((entry) => { const row = node('tr'); row.append(node('td', entry.slot), node('td', entry.name), node('td', entry.item), node('td', entry.level)); gear.append(row); });
+    if (!consumables.length) emptyRow(supplies, 3, 'Uygun sarf malzemesi yok.');
+    consumables.forEach((entry) => { const row = node('tr'); row.append(node('td', entry.name), node('td', entry.item), node('td', entry.quantity)); supplies.append(row); });
+    element('kit-state').textContent = `Oyuncu ${text(result.player)} · sınıf ${text(result.class_id)} · cinsiyet ${text(result.sex)} · set seviyesi ${text(result.level)}`;
+    return `${equipment.length} ekipman, ${consumables.length} sarf`;
+  }
+  const kitSummary = (result) => {
+    const items = Array.isArray(result.items) ? result.items : [];
+    const equipped = Array.isArray(result.equipped) ? result.equipped : [];
+    return `sv. ${text(result.level)}: ${items.map((entry) => `${entry.quantity ?? 1} × ${text(entry.name)}`).join(', ') || 'eşya yok'}${equipped.length ? `; giydirilen: ${equipped.map(text).join(', ')}` : ''}`;
+  };
+  element('kit-preview').addEventListener('click', () => {
+    try {
+      const character = itemCharacter();
+      void worldCommand('/v1/admin/world', kitBody({ command: 'kits', character_id: character }), `Karakter ${character} set önizlemesi`, undefined, (command) => renderKits(command.result));
+    } catch (error) { notice(error.message, 'error'); }
+  });
+  for (const kit of ['equipment', 'consumables']) {
+    element(kit === 'equipment' ? 'kit-equipment' : 'kit-consumables').addEventListener('click', () => {
+      void (async () => {
+        try {
+          const character = itemCharacter();
+          const body = kitBody({ command: 'give_kit', character_id: character, kit });
+          if (kit === 'equipment') body.equip = element('kit-equip').checked;
+          const name = kit === 'equipment' ? 'ekipman seti' : 'iksir seti';
+          const label = `Karakter ${character}: ${name} verme`;
+          const command = await worldCommand('/v1/admin/world', body, label,
+            `Karakter ${character} için ${name} verilsin mi?\nSeviye: ${body.level ?? 'karakterin seviyesi'}${kit === 'equipment' ? `\nGiydir: ${body.equip ? 'evet' : 'hayır'}` : ''}`, (recorded) => kitSummary(recorded.result));
+          await afterItemChange(character, label, command);
+        } catch (error) { notice(error.message, 'error'); }
+      })();
+    });
+  }
 
   element('settings-form').addEventListener('submit', (event) => {
     event.preventDefault();

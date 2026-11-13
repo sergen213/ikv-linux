@@ -89,7 +89,7 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
          "-subj", "/CN=localhost", "-keyout", server_key, "-out", request])
     extensions.write_text("subjectAltName=DNS:localhost,IP:127.0.0.1\n"
                           "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\n"
-                          "extendedKeyUsage=serverAuth\n", encoding="ascii")
+                          "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n", encoding="ascii")
     run(["openssl", "x509", "-req", "-in", request, "-CA", ca_cert, "-CAkey", ca_key,
          "-CAcreateserial", "-days", "1", "-sha256", "-extfile", extensions, "-out", server_cert])
     unrelated_ca = tls / "unrelated-ca.pem"

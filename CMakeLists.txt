@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ikv_native VERSION 0.11.1 LANGUAGES CXX)
+project(ikv_native VERSION 0.12.0 LANGUAGES CXX)
 
 option(IKV_BUILD_CLIENT "Build the native SDL3 OpenGL/Vulkan client" ON)
 option(IKV_BUILD_VULKAN "Build the Vulkan renderer and hardware ray-tracing support" ON)
@@ -154,7 +154,7 @@ if(IKV_BUILD_CLIENT)
     endif()
     # Original Ogg decoding: vendored stb_vorbis (third_party/stb_vorbis), compiled as C++ like upstream sources (-w).
     set_source_files_properties(third_party/stb_vorbis/stb_vorbis.c PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-w")
-    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_charsel.cpp src/audio.cpp
+    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_charsel.cpp src/audio.cpp
         third_party/stb_vorbis/stb_vorbis.c)
     target_link_libraries(ikv-client PRIVATE ikv-renderers Freetype::Freetype ${ikv_client_platform_libs} PkgConfig::TurboJPEG OpenSSL::SSL OpenSSL::Crypto Threads::Threads Boost::headers)
     if(WIN32)

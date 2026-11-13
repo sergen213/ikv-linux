@@ -632,7 +632,7 @@ def certificates(services):
                       "/CN=Unrelated native EOF CA", "-addext", "basicConstraints=critical,CA:TRUE",
                       "-addext", "keyUsage=critical,keyCertSign,cRLSign"])
     dns_cert = services.root / "localhost-only.pem"
-    extensions = services.secret_file("localhost-only.ext", "subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n")
+    extensions = services.secret_file("localhost-only.ext", "subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\n")
     services.command([openssl, "x509", "-req", "-in", services.root / "server.csr", "-CA", services.ca,
                       "-CAkey", services.root / "ca.key", "-CAcreateserial", "-out", dns_cert,
                       "-days", "1", "-extfile", extensions])

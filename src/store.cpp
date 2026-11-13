@@ -231,6 +231,41 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
 #endif
 }
 } // anonymous namespace
+// POST /v1/admin/world and the in-game Yönetici Paneli (World::handle "admin") share these bounds (NONCANONICAL web/in-game
+// administration). Only validated fields reach World::admin.
+Json admin_world_arguments(const std::string& command,const Json& body) {
+    const auto line=[&](const char* key,std::size_t min,std::size_t max){
+        auto value=text(body,key,min,max);
+        if(std::any_of(value.begin(),value.end(),[](unsigned char c){return c<32||c==127;}))throw ApiError(400,"invalid_request",std::string("Control characters in ")+key);
+        return value;
+    };
+    Json arguments=Json::object();
+    const auto character=[&](){arguments["character_id"]=number(body,"character_id",1,INT64_MAX);};
+    if(command=="announce")arguments["message"]=line("message",1,256);
+    else if(command=="kick"){character();if(body.contains("reason"))arguments["reason"]=line("reason",0,256);}
+    else if(command=="teleport"){
+        character();arguments["zone"]=line("zone",1,32);
+        if(body.contains("x")||body.contains("y")){arguments["x"]=number(body,"x",-10000000,10000000);arguments["y"]=number(body,"y",-10000000,10000000);}
+    }
+    else if(command=="summon"){character();arguments["to_character_id"]=number(body,"to_character_id",1,INT64_MAX);}
+    else if(command=="clock")arguments["hour"]=number(body,"hour",0,23);
+    else if(command=="respawn"){if(body.contains("zone"))arguments["zone"]=line("zone",1,32);}
+    else if(command=="items")arguments["search"]=body.contains("search")?line("search",0,64):std::string();
+    else if(command=="inventory"||command=="heal")character();
+    else if(command=="give_item"){character();arguments["item"]=line("item",1,32);arguments["quantity"]=number(body,"quantity",1,1000);}
+    else if(command=="take_item"){character();arguments["uid"]=line("uid",1,32);arguments["quantity"]=number(body,"quantity",1,1000);}
+    else if(command=="currency"){character();arguments["amount"]=number(body,"amount",-999000000,999000000);if(arguments["amount"]==0)throw ApiError(400,"invalid_request","amount geçersiz.");}
+    else if(command=="give_xp"){character();arguments["amount"]=number(body,"amount",1,10000000);}
+    else if(command=="kits"||command=="give_kit"){
+        character();if(body.contains("level"))arguments["level"]=number(body,"level",1,100);
+        if(command=="give_kit"){
+            arguments["kit"]=line("kit",6,11);if(arguments["kit"]!="equipment"&&arguments["kit"]!="consumables")throw ApiError(400,"invalid_request","kit is equipment or consumables");
+            if(body.contains("equip")){if(!body["equip"].is_boolean()||(body["equip"]==true&&arguments["kit"]!="equipment"))throw ApiError(400,"invalid_request","equip is a boolean for the equipment kit");arguments["equip"]=body["equip"];}
+        }
+    }
+    else if(command!="validate_config"&&command!="players")throw ApiError(400,"invalid_command","Use announce, kick, teleport, summon, clock, respawn, validate_config, players, items, inventory, give_item, take_item, currency, give_xp, heal, kits or give_kit");
+    return arguments;
+}
 
 struct Store::Impl {
     std::string dsn;
@@ -566,20 +601,7 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         }
         return enqueue(command,arguments);
     }
-    if(method=="POST"&&path=="/v1/admin/world"){
-        const auto command=text(body,"command",4,15);Json arguments=Json::object();
-        if(command=="announce")arguments["message"]=line(body,"message",1,256);
-        else if(command=="kick"){arguments["character_id"]=number(body,"character_id",1,INT64_MAX);if(body.contains("reason"))arguments["reason"]=line(body,"reason",0,256);}
-        else if(command=="teleport"){
-            arguments["character_id"]=number(body,"character_id",1,INT64_MAX);arguments["zone"]=line(body,"zone",1,32);
-            if(body.contains("x")||body.contains("y")){arguments["x"]=number(body,"x",-10000000,10000000);arguments["y"]=number(body,"y",-10000000,10000000);}
-        }
-        else if(command=="summon"){arguments["character_id"]=number(body,"character_id",1,INT64_MAX);arguments["to_character_id"]=number(body,"to_character_id",1,INT64_MAX);}
-        else if(command=="clock")arguments["hour"]=number(body,"hour",0,23);
-        else if(command=="respawn"){if(body.contains("zone"))arguments["zone"]=line(body,"zone",1,32);}
-        else if(command!="validate_config")throw ApiError(400,"invalid_command","Use announce, kick, teleport, summon, clock, respawn or validate_config");
-        return enqueue(command,arguments);
-    }
+    if(method=="POST"&&path=="/v1/admin/world"){const auto command=text(body,"command",4,15);return enqueue(command,admin_world_arguments(command,body));}
     if(method=="POST"&&path=="/v1/admin/bots"){
         const auto action=text(body,"action",5,7);Json arguments=Json::object();
         if(action=="spawn"){

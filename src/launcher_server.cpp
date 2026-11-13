@@ -28,6 +28,7 @@
 #include <QMessageBox>
 #include <QMap>
 #include <QMetaObject>
+#include <QPointer>
 #include <QNetworkAccessManager>
 #include <QNetworkInterface>
 #include <QNetworkReply>
@@ -202,7 +203,7 @@ void issueServiceCertificate(const QString& secrets, const QStringList& sans, bo
     const QString csr = secrets + "/request.csr", extensions = secrets + "/certificate.cnf", next = secrets + "/tls-cert.new";
     for (const auto& stale : {csr, extensions, next}) QFile::remove(stale);
     writePrivate(extensions, ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
-                              "extendedKeyUsage=serverAuth\nsubjectAltName=" + sans.join(',') + "\n").toUtf8());
+                              "extendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=" + sans.join(',') + "\n").toUtf8());
     QStringList request{"req", "-new", "-sha256", "-subj", "/CN=IKV LAUNCHER LOCAL SERVICE", "-out", csr};
     if (newKey) request << "-newkey" << "rsa:3072" << "-noenc" << "-keyout" << secrets + "/tls-key";
     else request << "-key" << secrets + "/tls-key";
@@ -874,8 +875,9 @@ private:
         auto* moderation = new QHBoxLayout; pv->addLayout(moderation);
         button(moderation, "Oyundan at", "hostKick", [this] {
             const auto row = selected(playersTable_, "oyuncu");
-            call("POST", "/v1/admin/world", {{"command", "kick"}, {"character_id", row.value(0)}}, [this](const QJsonObject&) { info("Oyuncu atıldı"); poll(); });
+            call("POST", "/v1/admin/world", {{"command", "kick"}, {"character_id", row.value(0).toLongLong()}}, [this](const QJsonObject&) { info("Oyuncu atıldı"); poll(); });
         });
+        button(moderation, "Eşya / karakter…", "hostPlayerItems", [this] { openPlayerItems(); });
         banReason_ = named(new QLineEdit("Kural ihlali"), "hostBanReason"); moderation->addWidget(new QLabel("Sebep")); moderation->addWidget(banReason_, 1);
         banDuration_ = named(new QComboBox, "hostBanDuration");
         for (const auto& [label, seconds] : {std::pair{"1 saat", 3600}, std::pair{"1 gün", 86400}, std::pair{"7 gün", 604800}, std::pair{"Kalıcı", 0}})
@@ -949,7 +951,7 @@ private:
             if (title == "Hesaplar") refreshAccounts(); else if (title == "Yedekler") refreshBackups(); else if (title == "Oranlar") loadSettings();
         });
         needsSession_ = {announce_, playersTable_, banReason_, banDuration_, botTarget_, accounts_, accountSearch_, xp_, drop_, regen_, zonesList_, backups_};
-        for (auto* name : {"hostAnnounce", "hostKick", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
+        for (auto* name : {"hostAnnounce", "hostKick", "hostPlayerItems", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
                            "hostSettingsSave", "hostSettingsRefresh", "hostBackupCreate", "hostBackupRefresh", "hostBackupRestore"})
             needsSession_ << managePage_->findChild<QPushButton*>(QString::fromLatin1(name));
     }
@@ -1108,6 +1110,218 @@ private:
                 .arg(who, accountId, seconds ? "için " + banDuration_->currentText() : QString("kalıcı olarak"))) != QMessageBox::Yes) return;
         call("POST", "/v1/admin/accounts/" + accountId + "/ban", {{"reason", reason}, {"duration_seconds", seconds}},
              [this, who](const QJsonObject&) { info(who + " yasaklandı"); refreshAccounts(); poll(); });
+    }
+    // World commands are queued: POST returns {ok,command_id}; World::admin's result lands in /v1/admin/status commands[] about a second later.
+    // Polls every 500 ms for at most 15 s; callbacks are dropped once `owner` is destroyed (dialog closed mid-poll). Never blocks the GUI thread.
+    void worldCommand(QObject* owner, const QJsonObject& body, std::function<void(const QJsonObject&)> done, std::function<void(const QString&)> failed) {
+        QPointer<QObject> guard(owner);
+        call("POST", "/v1/admin/world", body, [this, guard, done, failed](const QJsonObject& reply) {
+            if (!guard) return;
+            const qint64 id = reply.value("command_id").toInteger(-1);
+            if (id <= 0) { failed("Sunucu komut kimliği döndürmedi"); return; }
+            awaitCommand(guard, id, QDeadlineTimer(15000), done, failed);
+        }, 15000, [guard, failed](const QString& issue) { if (guard) failed(issue); });
+    }
+    void awaitCommand(QPointer<QObject> guard, qint64 id, QDeadlineTimer deadline, std::function<void(const QJsonObject&)> done, std::function<void(const QString&)> failed) {
+        if (!guard) return;
+        QTimer::singleShot(500, guard.data(), [this, guard, id, deadline, done, failed] {
+            const auto again = [this, guard, id, deadline, done, failed] {
+                if (deadline.hasExpired()) failed("Dünya komutu 15 saniyede işlenmedi; dünya sunucusu çalışıyor mu?");
+                else awaitCommand(guard, id, deadline, done, failed);
+            };
+            try {
+                call("GET", "/v1/admin/status", {}, [guard, id, done, failed, again](const QJsonObject& reply) {
+                    if (!guard) return;
+                    for (const auto& value : reply.value("commands").toArray()) {
+                        const auto command = value.toObject();
+                        if (command.value("id").toInteger() != id) continue;
+                        if (!command.value("result").isObject()) break; // not executed yet
+                        const auto result = command.value("result").toObject();
+                        if (result.value("ok").toBool()) done(result); else failed(result.value("error").toString("Dünya komutu başarısız oldu"));
+                        return;
+                    }
+                    again();
+                }, 5000, [guard, failed](const QString& issue) { if (guard) failed(issue); });
+            } catch (const std::exception& e) { if (guard) failed(failure(e)); }
+        });
+    }
+    // NONCANONICAL management feature: admin item/currency/XP grants and heal have no counterpart in the original game.
+    void openPlayerItems() {
+        const auto row = selected(playersTable_, "oyuncu");
+        const qint64 character = row.value(0).toLongLong();
+        const QString who = row.value(2).isEmpty() ? QString("#%1").arg(character) : QString("%1 (#%2)").arg(row.value(2)).arg(character);
+        auto* dialog = named(new QDialog(this), "hostPlayerItemsDialog");
+        dialog->setAttribute(Qt::WA_DeleteOnClose); dialog->setModal(true); dialog->setWindowTitle("Eşya / karakter — " + who); dialog->resize(820, 900);
+        auto* v = new QVBoxLayout(dialog);
+        auto* summary = named(new QLabel(who), "hostItemsSummary"); v->addWidget(summary);
+        auto* status = named(new QLabel("—"), "hostItemsStatus"); status->setWordWrap(true); status->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        const auto say = [status](const QString& text, bool error) { status->setText(error ? "<span style='color:#c0392b'>" + text.toHtmlEscaped() + "</span>" : text.toHtmlEscaped()); };
+        const auto add = [say](QBoxLayout* r, const QString& text, const char* name, std::function<void()> fn) {
+            auto* b = new QPushButton(text); b->setObjectName(name); r->addWidget(b);
+            QObject::connect(b, &QPushButton::clicked, b, [say, fn = std::move(fn)] { try { fn(); } catch (const std::exception& e) { say(failure(e), true); } });
+            return b;
+        };
+        const auto run = [this, dialog, say](const QJsonObject& body, const QString& pending, std::function<void(const QJsonObject&)> done) {
+            say(pending, false);
+            worldCommand(dialog, body, std::move(done), [say](const QString& issue) { say(issue, true); });
+        };
+        const auto spin = [](const char* name, int low, int high, int value) { auto* s = new QSpinBox; s->setObjectName(name); s->setRange(low, high); s->setValue(value); return s; };
+        const auto table = [](const char* name, const QStringList& headers) {
+            auto* t = new QTableWidget(0, static_cast<int>(headers.size())); t->setObjectName(name); t->setHorizontalHeaderLabels(headers);
+            t->setSelectionBehavior(QAbstractItemView::SelectRows); t->setSelectionMode(QAbstractItemView::SingleSelection);
+            t->setEditTriggers(QAbstractItemView::NoEditTriggers); t->horizontalHeader()->setStretchLastSection(true); t->verticalHeader()->setVisible(false);
+            return t;
+        };
+
+        auto* inventory = table("hostItemsInventory", {"UID", "Eşya", "Ad", "Adet", "Kuşanılmış"});
+        auto* takeQuantity = spin("hostItemsTakeQuantity", 1, 1000, 1);
+        const auto refresh = [run, say, summary, inventory, who, character] {
+            run({{"command", "inventory"}, {"character_id", character}}, "Envanter okunuyor…", [say, summary, inventory, who](const QJsonObject& r) {
+                summary->setText(QString("%1 · seviye %2 · para %3").arg(who).arg(r.value("level").toInt()).arg(r.value("currency").toInteger()));
+                QList<QStringList> rows, keys;
+                for (const auto& value : r.value("inventory").toArray()) {
+                    const auto e = value.toObject(); const auto uid = e.value("uid").toString(), quantity = QString::number(e.value("quantity").toInteger());
+                    const bool equipped = e.value("equipped").toBool();
+                    rows << QStringList{uid, e.value("item").toString(), e.value("name").toString(), quantity, equipped ? "evet" : ""};
+                    keys << QStringList{uid, e.value("item").toString(), e.value("name").toString(), quantity, equipped ? "1" : "0"};
+                }
+                fill(inventory, rows, keys);
+                say(QString("Envanter: %1 kalem").arg(rows.size()), false);
+            });
+        };
+
+        auto* giveBox = new QGroupBox("Eşya ver"); auto* gv = new QVBoxLayout(giveBox); v->addWidget(giveBox, 1);
+        auto* searchRow = new QHBoxLayout; gv->addLayout(searchRow);
+        auto* search = named(new QLineEdit, "hostItemsSearch"); search->setMaxLength(64); search->setPlaceholderText("eşya adı veya kimliğinde ara (boş = ilk 50)");
+        searchRow->addWidget(search, 1);
+        auto* items = table("hostItemsResults", {"Ad", "ID", "Yığın", "Seviye"}); gv->addWidget(items, 1);
+        auto* find = add(searchRow, "Ara", "hostItemsFind", [run, search, items, say] {
+            run({{"command", "items"}, {"search", search->text().trimmed()}}, "Eşyalar aranıyor…", [items, say](const QJsonObject& r) {
+                QList<QStringList> rows, keys;
+                for (const auto& value : r.value("items").toArray()) {
+                    const auto e = value.toObject(); const auto id = e.value("id").toString();
+                    rows << QStringList{e.value("name").toString(), id, QString::number(e.value("stack").toInteger()), QString::number(e.value("level").toInteger())};
+                    keys << QStringList{id, id, id, id};
+                }
+                fill(items, rows, keys);
+                const qint64 total = r.value("total").toInteger(rows.size());
+                say(total > rows.size() ? QString("%1 eşya bulundu; ilk %2 gösteriliyor").arg(total).arg(rows.size()) : QString("%1 eşya bulundu").arg(total), false);
+            });
+        });
+        connect(search, &QLineEdit::returnPressed, find, &QPushButton::click);
+        auto* giveRow = new QHBoxLayout; gv->addLayout(giveRow);
+        giveRow->addWidget(new QLabel("Eşya kimliği"));
+        auto* itemId = named(new QLineEdit, "hostItemsItemId"); itemId->setMaxLength(32); giveRow->addWidget(itemId, 1);
+        connect(items, &QTableWidget::itemSelectionChanged, itemId, [items, itemId] {
+            const auto rows = items->selectionModel()->selectedRows();
+            if (!rows.isEmpty()) if (const auto* cell = items->item(rows.first().row(), 1)) itemId->setText(cell->data(Qt::UserRole).toString());
+        });
+        giveRow->addWidget(new QLabel("Adet"));
+        auto* giveQuantity = spin("hostItemsGiveQuantity", 1, 1000, 1); giveRow->addWidget(giveQuantity);
+        add(giveRow, "Ver", "hostItemsGive", [run, refresh, itemId, giveQuantity, character, say] {
+            const auto item = itemId->text().trimmed();
+            if (item.isEmpty()) throw hostIssue("Önce bir eşya seçin veya kimliğini yazın");
+            run({{"command", "give_item"}, {"character_id", character}, {"item", item}, {"quantity", giveQuantity->value()}}, "Eşya veriliyor…", [refresh, say](const QJsonObject& r) {
+                const auto text = QString("Verildi: %1 × %2").arg(r.value("quantity").toInteger()).arg(r.value("name").toString(r.value("item").toString()));
+                say(text, false); try { refresh(); } catch (const std::exception&) {}
+            });
+        });
+
+        auto* bagBox = new QGroupBox("Envanter"); auto* bv = new QVBoxLayout(bagBox); v->addWidget(bagBox, 1);
+        bv->addWidget(inventory, 1);
+        auto* bagRow = new QHBoxLayout; bv->addLayout(bagRow);
+        add(bagRow, "Envanter", "hostItemsRefresh", refresh);
+        bagRow->addStretch(); bagRow->addWidget(new QLabel("Adet")); bagRow->addWidget(takeQuantity);
+        connect(inventory, &QTableWidget::itemSelectionChanged, takeQuantity, [inventory, takeQuantity] {
+            const auto rows = inventory->selectionModel()->selectedRows();
+            if (!rows.isEmpty()) if (const auto* cell = inventory->item(rows.first().row(), 3)) takeQuantity->setMaximum(std::clamp(cell->data(Qt::UserRole).toInt(), 1, 1000));
+        });
+        add(bagRow, "Seçileni al", "hostItemsTake", [run, refresh, inventory, takeQuantity, character, dialog, who, say] {
+            const auto entry = selected(inventory, "eşya");
+            if (entry.value(4) == "1") throw hostIssue("Kuşanılmış eşya alınamaz; önce oyuncu çıkarmalı");
+            const int quantity = takeQuantity->value();
+            if (QMessageBox::question(dialog, "Eşya al", QString("%1 kişisinden %2 × %3 (%4) alınsın mı?").arg(who).arg(quantity).arg(entry.value(2), entry.value(0))) != QMessageBox::Yes) return;
+            run({{"command", "take_item"}, {"character_id", character}, {"uid", entry.value(0)}, {"quantity", quantity}}, "Eşya alınıyor…", [refresh, say](const QJsonObject& r) {
+                say(QString("Alındı: %1 × %2").arg(r.value("quantity").toInteger()).arg(r.value("item").toString()), false); try { refresh(); } catch (const std::exception&) {}
+            });
+        });
+
+        auto* kitBox = new QGroupBox("Hazır setler"); auto* kv = new QVBoxLayout(kitBox); v->addWidget(kitBox, 1);
+        auto* kitRow = new QHBoxLayout; kv->addLayout(kitRow);
+        kitRow->addWidget(new QLabel("Seviye"));
+        auto* kitLevel = spin("hostKitLevel", 0, 100, 0); kitLevel->setSpecialValueText("karakterin seviyesi"); kitRow->addWidget(kitLevel);
+        auto* kitEquip = named(new QCheckBox("Giydir"), "hostKitEquip"); kitEquip->setChecked(true); kitRow->addWidget(kitEquip);
+        auto* kitTable = table("hostKitTable", {"Tür", "Yuva", "Ad", "ID", "Seviye/Adet"});
+        const auto kitBody = [character, kitLevel](const char* command) {
+            QJsonObject body{{"command", command}, {"character_id", character}};
+            if (kitLevel->value() > 0) body.insert("level", kitLevel->value());
+            return body;
+        };
+        add(kitRow, "Önizle", "hostKitPreview", [run, kitBody, kitTable, say] {
+            run(kitBody("kits"), "Set hazırlanıyor…", [kitTable, say](const QJsonObject& r) {
+                QList<QStringList> rows, keys;
+                for (const auto& value : r.value("equipment").toArray()) {
+                    const auto e = value.toObject();
+                    rows << QStringList{"Ekipman", e.value("slot").toString(), e.value("name").toString(), e.value("item").toString(), QString::number(e.value("level").toInteger())};
+                    keys << rows.last();
+                }
+                for (const auto& value : r.value("consumables").toArray()) {
+                    const auto e = value.toObject();
+                    rows << QStringList{"Sarf", QString(), e.value("name").toString(), e.value("item").toString(), QString("%1 adet").arg(e.value("quantity").toInteger())};
+                    keys << rows.last();
+                }
+                fill(kitTable, rows, keys);
+                say(QString("Seviye %1 seti: %2 ekipman, %3 sarf").arg(r.value("level").toInt()).arg(r.value("equipment").toArray().size()).arg(r.value("consumables").toArray().size()), false);
+            });
+        });
+        const auto kitDone = [refresh, say](const QJsonObject& r) {
+            QStringList given;
+            for (const auto& value : r.value("items").toArray()) { const auto e = value.toObject(); given << QString("%1 × %2").arg(e.value("quantity").toInteger(1)).arg(e.value("name").toString(e.value("item").toString())); }
+            const auto equipped = r.value("equipped").toArray();
+            say(QString("Set verildi (seviye %1): %2%3").arg(r.value("level").toInt()).arg(given.isEmpty() ? QString("—") : given.join(", "))
+                    .arg(equipped.isEmpty() ? QString() : QString(" · %1 yuva giydirildi").arg(equipped.size())), false);
+            try { refresh(); } catch (const std::exception&) {}
+        };
+        add(kitRow, "Ekipman seti ver", "hostKitGiveEquipment", [run, kitBody, kitEquip, kitDone] {
+            auto body = kitBody("give_kit"); body.insert("kit", "equipment"); body.insert("equip", kitEquip->isChecked());
+            run(body, "Ekipman seti veriliyor…", kitDone);
+        });
+        add(kitRow, "İksir seti ver", "hostKitGiveConsumables", [run, kitBody, kitDone] {
+            auto body = kitBody("give_kit"); body.insert("kit", "consumables");
+            run(body, "İksir seti veriliyor…", kitDone);
+        });
+        kitRow->addStretch();
+        kv->addWidget(kitTable, 1);
+
+        auto* charBox = new QGroupBox("Karakter"); auto* cf = new QFormLayout(charBox); v->addWidget(charBox);
+        auto* currencyRow = new QHBoxLayout; auto* currency = spin("hostItemsCurrency", -999000000, 999000000, 0); currencyRow->addWidget(currency, 1);
+        add(currencyRow, "Uygula", "hostItemsCurrencyApply", [run, refresh, currency, character, say] {
+            if (!currency->value()) throw hostIssue("Para miktarı sıfır olamaz");
+            run({{"command", "currency"}, {"character_id", character}, {"amount", currency->value()}}, "Para güncelleniyor…", [refresh, currency, say](const QJsonObject& r) {
+                currency->setValue(0); say(QString("Yeni para: %1").arg(r.value("currency").toInteger()), false); try { refresh(); } catch (const std::exception&) {}
+            });
+        });
+        cf->addRow("Para ekle / çıkar", currencyRow);
+        auto* xpRow = new QHBoxLayout; auto* xp = spin("hostItemsXp", 1, 10000000, 1000); xpRow->addWidget(xp, 1);
+        add(xpRow, "XP ver", "hostItemsXpGive", [run, refresh, xp, character, say] {
+            run({{"command", "give_xp"}, {"character_id", character}, {"amount", xp->value()}}, "XP veriliyor…", [refresh, say](const QJsonObject& r) {
+                say(QString("Seviye %1 · XP %2").arg(r.value("level").toInt()).arg(r.value("xp").toInteger()), false); try { refresh(); } catch (const std::exception&) {}
+            });
+        });
+        cf->addRow("Deneyim (XP oranı uygulanmaz)", xpRow);
+        auto* healRow = new QHBoxLayout;
+        add(healRow, "İyileştir / dirilt", "hostItemsHeal", [run, character, say] {
+            run({{"command", "heal"}, {"character_id", character}}, "İyileştiriliyor…", [say](const QJsonObject& r) {
+                say(QString("İyileştirildi: can %1 · mana %2").arg(r.value("hp").toInteger()).arg(r.value("mana").toInteger()), false);
+            });
+        });
+        healRow->addStretch(); cf->addRow("Can / mana", healRow);
+
+        v->addWidget(status);
+        auto* close = new QDialogButtonBox(QDialogButtonBox::Close); v->addWidget(close);
+        connect(close, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+        dialog->open();
+        try { refresh(); find->click(); } catch (const std::exception& e) { say(failure(e), true); }
     }
     // Live bot count: spawn (≤50 per command) or despawn the newest bots (≤64 ids per command); also kept for the next start.
     void applyBots(int target) {

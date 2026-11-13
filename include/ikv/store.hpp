@@ -18,6 +18,8 @@ struct ApiError : std::runtime_error {
     ApiError(int http_status, std::string error_code, std::string message)
         : std::runtime_error(std::move(message)), status(http_status), code(std::move(error_code)) {}
 };
+// Validated World::admin arguments for one /v1/admin/world command (also used by the in-game Yönetici Paneli); throws ApiError 400.
+Json admin_world_arguments(const std::string& command, const Json& body);
 class Store {
 public:
     explicit Store(std::string dsn);
