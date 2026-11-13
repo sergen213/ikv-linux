@@ -190,6 +190,8 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     if (cosine > 0.0 && visibility > 0.0)
         visibility = rtSunVisibility(position, facet, sunDir, 0u);
 #endif
+    // NONCANONICAL wave 27: cloud/fog light softens the sun shadow (weather.glsl; 0 without weather).
+    visibility = mix(visibility, 1.0, frameShadowSoftness());
     light.sun = rtSunRadiance() * (cosine * visibility * 0.96 / 3.14159265359);
     light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality);
     int samples = int(clamp(ceil(quality), 1.0, 4.0));

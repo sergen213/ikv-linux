@@ -49,15 +49,15 @@ struct MemoryPool {
 struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params;};
-static_assert(sizeof(Frame)==544 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528);
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc;};
+static_assert(sizeof(Frame)==592 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
 // Skinned meshes write staging[frame slot] on the host; the copy into vertices is recorded into that frame (upload).
 // previous: the pose the last frame drew (motion vectors; swapped with vertices on upload); previous_stale: previous
 // still differs from vertices.
-struct Geometry {Buffer vertices,indices,staging[2],previous;std::uint32_t count=0;std::uint64_t revision=0;std::array<float,4> bounds{};bool upload=false,previous_stale=false;};
+struct Geometry {Buffer vertices,indices,staging[2],previous;std::uint32_t count=0;std::uint64_t revision=0;std::array<float,4> bounds{};std::array<float,2> height{};bool upload=false,previous_stale=false;};
 // Two frames in flight: frame serial s records/submits slot s&1 and the CPU waits only for the frame two serials back.
 struct FrameSlot {VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquire=VK_NULL_HANDLE;bool pending=false;std::uint64_t serial=0;};
 struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};};
@@ -101,6 +101,11 @@ Image rt_diffuse_,rt_reflection_,diffuse_history_[2],reflection_history_[2],atro
 VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot][A/B target], [slot][iteration]
  std::uint64_t jitter_frame_=0;std::chrono::steady_clock::time_point last_render_{};bool fsr_reset_=true; // reset: new targets/scene
  std::array<float,2> previous_jitter_{}; // the last frame's jitter
+ // NONCANONICAL wave 27: this frame's weather inputs (renderer.hpp weather_uniforms), the integrated wind phase and the
+ // IKV_RENDER_WEATHER capture override.
+ // backdrop_: the scene clear colour (linear; weather_backdrop under weather).
+ std::array<float,3> backdrop_{.04f,.05f,.065f};
+ WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
  // IKV_GPU_TIMING: per slot 2 timestamps (scene pass begin/end); the average is logged every 30 frames. timed_[slot]:
  // that slot's last frame wrote them.
  VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};double timing_sum_=0;unsigned timing_count_=0;
@@ -1531,7 +1536,7 @@ void clear_material_sets(SceneSet& set) {
          // vertices, so both carry the same usage.
          g.previous=upload_buffer(mesh.vertices.data(),g.vertices.bytes,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT,batch);
      }
-     g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);
+     g.revision=mesh.revision;g.count=static_cast<std::uint32_t>(mesh.indices.size());g.bounds=mesh_bounds(mesh);g.height=mesh_height_range(mesh);
      return true;
  }
  // A new Scene (empty set) uploads everything in own waited submissions (render() waited for the device before replacing
@@ -1703,7 +1708,7 @@ void record_geometry_uploads(SceneSet& set) {
  void begin_pass(VkCommandBuffer c,VkRenderPass pass,VkFramebuffer fb,VkExtent2D size,bool depth) {
      const std::uint32_t colors=pass==shadow_pass_?0:attachments(colors_of(pass));
      std::array<VkClearValue,9> clears{};
-     if(colors)clears[0].color={{.04f,.05f,.065f,1}};
+     if(colors)clears[0].color={{backdrop_[0],backdrop_[1],backdrop_[2],1}};
      if(depth)clears[colors].depthStencil={1,0};
      VkRenderPassBeginInfo b{};b.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
      b.renderPass=pass;b.framebuffer=fb;b.renderArea.extent=size;
@@ -1966,7 +1971,7 @@ void set_particles(const ParticleFrame& frame)override {
      } else {
          for(const auto& instance:scene.instances) {
              if(instance.occlusion_proxy)continue;
-             const auto scroll=(instance.ocean&&instance.source_ordinary_color_participates)?
+             auto scroll=(instance.ocean&&instance.source_ordinary_color_participates)?
                  advance_source_scroll(set.source_scroll,static_cast<std::uint32_t>(SDL_GetTicks())):std::array<float,4>{};
              if(!scene_source_color_draw(scene,instance.mesh,instance.material,instance.source_ordinary_color_participates))continue;
              auto matrix=instance.transform.matrix;
@@ -2004,6 +2009,12 @@ void set_particles(const ParticleFrame& frame)override {
              const bool visible=always||(sphere_within(eye,matrix,set.geometry[instance.mesh].bounds,options_.view_distance)&&
                  sphere_visible(planes,matrix,set.geometry[instance.mesh].bounds));
              const bool fog=visible&&test_fog&&source_fog_enabled(instance.source_half_extents,center,matrix,eye,scene.lighting.fog_start);
+             // NONCANONICAL wave 27: non-ocean draws carry the wind sway vector in the (otherwise unused) scroll slot. RT keeps
+             // foliage rigid: the acceleration structures are not refit per frame, and a swayed surface tracing against its
+             // rigid triangle would shadow itself.
+             if(!instance.ocean&&!instance.sky&&material<scene.materials.size())
+                 scroll=weather_sway(weather_,scene.materials[material],matrix,set.geometry[instance.mesh].height,
+                     rt_enabled_||instance.entity_id!=0||!scene.meshes[instance.mesh].influences.empty());
              add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
              if(!visible||!contours)continue;
              if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
@@ -2037,7 +2048,7 @@ void set_particles(const ParticleFrame& frame)override {
      f.sky_b={lighting.sky_b[0],lighting.sky_b[1],lighting.sky_b[2],0};
      f.sky_c={lighting.sky_c[0],lighting.sky_c[1],lighting.sky_c[2],0};
  }
- void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float)override {
+ void render(const Scene& scene,std::span<const RenderEntity> entities,std::uint32_t,float dt)override {
      const unsigned slot=total_frames_&1u;
      wait_slot(slot,"frame wait"); // frame total_frames_-2: its command buffer, uniforms and staging are reusable
      if(timing_pool_&&std::exchange(timed_[slot],false)) {
@@ -2082,6 +2093,12 @@ void set_particles(const ParticleFrame& frame)override {
      auto eye=basis.eye;
      const auto source_ticks=static_cast<std::uint32_t>(SDL_GetTicks());
      contours_.clear();
+     {SceneLighting lighting=scene.lighting;if(weather_override_)lighting.weather=*weather_override_;
+      wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
+      weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);
+      backdrop_={.04f,.05f,.065f};
+      if(weather_.active()){const auto b=weather_backdrop(weather_,lighting,{std::pow(.04f,1/2.2f),std::pow(.05f,1/2.2f),std::pow(.065f,1/2.2f)});
+          for(unsigned i=0;i<3;++i)backdrop_[i]=std::pow(b[i],2.2f);}}
      const auto planes=frustum_planes(camera_view_projection(options_.camera,static_cast<int>(extent_.width),static_cast<int>(extent_.height),true));
      build_draws(scene_set,entities,eye,planes,&contours_);
      Frame f{};
@@ -2100,6 +2117,7 @@ void set_particles(const ParticleFrame& frame)override {
      const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
      f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_params={shadow_cascades.split,0,0,0};f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
+     f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
     // seconds, so gradual drift (2% per frame) is left to the resolve's variance clip and the deterministic Sun ray.
@@ -2175,7 +2193,7 @@ void set_particles(const ParticleFrame& frame)override {
             // Original 0049a780: depth test without write, per-system blend and D3DRS_DEPTHBIAS.
             vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,(after_hdr?after_particle_pipeline_:particle_pipeline_)[static_cast<unsigned>(batch.blend)]);
             bind_set(particle_sets_[batch.texture]);
-            Draw draw{};draw.flags={batch.depth_bias,batch.alpha_reference,0,0};
+            Draw draw{};draw.flags={batch.depth_bias,batch.alpha_reference,batch.blend==ParticleBlend::alpha?1.f:0.f,0}; // z: particle.frag GL-parity alpha
             vkCmdPushConstants(command_,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(draw),&draw);
             vkCmdDraw(command_,batch.count,1,batch.first,0);
         }

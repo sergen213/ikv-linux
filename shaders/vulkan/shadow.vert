@@ -9,5 +9,7 @@ layout(location=0) out vec2 texcoord;
 layout(location=1) out float fadeWeight;
 void main(){
     texcoord=uv;fadeWeight=sourceColor.a;
-    gl_Position=draw.cascadeLight*draw.model*vec4(position,1); // the source ocean casts no shadow (renderer_vk.cpp draw_scene)
+    // the source ocean casts no shadow (renderer_vk.cpp draw_scene). NONCANONICAL wave 27: swaying draws bend as in scene.vert.
+    vec3 sway=weatherSway(position.y,(draw.model*vec4(position,1)).xyz,draw.scroll,frame.wind,frame.weatherMisc,frame.sourceTime.y);
+    gl_Position=sway==vec3(0)?draw.cascadeLight*draw.model*vec4(position,1):draw.cascadeLight*(draw.model*vec4(position,1)+vec4(sway,0));
 }
