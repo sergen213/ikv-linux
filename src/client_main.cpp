@@ -647,6 +647,7 @@ class Application {
     Clock::time_point resurrect_at_{}; // original 00410b00: death sets a 15000 ms resurrection deadline
     long long resurrect_shown_=-2;
     std::vector<std::uint32_t> sacks_; // attached Ganimet sack models (corpse id - sack_offset)
+    std::vector<std::uint32_t> weather_props_; // NONCANONICAL wave 28: sacks and corpses for EffectSystem::set_weather_props
     std::uint32_t hilite_=0,hover_=0; // entity carrying the GroundHilite selection ring; entity under the cursor (contour)
     int skill_slot_=-1; std::array<int,15> skill_pending_{}; // Yetenekler selection (+0x1d90) and per-slot pending points (+0x19b4)
     std::map<std::string,int> stat_pending_; // Karakter Bilgisi pending Dirençler/Üretim/Toplama points (+0x3b4..+0x4cc), sent by ✓ 00402a80
@@ -4648,6 +4649,9 @@ private:
         ikv::ease_weather(weather_shown_,weather_target_,dt); scene_.lighting.weather=weather_shown_; // NONCANONICAL wave 27
         if (effects_) effects_->set_weather(weather_shown_,options_.appearance=="enhanced" && !scene_.lighting.roofed,renderer_->camera().target);
         if (effects_) {
+            weather_props_.assign(sacks_.begin(),sacks_.end()); // NONCANONICAL wave 28: sacks and corpses neither drip nor leave prints
+            for (const auto& p:poses_) if (const Json* e=entity(p.id); e && !e->value("alive",true)) weather_props_.push_back(p.id);
+            effects_->set_weather_props(weather_props_);
             effects_->update(dt,poses_);
             for (const auto& actor:actors_) if (ikv::original_blob_shadows_enabled(options_.appearance=="original") && !actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);
             // 004315c0 (WEAR 0x4a94d0): the slot-11 weapon (004301b0 finds the worn item with slot 0xb) attaches its two prefixes'
@@ -4692,6 +4696,7 @@ private:
                     effects_->trigger(clips[controller->current_clip].visual_effect,pose.id);
             }
             renderer_->set_particles(effects_->frame(renderer_->camera()));
+            renderer_->set_ground_marks(effects_->ground_marks()); // NONCANONICAL wave 28: puddle rings, snow prints
         }
         cpu_timing_.mark(CpuTiming::effects);
         renderer_->set_grayscale(dead()); // VOD 34:00: the dead player's world view is grayscale, HUD stays in colour
