@@ -13,8 +13,10 @@
 // Caustics: OpenUnderworld's own (1 / |det J| of the sun refracted through these waves; Evan Wallace's WebGL Water physics).
 // The includer defines: vec3 waterSceneColor(vec2 uv) (linear opaque scene copy), float waterSceneDepth(vec2 uv)
 // (hardware depth, 1 = empty), float waterNdcZ(float depth), float waterBedSun(vec3 p) (sun visibility of a bed point),
-// bool waterRayReflection(vec3 origin, vec3 direction, inout vec3 colour) (true: a traced reflection replaces SSR), and
-// includes weather.glsl first (NONCANONICAL wave 27 weatherRipple).
+// bool waterRayReflection(vec3 origin, vec3 direction, inout vec3 colour) (true: a traced reflection replaces SSR),
+// includes weather.glsl first (NONCANONICAL wave 27 weatherRipple) and defines the NONCANONICAL wave 28 wind sea
+// vec3 oceanWindSwell(vec2 xz, vec3 eye, vec4 wind, vec4 misc, int waves) (Vulkan frame.glsl, OpenGL IKV_GL_OCEAN_WIND),
+// which also displaces the ocean vertices.
 const float kWaterM=4.0;              // IKV units per metre: AGAH's skinned bounds stand ~7.5 units (~1.8 m)
 const float kWaterU=kWaterM/290.0;    // IKV units per OpenUnderworld (TRU) unit, for its raw-unit constants
 const float kWaterPi=3.14159265;
@@ -180,13 +182,22 @@ float waterGgxSpec(vec3 n,vec3 v,vec3 l,float a){
 // l toward the sun; light: ambient + sun on a level surface (linear); fogGamma: the fog (sky) colour as authored;
 // sunColor: sun radiance; sunVisibility at the surface; caustic strength. wind, weather, weatherMisc: the NONCANONICAL
 // wave 27 weather inputs (weather.glsl; weatherMisc.w 0 = inactive, the pre-wave water exactly): the waves turn to run
-// downwind and steepen with wind and gusts, rain roughens the glint and rings the surface, gales raise whitecaps.
+// downwind and steepen with wind and gusts, rain roughens the glint and rings the surface, gales raise whitecaps. Wave 28:
+// still air calms the sea to a near-glassy surface (chop x0.2, sea waves x0.25, a smoother glint, a thinner shore lace);
+// wind lengthens the waves and stretches them across the wind into crests, the wind sea (oceanWindSwell, all three
+// crests; the vertices carry the two longest) tilts the surface, whitecaps spread over its crests, foam streaks run
+// downwind and the surf widens.
 vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 fogGamma,vec3 sunColor,float sunVisibility,float caustic,
                 vec4 wind,vec4 weather,vec4 weatherMisc){
     gWaterVP=vp;gWaterInv=inverse(vp);gWaterEye=eye;
     float dist=distance(eye,p),footprint=length(fwidth(p.xz));
     bool weatherActive=weatherMisc.w>0.5;
     float ws=weatherActive?clamp(wind.z/25.0,0.0,1.0)*(1.0+0.5*weatherMisc.y):0.0;
+    // NONCANONICAL wave 28: breeze 0 in still air .. 1 from ~9 m/s; swell: the wind sea's height and world xz gradient.
+    float breeze=weatherActive?smoothstep(0.0,0.35,ws):1.0;
+    vec3 swell=weatherActive?oceanWindSwell(p.xz,eye,wind,weatherMisc,3):vec3(0.0);
+    // Sea sample scale (wave frame): features grow x1.4 in a gale and stretch x2.2 across the wind (wind runs along z).
+    vec2 sk=weatherActive?vec2(1.0/(1.0+1.2*ws),1.0)/(1.0+0.4*ws):vec2(1.0);
     // Wave frame: afl's first (heaviest) wave runs toward -z there, so -z is turned onto the wind; calm wind keeps the old frame.
     float turn=weatherActive?atan(-wind.x,-wind.y)*smoothstep(0.0,2.0,wind.z):0.0;
     mat2 frameR=mat2(cos(turn),sin(turn),-sin(turn),cos(turn));
@@ -198,14 +209,14 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     vec3 la=waterLayerA(wp,t,footprint),lb=waterLayerB(wp,t,footprint);
     float nfade=1.0/(1.0+dist/(60.0*kWaterM));
     vec2 s=0.25*(la.yz+lb.yz)*nfade;
-    if(weatherActive)s*=1.0+1.5*ws;
+    if(weatherActive)s*=mix(0.2,1.0,breeze)*(1.0+1.5*ws);
     int iters=dist<25.0*kWaterM?36:dist<80.0*kWaterM?24:12;
     float eps=max(0.01*kWaterSeaUnit,footprint);
-    float seaH=waterSea(wp,t,iters);
-    vec2 g=vec2(waterSea(wp+vec2(eps,0.0),t,iters)-seaH,waterSea(wp+vec2(0.0,eps),t,iters)-seaH)/eps;
-    s+=g*kWaterSeaUnit*(1.0-0.8*min(1.0,sqrt(dist/kWaterSeaUnit*0.01)*1.1))*(weatherActive?1.0+1.8*ws:1.0);
+    float seaH=waterSea(wp*sk,t,iters); // sk is 1 without weather: the pre-wave samples exactly
+    vec2 g=vec2(waterSea((wp+vec2(eps,0.0))*sk,t,iters)-seaH,waterSea((wp+vec2(0.0,eps))*sk,t,iters)-seaH)/eps;
+    s+=g*kWaterSeaUnit*(1.0-0.8*min(1.0,sqrt(dist/kWaterSeaUnit*0.01)*1.1))*(weatherActive?mix(0.25,1.0,breeze)*(1.0+2.4*ws):1.0);
     if(weatherActive){
-        s=transpose(frameR)*s; // back to world xz
+        s=transpose(frameR)*s+swell.yz; // back to world xz, the wind sea's slope added
         // Rain-drop rings (weather.glsl weatherRipple), denser and stronger with the rain.
         float rippleGain=weather.x*0.9*(1.0-smoothstep(12.0*kWaterM,40.0*kWaterM,dist));
         if(rippleGain>0.0)s+=rippleGain*weatherRipple(p.xz,t,0.35+0.65*weather.x);
@@ -259,15 +270,28 @@ vec3 waterShade(vec3 p,vec3 eye,mat4 vp,vec2 uv,float t,vec3 l,vec3 light,vec3 f
     float shore=smoothstep(0.0,0.2*kWaterM,cdepth);
     c=mix(c,refl,clamp(fresnel,0.0,1.0)*shore);
     // Sun glint (GGX, rougher far away) and afl's sharp sun disc in the reflection.
-    float spec=weatherActive?waterGgxSpec(n,v,l,mix(0.10,0.04,nfade)+0.14*weather.x+0.06*ws)+pow(max(dot(rs,l),0.0),720.0)*210.0*fresnel*(1.0-0.8*weather.x):
+    float spec=weatherActive?waterGgxSpec(n,v,l,mix(0.10,0.04,nfade)*(0.6+0.4*breeze)+0.14*weather.x+0.06*ws)+pow(max(dot(rs,l),0.0),720.0)*210.0*fresnel*(1.0-0.8*weather.x):
         waterGgxSpec(n,v,l,mix(0.10,0.04,nfade))+pow(max(dot(rs,l),0.0),720.0)*210.0*fresnel;
     c+=min(spec,64.0)*sunColor*sunVisibility*shore;
-    // Edge foam: lace where the squared edge noise exceeds the contact depth / 0.15 m.
+    // Edge foam: lace where the squared edge noise exceeds the contact depth / 0.15 m (wave 28: 0.09 m in still air).
     float e=0.5*(waterNoiseD(p.xz/(0.30*kWaterM)+t*vec2(0.30,0.10)).x+waterNoiseD(p.xz/(0.22*kWaterM)-t*vec2(0.10,0.25)).x);
-    float foam=smoothstep(-0.05,0.05,e*e-cdepth/(0.15*kWaterM));
+    float foam=smoothstep(-0.05,0.05,e*e-cdepth/(weatherActive?0.15*kWaterM*(0.6+0.4*breeze):0.15*kWaterM));
+    // Wave 28 surf: in the wind the lace spreads over the shallows, ~0.5 m deep in a gale. It follows the plain water
+    // depth (continuous; the contact depth's shore run steps at the bed's triangle edges), the contact depth at outlines,
+    // and fades over most of its depth: a sharp depth threshold traced the bed triangles' straight contour lines.
+    if(weatherActive){
+        float surfDepth=0.15*kWaterM*(0.1+2.5*ws);
+        foam=max(foam,smoothstep(0.15,0.6,ws)*(1.0-smoothstep(0.2*surfDepth,surfDepth,jump?cdepth:depth))*smoothstep(0.3,0.7,e));
+    }
     c=mix(c,light*0.9,foam*0.65);
-    // Whitecaps (wave 27): crests break into foam once the wind passes ~9 m/s.
-    if(weatherActive)c=mix(c,light*0.95,0.7*smoothstep(0.55,0.85,seaH)*smoothstep(0.35,0.8,ws)*smoothstep(0.35,0.65,e));
+    if(weatherActive){
+        // Whitecaps (wave 27/28): crests, the wind sea's highest, break into foam from ~6 m/s, spreading as the wind rises;
+        // foam streaks lie along the wind (the wave frame's z) from ~12 m/s.
+        float crest=seaH+0.12*swell.x,wsc=min(ws,1.0);
+        c=mix(c,light*0.95,0.75*smoothstep(0.62-0.22*wsc,0.88-0.18*wsc,crest)*smoothstep(0.22,0.7,ws)*smoothstep(0.3,0.65,e));
+        float streak=waterNoiseD(vec2(wp.x/(0.7*kWaterM),(wp.y+t*1.5*kWaterM)/(7.0*kWaterM))).x;
+        c=mix(c,light*0.9,0.35*smoothstep(0.62,0.85,streak)*smoothstep(0.45,0.95,ws)*(1.0-smoothstep(40.0*kWaterM,120.0*kWaterM,dist)));
+    }
     // Soft waterline: the bed shows through the last few units.
     c=mix(waterSceneColor(uv),c,smoothstep(0.0,6.0*kWaterU,cdepth));
     return max(c,vec3(0.0));
