@@ -412,8 +412,11 @@ void main() {
         bool weather=weatherOn(weather_misc);
         float direct_roughness=roughness,puddle=0.0;
         if(weather) {
-            WeatherSurface w=weatherSurface(albedo,n,nlength>0.00001?world_normal/nlength:n,fragment_position,roughness,source_time.y,weather_state,weather_misc,
-                weather_marks,weather_mark_info,weather_mark_bounds); // wave 28: footsteps
+            vec3 up=nlength>0.00001?world_normal/nlength:n;
+            WeatherSteps steps=weatherStepsNone(); // wave 28 footsteps, read from the uniform array in place
+            if(weatherStepsHere(fragment_position,up,weather_state,weather_mark_info,weather_mark_bounds))
+                for(int i=0;i<64;++i){if(float(i)>=weather_mark_info.x)break;weatherStep(steps,weather_marks[i],fragment_position,weather_state);}
+            WeatherSurface w=weatherSurface(albedo,n,up,fragment_position,roughness,source_time.y,weather_state,weather_misc,steps);
             baked=weatherBaked(baked,albedo,w,weather_misc)*weatherAmbientTint(weather_state,weather_misc,source_time.y);
             puddle=w.puddle;
             albedo=w.albedo;n=w.normal;roughness=w.roughness;direct_roughness=w.directRoughness;

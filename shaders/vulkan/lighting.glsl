@@ -278,8 +278,11 @@ if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosit
 bool weather=weatherOn(frame.weatherMisc);
 vec3 sourceAlbedo=albedo;float directRoughness=roughness;WeatherSurface weathered;
 if(weather) {
-    weathered=weatherSurface(albedo,n,dot(worldNormal,worldNormal)>1e-12?normalize(worldNormal):n,worldPosition,roughness,frame.sourceTime.y,frame.weather,frame.weatherMisc,
-        frame.groundMarks,frame.groundMarkInfo,frame.groundMarkBounds);
+    vec3 up=dot(worldNormal,worldNormal)>1e-12?normalize(worldNormal):n;
+    WeatherSteps steps=weatherStepsNone(); // marks read straight from the UBO (no array argument copies)
+    if(weatherStepsHere(worldPosition,up,frame.weather,frame.groundMarkInfo,frame.groundMarkBounds))
+        for(int i=0;i<64;++i){if(float(i)>=frame.groundMarkInfo.x)break;weatherStep(steps,frame.groundMarks[i],worldPosition,frame.weather);}
+    weathered=weatherSurface(albedo,n,up,worldPosition,roughness,frame.sourceTime.y,frame.weather,frame.weatherMisc,steps);
     albedo=weathered.albedo;n=weathered.normal;roughness=weathered.roughness;directRoughness=weathered.directRoughness;
 }
 float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=directRoughness*directRoughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(directRoughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;

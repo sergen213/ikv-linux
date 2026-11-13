@@ -34,7 +34,7 @@ layout(set=0,binding=0,std140) uniform Frame {
     // NONCANONICAL wave 28 footsteps (renderer.hpp ground_mark_uniforms; count 0 while inactive = the pre-wave paths):
     vec4 groundMarkInfo; // x mark count (<= 64)
     vec4 groundMarkBounds; // xz min, xz max (units) of every mark's reach
-    vec4 groundMarks[64]; // x,z world, y ground height, w packed age/heading/foot (weather.glsl weatherSteps)
+    vec4 groundMarks[64]; // x,z world, y ground height, w packed age/heading/foot (weather.glsl weatherStep)
 } frame;
 #include "weather.glsl"
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.

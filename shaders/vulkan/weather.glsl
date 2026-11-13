@@ -84,43 +84,42 @@ float weatherStreak(vec3 p,vec3 up,float t,vec4 state){
     float streak=smoothstep(0.55,0.85,weatherNoise(vec2(u*3.0,p.y*0.3+t*4.0)))*smoothstep(0.3,0.6,weatherNoise(vec2(u*0.8,7.3)));
     return vertical*streak*min(state.x*1.5,1.0)*state.z;
 }
-// NONCANONICAL wave 28: recent character footsteps (renderer.hpp ground_mark_uniforms; info.x mark count, 0 = none:
-// callers skip this entirely). marks[i]: x,z world (units, the foot itself), y ground height, w packed: sign the foot
-// (+1 right, -1 left), |w|-1 = age (1/64 s steps)*64 + heading (64 steps of a turn, travel direction (sin h, cos h)).
-// bounds: xz min and max of every mark's reach. In a puddle (puddle) a step < 1.5 s old sends two expanding rings
-// (ripple: their xz slope); in snow cover (snow) it leaves a ~0.28 m foot print fading out over 30..85 s. Returns the
-// print depth 0..1 and in pressSlope its world xz gradient. Marks more than 2 units (0.5 m) off the ground height are
-// ignored (roofs, shoulders above the walker).
-float weatherSteps(vec3 p,bool snow,bool puddle,vec4 marks[64],vec4 info,vec4 bounds,out vec3 ripple,out vec2 pressSlope){
-    ripple=vec3(0.0);pressSlope=vec2(0.0);
-    float press=0.0;
-    if(!(snow||puddle)||any(lessThan(p.xz,bounds.xy))||any(greaterThan(p.xz,bounds.zw)))return 0.0;
-    for(int i=0;i<64;++i){
-        if(float(i)>=info.x)break;
-        vec4 m=marks[i];
-        vec2 d=p.xz-m.xy;
-        if(abs(p.y-m.z)>2.0||max(abs(d.x),abs(d.y))>4.0)continue;
-        float v=abs(m.w)-1.0,age=floor(v/64.0)/64.0,heading=(v-64.0*floor(v/64.0))*(6.28318530718/64.0),side=m.w<0.0?-1.0:1.0;
-        if(puddle&&age<1.5){
-            float r=length(d),fade=(1.0-age/1.5)*(1.0-age/1.5),a=r-age*2.2,b=r-age*1.4;
-            float wave=sin(a*10.5)*exp(-a*a*6.0)+0.6*sin(b*10.5)*exp(-b*b*8.0);
-            if(r>1e-3)ripple+=vec3(d/r*wave,abs(wave))*fade;
-        }
-        if(snow&&dot(d,d)<0.36){
-            vec2 f=vec2(sin(heading),cos(heading)),s=vec2(f.y,-f.x)*side; // s: away from the walk line
-            float u=dot(d,s),fv=dot(d,f); // u < 0: the instep side, narrowed at the arch
-            float hw=mix(0.15,0.21,smoothstep(-0.4,0.3,fv))*(u<0.0?1.0-0.35*exp(-(fv+0.05)*(fv+0.05)*30.0):1.0);
-            float e=length(vec2(u/hw,fv/0.56));
-            if(e>=1.0)continue;
-            float fade=1.0-smoothstep(30.0,85.0,age),depth=(1.0-smoothstep(0.7,1.0,e))*fade;
-            if(depth>press){
-                float t=clamp((e-0.7)/0.3,0.0,1.0);
-                vec2 g=(-6.0*t*(1.0-t)/0.3)*fade*vec2(u/(hw*hw),fv/0.3136)/max(e,1e-3);
-                press=depth;pressSlope=s*g.x+f*g.y;
-            }
+// NONCANONICAL wave 28: recent character footsteps (renderer.hpp ground_mark_uniforms; info.x mark count, 0 = none).
+// Callers loop over their own mark array (Vulkan frame.groundMarks, GL weather_marks: never passed as an array, a by-value
+// copy spilled 1 KB per fragment) only when weatherStepsHere(), adding each mark with weatherStep(). A mark: x,z world
+// (units, the foot itself), y ground height, w packed: sign the foot (+1 right, -1 left), |w|-1 = age (1/64 s steps)*64 +
+// heading (64 steps of a turn, travel direction (sin h, cos h)). bounds: xz min and max of every mark's reach. While
+// wet (state.z) a step < 1.5 s old sends two expanding rings (ripple xy: their xz slope, z: agitation; weatherSurface
+// keeps them to puddles); under snow cover (state.w) it leaves a ~0.28 m foot print fading out over 30..85 s (press:
+// depth 0..1, pressSlope its world xz gradient; weatherSurface keeps it to snow-covered texels). Marks more than 2 units
+// (0.5 m) off the ground height are ignored (roofs, shoulders above the walker).
+struct WeatherSteps{vec3 ripple;vec2 pressSlope;float press;};
+WeatherSteps weatherStepsNone(){return WeatherSteps(vec3(0.0),vec2(0.0),0.0);}
+bool weatherStepsHere(vec3 p,vec3 up,vec4 state,vec4 info,vec4 bounds){
+    return info.x>0.5&&up.y>0.6&&(state.z>0.0||state.w>0.0)&&all(greaterThanEqual(p.xz,bounds.xy))&&all(lessThanEqual(p.xz,bounds.zw));
+}
+void weatherStep(inout WeatherSteps s,vec4 m,vec3 p,vec4 state){
+    vec2 d=p.xz-m.xy;
+    if(abs(p.y-m.z)>2.0||max(abs(d.x),abs(d.y))>4.0)return;
+    float v=abs(m.w)-1.0,age=floor(v/64.0)/64.0,heading=(v-64.0*floor(v/64.0))*(6.28318530718/64.0),side=m.w<0.0?-1.0:1.0;
+    if(state.z>0.0&&age<1.5){
+        float r=length(d),fade=(1.0-age/1.5)*(1.0-age/1.5),a=r-age*2.2,b=r-age*1.4;
+        float wave=sin(a*10.5)*exp(-a*a*6.0)+0.6*sin(b*10.5)*exp(-b*b*8.0);
+        if(r>1e-3)s.ripple+=vec3(d/r*wave,abs(wave))*fade;
+    }
+    if(state.w>0.0&&dot(d,d)<0.36){
+        vec2 f=vec2(sin(heading),cos(heading)),o=vec2(f.y,-f.x)*side; // o: away from the walk line
+        float u=dot(d,o),fv=dot(d,f); // u < 0: the instep side, narrowed at the arch
+        float hw=mix(0.15,0.21,smoothstep(-0.4,0.3,fv))*(u<0.0?1.0-0.35*exp(-(fv+0.05)*(fv+0.05)*30.0):1.0);
+        float e=length(vec2(u/hw,fv/0.56));
+        if(e>=1.0)return;
+        float fade=1.0-smoothstep(30.0,85.0,age),depth=(1.0-smoothstep(0.7,1.0,e))*fade;
+        if(depth>s.press){
+            float t=clamp((e-0.7)/0.3,0.0,1.0);
+            vec2 g=(-6.0*t*(1.0-t)/0.3)*fade*vec2(u/(hw*hw),fv/0.3136)/max(e,1e-3);
+            s.press=depth;s.pressSlope=o*g.x+f*g.y;
         }
     }
-    return press;
 }
 // Snow colour, pressed (footprint) snow compacted and shadowed bluish grey.
 vec3 weatherSnowColor(float press){return mix(vec3(0.78,0.80,0.84),vec3(0.50,0.54,0.61),press);}
@@ -128,20 +127,16 @@ vec3 weatherSnowColor(float press){return mix(vec3(0.78,0.80,0.84),vec3(0.50,0.5
 // p world position; roughness the dry value. Wet/streaked: darker and glossier; puddles: darker still, flat, mirror-like
 // and ringed by drops (as are other upward wet faces, faintly: splash flecks); snow: white and rough. directRoughness
 // floors the sun glint (glossy wet normal-mapped cobbles otherwise sparkle in single texels), except in puddles.
-// marks/markInfo/markBounds: footsteps (weatherSteps; NONCANONICAL wave 28): rings in puddles (stir), prints in snow (press).
+// steps: footsteps (weatherStep; NONCANONICAL wave 28): rings in puddles (stir), prints in snow (press).
 struct WeatherSurface{vec3 albedo;vec3 normal;float roughness;float directRoughness;float snow;float wet;float puddle;float press;float stir;};
-WeatherSurface weatherSurface(vec3 albedo,vec3 n,vec3 up,vec3 p,float roughness,float t,vec4 state,vec4 misc,vec4 marks[64],vec4 markInfo,vec4 markBounds){
+WeatherSurface weatherSurface(vec3 albedo,vec3 n,vec3 up,vec3 p,float roughness,float t,vec4 state,vec4 misc,WeatherSteps steps){
     WeatherSurface w;
     w.snow=weatherSnow(p,up,state);
     w.puddle=weatherPuddle(p,up,state)*(1.0-w.snow);
-    w.press=0.0;
-    vec3 stepRipple=vec3(0.0);vec2 pressSlope=vec2(0.0);
-    if(markInfo.x>0.5&&up.y>0.6){ // no marks (or walls): the exact wave-27 surface
-        float cover=smoothstep(0.0,0.2,w.snow); // no print without snow cover
-        w.press=weatherSteps(p,w.snow>0.0,w.puddle>0.0,marks,markInfo,markBounds,stepRipple,pressSlope)*cover;
-        pressSlope*=cover;
-        w.snow*=1.0-0.4*w.press; // compacted: the ground shows through a little
-    }
+    float cover=smoothstep(0.0,0.2,w.snow); // no print without snow cover
+    w.press=steps.press*cover;
+    vec3 stepRipple=steps.ripple;vec2 pressSlope=steps.pressSlope*cover;
+    w.snow*=1.0-0.4*w.press; // compacted: the ground shows through a little
     w.wet=max(weatherWet(up,w.snow,state),weatherStreak(p,up,t,state)*(1.0-w.snow));
     w.albedo=mix(weatherSeason(albedo,misc)*(1.0-0.45*w.wet)*(1.0-0.35*w.puddle),weatherSnowColor(w.press),w.snow);
     w.roughness=mix(mix(mix(roughness,mix(0.45,0.15,smoothstep(0.5,0.9,up.y)),w.wet),0.04,w.puddle),mix(0.85,0.55,w.press),w.snow);
