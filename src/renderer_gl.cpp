@@ -343,6 +343,18 @@ vec3 water_linear(vec3 y){y=min(pow(y,vec3(2.2)),vec3(0.99));vec3 a=2.43*y-2.51,
 vec3 waterSceneColor(vec2 uv){return water_linear(textureLod(water_color_map,uv,0.0).rgb);}
 float waterSceneDepth(vec2 uv){return textureLod(water_depth_map,uv,0.0).r;}
 float waterNdcZ(float depth){return depth*2.0-1.0;}
+// NONCANONICAL wave 28: the bed grid (renderer.hpp ocean_shore_field, unit 10, GlSet::shore_texture: texels x
+// kOceanShoreFieldRange 64 units), water_shore_grid its grid (zero: none), water_shore_level the water level. x the
+// distance to land, y the bed's height, z its depth under the water level (1e5, -1e5, 64 where unknown).
+uniform sampler2D water_shore_map;
+uniform vec4 water_shore_grid;
+uniform float water_shore_level;
+vec3 waterShoreField(vec2 xz){
+    vec2 u=(xz-water_shore_grid.xy)*water_shore_grid.zw;
+    if(water_shore_grid.z<=0.0||any(lessThan(u,vec2(0.0)))||any(greaterThan(u,vec2(1.0))))return vec3(1e5,-1e5,64.0);
+    vec2 f=textureLod(water_shore_map,u,0.0).rg*64.0;
+    return vec3(f.x,water_shore_level-f.y,f.y);
+}
 float waterBedSun(vec3 p){
     vec3 l=normalize(sun_direction),up=vec3(0.0,1.0,0.0);
     vec4 c=light_view_projection*vec4(p,1.0);vec3 near=c.xyz/c.w;vec2 uv=near.xy*0.5+0.5;
@@ -702,6 +714,7 @@ class GlRenderer final : public Renderer {
     GroundMarkTracker ground_marks_{std::getenv("IKV_RENDER_GROUND_MARKS")};
     GLint mark_info_location_=-1,mark_bounds_location_=-1,marks_location_=-1;
     GLuint water_framebuffer_=0,water_textures_[2]{}; // NONCANONICAL enhanced water scene copy: colour, depth
+    GLint water_shore_grid_location_=-1,water_shore_level_location_=-1; // NONCANONICAL wave 28 (GlSet::shore_texture)
     bool overlay_present_=false,rendered_=false,grayscale_=false;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
     bool source_presented_=false;
@@ -719,6 +732,7 @@ class GlRenderer final : public Renderer {
         std::vector<std::uint8_t> material_usage,mesh_plan; // mesh_plan 0: dormant/proxy, 1: referenced no-color, 2: upload
         std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced also uploads these subdivided (renderer.hpp ocean_wave_mesh)
         std::optional<OceanBed> ocean_bed; // their shore factors' bed grid, built on the first wave mesh upload
+        GLuint shore_texture=0;std::array<float,4> shore_grid{};float shore_level=0; // that grid's shore field (renderer.hpp ocean_shore_field)
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -737,7 +751,7 @@ class GlRenderer final : public Renderer {
     UniformVec4 depth_sway_;
     GLint normal_matrix_location_=-1,grayscale_location_=-1,contour_grayscale_location_=-1;
     GLint particle_grayscale_location_=-1,particle_fog_enabled_location_=-1,particle_fog_start_location_=-1,particle_fog_end_location_=-1;
-    std::array<GLuint,10> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
+    std::array<GLuint,11> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
     // Shadow casters without an alpha cutoff draw with a depth-only program. Static casters (no entity, skin or sway) of a
     // cascade are cached in shadow_static_*: while the light matrix and the static caster list are unchanged, the cached
     // depth is restored only where last frame's dynamic casters drew, then the dynamic casters are drawn again (the depth
@@ -825,7 +839,8 @@ public:
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
             glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
             glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
-            glUniform1i_(uniform(program_,"shadow_far_map"),9);
+            glUniform1i_(uniform(program_,"shadow_far_map"),9);glUniform1i_(uniform(program_,"water_shore_map"),10);
+            water_shore_grid_location_=uniform(program_,"water_shore_grid");water_shore_level_location_=uniform(program_,"water_shore_level");
             light_location_=uniform(program_,"light_view_projection");
             far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
             normal_matrix_location_=uniform(program_,"normal_matrix");grayscale_location_=uniform(program_,"grayscale");
@@ -1086,7 +1101,8 @@ public:
             glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,water_framebuffer_);
             glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT,GL_NEAREST);
             glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);
-            bind_texture(6,water_textures_[0]);bind_texture(7,water_textures_[1]);
+            bind_texture(6,water_textures_[0]);bind_texture(7,water_textures_[1]);bind_texture(10,set.shore_texture);
+            glUniform4fv_(water_shore_grid_location_,1,set.shore_grid.data());glUniform1f_(water_shore_level_location_,set.shore_level);
             for(const auto& draw:view_.opaque) if(draw.visible&&water(draw)) draw_instance(set,scene,draw);
             time_end(timed_water);
         }
@@ -1309,7 +1325,17 @@ private:
         };
         // NONCANONICAL wave 28: the subdivided ocean copy first, so the source mesh's VAO stays bound for the skin stream.
         if(index<set.ocean_meshes.size()&&set.ocean_meshes[index]) {
-            if(!set.ocean_bed)set.ocean_bed=ocean_bed(scene);
+            if(!set.ocean_bed) {
+                set.ocean_bed=ocean_bed(scene);
+                const auto field=ocean_shore_field(*set.ocean_bed);
+                if(!set.shore_texture&&!field.texels.empty()) {
+                    glGenTextures(1,&set.shore_texture);glBindTexture(GL_TEXTURE_2D,set.shore_texture);glPixelStorei(GL_UNPACK_ALIGNMENT,1);
+                    glTexImage2D(GL_TEXTURE_2D,0,GL_RG8,static_cast<GLsizei>(field.width),static_cast<GLsizei>(field.depth),0,GL_RG,GL_UNSIGNED_BYTE,field.texels.data());
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                    set.shore_grid=field.grid;set.shore_level=field.level;state_reset(); // the bind above bypassed bind_texture's cache
+                }
+            }
             const Mesh fine=ocean_wave_mesh(scene,index,*set.ocean_bed);
             static_buffers(gpu.wave_vao,gpu.wave_vertices,gpu.wave_indices,fine);gpu.wave_count=static_cast<GLsizei>(fine.indices.size());
         }
@@ -1348,6 +1374,7 @@ private:
     void release(GlSet& set) noexcept {
         for(auto& mesh:set.meshes)release(mesh);
         if(!set.textures.empty())glDeleteTextures(static_cast<GLsizei>(set.textures.size()),set.textures.data());
+        if(set.shore_texture)glDeleteTextures(1,&set.shore_texture);
         GlSet empty;empty.key=set.key;set=std::move(empty);
     }
     // Upload plan for the Scene's current structure. Actor attach/detach/replacement keeps every other mesh (moved by key)

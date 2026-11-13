@@ -167,6 +167,16 @@ layout(set=0,binding=16) uniform sampler2D previousReflection;
 vec3 waterSceneColor(vec2 uv){return textureLod(waterColor,uv,0).rgb;}
 float waterSceneDepth(vec2 uv){return textureLod(waterDepth,uv,0).r;}
 float waterNdcZ(float depth){return depth;}
+// NONCANONICAL wave 28: the bed grid (renderer.hpp ocean_shore_field: texels x kOceanShoreFieldRange 64 units;
+// renderer_vk.cpp SceneSet::ocean_shore), frame.oceanShore its grid (zero: none), frame.oceanBed.x the water level. x the
+// distance to land, y the bed's height, z its depth under the water level (1e5, -1e5, 64 where unknown).
+layout(set=0,binding=17) uniform sampler2D oceanShoreMap;
+vec3 waterShoreField(vec2 xz){
+    vec2 u=(xz-frame.oceanShore.xy)*frame.oceanShore.zw;
+    if(frame.oceanShore.z<=0||any(lessThan(u,vec2(0)))||any(greaterThan(u,vec2(1))))return vec3(1e5,-1e5,64);
+    vec2 f=textureLod(oceanShoreMap,u,0).rg*64.;
+    return vec3(f.x,frame.oceanBed.x-f.y,f.y);
+}
 float waterBedSun(vec3 p){
 #ifdef IKV_RT
     return rtSunVisibilityMasked(p+vec3(0,.6,0),vec3(0,1,0),normalize(frame.sun.xyz),3u,0u); // ocean (mask 4) never shadows

@@ -507,6 +507,7 @@ struct OceanBed {
     float x0 = 0, z0 = 0, cell = 1; std::uint32_t width = 0, depth = 0; std::vector<float> top;
     // Horizontal distance (units) from each cell to the nearest land: bed within 1 unit of the water level or above.
     std::vector<float> shore;
+    float level = -INFINITY; // the water level: the highest ocean placement's highest vertex
     float shore_at(float x, float z) const {
         if (shore.empty()) return INFINITY;
         const auto ix = std::clamp<std::int64_t>(std::int64_t(std::floor((x - x0) / cell)), 0, std::int64_t(width) - 1);
@@ -577,6 +578,7 @@ inline OceanBed ocean_bed(const Scene& s) {
     float level = -INFINITY;
     for (const auto& in : s.instances) if (in.mesh < s.meshes.size() && ocean_draw(in)) for (const auto& v : s.meshes[in.mesh].vertices) level = std::max(level, world(in.transform.matrix, v)[1]);
     if (!std::isfinite(level)) return g;
+    g.level = level;
     const float straight = g.cell, diagonal = g.cell * 1.41421356f;
     g.shore.assign(g.top.size(), INFINITY);
     for (std::size_t i = 0; i < g.top.size(); ++i) if (g.top[i] >= level - 1) g.shore[i] = 0;
@@ -617,6 +619,24 @@ inline Mesh ocean_wave_mesh(const Scene& s, std::size_t mesh, const OceanBed& be
         v.uv1 = {-1.f, (std::isfinite(d) ? f * f * (3 - 2 * f) : 1.f) * r * r * (3 - 2 * r)};
     }
     return fine;
+}
+// NONCANONICAL wave 28: the bed grid as an RG8 texture for the water shading (lighting.glsl/renderer_gl.cpp
+// waterShoreField), sampled per pixel so it holds whatever the ocean mesh's density. Texel (x, z) is cell (x, z): R the
+// distance to land (OceanBed::shore; the wall surf hugs quay walls), G the bed's depth below the water level (OceanBed::top;
+// refraction rays a character hides cross it in world space), each min(value, kOceanShoreFieldRange) /
+// kOceanShoreFieldRange x 255. grid maps world xz to texture uv (texel centres at cell centres): (x0, z0, 1 / (cell x
+// width), 1 / (cell x depth)), level the water level; all zero without a field, which the shaders read as no land or bed.
+constexpr float kOceanShoreFieldRange = 64.f; // units (16 m), beyond the widest gale wall surf
+struct OceanShoreField { std::uint32_t width = 0, depth = 0; std::vector<std::uint8_t> texels; std::array<float, 4> grid{}; float level = 0; };
+inline OceanShoreField ocean_shore_field(const OceanBed& bed) {
+    OceanShoreField f;
+    const std::size_t cells = std::size_t(bed.width) * bed.depth;
+    if (!cells || bed.shore.size() != cells || bed.top.size() != cells || !std::isfinite(bed.level)) return f;
+    f.width = bed.width; f.depth = bed.depth; f.texels.resize(2 * cells); f.level = bed.level;
+    const auto unorm = [](float v) { return std::uint8_t(std::lround(std::clamp(v / kOceanShoreFieldRange, 0.f, 1.f) * 255.f)); };
+    for (std::size_t i = 0; i < cells; ++i) { f.texels[2*i] = unorm(bed.shore[i]); f.texels[2*i+1] = unorm(bed.level - bed.top[i]); }
+    f.grid = {bed.x0, bed.z0, 1.f / (bed.cell * float(bed.width)), 1.f / (bed.cell * float(bed.depth))};
+    return f;
 }
 using FrustumPlanes = std::array<std::array<float, 4>, 6>;
 // Normalized clip planes of a column-major view-projection, GL depth range. For the Vulkan [0,1]-depth projection of the
