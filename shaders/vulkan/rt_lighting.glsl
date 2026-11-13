@@ -126,9 +126,10 @@ float rtSunVisibility(vec3 position, vec3 facet, vec3 sunDir, uint flags) {
     return 1.0;
 #endif
 }
-vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir) {
+// flags: extra ray flags of this ray (rtLighting/rtDiffuseLighting secondaryFlags).
+vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir, uint flags) {
     rayQueryEXT query;
-    rtTrace(query, position, facet, direction, 0u, 0xffu);
+    rtTrace(query, position, facet, direction, flags, 0xffu);
     if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT)
         return rtSky(direction);
     uint index = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)
@@ -155,14 +156,19 @@ vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir) {
 struct RtLight { vec3 sun; vec3 diffuse; vec3 reflection; };
 // One-bounce diffuse GI, shared by physical and faithful enhanced RT. Inputs are normalized; no direct sun or
 // reflection rays are traced here, so faithful does not pay for physical effects it does not display.
+// secondaryFlags: extra flags of the GI (and rtLighting's reflection) rays. NONCANONICAL wave 28 perf: blended
+// alpha-tested draws (foliage, grass) pass gl_RayFlagsOpaqueEXT: their rays started inside a canopy or a grass clump and
+// ran the alpha test (rtAlphaOpaque) on every leaf and blade they passed, the bulk of a low or horizon view's frame
+// (analysis/porting-wave28/Horizon). Neighbouring leaf quads then occlude as whole quads; their denoised GI and
+// glossy reflection look the same there. The Sun ray keeps the alpha test (leaf-shaped shadows).
 vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal,
-                       vec3 sunDir, uvec2 pixel, uint frame, float quality) {
+                       vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags) {
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
     vec3 diffuse = vec3(0.0);
 #if IKV_RT_GI
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
         vec3 direction = rtAboveSurface(rtHemisphere(normal, rtSequence(pixel, 1u, frame * uint(samples) + uint(sampleIndex))), smoothNormal);
-        diffuse += rtIncoming(position, facet, direction, sunDir);
+        diffuse += rtIncoming(position, facet, direction, sunDir, secondaryFlags);
     }
     // Cosine-weighted estimator: cosine / PDF cancels pi for Lambertian BRDF.
     diffuse *= 0.96 / float(samples);
@@ -174,7 +180,7 @@ vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal
 // facet: physical triangle normal facing the eye; smoothNormal: interpolated vertex normal; normal: authored
 // (normal-mapped) shading normal.
 RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, vec3 viewDir, float roughness,
-                   vec3 sunDir, uvec2 pixel, uint frame, float quality) {
+                   vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags) {
     facet = rtUnit(facet);
     smoothNormal = rtUnit(dot(smoothNormal, facet) < 0.0 ? -smoothNormal : smoothNormal);
     normal = rtUnit(normal);
@@ -193,7 +199,7 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     // NONCANONICAL wave 27: cloud/fog light softens the sun shadow (weather.glsl; 0 without weather).
     visibility = mix(visibility, 1.0, frameShadowSoftness());
     light.sun = rtSunRadiance() * (cosine * visibility * 0.96 / 3.14159265359);
-    light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality);
+    light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality, secondaryFlags);
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
 #if IKV_RT_REFLECTIONS
     // GGX importance-sampled half vectors, Schlick Fresnel, Smith masking.
@@ -220,7 +226,7 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
         // The estimator's mean (directional albedo) is at most one; grazing mapped normals made single
         // samples hundreds of times brighter (white actor sparkles), so each sample weight is capped at one.
         float weight = min(fresnel * gV * gL * vDotH / (nDotV * nDotH), 1.0);
-        light.reflection += rtIncoming(position, facet, rtAboveSurface(direction, smoothNormal), sunDir) * weight;
+        light.reflection += rtIncoming(position, facet, rtAboveSurface(direction, smoothNormal), sunDir, secondaryFlags) * weight;
     }
     light.reflection /= float(samples);
 #endif
