@@ -640,7 +640,8 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLGETQUERYOBJECTIVPROC, glGetQueryObjectiv);
     GL_ENTRY(PFNGLGETQUERYOBJECTUI64VPROC, glGetQueryObjectui64v);
 #undef GL_ENTRY
-    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0, stream=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
+    // wave_*: NONCANONICAL wave 28 subdivided copy of a source ocean mesh (renderer.hpp subdivide_ocean_mesh), enhanced only.
+    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0, stream=0, wave_vao=0, wave_vertices=0, wave_indices=0; GLsizei count=0, wave_count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
     struct SkinStream { std::array<float,3> position,normal,tangent; }; // skinned attributes (upload_stream)
     std::vector<SkinStream> skin_stream_;
     struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; };
@@ -683,6 +684,7 @@ class GlRenderer final : public Renderer {
     GLint weather_wind_location_=-1,weather_state_location_=-1,weather_misc_location_=-1,weather_sway_location_=-1,scene_fog_location_=-1;
     GLint shadow_wind_location_=-1,shadow_misc_location_=-1,shadow_sway_location_=-1,shadow_time_location_=-1;
     WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
+    bool ocean_waves_=false;std::array<float,3> ocean_eye_{}; // NONCANONICAL wave 28: subdivided ocean this frame (renderer.hpp ocean_waves_on)
     // NONCANONICAL wave 28: footsteps (+ IKV_RENDER_GROUND_MARKS capture-only trail) and their scene-program uniforms.
     GroundMarkTracker ground_marks_{std::getenv("IKV_RENDER_GROUND_MARKS")};
     GLint mark_info_location_=-1,mark_bounds_location_=-1,marks_location_=-1;
@@ -702,7 +704,7 @@ class GlRenderer final : public Renderer {
         std::vector<GLuint> textures;
         std::unordered_map<std::string,GLuint> texture_names;
         std::vector<std::uint8_t> material_usage,mesh_plan; // mesh_plan 0: dormant/proxy, 1: referenced no-color, 2: upload
-        std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced uploads these subdivided (renderer.hpp subdivide_ocean_mesh)
+        std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced also uploads these subdivided (renderer.hpp subdivide_ocean_mesh)
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -1007,6 +1009,7 @@ public:
         {SceneLighting lighting=light;if(weather_override_)lighting.weather=*weather_override_;
          wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
          weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);}
+        ocean_waves_=ocean_waves_on(weather_,ocean_waves_); // NONCANONICAL wave 28 (renderer.hpp)
         const auto backdrop=weather_backdrop(weather_,light,{0.045f,0.065f,0.085f}); // wave 27: skyless zones under weather
         glClearColor(backdrop[0],backdrop[1],backdrop[2],1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         const auto ticks=static_cast<std::uint32_t>(SDL_GetTicks());
@@ -1025,7 +1028,7 @@ public:
             glUseProgram_(program_);
         }
         contours_.clear();
-        const auto eye=camera_basis(options_.camera).eye;
+        const auto eye=camera_basis(options_.camera).eye;ocean_eye_=eye;
         build(view_,set,scene,entities,vp,eye);
         if(shadow_program_) {
             time_begin(timed_shadow);
@@ -1267,26 +1270,32 @@ private:
     void upload_mesh(GlSet& set,const Scene& scene,std::size_t index) {
         progress();
         validate_mesh(scene,index);
-        const bool wave=index<set.ocean_meshes.size()&&set.ocean_meshes[index];
-        const Mesh subdivided=wave?subdivide_ocean_mesh(scene.meshes[index]):Mesh{};
-        const auto& source=wave?subdivided:scene.meshes[index];auto& gpu=set.meshes[index];
+        const auto& source=scene.meshes[index];auto& gpu=set.meshes[index];
         gpu.texture=0; // Legacy texture residency is resolved lazily from the actual draw's material.
-        gpu.count=static_cast<GLsizei>(source.indices.size());glGenVertexArrays_(1,&gpu.vao);glBindVertexArray_(gpu.vao);
-        gpu.vertex_count=scene.meshes[index].vertices.size(); // the scene mesh's (topology check), also for a subdivided ocean
-        gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);gpu.height=mesh_height_range(source);
-        glGenBuffers_(1,&gpu.vertices);glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
-        progress();
-        glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.vertices.size()*sizeof(Vertex)),source.vertices.data(),GL_STATIC_DRAW);
-        progress();
-        glGenBuffers_(1,&gpu.indices);glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER,gpu.indices);glBufferData_(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.indices.size()*sizeof(std::uint32_t)),source.indices.data(),GL_STATIC_DRAW);
-        progress();
-        glEnableVertexAttribArray_(0);glVertexAttribPointer_(0,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,x)));
-        glEnableVertexAttribArray_(1);glVertexAttribPointer_(1,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,nx)));
-        glEnableVertexAttribArray_(2);glVertexAttribPointer_(2,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,u)));
-        glEnableVertexAttribArray_(3);glVertexAttribPointer_(3,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,ambient)));
-        glEnableVertexAttribArray_(4);glVertexAttribPointer_(4,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,tangent)));
-        glEnableVertexAttribArray_(5);glVertexAttribPointer_(5,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,uv1)));
-        glEnableVertexAttribArray_(6);glVertexAttribPointer_(6,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,color)));
+        gpu.count=static_cast<GLsizei>(source.indices.size());
+        gpu.vertex_count=source.vertices.size();gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);gpu.height=mesh_height_range(source);
+        const auto static_buffers=[&](GLuint& vao,GLuint& vertices,GLuint& indices,const Mesh& mesh) {
+            glGenVertexArrays_(1,&vao);glBindVertexArray_(vao);
+            glGenBuffers_(1,&vertices);glBindBuffer_(GL_ARRAY_BUFFER,vertices);
+            progress();
+            glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(mesh.vertices.size()*sizeof(Vertex)),mesh.vertices.data(),GL_STATIC_DRAW);
+            progress();
+            glGenBuffers_(1,&indices);glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER,indices);glBufferData_(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(mesh.indices.size()*sizeof(std::uint32_t)),mesh.indices.data(),GL_STATIC_DRAW);
+            progress();
+            glEnableVertexAttribArray_(0);glVertexAttribPointer_(0,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,x)));
+            glEnableVertexAttribArray_(1);glVertexAttribPointer_(1,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,nx)));
+            glEnableVertexAttribArray_(2);glVertexAttribPointer_(2,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,u)));
+            glEnableVertexAttribArray_(3);glVertexAttribPointer_(3,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,ambient)));
+            glEnableVertexAttribArray_(4);glVertexAttribPointer_(4,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,tangent)));
+            glEnableVertexAttribArray_(5);glVertexAttribPointer_(5,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,uv1)));
+            glEnableVertexAttribArray_(6);glVertexAttribPointer_(6,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,color)));
+        };
+        // NONCANONICAL wave 28: the subdivided ocean copy first, so the source mesh's VAO stays bound for the skin stream.
+        if(index<set.ocean_meshes.size()&&set.ocean_meshes[index]) {
+            const Mesh fine=subdivide_ocean_mesh(source);
+            static_buffers(gpu.wave_vao,gpu.wave_vertices,gpu.wave_indices,fine);gpu.wave_count=static_cast<GLsizei>(fine.indices.size());
+        }
+        static_buffers(gpu.vao,gpu.vertices,gpu.indices,source);
         // Skinned meshes: skinning rewrites only position, normal and tangent (scene_animation.cpp), so those come from a
         // separate 36-byte stream that refresh() re-specifies; uv, ambient, lightmap uv and colour stay in the static buffer.
         if(!source.influences.empty()) {
@@ -1313,6 +1322,9 @@ private:
         if(mesh.vertices)glDeleteBuffers_(1,&mesh.vertices);
         if(mesh.stream)glDeleteBuffers_(1,&mesh.stream);
         if(mesh.vao)glDeleteVertexArrays_(1,&mesh.vao);
+        if(mesh.wave_indices)glDeleteBuffers_(1,&mesh.wave_indices);
+        if(mesh.wave_vertices)glDeleteBuffers_(1,&mesh.wave_vertices);
+        if(mesh.wave_vao)glDeleteVertexArrays_(1,&mesh.wave_vao);
         mesh={};
     }
     void release(GlSet& set) noexcept {
@@ -1395,7 +1407,7 @@ private:
             const auto& mesh=scene.meshes[i];auto& gpu=set.meshes[i];
             if(!gpu.vao)continue;
             if(mesh.vertices.size()!=gpu.vertex_count)throw std::runtime_error("animated mesh topology changed without a new scene");
-            if(mesh.revision==gpu.revision||(i<set.ocean_meshes.size()&&set.ocean_meshes[i]))continue; // ocean: static, uploaded subdivided
+            if(mesh.revision==gpu.revision)continue;
             validate_vertices(mesh);
             progress();
             if(gpu.stream){glBindBuffer_(GL_ARRAY_BUFFER,gpu.stream);upload_stream(mesh);}
@@ -1726,7 +1738,9 @@ private:
         if(!options_.original_appearance&&!draw.instance->sky&&!material.source_ocean) {
             const auto n=normal_matrix(draw.matrix);glUniformMatrix3fv_(normal_matrix_location_,1,GL_FALSE,n.data());
         }
-        bind_texture(0,diffuse);bind_vao(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+        // NONCANONICAL wave 28: the subdivided ocean copy where the wind sea shows (renderer.hpp ocean_waves_on / kOceanWaveRange).
+        const bool waves=material.source_ocean&&!options_.original_appearance&&ocean_waves_&&gpu.wave_vao&&sphere_within(ocean_eye_,draw.matrix,gpu.bounds,kOceanWaveRange);
+        bind_texture(0,diffuse);bind_vao(waves?gpu.wave_vao:gpu.vao);glDrawElements(GL_TRIANGLES,waves?gpu.wave_count:gpu.count,GL_UNSIGNED_INT,nullptr);
     }
     void destroy() noexcept {
         if(!context_)return;

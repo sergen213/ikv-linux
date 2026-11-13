@@ -401,10 +401,11 @@ inline std::array<float, 4> mesh_bounds(const Mesh& mesh) {
     return s;
 }
 // NONCANONICAL wave 28 (enhanced appearance only): the source ocean meshes are coarse (Sivri Ada mean edges 26-130 units,
-// 6-32 m), too coarse to carry the wind sea's crests (frame.glsl oceanWindSwell): displaced, their flat facets drew
-// straight light bands across the shallows. The renderers upload these meshes (ocean_wave_meshes: any mesh drawn with a
-// source_ocean material) split by conforming longest-edge bisection until no edge exceeds max_edge (raised so that a mesh
-// stays near max_triangles). Every attribute is interpolated linearly, so undisplaced draws rasterise as before.
+// 6-32 m), too coarse to carry the wind sea's crests (frame.glsl oceanWindSwell). For any mesh drawn with a source_ocean
+// material (ocean_wave_meshes) the renderers also upload a copy split by conforming longest-edge bisection until no edge
+// exceeds max_edge (raised so that a mesh stays near max_triangles), and draw that copy only where ocean_waves_on and
+// kOceanWaveRange allow; everywhere else the source mesh draws exactly as before the wave. Every attribute is
+// interpolated linearly, so the copy differs only where it is displaced.
 inline Mesh subdivide_ocean_mesh(const Mesh& mesh, float max_edge = 32.f, std::size_t max_triangles = 300000) {
     if (mesh.indices.size() % 3 || !mesh.influences.empty()) return mesh;
     for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) return mesh; // the upload's validation reports it
@@ -475,6 +476,12 @@ inline std::vector<bool> ocean_wave_meshes(const Scene& scene) {
             ocean[instance.mesh] = true;
     return ocean;
 }
+// The subdivided copy costs ~0.1 ms on Sivri Ada (Vulkan enhanced, 40k -> 374k triangles), so it draws only while the wind
+// sea exists: weather active and wind above 2 m/s, off again below 1.5 m/s (no flapping), and only for ocean placements
+// whose culling sphere reaches within kOceanWaveRange of the eye (beyond it oceanWindSwell has faded to zero). At either
+// switch the wind sea is at most ~3 cm high or faded out, so the change is the source swell's finer sampling only.
+constexpr float kOceanWaveRange = 1920.f; // 12 x the longest crest: frame.glsl oceanWindSwell's fade end
+inline bool ocean_waves_on(const WeatherUniforms& w, bool was_on) { return w.active() && w.wind[2] > (was_on ? 1.5f : 2.f); }
 using FrustumPlanes = std::array<std::array<float, 4>, 6>;
 // Normalized clip planes of a column-major view-projection, GL depth range. For the Vulkan [0,1]-depth projection of the
 // same camera this is a superset of the visible volume, so culling stays conservative.
