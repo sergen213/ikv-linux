@@ -60,7 +60,8 @@ static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,p
 struct Geometry {Buffer vertices,indices,staging[2],previous;std::uint32_t count=0;std::uint64_t revision=0;std::array<float,4> bounds{};std::array<float,2> height{};bool upload=false,previous_stale=false;};
 // Two frames in flight: frame serial s records/submits slot s&1 and the CPU waits only for the frame two serials back.
 struct FrameSlot {VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquire=VK_NULL_HANDLE;bool pending=false;std::uint64_t serial=0;};
-struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};};
+// ocean: source ocean material (casts no shadow); water: enhanced water (ocean outside original appearance, drawn last).
+struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};bool ocean=false,water=false;};
 class VulkanRenderer final:public Renderer {
  SDL_Window* window_;RendererOptions options_;VkInstance instance_=VK_NULL_HANDLE;VkSurfaceKHR surface_=VK_NULL_HANDLE;VkPhysicalDevice physical_=VK_NULL_HANDLE;VkDevice device_=VK_NULL_HANDLE;VkQueue queue_=VK_NULL_HANDLE;std::uint32_t family_=0;
  VkSwapchainKHR swapchain_=VK_NULL_HANDLE;VkFormat swap_format_=VK_FORMAT_UNDEFINED;VkExtent2D extent_{},render_extent_{};std::vector<VkImage> swap_images_;std::vector<VkSemaphore> present_semaphores_;VkCommandPool pool_=VK_NULL_HANDLE;
@@ -69,6 +70,16 @@ class VulkanRenderer final:public Renderer {
  VkSampler sampler_=VK_NULL_HANDLE,shadow_sampler_=VK_NULL_HANDLE,linear_clamp_=VK_NULL_HANDLE;VkDescriptorSetLayout set_layout_=VK_NULL_HANDLE,rt_layout_=VK_NULL_HANDLE;VkPipelineLayout pipeline_layout_=VK_NULL_HANDLE;VkDescriptorPool descriptor_pool_=VK_NULL_HANDLE;VkDescriptorSet post_sets_[2]{},temporal_sets_[2]{};
  VkRenderPass scene_pass_=VK_NULL_HANDLE,shadow_pass_=VK_NULL_HANDLE,post_pass_=VK_NULL_HANDLE,temporal_pass_=VK_NULL_HANDLE,after_pass_=VK_NULL_HANDLE;VkFramebuffer scene_fb_[2]{},temporal_fb_[2]{},after_fb_[2]{},shadow_fb_=VK_NULL_HANDLE,post_fb_=VK_NULL_HANDLE;VkPipeline opaque_=VK_NULL_HANDLE,alpha_=VK_NULL_HANDLE,shadow_pipeline_=VK_NULL_HANDLE,post_pipeline_=VK_NULL_HANDLE,overlay_pipeline_=VK_NULL_HANDLE,temporal_pipeline_=VK_NULL_HANDLE,contour_pipeline_=VK_NULL_HANDLE;VkPipelineCache cache_=VK_NULL_HANDLE;
  VkPipeline opaque_double_=VK_NULL_HANDLE,alpha_double_=VK_NULL_HANDLE,shadow_double_=VK_NULL_HANDLE;
+ // Wave 27 perf: depth-only shadow casters (no fragment stage) for materials without an alpha cutoff.
+ VkPipeline shadow_depth_=VK_NULL_HANDLE,shadow_depth_double_=VK_NULL_HANDLE;
+ // Wave 27 perf, RT and enhanced (prepass_): opaque surfaces without an alpha cutoff first write depth only
+ // (prepass_pipeline_, no fragment stage), then shade with depth writes off (opaque_prepassed_*: LESS_OR_EQUAL against
+ // the identical invariant depth), so every pixel runs the expensive fragment shader (ray queries; parallax and PCF)
+ // once instead of once per overdrawn layer. Same image.
+ VkPipeline prepass_pipeline_=VK_NULL_HANDLE,prepass_double_=VK_NULL_HANDLE,opaque_prepassed_=VK_NULL_HANDLE,opaque_prepassed_double_=VK_NULL_HANDLE;
+ bool prepass_=false;
+ // shadow_ready_: the atlas was cleared once since create_targets (modes that never sample it skip the pass after that).
+ bool shadow_ready_=false;
  VkSampler shadow_compare_=VK_NULL_HANDLE; // binding 5 sampler2DShadow: bilinear depth compare (hardware PCF) when supported
  bool depth_clamp_=false; // shadow pipelines: casters sunward of the light near plane clamp to depth 0 and still cast
  VkPipeline sky_pipeline_[4]{},particle_pipeline_[5]{},after_particle_pipeline_[5]{};
@@ -106,9 +117,15 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  // backdrop_: the scene clear colour (linear; weather_backdrop under weather).
  std::array<float,3> backdrop_{.04f,.05f,.065f};
  WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
- // IKV_GPU_TIMING: per slot 2 timestamps (scene pass begin/end); the average is logged every 30 frames. timed_[slot]:
- // that slot's last frame wrote them.
- VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};double timing_sum_=0;unsigned timing_count_=0;
+ // IKV_GPU_TIMING: per slot one timestamp per TimingMark (wave 27: every pass, not only the scene pass); the 30-frame
+ // averages are logged as "Vulkan gpu timing frames=30 scenePassMs=X <pass>Ms=..." (scenePassMs first and unchanged:
+ // scene pass begin TOP_OF_PIPE to end BOTTOM_OF_PIPE). The other passes are the gaps between consecutive BOTTOM_OF_PIPE
+ // marks. timed_[slot]: that slot's last frame wrote them.
+ enum TimingMark:unsigned {mark_begin,mark_upload,mark_rt_update,mark_shadow,mark_scene_begin,mark_prepass,mark_scene_end,
+     mark_denoise,mark_glow,mark_fsr,mark_post,mark_end,timing_marks};
+ VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};std::array<double,timing_marks> timing_sum_{};unsigned timing_count_=0;
+ unsigned timing_slot_=0;
+ void mark(TimingMark m,VkPipelineStageFlagBits stage=VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT){if(timing_pool_)vkCmdWriteTimestamp(command_,stage,timing_pool_,timing_slot_*timing_marks+m);}
  // Frame uniforms: one aligned region per slot behind the dynamic binding 0 of every set (uniform_offset_ while recording).
  Buffer uniform_;std::uint32_t uniform_stride_=0,uniform_offset_=0;
  struct ViewsLess {bool operator()(const std::array<VkImageView,6>& a,const std::array<VkImageView,6>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
@@ -133,7 +150,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      std::uint64_t mesh_key=0; // Scene::mesh_key as last loaded: any actor (re)assembly since then reloads.
      std::size_t instance_count=0;
      bool loaded=false;
-     std::vector<DrawItem> draws;
+     std::vector<DrawItem> draws;std::size_t visible_draws=0; // draws[0,visible_draws): colour, sorted
  };
  std::unique_ptr<SceneSet> set_;
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
@@ -722,9 +739,11 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
                     bool depth,bool shadow,bool double_sided=false,bool depth_write=true,std::optional<ParticleBlend> particle={},
                     bool contour=false,bool glow_composite=false) {
      progress();
+     // frag null: depth only (no fragment stage, no colour writes): depth prepass and opaque shadow casters.
      VkShaderModule v=shader(vert),f=VK_NULL_HANDLE;VkPipeline result=VK_NULL_HANDLE;
      try {
-         f=shader(frag);VkPipelineShaderStageCreateInfo stages[2]{};
+         if(frag){f=shader(frag);}
+         VkPipelineShaderStageCreateInfo stages[2]{};
          for(auto& s:stages)s.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
          stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=v;stages[0].pName="main";
          stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=f;stages[1].pName="main";
@@ -786,6 +805,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
         }
         // Without independentBlend (enabled only for denoise/FSR) every location past 0 is VK_ATTACHMENT_UNUSED.
         if(!(denoise_enabled_||fsr_supported_))std::fill(blends.begin()+1,blends.end(),blends[0]);
+        if(!frag)for(auto& b:blends)b.colorWriteMask=0;
          VkPipelineColorBlendStateCreateInfo blending{};blending.sType=VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
          blending.attachmentCount=shadow?0:static_cast<std::uint32_t>(colors_of(pass).size());
          blending.pAttachments=shadow?nullptr:blends.data();
@@ -793,7 +813,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          VkPipelineDynamicStateCreateInfo dynamic{};dynamic.sType=VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
          dynamic.dynamicStateCount=2;dynamic.pDynamicStates=dynamic_states;
          VkGraphicsPipelineCreateInfo create{};create.sType=VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-         create.stageCount=2;create.pStages=stages;create.pVertexInputState=&input;create.pInputAssemblyState=&assembly;
+         create.stageCount=frag?2:1;create.pStages=stages;create.pVertexInputState=&input;create.pInputAssemblyState=&assembly;
          create.pViewportState=&viewport;create.pRasterizationState=&raster;create.pMultisampleState=&samples;
          create.pDepthStencilState=&ds;create.pColorBlendState=&blending;create.pDynamicState=&dynamic;
          create.layout=pipeline_layout_;create.renderPass=pass;
@@ -803,7 +823,7 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          if(result)vkDestroyPipeline(device_,result,nullptr);
          vkDestroyShaderModule(device_,v,nullptr);if(f)vkDestroyShaderModule(device_,f,nullptr);throw;
      }
-     vkDestroyShaderModule(device_,v,nullptr);vkDestroyShaderModule(device_,f,nullptr);return result;
+     vkDestroyShaderModule(device_,v,nullptr);if(f)vkDestroyShaderModule(device_,f,nullptr);return result;
  }
 // colors: one format per fragment output location, VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED; attachments are the defined
 // colours in location order, then depth. load: continue a finished scene target (colour SHADER_READ_ONLY, read-only
@@ -1035,7 +1055,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          if(std::isfinite(value)&&value>=0&&value<=20)pacing_lead_ms_=value;
      }
      if(SDL_getenv("IKV_GPU_TIMING")&&props.limits.timestampComputeAndGraphics) {
-         VkQueryPoolCreateInfo q{};q.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=4;
+         VkQueryPoolCreateInfo q{};q.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;q.queryType=VK_QUERY_TYPE_TIMESTAMP;q.queryCount=2*timing_marks;
          checked(vkCreateQueryPool(device_,&q,nullptr,&timing_pool_),"timestamp query pool");timestamp_period_=props.limits.timestampPeriod;
      }
      VkSamplerCreateInfo sampler{};sampler.sType=VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1106,7 +1126,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
  }
  void destroy_targets() {
      for(auto* p:{&opaque_,&alpha_,&shadow_pipeline_,&post_pipeline_,&overlay_pipeline_,&hud_pipeline_,
-                 &opaque_double_,&alpha_double_,&shadow_double_,&temporal_pipeline_,&contour_pipeline_,&glow_pipeline_,&glow_composite_pipeline_}) {
+                 &opaque_double_,&alpha_double_,&shadow_double_,&temporal_pipeline_,&contour_pipeline_,&glow_pipeline_,&glow_composite_pipeline_,
+                 &shadow_depth_,&shadow_depth_double_,&prepass_pipeline_,&prepass_double_,&opaque_prepassed_,&opaque_prepassed_double_}) {
          if(*p)vkDestroyPipeline(device_,*p,nullptr);
          *p=VK_NULL_HANDLE;
      }
@@ -1249,6 +1270,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
      water_ready_=false;
      shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
+     shadow_ready_=false;
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      output_=image(extent_.width,extent_.height,swap_format_,display_usage|(generating_?VkImageUsageFlags{VK_IMAGE_USAGE_SAMPLED_BIT}:0u));
@@ -1297,6 +1319,16 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      opaque_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true);
      alpha_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,true,true,false,true);
      shadow_double_=pipeline("shadow.vert","shadow.frag",shadow_pass_,true,false,true,true,true);
+     shadow_depth_=pipeline("shadow.vert",nullptr,shadow_pass_,true,false,true,true);
+     shadow_depth_double_=pipeline("shadow.vert",nullptr,shadow_pass_,true,false,true,true,true);
+     prepass_=rt_enabled_||!options_.original_appearance; // RT rays and enhanced parallax/PCF; original shading is cheap
+     if(const char* p=SDL_getenv("IKV_DEPTH_PREPASS"))prepass_=std::strcmp(p,"0")!=0; // A/B knob
+     if(prepass_) {
+         prepass_pipeline_=pipeline("scene.vert",nullptr,scene_pass_,true,false,true,false);
+         prepass_double_=pipeline("scene.vert",nullptr,scene_pass_,true,false,true,false,true);
+         opaque_prepassed_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,false,false);
+         opaque_prepassed_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true,false);
+     }
     for(unsigned i=0;i<4;++i)sky_pipeline_[i]=pipeline("scene.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0,false);
     for(unsigned i=0;i<5;++i)particle_pipeline_[i]=pipeline("particle.vert","particle.frag",scene_pass_,true,true,true,false,true,false,ParticleBlend(i));
     for(unsigned i=0;i<5;++i)after_particle_pipeline_[i]=pipeline("particle.vert","particle.frag",after_pass_,true,true,true,false,true,false,ParticleBlend(i));
@@ -1615,6 +1647,9 @@ void update_geometry(SceneSet& set) {
         if(vertices.size()*sizeof(Vertex)!=g.vertices.bytes||!stage.mapped)
             throw std::runtime_error("skinned topology changed without scene reload");
         copy_staging(stage.mapped,vertices.data(),static_cast<std::size_t>(g.vertices.bytes));
+        // Skins are world-space poses: shadow-caster culling (draw_scene) needs this pose's bounds, not the bind/upload
+        // pose's (an actor that walked away from where it was first skinned lost or kept its shadow wrongly).
+        g.bounds=mesh_bounds(scene.meshes[i]);
         g.upload=true;
     }
     for(std::size_t i=0;i<scene.meshes.size();++i)geometry_[i].revision=scene.meshes[i].revision;
@@ -1654,19 +1689,37 @@ void record_geometry_uploads(SceneSet& set) {
     b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;b.dstAccessMask=VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
+ // Push constants of one scene draw (shadow: previous_model carries the cascade's light matrix).
+ Draw scene_draw(const DrawItem& item,const Material* material,bool shadow,const Matrix4* light_vp)const {
+     Draw draw;draw.model=item.model;
+     draw.color=material?material->color:std::array<float,4>{1,1,1,1};
+     draw.flags={material&&!material->normal.empty()?1.f:0.f,material&&(!material->environment.empty()||(item.sky&&(!material->luminance.empty()||!material->lightmap.empty())))?1.f:0.f,
+         material&&!material->luminance.empty()?1.f:0.f,material?material->alpha_cutoff:0.f};
+    // extra.w packs alpha blending (1), source ocean (2) and animated draws (.5; guided history needs motion vectors).
+    draw.extra={material&&!material->lightmap.empty()?1.f:0.f,item.sky?1.f:0.f,item.fog?1.f:0.f,
+        (item.alpha?1.f:0.f)+(item.dynamic?.5f:0.f)+(material&&material->source_ocean?2.f:0.f)};
+     draw.scroll=item.scroll;draw.previous_model=shadow&&light_vp?*light_vp:item.previous;
+     return draw;
+ }
+ // Opaque colour draws the depth prepass covers: visible, not sky/water/blended, no alpha cutoff (lighting.glsl may
+ // discard those, so they keep their own depth writes).
+ bool prepassed(const Scene& scene,const DrawItem& item)const {
+     if(!prepass_||!item.visible||item.sky||item.alpha||item.ocean)return false;
+     return item.material>=scene.materials.size()||!(scene.materials[item.material].alpha_cutoff>0);
+ }
  // items: a slice of set.draws. casters: the shadow cascade's light volume, with near-clamped casters retained.
+ // prepass: the depth-only pass over the prepassed() items.
  void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,
-                 const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr) {
+                 const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr,bool prepass=false) {
      const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
-     if(rt_enabled_&&!shadow)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
+     if(rt_enabled_&&!shadow&&!prepass)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
      for(const auto& item:items) {
         // Shadow pass (enhanced raster only): source ocean casts none; off-camera casters still need light-volume culling.
         if(shadow) {
-            if(item.sky||(item.material<scene.materials.size()&&scene.materials[item.material].source_ocean)||
-               (casters&&!sphere_visible(*casters,item.model,set.geometry[item.mesh].bounds)))continue;
-        } else if(!item.visible)continue;
+            if(item.sky||item.ocean||(casters&&!sphere_visible(*casters,item.model,set.geometry[item.mesh].bounds)))continue;
+        } else if(prepass?!prepassed(scene,item):!item.visible)continue;
          if(!scene.materials.empty()) {
              if(item.material>=scene.materials.size()||item.material>=material_usage_.size())
                  throw std::runtime_error("scene draw material index out of range");
@@ -1674,19 +1727,14 @@ void record_geometry_uploads(SceneSet& set) {
                  throw std::runtime_error("scene draw references an unbound dormant material: "+std::to_string(item.material));
          }
          const Material* material=item.material<scene.materials.size()?&scene.materials[item.material]:nullptr;
-         Draw draw;draw.model=item.model;
-         draw.color=material?material->color:std::array<float,4>{1,1,1,1};
-         draw.flags={material&&!material->normal.empty()?1.f:0.f,material&&(!material->environment.empty()||(item.sky&&(!material->luminance.empty()||!material->lightmap.empty())))?1.f:0.f,
-             material&&!material->luminance.empty()?1.f:0.f,material?material->alpha_cutoff:0.f};
-        // extra.w packs alpha blending (1), source ocean (2) and animated draws (.5; guided history needs motion vectors).
-        draw.extra={material&&!material->lightmap.empty()?1.f:0.f,item.sky?1.f:0.f,item.fog?1.f:0.f,
-            (item.alpha?1.f:0.f)+(item.dynamic?.5f:0.f)+(material&&material->source_ocean?2.f:0.f)};
-         draw.scroll=item.scroll;draw.previous_model=shadow&&light_vp?*light_vp:item.previous;
+         const Draw draw=scene_draw(item,material,shadow,light_vp);
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
-         auto selected=shadow?(double_sided?shadow_double_:shadow_pipeline_):
+         auto selected=shadow?(draw.flags[3]>0?(double_sided?shadow_double_:shadow_pipeline_):(double_sided?shadow_depth_double_:shadow_depth_)):
+             prepass?(double_sided?prepass_double_:prepass_pipeline_):
              item.sky?sky_pipeline_[variant]:
-             item.alpha?(double_sided?alpha_double_:alpha_):(double_sided?opaque_double_:opaque_);
+             item.alpha?(double_sided?alpha_double_:alpha_):
+             prepassed(scene,item)?(double_sided?opaque_prepassed_double_:opaque_prepassed_):(double_sided?opaque_double_:opaque_);
          if(selected!=bound_pipeline){vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,selected);bound_pipeline=selected;}
          const auto descriptor=material_sets_[item.material<material_sets_.size()?item.material:0];
          if(descriptor!=bound_set){vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&descriptor,1,&uniform_offset_);bound_set=descriptor;}
@@ -1930,6 +1978,7 @@ void set_particles(const ParticleFrame& frame)override {
      if(geometry_changed){update_geometry(set);set.geometry_revision=scene.geometry_revision;}
      const bool changed=hash!=set.transform_hash||geometry_changed;
      record_geometry_uploads(set);
+     mark(mark_upload);
      const auto t2=clock::now();
      bool rebuilt=false;
      if(changed||set.rt_stale) {
@@ -1943,14 +1992,15 @@ void set_particles(const ParticleFrame& frame)override {
          }
          set.transform_hash=hash;set.rt_stale=false;
      }
+     mark(mark_rt_update);
      const auto ms=[](clock::time_point a,clock::time_point b){return std::chrono::duration<double,std::milli>(b-a).count();};
      const auto t3=clock::now();
      if(ms(t0,t3)>2||rebuilt)std::cerr<<"Vulkan scene set sync source_registry_id="<<(scene.source_registry_id?int(*scene.source_registry_id):-1)
          <<" loadMs="<<ms(t0,t1)<<" skinMs="<<ms(t1,t2)<<" rtMs="<<ms(t2,t3)<<" rtRebuild="<<rebuilt<<'\n';
      return changed;
  }
- // The frame's draw list in set.draws (sky, then opaque nearest-first, then alpha farthest-first). Frustum culling marks
- // colour draws instead of dropping them, so the shadow pass retains off-screen casters and the sort sees the whole list.
+ // The frame's draw list in set.draws: the visible colour draws first (sky, then opaque nearest-first, then alpha
+ // farthest-first; set.visible_draws), then the off-screen ones the shadow pass still needs as casters, unsorted.
  // Sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
  void build_draws(SceneSet& set,std::span<const RenderEntity> entities,const std::array<float,3>& eye,const FrustumPlanes& planes,
                   std::vector<ContourItem>* contours) {
@@ -1963,7 +2013,9 @@ void set_particles(const ParticleFrame& frame)override {
         bool alpha=material<scene.materials.size()&&(scene.materials[material].alpha||scene.materials[material].color[3]<.99f)&&
             (options_.original_appearance||!scene.materials[material].source_ocean);
          float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
-         draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix});
+         const bool ocean=material<scene.materials.size()&&scene.materials[material].source_ocean;
+         draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix,
+             ocean,ocean&&!options_.original_appearance});
      };
      if(scene.instances.empty()) {
          for(std::uint32_t i=0;i<scene.meshes.size();++i)
@@ -2023,13 +2075,15 @@ void set_particles(const ParticleFrame& frame)override {
              }
          }
      }
-    // In-place sorting avoids stable_sort's temporary allocation every frame.
+    // In-place sorting avoids stable_sort's temporary allocation every frame. Only colour draws are sorted (wave 27 perf):
+    // off-screen shadow casters follow them in any order (set.visible_draws: the sorted prefix).
     // NONCANONICAL enhanced water: source ocean draws close the opaque list, after the scene copy (copy_water).
-    const auto water=[&](const DrawItem& d){return !options_.original_appearance&&d.material<scene.materials.size()&&scene.materials[d.material].source_ocean;};
-    std::sort(draws.begin(),draws.end(),[&](const auto& a,const auto& b) {
+    const auto visible_end=std::partition(draws.begin(),draws.end(),[](const DrawItem& d){return d.visible;});
+    set.visible_draws=std::size_t(visible_end-draws.begin());
+    std::sort(draws.begin(),visible_end,[](const DrawItem& a,const DrawItem& b) {
         if(a.sky!=b.sky)return a.sky;
         if(a.alpha!=b.alpha)return !a.alpha;
-        if(!a.alpha&&water(a)!=water(b))return water(b);
+        if(!a.alpha&&a.water!=b.water)return b.water;
          // Opaque nearest-first: early Z rejects hidden fragments before their ray queries (-13% scene pass,
          // analysis/porting-wave12/Perf/report.md). Equal distances (meshes of one placement) fall back to material/mesh,
          // so coplanar opaque parts never swap draw order between frames.
@@ -2052,12 +2106,22 @@ void set_particles(const ParticleFrame& frame)override {
      const unsigned slot=total_frames_&1u;
      wait_slot(slot,"frame wait"); // frame total_frames_-2: its command buffer, uniforms and staging are reusable
      if(timing_pool_&&std::exchange(timed_[slot],false)) {
-         std::uint64_t t[2]{};
-         if(vkGetQueryPoolResults(device_,timing_pool_,slot*2,2,sizeof(t),t,sizeof(t[0]),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
-             timing_sum_+=double(t[1]-t[0])*timestamp_period_*1e-6;
+         std::array<std::uint64_t,timing_marks> t{};
+         if(vkGetQueryPoolResults(device_,timing_pool_,slot*timing_marks,timing_marks,sizeof(t),t.data(),sizeof(t[0]),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS) {
+             const auto gap=[&](unsigned a,unsigned b){return t[b]>=t[a]?double(t[b]-t[a])*timestamp_period_*1e-6:0.;};
+             const double ms[timing_marks]{gap(mark_scene_begin,mark_scene_end),gap(mark_begin,mark_upload),gap(mark_upload,mark_rt_update),
+                 gap(mark_rt_update,mark_shadow),gap(mark_scene_begin,mark_prepass),gap(mark_shadow,mark_scene_end),gap(mark_scene_end,mark_denoise),
+                 gap(mark_denoise,mark_glow),gap(mark_glow,mark_fsr),gap(mark_fsr,mark_post),gap(mark_post,mark_end),gap(mark_begin,mark_end)};
+             for(unsigned i=0;i<timing_marks;++i)timing_sum_[i]+=ms[i];
              if(++timing_count_==30) {
-                 std::cerr<<"Vulkan gpu timing frames=30 scenePassMs="<<timing_sum_/30<<'\n';
-                 timing_sum_=0;timing_count_=0;
+                 // scenePassMs first (older parsers match only it); sceneMs: shadow end to scene end (incl. water copy);
+                 // prepassMs: scene begin to after the sky and depth prepass.
+                 static constexpr const char* names[timing_marks]{"scenePassMs","uploadMs","rtUpdateMs","shadowMs","prepassMs","sceneMs",
+                     "denoiseMs","glowMs","fsrMs","postMs","presentCopyMs","totalMs"};
+                 std::cerr<<"Vulkan gpu timing frames=30";
+                 for(unsigned i=0;i<timing_marks;++i)std::cerr<<' '<<names[i]<<'='<<timing_sum_[i]/30;
+                 std::cerr<<'\n';
+                 timing_sum_={};timing_count_=0;
              }
          }
      }
@@ -2081,6 +2145,9 @@ void set_particles(const ParticleFrame& frame)override {
      VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
      begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
      checked(vkBeginCommandBuffer(command_,&begin),"begin frame");
+     timing_slot_=slot;
+     if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*timing_marks,timing_marks);timed_[slot]=true;}
+     mark(mark_begin);
      if(overlay_upload_)record_overlay_upload(command_);
      // A different Scene (the loading screen's empty scene, then the next zone) frees the previous scene's GPU and RT
      // resources once the device is idle; sync() then loads the new one in full (fsr_reset_, history reset).
@@ -2147,10 +2214,13 @@ void set_particles(const ParticleFrame& frame)override {
      const unsigned current=total_frames_&1u;
      // Replacement shadows share color visibility; this is not evidence of original source shadow behavior.
      // Enhanced raster: the near and far cascade in two atlas columns.
-     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
      // Only enhanced raster lighting samples the shadow map (lighting.glsl shadowVisibility); original appearance and
-     // the RT shaders never read it, so the pass only clears it.
-     if(!options_.original_appearance&&!rt_enabled_)for(unsigned index=0;index<2;++index) {
+     // the RT shaders never read it: the pass then only clears it, once after create_targets (wave 27 perf).
+     const bool shadows_sampled=!options_.original_appearance&&!rt_enabled_;
+     if(shadows_sampled||!shadow_ready_) {
+     shadow_ready_=true;
+     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
+     if(shadows_sampled)for(unsigned index=0;index<2;++index) {
          VkViewport v{float(index*2048),0,2048,2048,0,1};VkRect2D r{{std::int32_t(index*2048),0},{2048,2048}};
          vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
          const Matrix4& light=index?f.far_light:f.light;
@@ -2158,21 +2228,24 @@ void set_particles(const ParticleFrame& frame)override {
          draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light);
      }
      vkCmdEndRenderPass(command_);
-     if(timing_pool_){vkCmdResetQueryPool(command_,timing_pool_,slot*2,2);timed_[slot]=true;}
+     }
+     mark(mark_shadow);
     if(!water_ready_) { // draws before the first copy_water bind the copy too
         barrier(command_,water_color_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         barrier(command_,water_depth_.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,0,VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
         water_ready_=true;
     }
      begin_pass(command_,scene_pass_,scene_fb_[current],render_extent_,true);
-     if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,timing_pool_,slot*2);
+     mark(mark_scene_begin,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
     // Sky, then the rest. NONCANONICAL enhanced water: the opaque scene is copied before the source ocean (sorted after
     // the other opaque draws, build_draws), which then continues the pass with the alpha list in water_pass_.
-    const std::span<const DrawItem> source{scene_set.draws};
+    const auto source=std::span<const DrawItem>{scene_set.draws}.first(scene_set.visible_draws);
     const auto sky_end=std::size_t(std::find_if(source.begin(),source.end(),[](const DrawItem& d){return !d.sky;})-source.begin());
     draw_scene(command_,false,scene_set,source.first(sky_end));
     const auto rest=source.subspan(sky_end);
-    const auto is_water=[&](const DrawItem& d){return d.material<scene.materials.size()&&scene.materials[d.material].source_ocean;};
+    if(prepass_)draw_scene(command_,false,scene_set,rest,nullptr,nullptr,true);
+    mark(mark_prepass);
+    const auto is_water=[](const DrawItem& d){return d.ocean;};
     std::size_t water_begin=rest.size();
     if(!options_.original_appearance&&std::any_of(rest.begin(),rest.end(),[&](const DrawItem& d){return d.visible&&is_water(d);}))
         water_begin=std::size_t(std::find_if(rest.begin(),rest.end(),[&](const DrawItem& d){return d.alpha||is_water(d);})-rest.begin());
@@ -2215,7 +2288,7 @@ void set_particles(const ParticleFrame& frame)override {
         }
     }
     vkCmdEndRenderPass(command_);
-    if(timing_pool_)vkCmdWriteTimestamp(command_,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,timing_pool_,slot*2+1);
+    mark(mark_scene_end);
      if(denoise_enabled_) {
          // Temporal accumulation (stride 0), then a-trous strides 1/2/4: history -> A -> B -> A.
          vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,temporal_pipeline_);
@@ -2227,6 +2300,7 @@ void set_particles(const ParticleFrame& frame)override {
              vkCmdDraw(command_,3,1,0,0);vkCmdEndRenderPass(command_);
          }
      }
+     mark(mark_denoise);
      // Original fake HDR pass (0046fdb0 @470d2f) at 128x128, same chain as the GL renderer: half_intensity bb3c =
      // .45*scene + .55*bb38 (the previous frame's chain), then vertex buffers 0x77c344 (v) and 0x77c358 (u),
      // each 2x bb3c->bb38->bb3c of t_pseudo_HDR_blur, composited onto the scene before AfterHDR particles.
@@ -2258,6 +2332,7 @@ void set_particles(const ParticleFrame& frame)override {
          draw_particles(true);
          vkCmdEndRenderPass(command_);
      }
+    mark(mark_glow);
     float frame_ms=16.6667f;bool fsr_reset_frame=false;
     if(fsr_) {
          // FSR 3.1.4 resolves the jittered render-resolution frame into fsr_output_ at display size, before tonemap/HUD.
@@ -2282,6 +2357,7 @@ void set_particles(const ParticleFrame& frame)override {
          upscaled.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;upscaled.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;
          vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,0,1,&upscaled,0,nullptr,0,nullptr);
      }
+     mark(mark_fsr);
      begin_pass(command_,post_pass_,post_fb_,extent_,false);
      bind_set(post_sets_[current]);
      vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,post_pipeline_);vkCmdDraw(command_,3,1,0,0);
@@ -2289,6 +2365,7 @@ void set_particles(const ParticleFrame& frame)override {
          vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,overlay_pipeline_);vkCmdDraw(command_,3,1,0,0);
      }
      vkCmdEndRenderPass(command_);
+     mark(mark_post);
      auto& frame=slots_[slot];
      VkPipelineStageFlags wait=VK_PIPELINE_STAGE_TRANSFER_BIT;
      VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -2298,6 +2375,7 @@ void set_particles(const ParticleFrame& frame)override {
          // The frame halfway to this one (unless history was reset: then only this frame is shown).
          const bool generated=!fsr_reset_frame&&generation_frame_!=0;
          record_generation(slot,current,std::clamp(frame_ms,.1f,1000.f),!generated);
+         mark(mark_end);
          checked(vkEndCommandBuffer(command_),"end frame");
          // generated_/real_[slot] were last read by the present job of frame total_frames_-2.
          drain_presents(1);
@@ -2318,6 +2396,7 @@ void set_particles(const ParticleFrame& frame)override {
              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
          barrier(command_,swap_images_[image_index],VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
              VK_ACCESS_TRANSFER_WRITE_BIT,0,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+         mark(mark_end);
          checked(vkEndCommandBuffer(command_),"end frame");
          checked(vkResetFences(device_,1,&frame.fence),"reset frame fence");
          submit.waitSemaphoreCount=1;submit.pWaitSemaphores=&frame.acquire;submit.pWaitDstStageMask=&wait;

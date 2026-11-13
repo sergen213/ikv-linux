@@ -30,6 +30,9 @@ layout(location=13) out vec4 motionPrevious;
 layout(location=14) out vec3 sourceAmbientTerm;
 layout(location=15) out vec3 sourceSunTerm;
 layout(location=16) out vec4 farShadowPosition;
+// The RT depth prepass (renderer_vk.cpp prepass_) draws this shader without a fragment stage, then shades with depth
+// writes off against that depth: both pipelines must compute bit-identical positions.
+invariant gl_Position;
 void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
@@ -41,7 +44,10 @@ void main(){
     sourceOceanEye=ocean?normalize(frame.eye.xyz-world.xyz):vec3(0);
     sourceOceanUV=ocean?uv+draw.scroll.zw:vec2(0);
     worldPosition=world.xyz;
-    worldNormal=normalize(transpose(inverse(mat3(draw.model)))*normal);
+    // transpose(inverse(M)) = cofactor(M)/det(M): the cofactor columns (cross products), with det's sign kept for mirrored
+    // placements, normalize to the same normal without a per-vertex matrix inverse (wave 27 perf).
+    mat3 m=mat3(draw.model);
+    worldNormal=normalize(mat3(cross(m[1],m[2]),cross(m[2],m[0]),cross(m[0],m[1]))*normal*sign(dot(m[0],cross(m[1],m[2]))));
     worldTangent=mat3(draw.model)*tangent;
     texcoord=ocean?uv+draw.scroll.xy:uv;
     lightmapUV=secondaryUV;

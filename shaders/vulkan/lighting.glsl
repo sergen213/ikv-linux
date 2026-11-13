@@ -254,6 +254,12 @@ if(draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5)
 float sourceAlpha=draw.flags.x>.5||draw.flags.y>.5?1:texel.a;
 float sunVisibility=1.;
 #ifdef IKV_RT
+// The source alpha test (originalSurface's alpha, the discard below) before the Sun ray: cut-out texels trace nothing.
+if(frame.params.x<.5&&draw.flags.w>0) {
+    vec3 t=cross(cross(worldNormal,worldTangent),worldNormal);
+    float originalAlpha=(draw.flags.x>.5&&frame.sun.w>.5&&dot(t,t)>1e-12)||draw.flags.y>.5?1.:texel.a;
+    if(originalAlpha<=draw.flags.w)discard;
+}
 // Faithful RT (original appearance): actors (TLAS mask 2) cast deterministic Sun-ray shadows on static surfaces by
 // removing the source directional term. Scenery never occludes: the baked lightmaps hold its shadows, from a light that
 // is not the dynamic SunDir (with mask 0xff most of the lightmap-lit courtyard and every actor in it went dark).
@@ -300,10 +306,12 @@ if(weather)baked=weatherBaked(baked,sourceAlbedo,weathered,frame.weatherMisc)*we
 vec3 ambient=baked;
 #ifdef IKV_RT
 vec3 facet=rtUnit(rtFacet);if(dot(facet,v)<0)facet=-facet;
-float sunShadow=!roofed&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,facet,l,3u,0u):1.;
+// Fully record-fogged (the fog mix below keeps none of the lit colour; fogWeight 0 for the resolve): no rays (wave 27 perf).
+bool fogged=frame.fogColor.w>.5&&draw.extra.z>.5&&sourceFog<=0.;
+float sunShadow=!roofed&&!fogged&&dot(worldNormal,l)>0?rtSunVisibilityMasked(worldPosition,facet,l,3u,0u):1.;
 if(!roofed) {
     vec3 smoothNormal=rtUnit(dot(worldNormal,facet)<0?-worldNormal:worldNormal);
-    vec3 diffuse=rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
+    vec3 diffuse=fogged?vec3(0):rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
     ambient=albedo*diffuse;
 #ifdef IKV_RT_GUIDED
     // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.
