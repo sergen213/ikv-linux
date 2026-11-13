@@ -575,8 +575,8 @@ const ParticleFrame& EffectSystem::frame(const Camera& camera) {
     frame_.textures = textures_;
     frame_.vertices.clear();
     frame_.batches.clear();
-    std::vector<std::uint32_t> order;
-    std::vector<std::array<float, 3>> at; // world positions
+    static thread_local std::vector<std::uint32_t> order; // reused scratch
+    static thread_local std::vector<std::array<float, 3>> at; // world positions
     for (const auto& e : emitters_) {
         if (e.particles.empty() || e.texture == UINT32_MAX) continue;
         const auto& d = *e.def;
@@ -804,10 +804,10 @@ void EffectSystem::weather_update(float dt) {
     const float intensity = std::clamp(w.precipitation, 0.f, 1.f);
     const auto target = static_cast<std::size_t>(cap * intensity);
     const float fall = w.kind == WeatherKind::storm ? 10 * weather_metre : 8 * weather_metre, flake_fall = 1.1f * weather_metre;
-    const float t = static_cast<float>(now_ms_) * .001f;
+    const float t = static_cast<float>(now_ms_) * .001f, wind_length = std::hypot(wind[0], wind[1]);
     const auto horizontal = [&](const Drop& d) -> std::array<float, 2> {
         if (d.snow) return {wind[0] * .8f + std::sin(t * 1.7f + d.phase) * 1.2f, wind[1] * .8f + std::cos(t * 1.3f + d.phase * 1.7f) * 1.2f};
-        const float limit = .7f * -d.velocity[1], h = std::hypot(wind[0], wind[1]), s = h > limit ? limit / h : 1;
+        const float limit = .7f * -d.velocity[1], h = wind_length, s = h > limit ? limit / h : 1;
         return {wind[0] * s, wind[1] * s};
     };
     const auto place = [&](Drop& d, bool anywhere) {
@@ -839,16 +839,21 @@ void EffectSystem::weather_update(float dt) {
     near_.clear();
     for (const auto& e : entities_)
         if (std::hypot(e.x - focus_[0], e.z - focus_[2]) < weather_radius * 2) near_.push_back({e.x, e.ground_y + actor_top, e.z});
+    // Height band [lowest actor foot, highest head] holding every possible actor hit: a drop outside it cannot hit any actor,
+    // so it skips the scan (same result as scanning near_, whose first hit wins).
+    float band_low = INFINITY, band_high = -INFINITY;
+    for (const auto& a : near_) { band_low = std::min(band_low, a[1] - actor_top); band_high = std::max(band_high, a[1]); }
     for (std::size_t i = 0; i < drops_.size();) {
         auto& d = drops_[i];
         const float before = d.position[1];
         const auto h = horizontal(d); d.velocity[0] = h[0]; d.velocity[2] = h[1];
         for (unsigned k = 0; k < 3; ++k) d.position[k] += d.velocity[k] * dt;
         float y = 0; bool water = false, hit = false;
-        for (const auto& a : near_)
-            if (d.position[1] <= a[1] && d.position[1] > a[1] - actor_top && (d.position[0] - a[0]) * (d.position[0] - a[0]) + (d.position[2] - a[2]) * (d.position[2] - a[2]) < actor_radius * actor_radius) {
-                hit = true; y = std::min(a[1], before); break;
-            }
+        if (d.position[1] <= band_high && d.position[1] > band_low)
+            for (const auto& a : near_)
+                if (d.position[1] <= a[1] && d.position[1] > a[1] - actor_top && (d.position[0] - a[0]) * (d.position[0] - a[0]) + (d.position[2] - a[2]) * (d.position[2] - a[2]) < actor_radius * actor_radius) {
+                    hit = true; y = std::min(a[1], before); break;
+                }
         if (!hit && surface_at(d.position[0], d.position[2], y, water)) hit = d.position[1] <= y;
         const bool out = hit || d.position[1] < focus_[1] + weather_bottom || std::hypot(d.position[0] - focus_[0], d.position[2] - focus_[2]) > weather_radius * 1.8f;
         if (hit && weather_enabled_) impact(d, y, water);
@@ -900,10 +905,10 @@ void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
         for (const auto& d : drops_) {
             if (d.snow) continue;
             const std::array<float, 3> rel{d.position[0] - b.eye[0], d.position[1] - b.eye[1], d.position[2] - b.eye[2]};
-            const float v = std::hypot(d.velocity[0], d.velocity[1], d.velocity[2]), half = std::clamp(v * .04f, .6f, 3.f) * .5f;
+            const float v = std::sqrt(d.velocity[0] * d.velocity[0] + d.velocity[1] * d.velocity[1] + d.velocity[2] * d.velocity[2]), half = std::clamp(v * .04f, .6f, 3.f) * .5f;
             std::array<float, 3> u{}, r{};
             for (unsigned i = 0; i < 3; ++i) u[i] = -d.velocity[i] / v * half;
-            const auto side = cross(u, rel); const float s = std::hypot(side[0], side[1], side[2]);
+            const auto side = cross(u, rel); const float s = std::sqrt(side[0] * side[0] + side[1] * side[1] + side[2] * side[2]);
             if (s < 1e-6f) continue;
             for (unsigned i = 0; i < 3; ++i) r[i] = side[i] / s * .04f;
             quad(d.position, r, u, rain_color);

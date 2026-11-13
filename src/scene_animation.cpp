@@ -1,9 +1,16 @@
 #include "ikv/scene.hpp"
 #include "ikv/renderer.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <exception>
+#include <functional>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 
 namespace ikv {
@@ -108,11 +115,15 @@ void update_source_normals(Scene& scene, SourceSurface& surface, bool& changed) 
     if (surface.normals.size()!=surface.heads.size() || surface.aliases.size()!=surface.heads.size() ||
         surface.indices.size()%3!=0)
         throw std::runtime_error("invalid source surface normal metadata");
-    for (const auto index : surface.indices) {
+    // Each index occurrence's head vertex, validated once and reused by the face loop (same values, one lookup).
+    static thread_local std::vector<const Vertex*> head_vertex;
+    head_vertex.resize(surface.indices.size());
+    for (std::size_t i=0; i<surface.indices.size(); ++i) {
+        const auto index=surface.indices[i];
         if (index>=surface.heads.size() || surface.aliases[index][0]>=surface.heads.size() ||
             surface.aliases[index][1]>=surface.heads.size())
             throw std::runtime_error("invalid source surface index or alias");
-        source_corner(scene,surface,surface.heads[index]);
+        head_vertex[i]=&source_corner(scene,surface,surface.heads[index]);
     }
     if (surface.root_clears)
         for (auto& normal : surface.normals) normal={0,0,0};
@@ -121,9 +132,9 @@ void update_source_normals(Scene& scene, SourceSurface& surface, bool& changed) 
         // surface.indices: normal = (I0-I1)x(I2-I1). Un-reversing here pointed every recomputed actor normal inward.
         const auto ia=surface.indices[triangle], ib=surface.indices[triangle+1],
                    ic=surface.indices[triangle+2];
-        const auto& a=source_corner(scene,surface,surface.heads[ia]);
-        const auto& b=source_corner(scene,surface,surface.heads[ib]);
-        const auto& c=source_corner(scene,surface,surface.heads[ic]);
+        const auto& a=*head_vertex[triangle];
+        const auto& b=*head_vertex[triangle+1];
+        const auto& c=*head_vertex[triangle+2];
         const float az=a.z-b.z, cz=c.z-b.z, cy=c.y-b.y, ay=a.y-b.y,
                     cx=c.x-b.x, ax=a.x-b.x;
         const std::array<float,3> face{cz*ay-cy*az, cx*az-cz*ax, cy*ax-cx*ay};
@@ -159,6 +170,122 @@ void update_source_normals(Scene& scene, SourceSurface& surface, bool& changed) 
             }
         }
     }
+}
+
+// NONCANONICAL performance (wave 27): skin work runs on a few persistent workers, one actor assembly per task (the
+// original skins on its single thread; the results are bit-identical because each assembly's arithmetic and order are).
+class SkinWorkers {
+public:
+    SkinWorkers() {
+        const unsigned hardware=std::thread::hardware_concurrency();
+        const unsigned count=hardware>1 ? std::min(hardware-1,7u) : 0u;
+        for (unsigned i=0; i<count; ++i) threads_.emplace_back([this]{ loop(); });
+    }
+    ~SkinWorkers() {
+        { std::lock_guard lock(mutex_); stop_=true; }
+        wake_.notify_all();
+        for (auto& thread : threads_) thread.join();
+    }
+    std::size_t size() const { return threads_.size(); }
+    // Calls fn(i) for every i < count, on this thread and the workers; rethrows the first exception.
+    void run(std::size_t count,const std::function<void(std::size_t)>& fn) {
+        if (threads_.empty() || count<2) { for (std::size_t i=0; i<count; ++i) fn(i); return; }
+        {
+            std::lock_guard lock(mutex_);
+            fn_=&fn; count_=count; next_.store(0); error_=nullptr; active_=threads_.size(); ++generation_;
+        }
+        wake_.notify_all();
+        work();
+        std::unique_lock lock(mutex_);
+        done_.wait(lock,[this]{ return active_==0; });
+        fn_=nullptr;
+        if (error_) std::rethrow_exception(std::exchange(error_,nullptr));
+    }
+private:
+    void work() {
+        for (;;) {
+            const auto i=next_.fetch_add(1);
+            if (i>=count_) return;
+            try { (*fn_)(i); }
+            catch (...) {
+                std::lock_guard lock(mutex_);
+                if (!error_) error_=std::current_exception();
+                next_.store(count_);
+            }
+        }
+    }
+    void loop() {
+        std::uint64_t seen=0;
+        for (;;) {
+            {
+                std::unique_lock lock(mutex_);
+                wake_.wait(lock,[&]{ return stop_ || generation_!=seen; });
+                if (stop_) return;
+                seen=generation_;
+            }
+            work();
+            std::lock_guard lock(mutex_);
+            if (--active_==0) done_.notify_one();
+        }
+    }
+    std::vector<std::thread> threads_;
+    std::mutex mutex_;
+    std::condition_variable wake_,done_;
+    const std::function<void(std::size_t)>* fn_=nullptr;
+    std::size_t count_=0,active_=0;
+    std::atomic<std::size_t> next_{0};
+    std::uint64_t generation_=0;
+    std::exception_ptr error_;
+    bool stop_=false;
+};
+SkinWorkers& skin_workers() { static SkinWorkers workers; return workers; }
+// Below this many influences in assembly meshes to skin, the serial path is cheaper than waking the workers.
+std::size_t skin_parallel_min_influences=16384;
+
+bool bones_moved(const Mesh& mesh,const std::vector<std::uint8_t>& node_moved) {
+    for (const auto& influence : mesh.influences) if (node_moved[influence.node]) return true;
+    return false;
+}
+
+// Group 0: meshes and surfaces outside every assembly; group 1+a: assembly a. CSR lists keep ascending (serial) order.
+struct SkinGroups {
+    std::size_t count=0;
+    std::vector<std::uint32_t> mesh_group,surface_group,mesh_begin,meshes,surface_begin,surfaces,at;
+};
+bool group_skin_work(const Scene& scene,const SurfaceIndex& index,const std::vector<std::uint8_t>& held,SkinGroups& g) {
+    if (scene.actor_assemblies.size()<2 || !skin_workers().size()) return false;
+    std::size_t work=0;
+    for (const auto& assembly : scene.actor_assemblies)
+        for (auto m=assembly.begin[0]; m<assembly.end[0]; ++m) if (!(held[m]&1)) work+=scene.meshes[m].influences.size();
+    if (work<skin_parallel_min_influences) return false;
+    constexpr auto unset=UINT32_MAX;
+    const auto meshes=scene.meshes.size(),surfaces=scene.source_surfaces.size();
+    g.count=scene.actor_assemblies.size()+1;
+    g.mesh_group.assign(meshes,0);
+    for (std::size_t a=0; a<scene.actor_assemblies.size(); ++a) {
+        const auto& assembly=scene.actor_assemblies[a];
+        for (auto m=assembly.begin[0]; m<assembly.end[0]; ++m) {
+            if (g.mesh_group[m]) return false; // overlapping ranges: keep the serial order
+            g.mesh_group[m]=static_cast<std::uint32_t>(a+1);
+        }
+    }
+    g.surface_group.assign(surfaces,unset);
+    for (std::size_t m=0; m<meshes; ++m)
+        for (auto k=index.touch_begin[m]; k<index.touch_begin[m+1]; ++k) {
+            auto& group=g.surface_group[index.touch[k]];
+            if (group==unset) group=g.mesh_group[m];
+            else if (group!=g.mesh_group[m]) return false; // a surface spanning groups
+        }
+    const auto fill=[&](const std::vector<std::uint32_t>& owner,std::size_t size,std::vector<std::uint32_t>& begin,std::vector<std::uint32_t>& items) {
+        begin.assign(g.count+1,0);
+        for (std::size_t i=0; i<size; ++i) ++begin[(owner[i]==unset?0:owner[i])+1];
+        for (std::size_t k=0; k<g.count; ++k) begin[k+1]+=begin[k];
+        items.resize(size); g.at.assign(begin.begin(),begin.end()-1);
+        for (std::size_t i=0; i<size; ++i) items[g.at[owner[i]==unset?0:owner[i]]++]=static_cast<std::uint32_t>(i);
+    };
+    fill(g.mesh_group,meshes,g.mesh_begin,g.meshes);
+    fill(g.surface_group,surfaces,g.surface_begin,g.surfaces);
+    return true;
 }
 
 void advance_actor(Scene& scene, ActorAnimation& actor, float seconds) {
@@ -305,19 +432,19 @@ void update_scene(Scene& scene, float seconds) {
     bool pose_changed = scene.force_pose_update;
     scene.force_pose_update=false;
     bool bounds_changed = false;
-    for (auto& track : scene.animation) {
+    const auto sample_track=[&](AnimationTrack& track,bool& moved) {
         float sample_seconds=seconds;
         if (track.controller!=UINT32_MAX) {
             if (track.controller>=scene.actors.size())
                 throw std::runtime_error("invalid animation track controller");
             const auto& actor=scene.actors[track.controller];
             if (actor.stopped || actor.library==UINT32_MAX ||
-                scene.actor_tables.libraries[actor.library].clips.empty()) continue;
+                scene.actor_tables.libraries[actor.library].clips.empty()) return;
             sample_seconds=actor.time;
         }
-        if (track.keys.empty()) continue;
+        if (track.keys.empty()) return;
         // Recovered 0045c9e0 retains its cached pose when no strictly later key exists.
-        if (track.keys.size()>1 && sample_seconds>=track.keys.back().time) continue;
+        if (track.keys.size()>1 && sample_seconds>=track.keys.back().time) return;
         auto key=sample_key(track,sample_seconds);
         if(track.controller!=UINT32_MAX){
             const auto& actor=scene.actors[track.controller];
@@ -331,15 +458,20 @@ void update_scene(Scene& scene, float seconds) {
         const auto sampled = key_transform(key);
         if (local.matrix!=sampled.matrix) {
             local=sampled;
-            pose_changed=true;
+            moved=true;
         }
-    }
+    };
+    for (auto& track : scene.animation) sample_track(track,pose_changed);
+    // Thread-local scratch, bound to references: the skin workers below must see this thread's buffers, not their own.
+    static thread_local std::vector<std::uint8_t> node_moved_buffer; auto& node_moved=node_moved_buffer; // per node: world matrix changed in this pass
+    node_moved.assign(scene.nodes.size(),0);
     for (const auto index : scene.node_order) {
         auto& node = scene.nodes[index];
         const auto world = node.parent<0 ? node.local.matrix :
             multiply_matrix(scene.nodes[static_cast<std::size_t>(node.parent)].world.matrix,node.local.matrix);
         if (node.world.matrix!=world) {
             node.world.matrix=world;
+            node_moved[index]=1;
             pose_changed=true;
         }
         // Recovered 00410800 uses source-space position addition, not world rotation.
@@ -375,10 +507,11 @@ void update_scene(Scene& scene, float seconds) {
     for (const auto& assembly : scene.actor_assemblies) resumed |= assembly.skin_stale && !assembly.skin_held;
     if (pose_changed || resumed || scene.geometry_revision==0) {
         for (auto& surface : scene.source_surfaces) surface.positions_changed=false;
-        static thread_local SurfaceIndex by_mesh; // reused buffers
+        static thread_local SurfaceIndex by_mesh_buffer; auto& by_mesh=by_mesh_buffer; // reused buffers
         index_surfaces(scene,by_mesh);
         const bool all = pose_changed || scene.geometry_revision==0;
-        static thread_local std::vector<std::uint8_t> held; // per mesh: 1 = not skinned in this pass
+        // per mesh: bit 0 = not skinned in this pass; bit 1 = skinned even if none of its bones moved (released stale actor)
+        static thread_local std::vector<std::uint8_t> held_buffer; auto& held=held_buffer;
         held.assign(scene.meshes.size(),all ? 0 : 1);
         const bool initial = scene.geometry_revision==0;
         for (auto& assembly : scene.actor_assemblies) {
@@ -386,12 +519,19 @@ void update_scene(Scene& scene, float seconds) {
                 throw std::runtime_error("invalid actor assembly mesh range");
             const bool hold = !initial && assembly.skin_held;
             const bool skip = hold || (!all && !assembly.skin_stale);
+            const bool force = !hold && assembly.skin_stale;
             if (all || !hold) assembly.skin_stale = hold;
-            std::fill(held.begin()+static_cast<std::ptrdiff_t>(assembly.begin[0]),held.begin()+static_cast<std::ptrdiff_t>(assembly.end[0]),std::uint8_t{skip});
+            std::fill(held.begin()+static_cast<std::ptrdiff_t>(assembly.begin[0]),held.begin()+static_cast<std::ptrdiff_t>(assembly.end[0]),
+                      std::uint8_t(skip ? 1 : force ? 2 : 0));
         }
-        for (std::size_t mesh_index=0; mesh_index<scene.meshes.size(); ++mesh_index) {
-            if (held[mesh_index]) continue;
+        // NONCANONICAL performance (wave 27): a mesh none of whose bones changed world matrix this pass produces exactly the
+        // vertices it already holds, so it is not re-skinned (00476eb0 skins every visible root; the output is identical).
+        // skin_pending covers meshes never skinned yet (attached since the last pass); `force` covers released held actors.
+        const auto skin_mesh=[&](std::size_t mesh_index,bool& mesh_changed) {
+            if (held[mesh_index]&1) return;
             auto& mesh=scene.meshes[mesh_index];
+            if (!initial && !(held[mesh_index]&2) && !mesh.skin_pending && !bones_moved(mesh,node_moved)) return;
+            mesh.skin_pending=false;
             bool surface_changed=false;
             bool positions_changed=false;
             const bool source_normals=!mesh.influences.empty() && by_mesh.recompute[mesh_index];
@@ -425,7 +565,7 @@ void update_scene(Scene& scene, float seconds) {
                     positions_changed |= vertex.x!=x || vertex.y!=y || vertex.z!=z;
                     vertex.x=x; vertex.y=y; vertex.z=z;
                     if (!source_normals) { vertex.nx=nx; vertex.ny=ny; vertex.nz=nz; }
-                    changed=true;
+                    mesh_changed=true;
                     surface_changed=true;
                 }
             }
@@ -440,7 +580,7 @@ void update_scene(Scene& scene, float seconds) {
                     vertex.x=0; vertex.y=0; vertex.z=0;
                     // Regenerated normals clear their source scratch, avoiding intermediate GPU dirtiness.
                     if (clear_normal) { vertex.nx=0; vertex.ny=0; vertex.nz=0; }
-                    changed=true;
+                    mesh_changed=true;
                     surface_changed=true;
                 }
             }
@@ -475,13 +615,33 @@ void update_scene(Scene& scene, float seconds) {
             if (positions_changed)
                 for (auto k=by_mesh.touch_begin[mesh_index]; k<by_mesh.touch_begin[mesh_index+1]; ++k)
                     scene.source_surfaces[by_mesh.touch[k]].positions_changed=true;
-        }
-        for (auto& surface : scene.source_surfaces)
+        };
+        const auto normals=[&](SourceSurface& surface,bool& normals_changed) {
             if (surface.recompute_normals &&
                 (!surface.normals_initialized || scene.geometry_revision==0 || surface.positions_changed)) {
-                update_source_normals(scene,surface,changed);
+                update_source_normals(scene,surface,normals_changed);
                 surface.normals_initialized=true;
             }
+        };
+        // Actor assemblies own disjoint meshes and source surfaces, so each one skins (meshes, then its surfaces' normals)
+        // independently of the others on the skin workers; meshes and surfaces outside every assembly stay on this thread.
+        // Within a group the order is the serial order, so the results are bit-identical. Any surface spanning groups (or
+        // an index the serial path would reject) falls back to the serial path.
+        static thread_local SkinGroups groups_buffer; auto& groups=groups_buffer;
+        if (group_skin_work(scene,by_mesh,held,groups)) {
+            std::vector<std::uint8_t> group_changed(groups.count,0);
+            const auto run_group=[&](std::size_t group) {
+                bool local=false;
+                for (auto k=groups.mesh_begin[group]; k<groups.mesh_begin[group+1]; ++k) skin_mesh(groups.meshes[k],local);
+                for (auto k=groups.surface_begin[group]; k<groups.surface_begin[group+1]; ++k) normals(scene.source_surfaces[groups.surfaces[k]],local);
+                group_changed[group]=local;
+            };
+            skin_workers().run(groups.count,run_group);
+            for (const auto value : group_changed) changed |= value!=0;
+        } else {
+            for (std::size_t mesh_index=0; mesh_index<scene.meshes.size(); ++mesh_index) skin_mesh(mesh_index,changed);
+            for (auto& surface : scene.source_surfaces) normals(surface,changed);
+        }
     }
     if (changed) ++scene.geometry_revision;
 }
@@ -492,6 +652,50 @@ void scene_animation_self_test() {
         if (!condition) throw std::runtime_error("scene animation self-test failed");
     };
     const auto near = [](float a, float b) { return std::abs(a-b) < 0.0001f; };
+    {
+        // NONCANONICAL wave 27: per-assembly skin groups on the workers give bit-identical vertices, normals and revisions to
+        // the serial path, and a mesh whose bones did not move is not re-skinned (its vertices are already that pose).
+        const auto build=[]{
+            Scene crowd;
+            for (std::uint32_t a=0; a<3; ++a) {
+                crowd.nodes.emplace_back(); crowd.node_order.push_back(a);
+                if (a!=2) crowd.animation.push_back({a,{{0,{0,0,0,1},{float(a),0,0}},{1,{0,-std::sqrt(.5f),0,std::sqrt(.5f)},{float(a)+2,1,0}}}});
+                Mesh mesh; mesh.vertices={{0,0,0,0,1,0,0,0},{1,0,0,0,1,0,1,0},{0,0,1,0,1,0,0,1}}; mesh.indices={0,1,2};
+                for (std::uint32_t v=0; v<3; ++v) mesh.influences.push_back({v,a,1,{float(v==1),.5f*float(a),float(v==2)},{0,1,0}});
+                crowd.meshes.push_back(mesh);
+                SourceSurface surface; surface.recompute_normals=true; surface.heads={0,1,2}; surface.indices={0,1,2};
+                surface.corners={{a,0,UINT32_MAX},{a,1,UINT32_MAX},{a,2,UINT32_MAX}}; surface.aliases={{0,0},{1,1},{2,2}};
+                surface.normals.resize(3); crowd.source_surfaces.push_back(surface);
+                SceneActorAssembly assembly; assembly.entity_id=a+1; assembly.begin[0]=a; assembly.end[0]=a+1; assembly.begin[3]=a; assembly.end[3]=a+1;
+                assembly.begin[4]=std::min(a,2u); assembly.end[4]=a<2?a+1:2; crowd.actor_assemblies.push_back(assembly);
+            }
+            return crowd;
+        };
+        const auto saved=skin_parallel_min_influences;
+        Scene parallel=build(),serial=build();
+        for (const float t : {0.f,.25f,.5f,.75f}) {
+            skin_parallel_min_influences=0; update_scene(parallel,t);
+            skin_parallel_min_influences=SIZE_MAX; update_scene(serial,t);
+            for (std::size_t n=0; n<3; ++n) require(parallel.nodes[n].world.matrix==serial.nodes[n].world.matrix);
+            require(parallel.geometry_revision==serial.geometry_revision);
+            for (std::size_t m=0; m<3; ++m) {
+                require(parallel.meshes[m].revision==serial.meshes[m].revision);
+                for (std::size_t v=0; v<3; ++v) {
+                    const auto& p=parallel.meshes[m].vertices[v]; const auto& q=serial.meshes[m].vertices[v];
+                    require(p.x==q.x && p.y==q.y && p.z==q.z && p.nx==q.nx && p.ny==q.ny && p.nz==q.nz && p.tangent==q.tangent);
+                }
+            }
+        }
+        skin_parallel_min_influences=saved;
+        require(near(serial.meshes[0].vertices[1].x,serial.nodes[0].world.matrix[0]+serial.nodes[0].world.matrix[12]));
+        // Mesh 2's bones never move after its first skin: a sentinel written into it survives a pose pass of the others.
+        const auto still=serial.meshes[2].revision;
+        serial.meshes[2].vertices[0].x=42; update_scene(serial,.9f);
+        require(serial.meshes[2].vertices[0].x==42 && serial.meshes[2].revision==still && serial.meshes[0].revision>0);
+        // A newly attached mesh (skin_pending) is skinned on the next pass even though no bone moved.
+        serial.meshes[2].skin_pending=true; serial.force_pose_update=true; update_scene(serial,.9f);
+        require(serial.meshes[2].vertices[0].x!=42 && serial.meshes[2].revision>still && !serial.meshes[2].skin_pending);
+    }
     {
         Scene actions;actions.nodes.resize(1);actions.node_order={0};actions.actor_tables.libraries.resize(1);
         actions.actor_tables.libraries[0].clips={{2,2,0,"Rest",0,20,0,20,true},{1,2,0,"Move",4,6,4,6,true},{27,2,0,"Entry",10,11,10,11,false}};
