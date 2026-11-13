@@ -163,6 +163,33 @@ inline double advance_wind_phase(double phase, const SceneLighting& l, bool orig
     const float speed = std::isfinite(l.weather.wind_speed) ? std::clamp(l.weather.wind_speed, 0.f, 25.f) : 0.f;
     return std::fmod(phase + double(speed) * std::min(dt, 1.f), kWeatherPhasePeriod);
 }
+// NONCANONICAL wave 28: recent character footsteps for the enhanced weather surfaces (weather.glsl: rings in rain
+// puddles, prints pressed into snow cover). x/z world position (scene units), age seconds since the step, heading
+// radians of travel (atan2(dx, dz)), side -1 left foot / +1 right foot. EffectSystem::ground_marks() produces them from
+// actor movement; Renderer::set_ground_marks() uploads at most kMaxGroundMarks (newest first) for the next render().
+struct GroundMark { float x = 0, z = 0, age = 0, heading = 0, side = 1; };
+constexpr std::size_t kMaxGroundMarks = 64;
+// CPU mirror of weather.glsl weatherHash/weatherNoise/weatherPuddle for flat upward ground (up.y = 1): puddle coverage
+// 0..1 at world x/z for the given weather wetness. Must stay bit-for-bit in step with the shader (splashes, prints).
+inline float weather_hash(float cx, float cz) {
+    const auto qx = std::uint32_t(std::int32_t(std::floor(cx))), qz = std::uint32_t(std::int32_t(std::floor(cz)));
+    std::uint32_t n = (qx * 1597334677u) ^ (qz * 3812015801u);
+    n = (n ^ (n >> 15)) * 2246822519u;
+    return float(n >> 8) * (1.f / 16777216.f);
+}
+inline float weather_noise(float x, float z) {
+    const float ix = std::floor(x), iz = std::floor(z), fx = x - ix, fz = z - iz;
+    const float ux = fx*fx*(3 - 2*fx), uz = fz*fz*(3 - 2*fz);
+    const float a = weather_hash(ix, iz), b = weather_hash(ix + 1, iz), c = weather_hash(ix, iz + 1), d = weather_hash(ix + 1, iz + 1);
+    return (a + (b - a)*ux) + ((c + (d - c)*ux) - (a + (b - a)*ux))*uz;
+}
+inline float weather_puddle(float x, float z, float wetness) {
+    if (!(wetness > 0)) return 0;
+    wetness = std::min(wetness, 1.f);
+    const float m = weather_noise(x*.06f, z*.06f)*.65f + weather_noise(x*.23f, z*.23f)*.35f;
+    const float lo = .66f - .22f*wetness, hi = .72f - .22f*wetness, t = std::clamp((m - lo)/(hi - lo), 0.f, 1.f);
+    return wetness * t*t*(3 - 2*t);
+}
 // Mesh-space {lowest, highest} vertex y (wind sway weights vertices by height above the mesh base).
 inline std::array<float, 2> mesh_height_range(const Mesh& mesh) {
     float lo = INFINITY, hi = -INFINITY;
