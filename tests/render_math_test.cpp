@@ -219,5 +219,30 @@ int main() {
         try{ikv::parse_weather_override("kind=hail");}catch(const std::invalid_argument&){override_rejected=true;}
         assert(override_rejected&&!ikv::parse_weather_override(nullptr)&&!ikv::parse_weather_override(""));
     }
+    { // NONCANONICAL wave 28: puddle mirror (weather.glsl weatherPuddle) coverage and ground-mark packing
+        auto coverage=[](float wet){int covered=0;for(int i=0;i<400;++i)for(int j=0;j<400;++j)covered+=ikv::weather_puddle(float(i)*2.3f-410,float(j)*1.9f+57,wet)>.05f*wet;return float(covered)/160000.f;};
+        const float full=coverage(1),quarter=coverage(.25f),halfway=coverage(.5f);
+        assert(full>.08f&&full<.16f&&quarter<.04f&&quarter<halfway&&halfway<full); // occasional puddles, growing with wetness
+        assert(ikv::weather_puddle(3,4,0)==0&&ikv::weather_puddle(3,4,-1)==0&&ikv::weather_puddle(3,4,2)==ikv::weather_puddle(3,4,1));
+        // Regression lock of the shader formula (change both sides together): sampled values at known points.
+        assert(std::abs(ikv::weather_hash(3,-7)-.414270818f)<1e-7f);
+        assert(std::abs(ikv::weather_puddle(-23.04f,146.88f,1)-.52662307f)<1e-4f);
+        ikv::WeatherUniforms active;active.misc[3]=3;
+        const std::array<ikv::GroundMark,3> marks{{{10,-4,.5f,-1.f,-1},{12,-2,200,0,1},{11,-6,89,7.f,1}}};
+        const std::array<float,3> heights{2,2,3};
+        assert(ikv::ground_mark_uniforms({},marks,heights).info[0]==0); // inactive weather: nothing
+        const auto g=ikv::ground_mark_uniforms(active,marks,heights);
+        assert(g.info[0]==2&&g.bounds[0]==10-ikv::kGroundMarkReach&&g.bounds[1]==-6-ikv::kGroundMarkReach&&g.bounds[2]==11+ikv::kGroundMarkReach&&g.bounds[3]==-4+ikv::kGroundMarkReach);
+        auto decode=[](float w){const float v=std::abs(w)-1;return std::array<float,3>{std::floor(v/64)/64,(v-64*std::floor(v/64))*(6.2831853f/64),w<0?-1.f:1.f};};
+        const auto a=decode(g.marks[0][3]),b=decode(g.marks[1][3]);
+        assert(g.marks[0][0]==10&&g.marks[0][1]==-4&&g.marks[0][2]==2&&a[0]==.5f&&std::abs(a[1]-(6.2831853f-1))<.06f&&a[2]==-1);
+        assert(g.marks[1][2]==3&&std::abs(b[0]-89)<1.f/64&&std::abs(b[1]-(7-6.2831853f))<.06f&&b[2]==1);
+        ikv::GroundMarkTracker tracker(nullptr);
+        tracker.set(marks);
+        const std::array<ikv::RenderEntity,2> walkers{{{1,10.5f,7,-4,0,{}},{2,40,1,40,0,{}}}};
+        assert(tracker.uniforms(active,walkers,ikv::Camera{},0).marks[0][2]==7); // the nearest walker's ground
+        const std::array<ikv::RenderEntity,1> moved{{{1,40,9,40,0,{}}}};
+        assert(tracker.uniforms(active,moved,ikv::Camera{},0).marks[0][2]==7); // kept while the mark lives
+    }
     return 0;
 }

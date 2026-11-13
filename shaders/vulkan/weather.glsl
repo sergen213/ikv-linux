@@ -68,11 +68,13 @@ vec2 weatherRipple(vec2 p,float t,float density){
     }
     return slope;
 }
-// Puddles: flat upward ground collects water in ~4 m noise hollows, spreading with wetness.
+// Puddles: flat upward ground collects water in occasional ~4 m noise hollows, spreading with wetness.
+// NONCANONICAL wave 28: thresholds raised so full wetness floods ~12% of flat ground (was ~60%), ~2% at a quarter.
+// CPU mirror renderer.hpp weather_puddle (up.y = 1): keep both identical.
 float weatherPuddle(vec3 p,vec3 up,vec4 state){
     if(state.z<=0.0)return 0.0;
     float m=weatherNoise(p.xz*0.06)*0.65+weatherNoise(p.xz*0.23)*0.35;
-    return state.z*smoothstep(0.88,0.97,up.y)*smoothstep(0.66-0.22*state.z,0.72-0.22*state.z,m);
+    return state.z*smoothstep(0.88,0.97,up.y)*smoothstep(0.84-0.16*state.z,0.88-0.16*state.z,m);
 }
 // Rain running down vertical faces (walls, trunks, characters): streaks sliding down at ~1 m/s while it rains.
 float weatherStreak(vec3 p,vec3 up,float t,vec4 state){
@@ -82,29 +84,83 @@ float weatherStreak(vec3 p,vec3 up,float t,vec4 state){
     float streak=smoothstep(0.55,0.85,weatherNoise(vec2(u*3.0,p.y*0.3+t*4.0)))*smoothstep(0.3,0.6,weatherNoise(vec2(u*0.8,7.3)));
     return vertical*streak*min(state.x*1.5,1.0)*state.z;
 }
+// NONCANONICAL wave 28: recent character footsteps (renderer.hpp ground_mark_uniforms; info.x mark count, 0 = none:
+// callers skip this entirely). marks[i]: x,z world (units, the foot itself), y ground height, w packed: sign the foot
+// (+1 right, -1 left), |w|-1 = age (1/64 s steps)*64 + heading (64 steps of a turn, travel direction (sin h, cos h)).
+// bounds: xz min and max of every mark's reach. In a puddle (puddle) a step < 1.5 s old sends two expanding rings
+// (ripple: their xz slope); in snow cover (snow) it leaves a ~0.28 m foot print fading out over 30..85 s. Returns the
+// print depth 0..1 and in pressSlope its world xz gradient. Marks more than 2 units (0.5 m) off the ground height are
+// ignored (roofs, shoulders above the walker).
+float weatherSteps(vec3 p,bool snow,bool puddle,vec4 marks[64],vec4 info,vec4 bounds,out vec3 ripple,out vec2 pressSlope){
+    ripple=vec3(0.0);pressSlope=vec2(0.0);
+    float press=0.0;
+    if(!(snow||puddle)||any(lessThan(p.xz,bounds.xy))||any(greaterThan(p.xz,bounds.zw)))return 0.0;
+    for(int i=0;i<64;++i){
+        if(float(i)>=info.x)break;
+        vec4 m=marks[i];
+        vec2 d=p.xz-m.xy;
+        if(abs(p.y-m.z)>2.0||max(abs(d.x),abs(d.y))>4.0)continue;
+        float v=abs(m.w)-1.0,age=floor(v/64.0)/64.0,heading=(v-64.0*floor(v/64.0))*(6.28318530718/64.0),side=m.w<0.0?-1.0:1.0;
+        if(puddle&&age<1.5){
+            float r=length(d),fade=(1.0-age/1.5)*(1.0-age/1.5),a=r-age*2.2,b=r-age*1.4;
+            float wave=sin(a*10.5)*exp(-a*a*6.0)+0.6*sin(b*10.5)*exp(-b*b*8.0);
+            if(r>1e-3)ripple+=vec3(d/r*wave,abs(wave))*fade;
+        }
+        if(snow&&dot(d,d)<0.36){
+            vec2 f=vec2(sin(heading),cos(heading)),s=vec2(f.y,-f.x)*side; // s: away from the walk line
+            float u=dot(d,s),fv=dot(d,f); // u < 0: the instep side, narrowed at the arch
+            float hw=mix(0.15,0.21,smoothstep(-0.4,0.3,fv))*(u<0.0?1.0-0.35*exp(-(fv+0.05)*(fv+0.05)*30.0):1.0);
+            float e=length(vec2(u/hw,fv/0.56));
+            if(e>=1.0)continue;
+            float fade=1.0-smoothstep(30.0,85.0,age),depth=(1.0-smoothstep(0.7,1.0,e))*fade;
+            if(depth>press){
+                float t=clamp((e-0.7)/0.3,0.0,1.0);
+                vec2 g=(-6.0*t*(1.0-t)/0.3)*fade*vec2(u/(hw*hw),fv/0.3136)/max(e,1e-3);
+                press=depth;pressSlope=s*g.x+f*g.y;
+            }
+        }
+    }
+    return press;
+}
+// Snow colour, pressed (footprint) snow compacted and shadowed bluish grey.
+vec3 weatherSnowColor(float press){return mix(vec3(0.78,0.80,0.84),vec3(0.50,0.54,0.61),press);}
 // A weathered outdoor surface (enhanced lighting): albedo linear; n shading normal; up interpolated geometric normal;
 // p world position; roughness the dry value. Wet/streaked: darker and glossier; puddles: darker still, flat, mirror-like
 // and ringed by drops (as are other upward wet faces, faintly: splash flecks); snow: white and rough. directRoughness
 // floors the sun glint (glossy wet normal-mapped cobbles otherwise sparkle in single texels), except in puddles.
-struct WeatherSurface{vec3 albedo;vec3 normal;float roughness;float directRoughness;float snow;float wet;float puddle;};
-WeatherSurface weatherSurface(vec3 albedo,vec3 n,vec3 up,vec3 p,float roughness,float t,vec4 state,vec4 misc){
+// marks/markInfo/markBounds: footsteps (weatherSteps; NONCANONICAL wave 28): rings in puddles (stir), prints in snow (press).
+struct WeatherSurface{vec3 albedo;vec3 normal;float roughness;float directRoughness;float snow;float wet;float puddle;float press;float stir;};
+WeatherSurface weatherSurface(vec3 albedo,vec3 n,vec3 up,vec3 p,float roughness,float t,vec4 state,vec4 misc,vec4 marks[64],vec4 markInfo,vec4 markBounds){
     WeatherSurface w;
     w.snow=weatherSnow(p,up,state);
-    w.wet=max(weatherWet(up,w.snow,state),weatherStreak(p,up,t,state)*(1.0-w.snow));
     w.puddle=weatherPuddle(p,up,state)*(1.0-w.snow);
-    w.albedo=mix(weatherSeason(albedo,misc)*(1.0-0.45*w.wet)*(1.0-0.35*w.puddle),vec3(0.78,0.80,0.84),w.snow);
-    w.roughness=mix(mix(mix(roughness,mix(0.45,0.15,smoothstep(0.5,0.9,up.y)),w.wet),0.04,w.puddle),0.85,w.snow);
+    w.press=0.0;
+    vec3 stepRipple=vec3(0.0);vec2 pressSlope=vec2(0.0);
+    if(markInfo.x>0.5&&up.y>0.6){ // no marks (or walls): the exact wave-27 surface
+        float cover=smoothstep(0.0,0.2,w.snow); // no print without snow cover
+        w.press=weatherSteps(p,w.snow>0.0,w.puddle>0.0,marks,markInfo,markBounds,stepRipple,pressSlope)*cover;
+        pressSlope*=cover;
+        w.snow*=1.0-0.4*w.press; // compacted: the ground shows through a little
+    }
+    w.wet=max(weatherWet(up,w.snow,state),weatherStreak(p,up,t,state)*(1.0-w.snow));
+    w.albedo=mix(weatherSeason(albedo,misc)*(1.0-0.45*w.wet)*(1.0-0.35*w.puddle),weatherSnowColor(w.press),w.snow);
+    w.roughness=mix(mix(mix(roughness,mix(0.45,0.15,smoothstep(0.5,0.9,up.y)),w.wet),0.04,w.puddle),mix(0.85,0.55,w.press),w.snow);
+    w.stir=min(stepRipple.z,1.0)*w.puddle; // footstep rings: agitated, rougher water with lighter crests
+    w.roughness=mix(w.roughness,0.6,w.stir);w.albedo*=1.0+1.5*w.stir;
     w.directRoughness=max(w.roughness,mix(0.45,0.08,w.puddle));
     float rippleGain=state.x*smoothstep(0.6,0.9,up.y)*(0.2+0.8*w.puddle)*(1.0-w.snow);
     vec2 ripple=rippleGain>0.0?rippleGain*weatherRipple(p.xz,t,0.3+0.7*state.x):vec2(0.0); // dry: no ring evaluation
-    w.normal=normalize(mix(n,up,w.puddle)+0.5*vec3(ripple.x,0.0,ripple.y));
+    ripple+=2.0*w.puddle*stepRipple.xy;
+    w.normal=normalize(mix(n,up,w.puddle)+0.5*vec3(ripple.x,0.0,ripple.y)+0.1*vec3(pressSlope.x,0.0,pressSlope.y));
+    w.puddle*=1.0-0.6*w.stir; // ring crests break the puddle's mirror (callers' reflection gain)
     return w;
 }
-// The baked (original) light of the same surface under weather: tint, wetness and puddles; snow takes its light level.
+// The baked (original) light of the same surface under weather: tint, wetness and puddles; snow takes its light level
+// (footprints: compacted snow colour).
 vec3 weatherBaked(vec3 baked,vec3 sourceAlbedo,WeatherSurface w,vec4 misc){
     vec3 luma=vec3(0.2126,0.7152,0.0722);
     float level=clamp(dot(baked,luma)/max(dot(sourceAlbedo,luma),0.02),0.0,4.0);
-    return mix(weatherSeason(baked,misc)*(1.0-0.45*w.wet)*(1.0-0.35*w.puddle),vec3(0.78,0.80,0.84)*level,w.snow);
+    return mix(weatherSeason(baked,misc)*(1.0-0.45*w.wet)*(1.0-0.35*w.puddle)*(1.0+1.5*w.stir),weatherSnowColor(w.press)*level,w.snow);
 }
 // Storm lightning: a flickering flash about every 7 s, deterministic in t (seconds), shared by every backend.
 float weatherLightning(vec4 misc,float t){

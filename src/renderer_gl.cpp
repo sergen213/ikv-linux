@@ -213,6 +213,10 @@ uniform vec4 weather_wind;
 uniform vec4 weather_state;
 uniform vec4 weather_misc;
 uniform bool scene_fog;
+// NONCANONICAL wave 28 footsteps (renderer.hpp ground_mark_uniforms = Vulkan frame.groundMark*; count 0 = no marks).
+uniform vec4 weather_mark_info;
+uniform vec4 weather_mark_bounds;
+uniform vec4 weather_marks[64];
 uniform vec4 source_time;
 )GLSL" IKV_GL_WEATHER R"GLSL(
 // Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
@@ -386,7 +390,8 @@ void main() {
         bool weather=weatherOn(weather_misc);
         float direct_roughness=roughness,puddle=0.0;
         if(weather) {
-            WeatherSurface w=weatherSurface(albedo,n,nlength>0.00001?world_normal/nlength:n,fragment_position,roughness,source_time.y,weather_state,weather_misc);
+            WeatherSurface w=weatherSurface(albedo,n,nlength>0.00001?world_normal/nlength:n,fragment_position,roughness,source_time.y,weather_state,weather_misc,
+                weather_marks,weather_mark_info,weather_mark_bounds); // wave 28: footsteps
             baked=weatherBaked(baked,albedo,w,weather_misc)*weatherAmbientTint(weather_state,weather_misc,source_time.y);
             puddle=w.puddle;
             albedo=w.albedo;n=w.normal;roughness=w.roughness;direct_roughness=w.directRoughness;
@@ -656,6 +661,9 @@ class GlRenderer final : public Renderer {
     GLint weather_wind_location_=-1,weather_state_location_=-1,weather_misc_location_=-1,weather_sway_location_=-1,scene_fog_location_=-1;
     GLint shadow_wind_location_=-1,shadow_misc_location_=-1,shadow_sway_location_=-1,shadow_time_location_=-1;
     WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
+    // NONCANONICAL wave 28: footsteps (+ IKV_RENDER_GROUND_MARKS capture-only trail) and their scene-program uniforms.
+    GroundMarkTracker ground_marks_{std::getenv("IKV_RENDER_GROUND_MARKS")};
+    GLint mark_info_location_=-1,mark_bounds_location_=-1,marks_location_=-1;
     GLuint water_framebuffer_=0,water_textures_[2]{}; // NONCANONICAL enhanced water scene copy: colour, depth
     bool overlay_present_=false,rendered_=false,grayscale_=false;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
@@ -771,6 +779,8 @@ public:
             weather_wind_location_=uniform(program_,"weather_wind");weather_state_location_=uniform(program_,"weather_state");
             weather_misc_location_=uniform(program_,"weather_misc");weather_sway_location_=uniform(program_,"weather_sway");
             scene_fog_location_=uniform(program_,"scene_fog");
+            mark_info_location_=uniform(program_,"weather_mark_info");mark_bounds_location_=uniform(program_,"weather_mark_bounds");
+            marks_location_=uniform(program_,"weather_marks");
             glUseProgram_(program_); glUniform1i_(uniform(program_,"diffuse_map"),0);
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
@@ -934,6 +944,7 @@ public:
         overlay_present_=true;check("uploading HUD");
         progress();
     }
+    void set_ground_marks(std::span<const GroundMark> marks) override { ground_marks_.set(marks); }
     void set_particles(const ParticleFrame& frame) override {
         current();
         if(frame.textures.size()<particle_textures_.size()){glDeleteTextures(static_cast<GLsizei>(particle_textures_.size()),particle_textures_.data());particle_textures_.clear();}
@@ -980,6 +991,9 @@ public:
         glUniform4fv_(time_location_,1,source_time.data());
         glUniform4fv_(weather_wind_location_,1,weather_.wind.data());glUniform4fv_(weather_state_location_,1,weather_.weather.data());
         glUniform4fv_(weather_misc_location_,1,weather_.misc.data());glUniform1i_(scene_fog_location_,light.fog_enabled?1:0);
+        {const auto g=ground_marks_.uniforms(weather_,entities,options_.camera,source_time[1]);
+         glUniform4fv_(mark_info_location_,1,g.info.data());glUniform4fv_(mark_bounds_location_,1,g.bounds.data());
+         if(g.info[0]>0)glUniform4fv_(marks_location_,static_cast<GLsizei>(g.info[0]),g.marks[0].data());}
         if(shadow_program_) {
             glUseProgram_(shadow_program_);glUniform4fv_(shadow_wind_location_,1,weather_.wind.data());
             glUniform4fv_(shadow_misc_location_,1,weather_.misc.data());glUniform4fv_(shadow_time_location_,1,source_time.data());

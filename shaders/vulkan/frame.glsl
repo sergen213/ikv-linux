@@ -31,6 +31,10 @@ layout(set=0,binding=0,std140) uniform Frame {
     vec4 wind; // xy unit dir (world X/Z), z speed m/s, w accumulated wind phase in metres (renderer integrates speed*dt)
     vec4 weather; // x precipitation, y cloud cover, z wetness, w snow cover
     vec4 weatherMisc; // x fog density, y gust, z season index 0..3, w kind index+1 (0 = inactive)
+    // NONCANONICAL wave 28 footsteps (renderer.hpp ground_mark_uniforms; count 0 while inactive = the pre-wave paths):
+    vec4 groundMarkInfo; // x mark count (<= 64)
+    vec4 groundMarkBounds; // xz min, xz max (units) of every mark's reach
+    vec4 groundMarks[64]; // x,z world, y ground height, w packed age/heading/foot (weather.glsl weatherSteps)
 } frame;
 #include "weather.glsl"
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.

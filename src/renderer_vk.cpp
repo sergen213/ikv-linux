@@ -49,8 +49,10 @@ struct MemoryPool {
 struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkDeviceSize bytes=0;void* mapped=nullptr;std::shared_ptr<MemoryBlock> block; };
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc;};
-static_assert(sizeof(Frame)==592 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544);
+// NONCANONICAL wave 28: ground_mark_info/bounds/marks = frame.glsl groundMark* (renderer.hpp GroundMarkUniforms).
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;};
+static_assert(sizeof(Frame)==1648 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
+              offsetof(Frame,ground_mark_info)==592 && offsetof(Frame,ground_marks)==624 && kMaxGroundMarks==64);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
 static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128);
@@ -117,6 +119,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  // backdrop_: the scene clear colour (linear; weather_backdrop under weather).
  std::array<float,3> backdrop_{.04f,.05f,.065f};
  WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
+ GroundMarkTracker ground_marks_{std::getenv("IKV_RENDER_GROUND_MARKS")}; // NONCANONICAL wave 28 footsteps (+ capture-only trail)
  // IKV_GPU_TIMING: per slot one timestamp per TimingMark (wave 27: every pass, not only the scene pass); the 30-frame
  // averages are logged as "Vulkan gpu timing frames=30 scenePassMs=X <pass>Ms=..." (scenePassMs first and unchanged:
  // scene pass begin TOP_OF_PIPE to end BOTTOM_OF_PIPE). The other passes are the gaps between consecutive BOTTOM_OF_PIPE
@@ -1923,6 +1926,7 @@ void set_upscaling(Upscaler upscaler,FsrQuality quality,float sharpness,bool fra
     if(upscaler!=options_.upscaler||quality!=options_.fsr_quality||frame_generation!=options_.frame_generation)dirty_=true;
     options_.upscaler=upscaler;options_.fsr_quality=quality;options_.fsr_sharpness=sharpness;options_.frame_generation=frame_generation;
 }
+void set_ground_marks(std::span<const GroundMark> marks)override {ground_marks_.set(marks);}
 void set_particles(const ParticleFrame& frame)override {
     for(const auto& batch:frame.batches)
         if(batch.texture>=frame.textures.size()||batch.first>frame.vertices.size()||batch.count>frame.vertices.size()-batch.first||batch.count%6||
@@ -2185,6 +2189,8 @@ void set_particles(const ParticleFrame& frame)override {
      f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_params={shadow_cascades.split,0,0,0};f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
      f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
+     {const auto g=ground_marks_.uniforms(weather_,entities,options_.camera,float(source_ticks)*.001f);
+      f.ground_mark_info=g.info;f.ground_mark_bounds=g.bounds;f.ground_marks=g.marks;}
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
     // seconds, so gradual drift (2% per frame) is left to the resolve's variance clip and the deterministic Sun ray.

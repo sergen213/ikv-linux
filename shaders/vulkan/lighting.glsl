@@ -273,11 +273,13 @@ vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.
 if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));
-// NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl).
+// NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl);
+// NONCANONICAL wave 28: footstep rings in puddles and prints in snow (frame.groundMarks).
 bool weather=weatherOn(frame.weatherMisc);
 vec3 sourceAlbedo=albedo;float directRoughness=roughness;WeatherSurface weathered;
 if(weather) {
-    weathered=weatherSurface(albedo,n,dot(worldNormal,worldNormal)>1e-12?normalize(worldNormal):n,worldPosition,roughness,frame.sourceTime.y,frame.weather,frame.weatherMisc);
+    weathered=weatherSurface(albedo,n,dot(worldNormal,worldNormal)>1e-12?normalize(worldNormal):n,worldPosition,roughness,frame.sourceTime.y,frame.weather,frame.weatherMisc,
+        frame.groundMarks,frame.groundMarkInfo,frame.groundMarkBounds);
     albedo=weathered.albedo;n=weathered.normal;roughness=weathered.roughness;directRoughness=weathered.directRoughness;
 }
 float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=directRoughness*directRoughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(directRoughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;

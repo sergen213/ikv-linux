@@ -183,13 +183,106 @@ inline float weather_noise(float x, float z) {
     const float a = weather_hash(ix, iz), b = weather_hash(ix + 1, iz), c = weather_hash(ix, iz + 1), d = weather_hash(ix + 1, iz + 1);
     return (a + (b - a)*ux) + ((c + (d - c)*ux) - (a + (b - a)*ux))*uz;
 }
+// NONCANONICAL wave 28: ~12% of flat ground at full wetness (weather.glsl weatherPuddle thresholds).
 inline float weather_puddle(float x, float z, float wetness) {
     if (!(wetness > 0)) return 0;
     wetness = std::min(wetness, 1.f);
     const float m = weather_noise(x*.06f, z*.06f)*.65f + weather_noise(x*.23f, z*.23f)*.35f;
-    const float lo = .66f - .22f*wetness, hi = .72f - .22f*wetness, t = std::clamp((m - lo)/(hi - lo), 0.f, 1.f);
+    const float lo = .84f - .16f*wetness, hi = .88f - .16f*wetness, t = std::clamp((m - lo)/(hi - lo), 0.f, 1.f);
     return wetness * t*t*(3 - 2*t);
 }
+// NONCANONICAL wave 28: GroundMarks as shader inputs (Vulkan frame.glsl groundMark*, OpenGL weather_mark* uniforms;
+// decoded by weather.glsl weatherSteps). info x: count; bounds: xz min/max of every mark's reach (kGroundMarkReach);
+// marks: x, z, ground height y, w = foot sign * (floor(age*64)*64 + heading in 64ths of a turn + 1). All zero (no marks:
+// the wave-27 surface) while weather is inactive. Marks older than kGroundMarkLife (prints faded) or non-finite drop.
+constexpr float kGroundMarkLife = 90, kGroundMarkReach = 4;
+struct GroundMarkUniforms {
+    std::array<float, 4> info{}, bounds{};
+    std::array<std::array<float, 4>, kMaxGroundMarks> marks{};
+};
+inline float pack_ground_mark(float age, float heading, float side) {
+    constexpr float turn = 6.2831853f;
+    float h = std::fmod(heading, turn); if (h < 0) h += turn;
+    const float step = std::fmod(std::round(h / turn * 64), 64.f);
+    return (side < 0 ? -1.f : 1.f) * (std::floor(std::clamp(age, 0.f, kGroundMarkLife) * 64) * 64 + step + 1);
+}
+// heights: each mark's ground height (same order as marks).
+inline GroundMarkUniforms ground_mark_uniforms(const WeatherUniforms& u, std::span<const GroundMark> marks, std::span<const float> heights) {
+    GroundMarkUniforms g;
+    if (!u.active()) return g;
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < marks.size() && i < heights.size() && n < kMaxGroundMarks; ++i) {
+        const auto& m = marks[i];
+        if (!std::isfinite(m.x) || !std::isfinite(m.z) || !std::isfinite(m.age) || !std::isfinite(m.heading) || !std::isfinite(heights[i]) ||
+            m.age < 0 || m.age >= kGroundMarkLife) continue;
+        if (n == 0) g.bounds = {m.x, m.z, m.x, m.z};
+        g.bounds = {std::min(g.bounds[0], m.x), std::min(g.bounds[1], m.z), std::max(g.bounds[2], m.x), std::max(g.bounds[3], m.z)};
+        g.marks[n++] = {m.x, m.z, heights[i], pack_ground_mark(m.age, m.heading, m.side)};
+    }
+    if (n) g.bounds = {g.bounds[0] - kGroundMarkReach, g.bounds[1] - kGroundMarkReach, g.bounds[2] + kGroundMarkReach, g.bounds[3] + kGroundMarkReach};
+    g.info[0] = float(n);
+    return g;
+}
+// Per-renderer footstep state: Renderer::set_ground_marks() stores the marks; at render() each mark new since the last
+// frame takes its ground height from the nearest entity (the walker, kGroundMarkReach*2 units), else the camera target,
+// and keeps it while it lives. debug (IKV_RENDER_GROUND_MARKS, capture-only, any non-empty value): replaces the marks
+// by a fabricated 24-step trail across the view through the camera target (in rain moved onto the nearest puddle,
+// weather_puddle), the six newest stepping again every 1.5 s so their rings animate.
+class GroundMarkTracker {
+public:
+    explicit GroundMarkTracker(const char* debug) : debug_(debug && *debug) {}
+    void set(std::span<const GroundMark> marks) { marks_.assign(marks.begin(), marks.begin() + std::ptrdiff_t(std::min(marks.size(), kMaxGroundMarks))); }
+    GroundMarkUniforms uniforms(const WeatherUniforms& u, std::span<const RenderEntity> entities, const Camera& camera, float seconds) {
+        if (!u.active()) { heights_.clear(); return {}; }
+        if (debug_) fabricate(u, camera, seconds);
+        float fallback = camera.target[1];
+        if (debug_) { // the fabricated trail lies on the ground of the entity nearest the camera target (the player)
+            float best = INFINITY;
+            for (const auto& e : entities) {
+                const float dx = e.x - camera.target[0], dz = e.z - camera.target[2], d = dx*dx + dz*dz;
+                if (std::isfinite(e.ground_y) && d < best) { best = d; fallback = e.ground_y; }
+            }
+        }
+        std::vector<std::array<float, 3>> next;
+        next.reserve(marks_.size());
+        std::vector<float> heights;
+        heights.reserve(marks_.size());
+        for (const auto& m : marks_) {
+            float y = fallback, best = 4*kGroundMarkReach*kGroundMarkReach;
+            bool known = false;
+            for (const auto& h : heights_) if (h[0] == m.x && h[1] == m.z) { y = h[2]; known = true; break; }
+            if (!known) for (const auto& e : entities) {
+                const float dx = e.x - m.x, dz = e.z - m.z, d = dx*dx + dz*dz;
+                if (std::isfinite(e.ground_y) && d < best) { best = d; y = e.ground_y; }
+            }
+            next.push_back({m.x, m.z, y});
+            heights.push_back(y);
+        }
+        heights_ = std::move(next);
+        return ground_mark_uniforms(u, marks_, heights);
+    }
+private:
+    void fabricate(const WeatherUniforms& u, const Camera& camera, float seconds) {
+        float cx = camera.target[0], cz = camera.target[2];
+        if (u.weather[2] > 0 && u.weather[3] <= 0) { // rain: centre the trail on the nearest puddle
+            float best = INFINITY;
+            for (int i = -40; i <= 40; ++i) for (int j = -40; j <= 40; ++j) {
+                const float x = camera.target[0] + float(i), z = camera.target[2] + float(j), d = float(i*i + j*j);
+                if (d < best && weather_puddle(x, z, u.weather[2]) > .9f*u.weather[2]) { best = d; cx = x; cz = z; }
+            }
+        }
+        const float heading = camera.yaw + 1.5707963f, fx = std::sin(heading), fz = std::cos(heading);
+        marks_.clear();
+        for (int i = 0; i < 24; ++i) { // newest first, the walker heading +f, strides 2.8 units, feet 0.48 off the line
+            const float along = 8.f - 2.8f*float(i), side = i % 2 ? -1.f : 1.f;
+            const float age = i < 6 ? std::fmod(seconds + .25f*float(i), 1.5f) : 4.f*float(i - 5);
+            marks_.push_back({cx + fx*along + fz*.48f*side, cz + fz*along - fx*.48f*side, age, heading, side});
+        }
+    }
+    bool debug_ = false;
+    std::vector<GroundMark> marks_;
+    std::vector<std::array<float, 3>> heights_; // x, z, ground y of the marks last uploaded
+};
 // Mesh-space {lowest, highest} vertex y (wind sway weights vertices by height above the mesh base).
 inline std::array<float, 2> mesh_height_range(const Mesh& mesh) {
     float lo = INFINITY, hi = -INFINITY;
@@ -442,6 +535,9 @@ public:
     // Uploads billboards for the next render(): non-AfterHDR batches after scene alpha (glow input), AfterHDR batches after
     // the glow composite, both before HUD; alpha is fogged like v_particles.vsh. Caller may mutate the frame afterwards.
     virtual void set_particles(const ParticleFrame&) = 0;
+    // NONCANONICAL wave 28: footsteps for the next render()'s enhanced weather surfaces (GroundMarkTracker; newest first,
+    // at most kMaxGroundMarks used). Caller may mutate them afterwards.
+    virtual void set_ground_marks(std::span<const GroundMark>) = 0;
     // Original death view (VOD 34:00): desaturates the 3D scene and particles for following render() calls; HUD stays in colour.
     virtual void set_grayscale(bool) = 0;
     // Vulkan applies upscaler/quality/sharpness/frame generation from the next render() (targets rebuilt on change);

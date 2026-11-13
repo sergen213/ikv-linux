@@ -233,6 +233,14 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-13 wave 28 (surfaces): fewer puddles, footsteps in puddles and snow
+
+User request: puddles were far too widespread and walking through them caused nothing; characters should leave footprints in snow cover. NONCANONICAL, enhanced appearance only; inactive weather, original appearance and roofed zones keep the exact pre-wave paths.
+
+- **Puddles:** `weather.glsl weatherPuddle` (and its CPU mirror `renderer.hpp weather_puddle`, kept identical) now floods ~13 % of flat ground at full wetness (was ~62 %), ~2 % at a quarter. `render-math` checks the mirror's coverage and locks sampled values.
+- **Footsteps:** `Renderer::set_ground_marks()` (GL + Vulkan; `GroundMarkTracker`/`ground_mark_uniforms` in `renderer.hpp`) uploads up to 64 marks (Vulkan `Frame` grows to 1648 bytes: `groundMarkInfo/Bounds/groundMarks[64]`; GL `weather_mark*` uniforms) with each mark's ground height taken from the nearest entity when it appears. `weatherSteps` in `weatherSurface`: a step < 1.5 s old in a puddle sends two expanding rings (normal slope, rougher brighter crests, broken mirror); in snow cover each mark presses a ~0.28 m oriented, left/right-mirrored foot print (compacted bluish snow, rim normals) that fades over 30–85 s; `weatherBaked` uses the same masks. Cost bounded by a mark-bounds rectangle, per-mark 4-unit/0.5 m-height culling and the no-marks early-out.
+- **Capture-only:** `IKV_RENDER_GROUND_MARKS=1` replaces the marks by a fabricated 24-step trail through the camera target (in rain moved onto the nearest puddle). Evidence: `analysis/porting-wave28/Surfaces/` (`coverage-before-after.png` puddle coverage 0.13.0 vs wave 28, `rain-puddle-low/` rings, `snow-close/` and `after-marks/winter-snow/` prints; GL and Vulkan match).
+
 ## 2026-11-12 wave 27: seasons, weather and wind
 
 User request: a wind system that moves water and the environment, and weather for every season; later feedback: raindrops must interact with characters, objects and water, and the lighting must change with every weather. All of it is NONCANONICAL (the original game had no weather) and visible only with the enhanced appearance; original appearance draws exactly what it drew before.
