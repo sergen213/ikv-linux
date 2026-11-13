@@ -50,8 +50,8 @@ struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HAN
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
 // NONCANONICAL wave 28: ground_mark_info/bounds/marks = frame.glsl groundMark* (renderer.hpp GroundMarkUniforms).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;};
-static_assert(sizeof(Frame)==1648 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;std::array<float,4> ocean_shore,ocean_bed;};
+static_assert(sizeof(Frame)==1680 && offsetof(Frame,ocean_shore)==1648 && offsetof(Frame,ocean_bed)==1664 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
               offsetof(Frame,ground_mark_info)==592 && offsetof(Frame,ground_marks)==624 && kMaxGroundMarks==64);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;};
@@ -100,7 +100,7 @@ class VulkanRenderer final:public Renderer {
 // (copy_water, bindings 12/13), and water_pass_ continuing the scene pass with writable depth. water_ready_: in a sampled
 // layout (every scene draw binds them, also before the first copy).
 Image water_color_,water_depth_;VkRenderPass water_pass_=VK_NULL_HANDLE;bool water_ready_=false;
-static constexpr std::uint32_t scene_images=14; // combined image samplers per frame/material descriptor set
+static constexpr std::uint32_t scene_images=15; // combined image samplers per frame/material descriptor set
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
  // 2 motion (RG16F previousUV-UV, FSR or RT denoise), 3/4 RT illumination/reflection history, 5 FSR reactive (R8).
  std::vector<VkFormat> scene_colors_,after_colors_,temporal_colors_{VK_FORMAT_R16G16B16A16_SFLOAT};
@@ -160,8 +160,12 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      std::size_t instance_count=0;
      bool loaded=false;
      std::vector<DrawItem> draws;std::size_t visible_draws=0; // draws[0,visible_draws): colour, sorted
+     // NONCANONICAL wave 28: the ocean bed grid's shore field (renderer.hpp ocean_shore_field; binding 15, Frame ocean_shore
+     // = its grid, ocean_bed.x = the water level), built with the first ocean wave copy.
+     Image ocean_shore;std::array<float,4> ocean_shore_grid{};float ocean_shore_level=0;
  };
  std::unique_ptr<SceneSet> set_;
+ const Image* shore_map_=nullptr; // set_'s ocean_shore for material sets written by descriptors(); null: white
  bool overlay_visible_=false,rt_enabled_=false,denoise_enabled_=false,fsr_supported_=false,dirty_=true,rendered_=false,grayscale_=false;
  bool bc_supported_=false; // BC1/2/3 sampled natively (textureCompressionBC + linear filtering)
  // Original lighting equation (lighting.glsl originalSurface, display-referred, fog, lightmaps, glow): original appearance
@@ -208,6 +212,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      set.rt_pool=VK_NULL_HANDLE;set.rt.reset();
      for(auto& g:set.geometry)destroy(g);
      for(auto& t:set.textures)destroy(t);
+     destroy(set.ocean_shore);set.ocean_shore_grid={};set.ocean_shore_level=0;shore_map_=nullptr;
      set.geometry.clear();set.textures.clear();
  }
  void progress()const {if(options_.progress)options_.progress();}
@@ -720,6 +725,21 @@ Image upload(std::uint32_t w,std::uint32_t h,const std::uint8_t* pixels,
     if(!batch)destroy(staging);
     return i;
 }
+// One-level RG8 image through the scene upload batch (NONCANONICAL wave 28 ocean shore field).
+Image upload_rg8(std::uint32_t w,std::uint32_t h,const std::vector<std::uint8_t>& pixels,UploadBatch& batch) {
+    if(!w||!h||pixels.size()!=std::size_t(w)*h*2)throw std::runtime_error("invalid ocean shore field");
+    Image i=image(w,h,VK_FORMAT_R8G8_UNORM,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_COLOR_BIT,1,batch.pool);
+    try {
+        const Staged source=batch.stage(pixels.data(),pixels.size());
+        VkBufferImageCopy copy{};copy.bufferOffset=source.offset;copy.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.imageExtent={w,h,1};
+        barrier(batch.command,i.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_IMAGE_ASPECT_COLOR_BIT,1);
+        vkCmdCopyBufferToImage(batch.command,source.handle,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+        barrier(batch.command,i.handle,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,VK_IMAGE_ASPECT_COLOR_BIT,1);
+    } catch(...) {destroy(i);throw;}
+    return i;
+}
 // Scene/particle textures: authored BC blocks stay compressed when the device samples BC (bc_supported_); otherwise they
 // decode to RGBA8 exactly like the CPU decoder.
 Image upload_texture(const Texture& t,UploadBatch* batch=nullptr) {
@@ -1090,7 +1110,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      if(depth_features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
      sampler.compareEnable=VK_TRUE;sampler.compareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
      checked(vkCreateSampler(device_,&sampler,nullptr,&shadow_compare_),"shadow compare sampler");
-     // Image bindings 1..14 (write_set): 10/11 temporal guides (white without denoise), 12/13 the water copy, 14 parallax height.
+     // Image bindings 1..15 (write_set): 10/11 temporal guides (white without denoise), 12/13 the water copy, 14 parallax height,
+     // 15 the ocean shore field (shore_map_).
      std::array<VkDescriptorSetLayoutBinding,scene_images+1> bindings{};
      bindings[0]={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
      const std::uint32_t binding_count=scene_images+1;
@@ -1384,7 +1405,8 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,6>* bound,unsig
                const Image* input_diffuse=nullptr,const Image* input_reflection=nullptr) {
      VkDescriptorBufferInfo buffer_info{uniform_.handle,0,sizeof(Frame)};
      std::array<VkDescriptorImageInfo,scene_images> images{};
-     const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_};
+     const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_,
+         bound&&shore_map_?shore_map_:&white_};
      if(post)maps[0]=&hdr_[history];
      else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];maps[13]=(*bound)[5];}
     if(diffuse)maps[0]=diffuse;
@@ -1400,7 +1422,7 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,6>* bound,unsig
      writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
      writes[0].pBufferInfo=&buffer_info;
      for(unsigned i=0;i<image_count;++i) {
-         images[i]={i==4?shadow_compare_:i==6||i==9||i==10||i==12?shadow_sampler_:i==5||i==7||i==11||(post&&i<2)?linear_clamp_:sampler_,
+         images[i]={i==4?shadow_compare_:i==6||i==9||i==10||i==12?shadow_sampler_:i==5||i==7||i==11||i==14||(post&&i<2)?linear_clamp_:sampler_,
              maps[i]->view,i==4||i==6?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
          writes[i+1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i+1].dstSet=set;writes[i+1].dstBinding=i+1;
          writes[i+1].descriptorCount=1;writes[i+1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1471,6 +1493,7 @@ void clear_material_sets(SceneSet& set) {
      progress();
      const Scene& scene=*set.scene;
      set.material_usage=scene_material_usage(scene);
+     shore_map_=set.ocean_shore.view?&set.ocean_shore:nullptr; // material sets bind it (write_set)
      progress();
      const std::uint32_t materials=static_cast<std::uint32_t>(std::max<std::size_t>(1,scene.materials.size()));
      std::size_t kept=0;
@@ -1630,7 +1653,11 @@ void clear_material_sets(SceneSet& set) {
          new_meshes+=upload_mesh(g,s.meshes[mesh_index],used[mesh_index],batch);
          if(!ocean.empty()&&ocean[mesh_index]&&used[mesh_index]==2&&!g.wave_vertices.handle) {
              Geometry wave;
-             if(!bed)bed=ocean_bed(s);
+             if(!bed) {
+                 bed=ocean_bed(s);
+                 const auto field=ocean_shore_field(*bed);
+                 if(!set.ocean_shore.handle&&!field.texels.empty()){set.ocean_shore=upload_rg8(field.width,field.depth,field.texels,batch);set.ocean_shore_grid=field.grid;set.ocean_shore_level=field.level;}
+             }
              if(upload_mesh(wave,ocean_wave_mesh(s,mesh_index,*bed),2,batch)) {
                  g.wave_vertices=std::exchange(wave.vertices,Buffer{});g.wave_indices=std::exchange(wave.indices,Buffer{});g.wave_count=wave.count;
              }
@@ -2222,6 +2249,7 @@ void set_particles(const ParticleFrame& frame)override {
      f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
      {const auto g=ground_marks_.uniforms(weather_,entities,options_.camera,float(source_ticks)*.001f);
       f.ground_mark_info=g.info;f.ground_mark_bounds=g.bounds;f.ground_marks=g.marks;}
+     f.ocean_shore=scene_set.ocean_shore_grid;f.ocean_bed={scene_set.ocean_shore_level,0,0,0};
     // Environment/source shading jumps invalidate all history; camera and skins do not. The day clock moves the
     // Sun/ambient/fog a little every game minute: resetting on each step re-noised the whole RT image every few
     // seconds, so gradual drift (2% per frame) is left to the resolve's variance clip and the deterministic Sun ray.

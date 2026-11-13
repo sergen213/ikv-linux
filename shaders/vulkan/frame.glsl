@@ -35,6 +35,10 @@ layout(set=0,binding=0,std140) uniform Frame {
     vec4 groundMarkInfo; // x mark count (<= 64)
     vec4 groundMarkBounds; // xz min, xz max (units) of every mark's reach
     vec4 groundMarks[64]; // x,z world, y ground height, w packed age/heading/foot (weather.glsl weatherStep)
+    // NONCANONICAL wave 28: the ocean shore field's grid (renderer.hpp ocean_shore_field: x0, z0, 1/(cell x width),
+    // 1/(cell x depth); lighting.glsl waterShoreField), zero without one; oceanBed.x the water level.
+    vec4 oceanShore;
+    vec4 oceanBed;
 } frame;
 #include "weather.glsl"
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.
