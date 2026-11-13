@@ -541,6 +541,8 @@ def admin_web(services, users, characters):
     for path, body in (("/v1/admin/world", {"command": "shell", "message": "x"}), ("/v1/admin/world", {"command": "announce", "message": ""}),
                        ("/v1/admin/world", {"command": "announce", "message": "line\nbreak"}), ("/v1/admin/world", {"command": "kick"}),
                        ("/v1/admin/world", {"command": "clock", "hour": 24}), ("/v1/admin/control", {"command": "restart", "delay_seconds": 3601}),
+                       ("/v1/admin/world", {"command": "weather"}), ("/v1/admin/world", {"command": "weather", "kind": "hail"}),
+                       ("/v1/admin/world", {"command": "weather", "season": "monsoon"}), ("/v1/admin/world", {"command": "weather", "kind": "rain", "minutes": 0}),
                        ("/v1/admin/world", {"command": "give_item", "character_id": aid, "item": "healing_tonic", "quantity": 0}),
                        ("/v1/admin/world", {"command": "currency", "character_id": aid, "amount": 0}),
                        ("/v1/admin/world", {"command": "give_kit", "character_id": aid, "kit": "weapons"}),
@@ -570,6 +572,13 @@ def admin_web(services, users, characters):
         assert services.sql(f"SELECT result->>'ok' FROM world_commands WHERE id={command_id}") == "true"
         assert abs(admin_command(services, admin, "/v1/admin/world", {"command": "clock", "hour": 3})["clock_hour"] - 3) < 0.05
         assert first.until(lambda kind, body: kind == 6 and "clock" in body and abs(body["clock"]["hour"] - 3) < 0.05)
+        # NONCANONICAL wave 27: the admin weather command travels through world_commands (migration 008) and every state
+        # frame's clock carries the server weather.
+        forced = admin_command(services, admin, "/v1/admin/world", {"command": "weather", "kind": "snow", "instant": True})
+        assert forced["ok"] and forced["weather"]["kind"] == "snow" and forced["forced"]["kind"] == "snow" and forced["weather"]["temperature"] < 2
+        frame = first.until(lambda kind, body: kind == 6 and body.get("clock", {}).get("weather", {}).get("kind") == "snow")
+        print("clock.weather sample:", json.dumps(frame["clock"]["weather"], sort_keys=True), flush=True)
+        assert admin_command(services, admin, "/v1/admin/world", {"command": "weather", "kind": "auto"})["forced"]["kind"] is None
         applied = admin_command(services, admin, "/v1/admin/settings", {"xp_rate": 200, "drop_rate": 100, "regen_rate": 100, "disabled_zones": ["old_town", "missing_zone"]})
         assert applied["ok"] and applied["unknown_zones"] == ["missing_zone"]
         assert services.api("GET", "/v1/admin/settings", session=admin, admin=True)["settings"]["disabled_zones"] == ["missing_zone", "old_town"]

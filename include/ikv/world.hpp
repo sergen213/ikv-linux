@@ -34,7 +34,7 @@ public:
     Json recipe_book(uint32_t id) const;
     Json bank_view(uint32_t id) const;
     Json status() const;
-    // Private web administration command (announce/kick/teleport/summon/clock/respawn/settings); throws
+    // Private web administration command (announce/kick/teleport/summon/clock/weather/respawn/settings); throws
     // std::invalid_argument with "code: message" when refused. NONCANONICAL operator tooling.
     Json admin(const std::string& command, const Json& arguments);
     void save_all();
@@ -139,6 +139,22 @@ private:
     std::set<std::string> disabled_zones_;
     double clock_offset_ = 0;
     double clock_hour() const;
+    // NONCANONICAL wave 27 seasons/weather/wind (src/world_weather.cpp): smoothed state sent as clock.weather. Kinds index
+    // clear, cloudy, rain, storm, snow, fog; seasons spring, summer, autumn, winter; forced_*: admin "weather" override (-1 none).
+    struct Weather { int kind = 0, shown = 0, forced_kind = -1, forced_season = -1; uint32_t forced_until = 0; double precipitation = 0, cloud = 0, fog = 0, wetness = 0, snow = 0, temperature = 15, wind_angle = 0, wind_speed = 0; };
+    struct WeatherTarget { int kind; double precipitation, cloud, fog, wind, temperature, angle; };
+    Weather weather_;
+    double weather_origin_ = 0; // absolute in-game minute at tick 0 (weather.start_day or the wall clock)
+    void weather_validate() const;
+    void weather_start(); // origin + 48 in-game hour warm start
+    void weather_tick();
+    double weather_minute() const;
+    int weather_season(double minute) const;
+    WeatherTarget weather_target(double minute) const;
+    void weather_step(double minute, double minutes);
+    Json weather_json() const;
+    Json weather_admin(const Json& arguments);
+    Json weather_forced() const; // admin override {kind, season, until_tick}, nulls when none
     void kick(uint32_t id, uint32_t by);
     Actor& actor(uint32_t id);
     void emit(uint32_t id, Json event);

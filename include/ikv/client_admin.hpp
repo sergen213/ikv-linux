@@ -74,6 +74,8 @@ public:
     std::optional<Json> announce();
     std::optional<Json> clock();
     std::optional<Json> respawn() const;
+    // NONCANONICAL wave 27: force a weather kind or season at once ("auto" returns to the simulation).
+    static Json weather(std::string_view key, std::string_view value) { return request("weather", Json{{std::string(key), std::string(value)}, {"instant", true}}); }
     // Setler: kits previews the level-appropriate sets; give_kit hands one ("equipment" honours kit_equip). A blank level
     // field leaves "level" out, so the server uses the target's own level.
     std::optional<Json> preview_kits();

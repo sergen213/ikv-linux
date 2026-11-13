@@ -273,6 +273,10 @@ std::optional<Json> ClientAdmin::receive(const Json& event) {
         else if (command == "announce") status_ = "Duyuru gönderildi (" + std::to_string(integer(result, "recipients")) + " alıcı).";
         else if (command == "respawn") status_ = std::to_string(integer(result, "respawned")) + " NPC canlandırıldı.";
         else if (command == "clock") status_ = "Oyun saati ayarlandı.";
+        else if (command == "weather") { // NONCANONICAL wave 27
+            const auto it = result.find("weather"); const Json& w = it != result.end() && it->is_object() ? *it : none;
+            status_ = "Hava: " + string(w, "kind") + ", mevsim: " + string(w, "season") + ".";
+        }
         else if (command == "give_kit") {
             const auto given = array(result, "items").size(), worn = array(result, "equipped").size();
             status_ = "Set verildi: " + std::to_string(given) + " eşya" + (worn ? ", " + std::to_string(worn) + " kuşanıldı." : std::string("."));

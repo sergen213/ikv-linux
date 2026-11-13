@@ -10,6 +10,7 @@
 #include <charconv>
 #include <cmath>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <numeric>
 #include <sstream>
@@ -418,6 +419,7 @@ void EffectSystem::attach_scene(const Scene& scene) {
         }
     }
     scene_ = &scene;
+    surface_ = {}; // NONCANONICAL wave 27: the weather surface grid is rebuilt for the new scene on first use
 }
 
 void EffectSystem::step(Emitter& e, float dt, std::array<float, 3> from) {
@@ -554,6 +556,7 @@ void EffectSystem::update(float dt, std::span<const RenderEntity> entities) {
         step(e, dt, e.follow ? e.origin : from);
     }
     std::erase_if(projectiles_, [](const Projectile& p) { return p.done; });
+    weather_update(dt);
     // 0049a520: finished when emission is exhausted or stopped and no particle remains (-1 never exhausts).
     std::erase_if(emitters_, [](const Emitter& e) {
         return e.particles.empty() && (e.stopped || (e.remaining != -1 && e.remaining < 1));
@@ -657,7 +660,267 @@ const ParticleFrame& EffectSystem::frame(const Camera& camera) {
         }
         frame_.batches.back().count = static_cast<std::uint32_t>(frame_.vertices.size()) - frame_.batches.back().first;
     }
+    weather_frame(basis, camera);
     return frame_;
+}
+
+// NONCANONICAL wave 27 weather (the original game had none). Scene scale: 4 units = 1 m (shared water.glsl kWaterM).
+namespace {
+constexpr float weather_metre = 4, weather_radius = 34, weather_top = 32, weather_bottom = -8;
+constexpr float actor_top = 7, actor_radius = 1.1f; // a source actor stands ~7.5 units; drops end on heads and shoulders
+constexpr std::size_t splash_cap = 3500;
+enum : std::uint8_t { splash_droplet, splash_ring, splash_settled, splash_mist };
+bool falls_as_rain(WeatherKind k) { return k == WeatherKind::rain || k == WeatherKind::storm; }
+// Procedural RGBA8 textures: the original fx art has no single-drop/flake/ripple sprite with usable alpha (yagmur.dds is a sheet
+// of streaks, particle02/13 are opaque-alpha additive blobs), so a soft vertical streak, a round flake and a ripple ring are
+// generated here.
+Texture weather_texture(unsigned which) {
+    const std::uint32_t w = which == 0 ? 8 : 32, h = which == 0 ? 64 : 32;
+    Texture t; t.name = which == 0 ? "weather/streak" : which == 1 ? "weather/flake" : "weather/ring"; t.width = w; t.height = h;
+    t.format = assets::DdsFormat::rgba8; t.source_path = "procedural (NONCANONICAL wave 27)"; t.data.resize(std::size_t(w) * h * 4);
+    for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) {
+        float a;
+        const float r = std::hypot(static_cast<float>(x) - 15.5f, static_cast<float>(y) - 15.5f) / 15.5f;
+        if (which == 1) a = std::pow(std::clamp(1 - r, 0.f, 1.f), 1.5f);
+        else if (which == 2) a = std::exp(-(r - .75f) * (r - .75f) / (.12f * .12f));
+        else { const float across = 1 - std::abs(static_cast<float>(x) - 3.5f) / 4; a = across * across * std::sin(3.1415927f * (static_cast<float>(y) + .5f) / static_cast<float>(h)); }
+        auto* p = &t.data[(std::size_t(y) * w + x) * 4];
+        p[0] = p[1] = p[2] = 255; p[3] = static_cast<std::uint8_t>(std::lround(std::clamp(a, 0.f, 1.f) * 255));
+    }
+    t.mips = {{w, h, 0, t.data.size()}};
+    return t;
+}
+}
+
+void ease_weather(SceneWeather& c, const SceneWeather& t, float dt) {
+    if (!c.active || !t.active) { c = t; return; } // the first clock.weather shows at once
+    const float k = 1 - std::exp(-std::max(dt, 0.f) / 1.5f);
+    for (auto [v, to] : std::initializer_list<std::pair<float*, float>>{{&c.wind_speed, t.wind_speed}, {&c.gust, t.gust}, {&c.precipitation, t.precipitation}, {&c.cloud_cover, t.cloud_cover},
+                         {&c.fog_density, t.fog_density}, {&c.wetness, t.wetness}, {&c.snow_cover, t.snow_cover}, {&c.temperature, t.temperature}})
+        *v += (to - *v) * k;
+    const std::array<float, 2> d{c.wind_direction[0] + (t.wind_direction[0] - c.wind_direction[0]) * k, c.wind_direction[1] + (t.wind_direction[1] - c.wind_direction[1]) * k};
+    const float length = std::hypot(d[0], d[1]);
+    c.wind_direction = length > 1e-3f ? std::array<float, 2>{d[0] / length, d[1] / length} : t.wind_direction;
+    c.season = t.season; c.kind = t.kind;
+}
+
+// Coarse top-down surface grid of the zone: per cell (≤2048² cells, ≥1 unit) the highest drawn static geometry and whether that
+// top surface is water (ocean instances / source_ocean materials). Built once per scene on the first enabled weather frame, so
+// the original appearance never pays for it. Triangles stamp the cells whose centres they cover (interpolated height); triangles
+// covering no centre (walls, slivers, small props) stamp their vertices' cells. Roofs and overhangs therefore stop drops above
+// whatever stands under them. Animated and entity instances are not part of it (actors are tested from the entity list).
+void EffectSystem::build_surface() {
+    surface_ = {}; surface_.built = true;
+    if (!scene_) return;
+    const auto& s = *scene_;
+    const auto usable = [&](const Instance& in) {
+        return in.entity_id == 0 && !in.occlusion_proxy && !in.sky && in.mesh < s.meshes.size() && scene_source_color_draw(s, in.mesh, in.material, in.source_ordinary_color_participates);
+    };
+    const auto world = [](const float* m, const Vertex& v) { return std::array<float, 3>{m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12], m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13], m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14]}; };
+    float lo[2]{INFINITY, INFINITY}, hi[2]{-INFINITY, -INFINITY};
+    for (const auto& in : s.instances) if (usable(in)) for (const auto& v : s.meshes[in.mesh].vertices) {
+        const auto p = world(in.transform.matrix.data(), v);
+        if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) continue;
+        lo[0] = std::min(lo[0], p[0]); lo[1] = std::min(lo[1], p[2]); hi[0] = std::max(hi[0], p[0]); hi[1] = std::max(hi[1], p[2]);
+    }
+    if (!(lo[0] <= hi[0] && lo[1] <= hi[1])) return;
+    auto& g = surface_;
+    g.cell = std::max(1.f, std::max(hi[0] - lo[0], hi[1] - lo[1]) / 2048); g.x0 = lo[0]; g.z0 = lo[1];
+    g.width = static_cast<std::uint32_t>((hi[0] - lo[0]) / g.cell) + 1; g.depth = static_cast<std::uint32_t>((hi[1] - lo[1]) / g.cell) + 1;
+    g.top.assign(std::size_t(g.width) * g.depth, -INFINITY); g.water.assign(g.top.size(), 0);
+    const auto cell_of = [&](float v, float origin, std::uint32_t n) { return std::min(static_cast<std::int64_t>(n) - 1, std::max<std::int64_t>(0, static_cast<std::int64_t>((v - origin) / g.cell))); };
+    const auto stamp = [&](std::int64_t ix, std::int64_t iz, float y, bool water) {
+        auto& top = g.top[std::size_t(iz) * g.width + std::size_t(ix)];
+        if (y > top) { top = y; g.water[std::size_t(iz) * g.width + std::size_t(ix)] = water; }
+    };
+    for (const auto& in : s.instances) {
+        if (!usable(in)) continue;
+        const auto& mesh = s.meshes[in.mesh];
+        const auto material = in.material == UINT32_MAX ? mesh.material : in.material;
+        const bool water = in.ocean || (material < s.materials.size() && s.materials[material].source_ocean);
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            if (mesh.indices[t] >= mesh.vertices.size() || mesh.indices[t + 1] >= mesh.vertices.size() || mesh.indices[t + 2] >= mesh.vertices.size()) continue;
+            const auto a = world(in.transform.matrix.data(), mesh.vertices[mesh.indices[t]]), b = world(in.transform.matrix.data(), mesh.vertices[mesh.indices[t + 1]]),
+                       c = world(in.transform.matrix.data(), mesh.vertices[mesh.indices[t + 2]]);
+            if (!std::isfinite(a[1] + b[1] + c[1] + a[0] + b[0] + c[0] + a[2] + b[2] + c[2])) continue;
+            const float area = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
+            bool covered = false;
+            if (std::abs(area) > 1e-6f) {
+                const auto x0 = cell_of(std::min({a[0], b[0], c[0]}), g.x0, g.width), x1 = cell_of(std::max({a[0], b[0], c[0]}), g.x0, g.width);
+                const auto z0 = cell_of(std::min({a[2], b[2], c[2]}), g.z0, g.depth), z1 = cell_of(std::max({a[2], b[2], c[2]}), g.z0, g.depth);
+                for (auto iz = z0; iz <= z1; ++iz) for (auto ix = x0; ix <= x1; ++ix) {
+                    const float px = g.x0 + (static_cast<float>(ix) + .5f) * g.cell, pz = g.z0 + (static_cast<float>(iz) + .5f) * g.cell;
+                    const float u = ((b[0] - px) * (c[2] - pz) - (c[0] - px) * (b[2] - pz)) / area, v = ((c[0] - px) * (a[2] - pz) - (a[0] - px) * (c[2] - pz)) / area, w = 1 - u - v;
+                    if (u < 0 || v < 0 || w < 0) continue;
+                    stamp(ix, iz, u * a[1] + v * b[1] + w * c[1], water); covered = true;
+                }
+            }
+            if (!covered) for (const auto* p : {&a, &b, &c}) stamp(cell_of((*p)[0], g.x0, g.width), cell_of((*p)[2], g.z0, g.depth), (*p)[1], water);
+        }
+    }
+}
+
+bool EffectSystem::surface_at(float x, float z, float& height, bool& water) const {
+    const auto& g = surface_;
+    if (g.top.empty()) return false;
+    const float fx = (x - g.x0) / g.cell, fz = (z - g.z0) / g.cell;
+    if (!(fx >= 0 && fz >= 0 && fx < static_cast<float>(g.width) && fz < static_cast<float>(g.depth))) return false;
+    const std::size_t i = std::size_t(fz) * g.width + std::size_t(fx);
+    if (!std::isfinite(g.top[i])) return false;
+    height = g.top[i]; water = g.water[i] != 0; return true;
+}
+
+void EffectSystem::weather_update(float dt) {
+    const auto& w = weather_;
+    if (weather_enabled_ && !surface_.built) build_surface();
+    const float speed = weather_enabled_ ? std::clamp(w.wind_speed, 0.f, 30.f) * (.75f + .5f * std::clamp(w.gust, 0.f, 1.f)) * weather_metre : 0;
+    const std::array<float, 2> wind{w.wind_direction[0] * speed, w.wind_direction[1] * speed}; // scene units/s
+    // Zone smoke/fire (type-11 scene emitters) drifts with 8 % of the wind, moved in node space through the inverse node matrix.
+    if (speed > 0 && scene_) for (auto& e : emitters_) {
+        if (e.node == UINT32_MAX || e.node >= scene_->nodes.size() || e.particles.empty()) continue;
+        const auto& m = scene_->nodes[e.node].world.matrix;
+        const std::array<float, 3> c0{m[0], m[1], m[2]}, c1{m[4], m[5], m[6]}, c2{m[8], m[9], m[10]};
+        const auto r0 = cross(c1, c2), r1 = cross(c2, c0), r2 = cross(c0, c1);
+        const float det = c0[0] * r0[0] + c0[1] * r0[1] + c0[2] * r0[2];
+        if (std::abs(det) < 1e-9f) continue;
+        const std::array<float, 2> drift{wind[0] * .08f * dt / det, wind[1] * .08f * dt / det};
+        const std::array<float, 3> local{r0[0] * drift[0] + r0[2] * drift[1], r1[0] * drift[0] + r1[2] * drift[1], r2[0] * drift[0] + r2[2] * drift[1]};
+        for (auto& p : e.particles) for (unsigned i = 0; i < 3; ++i) p.position[i] += local[i];
+    }
+    // Splashes: droplets fly under gravity, rings widen on water, settled flakes and mist fade; all end with their life.
+    for (auto& p : splashes_) {
+        p.life -= dt;
+        for (unsigned k = 0; k < 3; ++k) p.position[k] += p.velocity[k] * dt;
+        if (p.kind == splash_droplet) p.velocity[1] -= 40 * dt; // ~10 m/s²
+        else if (p.kind == splash_ring) p.size += 1.6f * dt;
+        else if (p.kind == splash_mist) p.size += .6f * dt;
+    }
+    std::erase_if(splashes_, [](const Splash& p) { return p.life <= 0; });
+    // Precipitation column around the camera target: count ∝ precipitation (capped); every drop ends on the first surface it
+    // meets (zone surface grid, actor heads/shoulders) with a splash, a ripple on water or a settling flake, then respawns at
+    // the top until the weather changes kind, stops or the column shrinks.
+    const bool rain = falls_as_rain(w.kind), snow = w.kind == WeatherKind::snow;
+    const float cap = !weather_enabled_ ? 0 : w.kind == WeatherKind::storm ? 4500.f : rain ? 3200.f : snow ? 3200.f : 0;
+    const float intensity = std::clamp(w.precipitation, 0.f, 1.f);
+    const auto target = static_cast<std::size_t>(cap * intensity);
+    const float fall = w.kind == WeatherKind::storm ? 10 * weather_metre : 8 * weather_metre, flake_fall = 1.1f * weather_metre;
+    const float t = static_cast<float>(now_ms_) * .001f;
+    const auto horizontal = [&](const Drop& d) -> std::array<float, 2> {
+        if (d.snow) return {wind[0] * .8f + std::sin(t * 1.7f + d.phase) * 1.2f, wind[1] * .8f + std::cos(t * 1.3f + d.phase * 1.7f) * 1.2f};
+        const float limit = .7f * -d.velocity[1], h = std::hypot(wind[0], wind[1]), s = h > limit ? limit / h : 1;
+        return {wind[0] * s, wind[1] * s};
+    };
+    const auto place = [&](Drop& d, bool anywhere) {
+        const float a = weather_rand() * 6.2831855f, r = weather_radius * std::sqrt(weather_rand());
+        const float y = anywhere ? weather_bottom + (weather_top - weather_bottom) * weather_rand() : weather_top;
+        const auto h = horizontal(d); const float lead = y / -d.velocity[1]; // slanted column: drops land around the focus (ground level), not downwind of it
+        d.position = {focus_[0] + std::cos(a) * r - h[0] * lead, focus_[1] + y, focus_[2] + std::sin(a) * r - h[1] * lead};
+        // A surface above the spawn height (tall roof): the drop starts above it and lands on it, never beneath.
+        float top = 0; bool water = false;
+        if (surface_at(d.position[0], d.position[2], top, water) && d.position[1] <= top + .5f)
+            d.position[1] = top + .5f + (anywhere ? weather_rand() * std::max(0.f, focus_[1] + weather_top - top) : 0);
+        for (const auto& head : near_) // likewise never inside an actor
+            if (d.position[1] <= head[1] && (d.position[0] - head[0]) * (d.position[0] - head[0]) + (d.position[2] - head[2]) * (d.position[2] - head[2]) < actor_radius * actor_radius)
+                d.position[1] = head[1] + .5f;
+    };
+    const auto splash = [&](Splash p) { if (splashes_.size() < splash_cap) splashes_.push_back(p); };
+    const auto impact = [&](const Drop& d, float y, bool water) {
+        const std::array<float, 3> at{d.position[0], y, d.position[2]};
+        if (d.snow) { splash({{at[0], y + .03f, at[2]}, {}, 1.6f, 1.6f, d.size, splash_settled}); return; } // settles, then fades
+        if (weather_rand() > .35f + .65f * intensity) return;
+        if (water) splash({{at[0], y + .03f, at[2]}, {}, .45f, .45f, .12f, splash_ring});
+        for (int n = w.kind == WeatherKind::storm ? 3 : 2; n > 0; --n) {
+            const float life = .22f + .15f * weather_rand();
+            splash({{at[0], y + .05f, at[2]}, {(weather_rand() * 2 - 1) * 2.5f, 3 + 3 * weather_rand(), (weather_rand() * 2 - 1) * 2.5f}, life, life, .045f, splash_droplet});
+        }
+        if (w.kind == WeatherKind::storm && weather_rand() < .15f) splash({{at[0], y + .3f, at[2]}, {wind[0] * .2f, .8f, wind[1] * .2f}, .5f, .5f, .45f, splash_mist});
+    };
+    // Actors near the column (heads and shoulders): a cylinder of actor_radius up to ground + actor_top.
+    near_.clear();
+    for (const auto& e : entities_)
+        if (std::hypot(e.x - focus_[0], e.z - focus_[2]) < weather_radius * 2) near_.push_back({e.x, e.ground_y + actor_top, e.z});
+    for (std::size_t i = 0; i < drops_.size();) {
+        auto& d = drops_[i];
+        const float before = d.position[1];
+        const auto h = horizontal(d); d.velocity[0] = h[0]; d.velocity[2] = h[1];
+        for (unsigned k = 0; k < 3; ++k) d.position[k] += d.velocity[k] * dt;
+        float y = 0; bool water = false, hit = false;
+        for (const auto& a : near_)
+            if (d.position[1] <= a[1] && d.position[1] > a[1] - actor_top && (d.position[0] - a[0]) * (d.position[0] - a[0]) + (d.position[2] - a[2]) * (d.position[2] - a[2]) < actor_radius * actor_radius) {
+                hit = true; y = std::min(a[1], before); break;
+            }
+        if (!hit && surface_at(d.position[0], d.position[2], y, water)) hit = d.position[1] <= y;
+        const bool out = hit || d.position[1] < focus_[1] + weather_bottom || std::hypot(d.position[0] - focus_[0], d.position[2] - focus_[2]) > weather_radius * 1.8f;
+        if (hit && weather_enabled_) impact(d, y, water);
+        if (out && (drops_.size() > target || d.snow != snow)) { d = drops_.back(); drops_.pop_back(); continue; }
+        if (out) place(d, false);
+        ++i;
+    }
+    while (drops_.size() < target) { // newly falling: spread over the column height so it does not arrive as one sheet
+        Drop d{{}, {0, snow ? -flake_fall * (.8f + .4f * weather_rand()) : -fall * (.9f + .2f * weather_rand()), 0}, snow ? .1f + .1f * weather_rand() : 0, weather_rand() * 6.2831855f, snow};
+        place(d, true); drops_.push_back(d);
+    }
+}
+
+void EffectSystem::weather_frame(const CameraBasis& b, const Camera& camera) {
+    if (drops_.empty() && splashes_.empty()) return;
+    for (unsigned k = 0; k < 3; ++k) if (weather_textures_[k] == UINT32_MAX) {
+        textures_.push_back(weather_texture(k)); weather_textures_[k] = static_cast<std::uint32_t>(textures_.size() - 1);
+        frame_.textures = textures_;
+    }
+    // Drops are unlit particles: dimmed at night by the server clock hour (source_hour, -1 until received).
+    float light = 1;
+    if (scene_ && scene_->lighting.source_hour >= 0) {
+        const float h = scene_->lighting.source_hour;
+        const auto step = [](float lo, float hi, float x) { const float u = std::clamp((x - lo) / (hi - lo), 0.f, 1.f); return u * u * (3 - 2 * u); };
+        light = .3f + .7f * step(4.5f, 7.5f, h) * (1 - step(18.5f, 21, h));
+    }
+    const bool storm = weather_.kind == WeatherKind::storm;
+    const std::array<float, 4> rain_color{.72f * light, .76f * light, .84f * light, storm ? .55f : .45f}, snow_color{.95f * light, .96f * light, light, .9f};
+    // One quad: centre, half axes r (u texture axis) and u (v axis); false when culled at the lens or beyond 150 units.
+    const auto quad = [&](const std::array<float, 3>& at, const std::array<float, 3>& r, const std::array<float, 3>& u, std::array<float, 4> color) {
+        const std::array<float, 3> rel{at[0] - b.eye[0], at[1] - b.eye[1], at[2] - b.eye[2]};
+        const float z = rel[0] * b.forward[0] + rel[1] * b.forward[1] + rel[2] * b.forward[2];
+        if (z < std::max(camera.near_plane, 3.f) || z > 150) return; // drops at the lens would fill the screen
+        color[3] *= std::min(1.f, (z - 3) / 6); // fade in over 3..9 units from the eye
+        const auto corner = [&](float a, float c, float tu, float tv) { return ParticleVertex{at[0] + r[0] * a + u[0] * c, at[1] + r[1] * a + u[1] * c, at[2] + r[2] * a + u[2] * c, tu, tv, color}; };
+        const auto bl = corner(-1, -1, 0, 1), tl = corner(-1, 1, 0, 0), tr = corner(1, 1, 1, 0), br = corner(1, -1, 1, 1);
+        frame_.vertices.insert(frame_.vertices.end(), {bl, tl, tr, bl, tr, br});
+    };
+    const auto billboard = [&](const std::array<float, 3>& at, float size, std::array<float, 4> color) {
+        quad(at, {b.right[0] * size, b.right[1] * size, b.right[2] * size}, {b.up[0] * size, b.up[1] * size, b.up[2] * size}, color);
+    };
+    const auto batch = [&](unsigned texture, auto&& fill) {
+        frame_.batches.push_back({weather_textures_[texture], ParticleBlend::alpha, 0, 0, static_cast<std::uint32_t>(frame_.vertices.size()), 0, false});
+        fill();
+        frame_.batches.back().count = static_cast<std::uint32_t>(frame_.vertices.size()) - frame_.batches.back().first;
+        if (!frame_.batches.back().count) frame_.batches.pop_back();
+    };
+    batch(0, [&] { // rain: a streak along the velocity (~40 ms of travel), facing the eye
+        for (const auto& d : drops_) {
+            if (d.snow) continue;
+            const std::array<float, 3> rel{d.position[0] - b.eye[0], d.position[1] - b.eye[1], d.position[2] - b.eye[2]};
+            const float v = std::hypot(d.velocity[0], d.velocity[1], d.velocity[2]), half = std::clamp(v * .04f, .6f, 3.f) * .5f;
+            std::array<float, 3> u{}, r{};
+            for (unsigned i = 0; i < 3; ++i) u[i] = -d.velocity[i] / v * half;
+            const auto side = cross(u, rel); const float s = std::hypot(side[0], side[1], side[2]);
+            if (s < 1e-6f) continue;
+            for (unsigned i = 0; i < 3; ++i) r[i] = side[i] / s * .04f;
+            quad(d.position, r, u, rain_color);
+        }
+    });
+    batch(1, [&] { // snowflakes, settled flakes, splash droplets and storm mist
+        for (const auto& d : drops_) if (d.snow) billboard(d.position, d.size, snow_color);
+        for (const auto& p : splashes_) {
+            const float fade = p.life / p.total;
+            if (p.kind == splash_settled) billboard(p.position, p.size, {snow_color[0], snow_color[1], snow_color[2], snow_color[3] * std::min(1.f, fade * 2)});
+            else if (p.kind == splash_droplet) billboard(p.position, p.size, {rain_color[0], rain_color[1], rain_color[2], .7f * fade});
+            else if (p.kind == splash_mist) billboard(p.position, p.size, {.8f * light, .82f * light, .86f * light, .16f * fade});
+        }
+    });
+    batch(2, [&] { // ripple rings lying on the water surface
+        for (const auto& p : splashes_) if (p.kind == splash_ring) quad(p.position, {p.size, 0, 0}, {0, 0, p.size}, {rain_color[0], rain_color[1], rain_color[2], .6f * p.life / p.total});
+    });
 }
 
 void EffectSystem::self_test() {
@@ -810,6 +1073,65 @@ void EffectSystem::self_test() {
     badge.update(0, std::span(&walker, 1));
     require(badge.emitters_[0].blend == ParticleBlend::alpha && badge.emitters_[0].particles.at(0).position == std::array<float, 3>{15, 3, -5}, "attached icon");
     require(badge.frame(Camera{{15, 3, -5}}).batches.at(0).blend == ParticleBlend::alpha, "instance blend drawn");
+    // NONCANONICAL wave 27 weather: easing is frame-rate independent and keeps a unit wind; drops only when enabled, count
+    // scales with precipitation, rain slants downwind as alpha-blended streaks, snow replaces rain, a stopped weather drains.
+    {
+        SceneWeather target; target.active = true; target.kind = WeatherKind::rain; target.precipitation = 1; target.wind_speed = 10;
+        SceneWeather shown; ease_weather(shown, target, .016f);
+        require(shown.active && shown.precipitation == 1 && shown.wind_speed == 10, "first weather shows at once");
+        auto calm = target; calm.precipitation = 0; calm.wind_direction = {0, 1};
+        auto once = shown, twice = shown; ease_weather(once, calm, 1.5f); ease_weather(twice, calm, .75f); ease_weather(twice, calm, .75f);
+        require(std::abs(once.precipitation - std::exp(-1.f)) < 1e-5f && std::abs(once.precipitation - twice.precipitation) < 1e-5f &&
+                std::abs(std::hypot(once.wind_direction[0], once.wind_direction[1]) - 1) < 1e-5f, "weather eases with a 1.5 s time constant");
+        EffectSystem sky(std::filesystem::path{}, {}, {});
+        sky.set_weather(target, false, {0, 0, 0}); sky.update(.1f, {});
+        require(sky.weather_count() == 0 && sky.frame(Camera{}).vertices.empty(), "original appearance or a roofed zone draws no weather");
+        sky.set_weather(target, true, {0, 0, 0}); sky.update(.1f, {}); sky.update(.1f, {});
+        require(sky.weather_count() == 3200 && std::all_of(sky.drops_.begin(), sky.drops_.end(), [](const Drop& drop) { return !drop.snow && drop.velocity[0] > 18 && drop.velocity[1] < -28; }), "rain falls slanted downwind");
+        const auto& rain = sky.frame(Camera{});
+        require(rain.batches.size() == 1 && rain.batches[0].blend == ParticleBlend::alpha && rain.batches[0].count > 0 && rain.batches[0].count % 6 == 0 &&
+                rain.textures[rain.batches[0].texture].name == "weather/streak", "rain streak batch");
+        auto snow = target; snow.kind = WeatherKind::snow; snow.precipitation = .5f;
+        sky.set_weather(snow, true, {0, 0, 0}); for (int i = 0; i < 40; ++i) sky.update(.1f, {});
+        require(sky.weather_count() == 1600 && std::all_of(sky.drops_.begin(), sky.drops_.end(), [](const Drop& drop) { return drop.snow; }), "snow replaces rain, half as many at half precipitation");
+        snow.active = false; sky.set_weather(snow, true, {0, 0, 0}); for (int i = 0; i < 200; ++i) sky.update(.1f, {});
+        require(sky.weather_count() == 0, "an inactive weather drains");
+    }
+    // Drops end on surfaces: ground, a roof (no rain beneath it), water (ripple rings) and actor heads (splashes); snow settles.
+    {
+        Scene yard; Mesh solid, pool;
+        const auto quad = [](Mesh& m, float x0, float x1, float y) {
+            const auto base = static_cast<std::uint32_t>(m.vertices.size());
+            for (const auto [x, z] : {std::pair{x0, -100.f}, {x1, -100.f}, {x1, 100.f}, {x0, 100.f}}) { Vertex v{}; v.x = x; v.y = y; v.z = z; m.vertices.push_back(v); }
+            m.indices.insert(m.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
+        };
+        quad(solid, -100, 100, 0); quad(solid, 10, 100, 12); quad(pool, -30, -12, 1);
+        yard.meshes = {solid, pool}; yard.instances.resize(2); yard.instances[1].mesh = 1; yard.instances[1].ocean = true;
+        EffectSystem pond(std::filesystem::path{}, {}, {});
+        pond.attach_scene(yard);
+        SceneWeather rain; rain.active = true; rain.kind = WeatherKind::rain; rain.precipitation = 1;
+        const RenderEntity passer{9, -5, 0, 0, 0};
+        bool sheltered = true, above_ground = true, clear_head = true;
+        for (int i = 0; i < 40; ++i) {
+            pond.set_weather(rain, true, {0, 0, 0}); pond.update(.05f, std::span(&passer, 1));
+            for (const auto& drop : pond.drops_) {
+                if (drop.position[0] > 11 && drop.position[0] < 99) sheltered = sheltered && drop.position[1] > 12;
+                above_ground = above_ground && drop.position[1] > 0;
+                if (std::hypot(drop.position[0] + 5, drop.position[2]) < actor_radius * .9f) clear_head = clear_head && drop.position[1] > actor_top - .01f;
+            }
+        }
+        const auto any = [&](auto&& f) { return std::any_of(pond.splashes_.begin(), pond.splashes_.end(), f); };
+        require(sheltered && above_ground && clear_head && pond.surface_.built && pond.surface_.top.size() > 1, "rain never falls through roofs, ground or actors");
+        require(any([](const Splash& s) { return s.kind == splash_ring && std::abs(s.position[1] - 1.03f) < 1e-3f && s.position[0] < -12; }), "rain on water leaves ripple rings at the water surface");
+        require(any([](const Splash& s) { return s.kind == splash_droplet && std::abs(s.position[0] + 5) < 2 && s.position[1] > actor_top - .5f; }), "rain splashes on heads");
+        require(any([](const Splash& s) { return s.kind == splash_droplet && s.position[0] > 10 && s.position[1] > 11.5f; }), "rain splashes on the roof");
+        require(pond.splash_count() <= splash_cap && pond.frame(Camera{}).batches.size() >= 2, "splash budget and batches");
+        auto snow = rain; snow.kind = WeatherKind::snow;
+        for (int i = 0; i < 100; ++i) { pond.set_weather(snow, true, {0, 0, 0}); pond.update(.1f, std::span(&passer, 1)); }
+        require(any([](const Splash& s) { return s.kind == splash_settled && s.velocity == std::array<float, 3>{} && s.position[1] >= .03f; }), "snowflakes settle on surfaces");
+        for (int i = 0; i < 100; ++i) { pond.set_weather(snow, false, {0, 0, 0}); pond.update(.1f, std::span(&passer, 1)); }
+        require(pond.weather_count() == 0 && pond.splash_count() == 0, "disabled weather leaves no drops or splashes");
+    }
 }
 
 EffectSystem::EffectSystem(const std::filesystem::path& asset_base, std::vector<ParticleSystemDef> systems, std::vector<EffectDef> effects)

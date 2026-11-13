@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <map>
 #include <fstream>
+#include <functional>
+#include <set>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -1446,6 +1448,85 @@ void crafter_frame(const ikv::Json& config, const std::filesystem::path& assets)
     check(size(frame)<=65533 && size(book)<=65533 && size(bank)<=65533,"state and each catalog part fit one frame");
     check(std::any_of(frame.at("entities").begin(),frame.at("entities").end(),[&](const ikv::Json& e){return e.at("id")==banker;}),"the banker stays in view beside a full recipe memory and bank");
 }
+// NONCANONICAL wave 27 seasons/weather/wind (src/world_weather.cpp): deterministic from (seed, in-game minute), seasons in
+// order, bounded ramps, snow only when cold, clock.weather on the wire, the admin "weather" command and config validation.
+void weather_rules(ikv::Json config) {
+    const auto silent=[](std::span<const ikv::CharacterSave>){};
+    config["weather"]["start_day"]=0; config["weather"]["season_days"]=1; config["clock"]["rate"]=1000; // one in-game day = 1728 ticks
+    const auto names=std::vector<std::string>{"spring","summer","autumn","winter"};
+    const auto in=[](const ikv::Json& v,double lo,double hi){return v.is_number() && v.get<double>()>=lo && v.get<double>()<=hi;};
+    const auto valid=[&](const ikv::Json& w){
+        static const std::set<std::string> kinds{"clear","cloudy","rain","storm","snow","fog"};
+        const auto& wind=w.at("wind"); const double norm=wind.size()==3 && wind[0].is_number() && wind[1].is_number()?std::hypot(wind[0].get<double>(),wind[1].get<double>()):0;
+        return std::find(names.begin(),names.end(),w.at("season").get<std::string>())!=names.end() && kinds.contains(w.at("kind").get<std::string>()) && norm>.99 && norm<1.01 &&
+               in(wind[2],0,25) && in(w.at("gust"),0,1) && in(w.at("precipitation"),0,1) && in(w.at("cloud"),0,1) && in(w.at("fog"),0,1) &&
+               in(w.at("wetness"),0,1) && in(w.at("snow"),0,1) && in(w.at("temperature"),-60,60);};
+    {   // Determinism: two servers from the same config agree tick by tick; another seed diverges.
+        ikv::World a(config,silent),b(config,silent); auto other=config; other["weather"]["seed"]=7; ikv::World c(other,silent);
+        bool same=true,differs=false;
+        for(int i=0;i<6000;i+=20){ticks(a,20);ticks(b,20);ticks(c,20);same=same && a.status().at("weather")==b.status().at("weather");differs=differs || a.status().at("weather")!=c.status().at("weather");}
+        check(same && differs,"weather is deterministic from (seed, tick)");
+    }
+    {   // Five in-game days: seasons advance spring → summer → autumn → winter → spring → summer, values stay in range, ramps are bounded
+        // by transition_minutes, snow falls and accumulates only below 2 °C, and the state frame carries clock.weather.
+        ikv::World world(config,silent); world.add(1,1,1,record(1));
+        check(valid(world.state(1).at("clock").at("weather")),"state clock.weather carries the contract fields");
+        std::vector<std::string> order; ikv::Json previous=world.status().at("weather");
+        const double ramp=1000.0/60/config.at("weather").at("transition_minutes").get<double>()+.002;
+        bool bounded=true,cold_snow=true,cold_cover=true,ranges=true; int snowing=0,raining=0;
+        for(int i=0;i<5*1728;i+=20){
+            ticks(world,20); const auto w=world.status().at("weather"); ranges=ranges && valid(w);
+            if(const auto season=w.at("season").get<std::string>(); order.empty() || order.back()!=season)order.push_back(season);
+            for(const char* key:{"precipitation","cloud","fog"})bounded=bounded && std::abs(w.at(key).get<double>()-previous.at(key).get<double>())<=ramp;
+            if(w.at("kind")=="snow"){++snowing;cold_snow=cold_snow && w.at("temperature").get<double>()<2;}
+            if(w.at("kind")=="rain" || w.at("kind")=="storm")++raining;
+            if(w.at("snow").get<double>()>previous.at("snow").get<double>())cold_cover=cold_cover && w.at("kind")=="snow" && w.at("temperature").get<double>()<2;
+            previous=w;
+        }
+        check(order==std::vector<std::string>({"spring","summer","autumn","winter","spring","summer"}),"seasons cycle every season_days in order"); // 07:00 day 0 to 07:00 day 5
+        check(ranges,"weather values stay within the contract ranges");
+        check(bounded,"precipitation, cloud and fog ramp no faster than transition_minutes");
+        check(cold_snow && cold_cover,"snow falls and accumulates only below 2 °C");
+        check(raining>0 && snowing>0,"the year has rain and winter snow");
+    }
+    {   // Admin weather: forced kinds/seasons, instant, bounded duration, auto; the in-game Yönetici Paneli path.
+        ikv::World world(config,silent); world.add(1,1,1,record(1),true);
+        auto r=world.admin("weather",ikv::admin_world_arguments("weather",{{"kind","storm"},{"season","summer"},{"instant",true}}));
+        const auto& w=r.at("weather");
+        check(r.at("ok")==true && w.at("kind")=="storm" && w.at("season")=="summer" && w.at("precipitation").get<double>()>=.75 && w.at("wind")[2].get<double>()>=9 &&
+              w.at("wetness").get<double>()>.5 && r.at("forced").at("kind")=="storm" && r.at("forced").at("until_tick").is_null(),"admin weather forces an instant summer storm");
+        r=world.admin("weather",ikv::admin_world_arguments("weather",{{"kind","snow"},{"minutes",1},{"instant",true}}));
+        check(r.at("weather").at("kind")=="snow" && r.at("weather").at("temperature").get<double>()<2 && r.at("weather").at("snow").get<double>()>0 &&
+              r.at("forced").at("until_tick")==world.tick()+1200,"forced snow is cold, accumulates and is bounded by minutes");
+        ticks(world,1200); check(world.status().at("weather").at("forced").at("kind").is_null() && world.status().at("weather").at("forced").at("season").is_null(),"a timed override expires");
+        world.admin("weather",ikv::admin_world_arguments("weather",{{"kind","fog"}})); r=world.admin("weather",ikv::admin_world_arguments("weather",{{"kind","auto"}}));
+        check(r.at("forced").at("kind").is_null(),"kind auto returns to the simulation");
+        world.action(1,{{"action","admin"},{"command","weather"},{"args",{{"kind","rain"},{"instant",true}}}});
+        bool applied=false,refused=false;
+        {const auto f=world.state(1);for(const auto& e:f.at("events"))if(e.at("type")=="admin_result")applied=e.at("result").at("ok")==true && e.at("result").at("forced").at("kind")=="rain";}
+        world.action(1,{{"action","admin"},{"command","weather"},{"args",{{"kind","hail"}}}});
+        {const auto f=world.state(1);for(const auto& e:f.at("events"))if(e.at("type")=="admin_result")refused=e.at("result").at("ok")==false;}
+        check(applied && refused,"Yönetici Paneli weather command applies and refuses unknown kinds");
+        bool missing=false;try{ikv::admin_world_arguments("weather",ikv::Json::object());}catch(const std::exception&){missing=true;}
+        check(missing,"admin weather needs kind and/or season");
+    }
+    {   // Without the block nothing is simulated or sent; malformed blocks are refused at load.
+        auto none=config; none.erase("weather"); ikv::World world(none,silent); world.add(1,1,1,record(1));
+        check(!world.state(1).at("clock").contains("weather") && !world.status().contains("weather"),"no weather block: no clock.weather");
+        bool refused=false;try{world.admin("weather",{{"kind","rain"}});}catch(const std::invalid_argument& e){refused=std::string(e.what())=="weather: This gameplay configuration has no weather";}
+        check(refused,"admin weather refused without the weather block");
+        const auto rejects=[&](const std::function<void(ikv::Json&)>& edit){auto bad=config;edit(bad);try{ikv::World w(bad,silent);}catch(const std::invalid_argument&){return true;}return false;};
+        check(rejects([](ikv::Json& c){c["weather"]["kinds"].erase("fog");}),"weather kinds must all be defined");
+        check(rejects([](ikv::Json& c){c["weather"]["seasons"]["winter"]["weights"]={{"snow",0}};}),"season weights must not all be zero");
+        check(rejects([](ikv::Json& c){c["weather"]["seasons"]["summer"]["weights"]["hail"]=1;}),"unknown weather kinds are refused");
+        check(rejects([](ikv::Json& c){c["weather"]["seasons"]["spring"]["temperature"]={20,10};}),"temperature ranges are ordered");
+        check(rejects([](ikv::Json& c){c["weather"]["kinds"]["rain"]["precipitation"]=0;}),"rain must precipitate");
+        check(rejects([](ikv::Json& c){c["weather"]["kinds"]["storm"]["wind"]={30,40};}),"wind stays within 25 m/s");
+        check(rejects([](ikv::Json& c){c["weather"]["season_days"]=0;}),"season_days is at least one");
+        check(rejects([](ikv::Json& c){c.erase("clock");}),"weather requires the clock");
+    }
+    std::cout << "weather/seasons/wind passed\n";
+}
 int main(int argc, char** argv) {
     try {
         if (argc != 3) throw std::runtime_error("usage: world-test config/gameplay.json tests/independent_content.json");
@@ -1481,6 +1562,7 @@ int main(int argc, char** argv) {
         quest_objectives(config);
         starter_kit(config);
         admin_rules(config);
+        weather_rules(config);
         bot_rules(config);bot_fairness(config);bot_claim(config);bot_spawn_spread(config);
         check(world.state(1).at("character").at("state").at("currency") == 100, "default currency");
         check(world.state(1).at("clock").at("interior")==ikv::Json::array({200,157,142,126,105,110,184,199,217,78,0}),"roofed zones get the interior_hour (noon) record at every hour");

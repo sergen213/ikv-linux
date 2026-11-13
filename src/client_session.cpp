@@ -26,11 +26,14 @@ constexpr SOCKET INVALID_SOCKET = -1;
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cmath>
 #include <condition_variable>
 #include <deque>
+#include <initializer_list>
 #include <limits>
 #include <mutex>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <utility>
 
@@ -273,6 +276,25 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         if (!fog.is_array() || fog.size() != 2 || !fog[0].is_number() || !fog[1].is_number()) invalid();
         const auto start = fog[0].get<double>(), end = fog[1].get<double>();
         if (!(start >= 0 && start <= end && end <= 1e6)) invalid();
+        // NONCANONICAL wave 27 seasons/weather/wind (server src/world_weather.cpp): names from the closed sets, unit wind
+        // direction, every scalar finite and within the contract range; anything else rejects the frame.
+        if (clock.contains("weather")) {
+            const auto& w = clock.at("weather");
+            if (!w.is_object()) invalid();
+            const auto name = [&](const char* key, std::initializer_list<std::string_view> names) {
+                if (!w.at(key).is_string() || std::find(names.begin(), names.end(), w.at(key).get_ref<const std::string&>()) == names.end()) invalid();
+            };
+            name("season", {"spring", "summer", "autumn", "winter"});
+            name("kind", {"clear", "cloudy", "rain", "storm", "snow", "fog"});
+            const auto number = [](const Json& v, double lo, double hi) { if (!v.is_number() || !(v.get<double>() >= lo && v.get<double>() <= hi)) invalid(); return v.get<double>(); };
+            const auto& wind = w.at("wind");
+            if (!wind.is_array() || wind.size() != 3) invalid();
+            const double length = std::hypot(number(wind[0], -1.01, 1.01), number(wind[1], -1.01, 1.01));
+            if (!(length > .9 && length < 1.1)) invalid();
+            number(wind[2], 0, 25.5);
+            for (const char* key : {"gust", "precipitation", "cloud", "fog", "wetness", "snow"}) number(w.at(key), 0, 1);
+            number(w.at("temperature"), -60, 60);
+        }
     }
     integer(state.at("currency"), 0, INT64_MAX);
     const auto& inventory = state.at("inventory");

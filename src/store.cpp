@@ -249,6 +249,14 @@ Json admin_world_arguments(const std::string& command,const Json& body) {
     }
     else if(command=="summon"){character();arguments["to_character_id"]=number(body,"to_character_id",1,INT64_MAX);}
     else if(command=="clock")arguments["hour"]=number(body,"hour",0,23);
+    else if(command=="weather"){ // NONCANONICAL wave 27: force a weather kind and/or season ("auto" clears), optional real minutes
+        static const std::set<std::string> kinds{"auto","clear","cloudy","rain","storm","snow","fog"},seasons{"auto","spring","summer","autumn","winter"};
+        if(!body.contains("kind")&&!body.contains("season"))throw ApiError(400,"invalid_request","weather needs kind and/or season");
+        if(body.contains("kind")){arguments["kind"]=line("kind",3,6);if(!kinds.contains(arguments["kind"].get<std::string>()))throw ApiError(400,"invalid_request","kind is auto, clear, cloudy, rain, storm, snow or fog");}
+        if(body.contains("season")){arguments["season"]=line("season",4,6);if(!seasons.contains(arguments["season"].get<std::string>()))throw ApiError(400,"invalid_request","season is auto, spring, summer, autumn or winter");}
+        if(body.contains("minutes"))arguments["minutes"]=number(body,"minutes",1,10080);
+        if(body.contains("instant")){if(!body["instant"].is_boolean())throw ApiError(400,"invalid_request","instant is a boolean");arguments["instant"]=body["instant"];}
+    }
     else if(command=="respawn"){if(body.contains("zone"))arguments["zone"]=line("zone",1,32);}
     else if(command=="items")arguments["search"]=body.contains("search")?line("search",0,64):std::string();
     else if(command=="inventory"||command=="heal")character();
@@ -263,7 +271,7 @@ Json admin_world_arguments(const std::string& command,const Json& body) {
             if(body.contains("equip")){if(!body["equip"].is_boolean()||(body["equip"]==true&&arguments["kit"]!="equipment"))throw ApiError(400,"invalid_request","equip is a boolean for the equipment kit");arguments["equip"]=body["equip"];}
         }
     }
-    else if(command!="validate_config"&&command!="players")throw ApiError(400,"invalid_command","Use announce, kick, teleport, summon, clock, respawn, validate_config, players, items, inventory, give_item, take_item, currency, give_xp, heal, kits or give_kit");
+    else if(command!="validate_config"&&command!="players")throw ApiError(400,"invalid_command","Use announce, kick, teleport, summon, clock, weather, respawn, validate_config, players, items, inventory, give_item, take_item, currency, give_xp, heal, kits or give_kit");
     return arguments;
 }
 

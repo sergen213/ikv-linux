@@ -59,6 +59,27 @@
     "fog": [300,1090],
     "provenance": "NONCANONICAL: the original server sent the hour and a byte environment record (packet thgf, client 0x004a4c90/0x004a4680/0x004b6970). Rate 4 = VOD minimap clock 7:02 at 18:30 to 9:18 at 52:30; start hour 7 = first VOD sample. Record = [hour, ambient (lighting_multipliers_1) rgb, sun (lighting_multipliers_2) rgb, horizon/clear rgb, lightmap shadow strength, HDR glow (c308; 0 = the original value before any server record)] bytes. Day ambient/sun/shadow bytes are the original client's Eminonu zone-load constants (0x0041c9a0: .784 .616 .556 / .496 .412 .432 / .304); dawn, dusk, night and horizon bytes are invented. fog = thgf float fog start/end distances (004a4680 params 6/7, client record +0xec/+0xf0; the client draws D3D fog start*view .. end*view+110 and culls emitters beyond sqrt(.5)*end*view, 0046b630/0046b660/00478586): the official values were server-only; 300/1090 keep the earlier 300..1200 haze."
   },
+  "weather": {
+    "seed": 2027,
+    "season_days": 7,
+    "period_minutes": 180,
+    "transition_minutes": 30,
+    "kinds": {
+      "clear": {"precipitation": 0, "cloud": 0.12, "fog": 0, "wind": [0.5, 4]},
+      "cloudy": {"precipitation": 0, "cloud": 0.75, "fog": 0.05, "wind": [2, 7]},
+      "rain": {"precipitation": 0.6, "cloud": 0.9, "fog": 0.15, "wind": [3, 9]},
+      "storm": {"precipitation": 1, "cloud": 1, "fog": 0.1, "wind": [12, 22]},
+      "snow": {"precipitation": 0.65, "cloud": 0.85, "fog": 0.25, "wind": [1, 6]},
+      "fog": {"precipitation": 0, "cloud": 0.55, "fog": 0.85, "wind": [0, 2.5]}
+    },
+    "seasons": {
+      "spring": {"weights": {"clear": 4, "cloudy": 3, "rain": 4, "storm": 1, "fog": 1}, "temperature": [7, 19], "wind_scale": 1},
+      "summer": {"weights": {"clear": 9, "cloudy": 2, "rain": 1, "storm": 1}, "temperature": [18, 31], "wind_scale": 0.8},
+      "autumn": {"weights": {"clear": 2, "cloudy": 5, "rain": 5, "storm": 2, "fog": 3}, "temperature": [6, 16], "wind_scale": 1.35},
+      "winter": {"weights": {"clear": 2, "cloudy": 3, "rain": 2, "storm": 1, "snow": 6, "fog": 3}, "temperature": [-5, 6], "wind_scale": 1.15}
+    },
+    "provenance": "NONCANONICAL wave 27: the original game had no seasons, weather or wind. Seasons cycle every season_days in-game days (clock.rate time); each period_minutes segment picks a kind from the season's weights (deterministic from seed), values ramp over transition_minutes; snow only below 2 C. Without start_day the calendar follows the wall clock so restarts resume the same season. Sent as clock.weather (src/world_weather.cpp)."
+  },
   "combat_provenance": "Click-to-attack: the PC approaches into range and auto-attacks until the target dies, the player moves or retargets, every Saldırı Hızı (formulas). death_resurrect_delay 300 ticks = original client 00410b00 15000 ms 'Canlanma Süresi' countdown. Weapon/NPC attack_range is classes.dat attackrange×1000, NPC attack_cooldown attackrate÷50; bare-hand combat_range 6000 copies the most common classes.dat weapon attackrange 6 (NONCANONICAL). Since the Rules wave all Enerji/Kudret/damage numbers are original units (classes.dat raw, VOD Enerji 248 at level 1); skill magnitudes were rescaled x3.83 (damage/heal) and x12 (Kudret) from the earlier 100-HP scale and stay NONCANONICAL. NPC aggro/leash/respawn/return-home behaviour is NONCANONICAL server policy. auto_retaliate (NONCANONICAL, off by default): an idle player struck by an enemy NPC or a hostile player auto-attacks it back; the original client sends no command when hit (only hcpe 004a6720, vldw 004a4900 and tzrt 004a8940 among its inbound handlers send any), so whether the official server retaliated is unknown.",
   "skill_points_base": 2,
   "skill_points_per_level": 2,

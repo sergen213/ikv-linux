@@ -47,6 +47,9 @@ struct EffectDef {
 };
 std::vector<ParticleSystemDef> parse_particle_systems(std::string_view xml);
 std::vector<EffectDef> parse_effects(std::string_view xml);
+// NONCANONICAL wave 27: frame-rate independent easing of the drawn weather toward the last server clock.weather (time
+// constant ~1.5 s; season/kind switch at once, wind direction stays a unit vector); current becomes active.
+void ease_weather(SceneWeather& current, const SceneWeather& target, float dt);
 
 // Client-owned visual effect simulation. Particles are spawned in world space (scene units, Y up).
 class EffectSystem {
@@ -72,6 +75,15 @@ public:
     // pref·160000), and every emitter farther than sqrt(.5·k·far²) (far = fog far distance 0x77c320, k = node +0x21c:
     // 1, 3.05 for "particle_far_*" scene nodes, 004a2e70).
     void set_ranges(float scene_squared,float entity_squared,float far_squared) { ranges_={scene_squared,entity_squared,far_squared}; }
+    // NONCANONICAL wave 27 (enhanced appearance only; the original game had no weather): `enabled` draws rain streaks slanted
+    // by the wind, heavier storms and wind-drifted snowflakes in a column around `focus` (camera target) and lets the wind
+    // carry the zone emitters' smoke/fire particles. Drops end on the first surface (zone geometry grid, actors) with splashes,
+    // water ripples or settling flakes, so nothing falls through roofs, ground, water or characters. The client passes
+    // enabled=false for the original appearance, an inactive weather and roofed zones; existing drops then fall out without
+    // respawning. Call before update().
+    void set_weather(const SceneWeather& weather, bool enabled, std::array<float, 3> focus) { weather_ = weather; weather_enabled_ = enabled && weather.active; focus_ = focus; }
+    std::size_t weather_count() const { return drops_.size(); }
+    std::size_t splash_count() const { return splashes_.size(); }
     void update(float dt,std::span<const RenderEntity> entities);
     const ParticleFrame& frame(const Camera&);
     std::size_t particle_count() const;
@@ -103,6 +115,23 @@ private:
     const Scene* scene_=nullptr;
     std::array<float,3> ranges_{INFINITY,INFINITY,INFINITY}; // squared scene units: zone emitters, entity/projectile emitters, fog far
     std::uint32_t random_=1,now_ms_=0,next_projectile_=1;
+    struct Drop { std::array<float,3> position,velocity; float size,phase; bool snow; };
+    struct Splash { std::array<float,3> position,velocity; float life,total,size; std::uint8_t kind; }; // droplet, ripple ring, settled flake, mist
+    // Coarse top-down surface grid (highest drawn static geometry per cell, water flag); see build_surface().
+    struct Surface { float x0=0,z0=0,cell=1; std::uint32_t width=0,depth=0; std::vector<float> top; std::vector<std::uint8_t> water; bool built=false; };
+    std::vector<Splash> splashes_;
+    Surface surface_;
+    std::vector<std::array<float,3>> near_; // actor head points near the column, per update
+    void build_surface();
+    bool surface_at(float x,float z,float& height,bool& water) const;
+    SceneWeather weather_{};
+    bool weather_enabled_=false;
+    std::array<float,3> focus_{};
+    std::vector<Drop> drops_;
+    std::uint32_t weather_random_=27,weather_textures_[3]{UINT32_MAX,UINT32_MAX,UINT32_MAX}; // own LCG: the original emitters' rand() stream is untouched
+    float weather_rand() { weather_random_=weather_random_*1664525u+1013904223u; return static_cast<float>(weather_random_>>8)*(1.f/16777216.f); }
+    void weather_update(float dt);
+    void weather_frame(const CameraBasis& basis,const Camera& camera);
     float random();
     float random(ParticleRange r) { return r.min==r.max?r.min:r.min+(r.max-r.min)*random(); }
     std::array<float,3> generate(const ParticleGenerator&);

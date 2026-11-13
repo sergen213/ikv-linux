@@ -27,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -539,6 +540,10 @@ class Application {
     bool world_dirty_=false; // only name labels/floaters changed: paint_world alone (hud_dirty_ repaints both)
     std::size_t label_hits_=0; // hits_ prefix painted by paint_labels
     int clock_minute_=-1; // last painted server clock minute
+    // NONCANONICAL wave 27: last server clock.weather and the eased weather written to scene_.lighting.weather each frame
+    // (the renderer decides what roofed zones and the original appearance show; the client's precipitation particles are
+    // enhanced-only and off under a roof).
+    ikv::SceneWeather weather_target_{},weather_shown_{};
     Json hud_values_=Json::object(),hud_entities_=Json::array();
     std::string input_,selected_uid_;
     std::uint64_t trade_currency_=0;
@@ -854,6 +859,19 @@ private:
         const std::array<float,2> fog{clock.at("fog")[0].get<float>(),clock.at("fog")[1].get<float>()};
         if (fog==zone.lighting.fog_record) return false;
         zone.lighting.fog_record=fog; return true;
+    }
+    // NONCANONICAL wave 27: clock.weather, already range-checked by ClientSession (validate_state).
+    static ikv::SceneWeather parse_weather(const Json& w) {
+        static constexpr std::array<std::string_view,4> seasons{"spring","summer","autumn","winter"};
+        static constexpr std::array<std::string_view,6> kinds{"clear","cloudy","rain","storm","snow","fog"};
+        ikv::SceneWeather r; r.active=true;
+        r.season=static_cast<ikv::Season>(std::find(seasons.begin(),seasons.end(),w.at("season").get<std::string>())-seasons.begin());
+        r.kind=static_cast<ikv::WeatherKind>(std::find(kinds.begin(),kinds.end(),w.at("kind").get<std::string>())-kinds.begin());
+        const float dx=w.at("wind")[0].get<float>(),dz=w.at("wind")[1].get<float>(),length=std::hypot(dx,dz);
+        r.wind_direction={dx/length,dz/length}; r.wind_speed=w.at("wind")[2].get<float>();
+        r.gust=w.at("gust").get<float>(); r.precipitation=w.at("precipitation").get<float>(); r.cloud_cover=w.at("cloud").get<float>();
+        r.fog_density=w.at("fog").get<float>(); r.wetness=w.at("wetness").get<float>(); r.snow_cover=w.at("snow").get<float>(); r.temperature=w.at("temperature").get<float>();
+        return r;
     }
     void shutdown() noexcept {
         session_.reset(); audio_.reset(); ui_.reset(); renderer_.reset();
@@ -2005,6 +2023,16 @@ private:
             Flow b{left,right,left,y}; flow(b,"NPC'leri canlandır",nullptr,-1,"admin:respawn"); y=flow_end(b)+S(2);
             ui_->text(left,y,"Oyun saati (0–23)",gold_rgba); y+=lh()+S(2);
             field_row(y,A::field_hour,"Ayarla","admin:clock"); y+=row;
+            // NONCANONICAL wave 27: server weather kind and season (Otomatik returns to the simulation).
+            ui_->text(left,y,"Hava",gold_rgba); y+=lh()+S(2);
+            { Flow w{left,right,left,y};
+              for (const auto& [label,kind]:std::initializer_list<std::pair<const char*,const char*>>{{"Açık","clear"},{"Bulutlu","cloudy"},{"Yağmur","rain"},{"Fırtına","storm"},{"Kar","snow"},{"Sis","fog"},{"Otomatik","auto"}})
+                  flow(w,label,nullptr,-1,std::string("admin:weather:")+kind);
+              y=flow_end(w)+S(2); }
+            { Flow w{left,right,left,y};
+              for (const auto& [label,season]:std::initializer_list<std::pair<const char*,const char*>>{{"İlkbahar","spring"},{"Yaz","summer"},{"Sonbahar","autumn"},{"Kış","winter"},{"Mevsim: otomatik","auto"}})
+                  flow(w,label,nullptr,-1,std::string("admin:season:")+season);
+              y=flow_end(w)+S(2); }
             paragraph(left,y,width,list_bottom,"Işınlan sizi bölgenin doğuş noktasına götürür. NPC canlandırma bölge alanına, alan boşsa tüm dünyaya uygulanır.",dim_rgba);
             break;
         }
@@ -2045,6 +2073,8 @@ private:
         else if (value=="admin:announce") go(admin_.announce());
         else if (value=="admin:teleport") go(admin_.teleport_self(self));
         else if (value=="admin:clock") go(admin_.clock());
+        else if (value.starts_with("admin:weather:")) go(ikv::ClientAdmin::weather("kind",value.substr(14)));
+        else if (value.starts_with("admin:season:")) go(ikv::ClientAdmin::weather("season",value.substr(13)));
         else if (value=="admin:respawn") go(admin_.respawn());
         else if (value=="admin-equip") admin_.kit_equip=!admin_.kit_equip;
         else if (value=="admin:kits") go(admin_.preview_kits());
@@ -3699,6 +3729,7 @@ private:
         }
         if (state.contains("clock")) { // validated by ClientSession; original thgf consumer 004a4c90/004b6970
             if (apply_clock(scene_,state.at("clock"))) apply_view(scene_);
+            if (state.at("clock").contains("weather")) weather_target_=parse_weather(state.at("clock").at("weather"));
             if (const int minute=static_cast<int>(scene_.lighting.source_hour*60); minute!=clock_minute_) { clock_minute_=minute; hud_dirty_=true; }
         }
         for (const auto* key:{"hp","max_hp","mana","max_mana","xp","level","currency","inventory","equipment","quests","buffs"}) {
@@ -4546,6 +4577,8 @@ private:
             if (!hud_click(x,y) && !over_window(x,y) && session_ && session_->self) pick(x,y);
             if (hud_dirty_) paint_hud();
         }
+        ikv::ease_weather(weather_shown_,weather_target_,dt); scene_.lighting.weather=weather_shown_; // NONCANONICAL wave 27
+        if (effects_) effects_->set_weather(weather_shown_,options_.appearance=="enhanced" && !scene_.lighting.roofed,renderer_->camera().target);
         if (effects_) {
             effects_->update(dt,poses_);
             for (const auto& actor:actors_) if (ikv::original_blob_shadows_enabled(options_.appearance=="original") && !actor.shadow.empty() && actor.shadow!="none") effects_->attach(actor.shadow,actor.id);

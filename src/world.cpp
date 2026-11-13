@@ -312,6 +312,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             // hour, sent as clock.interior, instead of the cycle (the invented night record turned them dark blue).
             if (clock.contains("interior_hour")) integer(clock.at("interior_hour"), 0, 23);
         }
+        weather_validate(); // NONCANONICAL wave 27 seasons/weather/wind (src/world_weather.cpp)
         require(config_.at("vendor_return_denominator") == 5 && config_.at("vendor_plus_return_denominator") == 3, "config", "Guide vendor ratios required");
         require(config_.at("zones").is_object() && config_.at("zones").size() > 0 && config_.at("zones").size() <= 32, "config", "Zone count invalid");
         for (const auto& [name, zone] : config_.at("zones").items()) {
@@ -715,7 +716,8 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             {"stats",{{"attack",INT32_MAX},{"defense",INT32_MAX},{"attack_cooldown",10000},{"weapon_damage",Json::array({INT32_MAX,INT32_MAX})},{"armor",Json::array({1000,100})},{"charisma",1000},{"resistance_points",1000000},{"craft_points",1000000},
                       {"clan_rank",std::string(32,'"')},{"guild_rank",std::string(32,'"')},{"arena_power",1000},
                       {"crit",Json::array({INT32_MIN,10})},{"efsun",[&]{Json e=Json::object();for(const auto& [pid,p]:config_.at("prefixes").items()){(void)pid;for(const auto& a:p.at("attributes"))e[std::to_string(a[0].get<int>())]=INT32_MIN;}return e;}()}}},
-            {"clock",{{"hour",23.999999999999996},{"environment",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"interior",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"fog",Json::array({1000000,1000000})}}},
+            {"clock",{{"hour",23.999999999999996},{"environment",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"interior",Json::array({255,255,255,255,255,255,255,255,255,255,255})},{"fog",Json::array({1000000,1000000})},
+                      /* NONCANONICAL wave 27 */ {"weather",{{"season","autumn"},{"kind","cloudy"},{"wind",Json::array({-0.707,-0.707,25.25})},{"gust",0.999},{"precipitation",0.999},{"cloud",0.999},{"fog",0.999},{"wetness",0.999},{"snow",0.999},{"temperature",-40.1}}}}},
             {"bounds",Json::array({-coordinate_limit,-coordinate_limit,coordinate_limit,coordinate_limit})},
             {"character",{{"name",std::string(32,'"')},{"class_id",3},{"equipment",player_bound.at("equipment")},
             {"appearance",std::move(appearance_bound)},{"state",{{"p",std::string(8184,'x')}}}}},
@@ -741,6 +743,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
             for(size_t n=0;n<std::min(slots,item_sizes.size());++n)vault+=item_sizes[n].first+1;
             require(book<=65533 && vault<=65533,"config","Recipe memory or Banka tab exceeds protocol envelope");
         }
+        weather_start();
         initializing_=false;
     } catch (const Rejected& e) { throw std::invalid_argument("gameplay config: " + e.message); }
       catch (const Json::exception& e) { throw std::invalid_argument(std::string("gameplay config: ") + e.what()); }
@@ -2611,7 +2614,7 @@ void World::handle(uint32_t id, const Json& request) {
     // dashboard, and the outcome returns as an admin_result event (a refused command is a result, not a connection error).
     if (action == "admin") {
         require(a.admin,"permission","Bunun için yönetici yetkisi gerekir."); const auto command = text(request.at("command"),16);
-        static const std::set<std::string> allowed{"players","items","inventory","give_item","take_item","currency","give_xp","heal","kits","give_kit","teleport","summon","kick","announce","respawn","clock"};
+        static const std::set<std::string> allowed{"players","items","inventory","give_item","take_item","currency","give_xp","heal","kits","give_kit","teleport","summon","kick","announce","respawn","clock","weather"};
         require(allowed.contains(command),"request","Bu yönetici komutu oyun içinden kullanılamaz.");
         Json result;
         try {
@@ -2788,6 +2791,7 @@ void World::advance() {
         walk(id,n,gx,gy,pace);
     }
     if (tick_ % 20 == 0) arena_tick();
+    weather_tick(); // NONCANONICAL wave 27 seasons/weather/wind
     bots_tick();
 }
 uint32_t World::tick() const { return tick_; }
@@ -2836,6 +2840,7 @@ Json World::state(uint32_t id) {
         const double hour=clock_hour();
         result["clock"]={{"hour",hour},{"environment",environment(hour)},{"fog",clock.at("fog")}};
         if(clock.contains("interior_hour"))result["clock"]["interior"]=environment(clock.at("interior_hour").get<double>());
+        if(config_.contains("weather"))result["clock"]["weather"]=weather_json(); // NONCANONICAL wave 27
     }
     result["character"]["equipment"]=visible_equipment(a.character.at("state"));
     // Puan: the original shows cumulative XP over the next cumulative threshold (VOD 1811/3183); state xp is within the level.
@@ -2976,6 +2981,7 @@ Json World::status() const {
     Json result{{"tick",tick_},{"tick_hz",20},{"players",online.size()},{"npcs",npcs_.size()},{"zones",zones},{"online",online},{"trades",trades_.size()},{"groups",groups_.size()},{"logs",logs_},{"provenance",config_.at("provenance")},
                 {"rates",{{"xp_rate",xp_rate_},{"drop_rate",drop_rate_},{"regen_rate",regen_rate_}}}};
     if(config_.contains("clock"))result["clock_hour"]=clock_hour();
+    if(config_.contains("weather")){result["weather"]=weather_json();result["weather"]["forced"]=weather_forced();}
     // The store rejects a status over 64 KiB (Store::world_status); 256 bot rows alone exceed it. Bot rows fill what is left
     // after the rest and a 4 KiB margin for the server's heartbeat fields; bots_total is the whole population (per-zone counts
     // stay complete in "zones").
@@ -3022,6 +3028,7 @@ Json World::admin(const std::string& command, const Json& arguments) {
             clock_offset_=std::fmod(clock_offset_+integer(arguments.at("hour"),0,23)-clock_hour()+48.0,24.0);
             return {{"ok",true},{"clock_hour",clock_hour()}};
         }
+        if(command=="weather")return weather_admin(arguments); // NONCANONICAL wave 27: force/clear weather kind and season
         if(command=="respawn") {
             const auto zone=arguments.contains("zone")?text(arguments.at("zone"),32):std::string();int count=0;
             require(zone.empty()||config_.at("zones").contains(zone),"zone","Unknown zone");
