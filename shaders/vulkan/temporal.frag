@@ -44,7 +44,11 @@ void main() {
     if(!(guide.w>0) || !(guide.z>0))return;
     vec3 normal=rtGuideDecodeNormal(guide.xy);
     float depth=guide.w;
-    vec3 diffuse0=texelFetch(currentDiffuse,p,0).rgb;
+    vec4 diffuseSample=texelFetch(currentDiffuse,p,0);
+    vec3 diffuse0=diffuseSample.rgb;
+    // NONCANONICAL wave 28 sparse far indirect (lighting.glsl `indirect`): a 0 = no stochastic sample this frame, only
+    // the analytic estimate the raw colour was lit with; it is replaced but never averaged.
+    float traced=diffuseSample.a>.5?1.:0.;
     vec4 reflection0=texelFetch(currentReflection,p,0);
     vec2 currentUV=(vec2(p)+.5)/vec2(size);
     vec3 ray=viewRay(currentUV);
@@ -132,10 +136,10 @@ void main() {
 
     // Spatial prefilter: 5x5 geometry-weighted kernel over the stochastic terms only. Same-surface statistics over the
     // whole 5x5 bound how far history may differ from the current signal (a moving caster's indirect shadow).
-    vec3 sumDiffuse=diffuse0,sumReflection=reflection0.rgb;
-    float weight=1;
-    vec3 mean=diffuse0,square=diffuse0*diffuse0;
-    float count=1;
+    vec3 sumDiffuse=diffuse0*traced,sumReflection=reflection0.rgb*traced;
+    float weight=traced;
+    vec3 mean=diffuse0*traced,square=diffuse0*diffuse0*traced;
+    float count=traced;
     for(int y=-2;y<=2;++y)for(int x=-2;x<=2;++x) {
         if(x==0 && y==0)continue;
         ivec2 q=p+ivec2(x,y);
@@ -145,12 +149,25 @@ void main() {
         float plane=abs(neighbor.w*(rayN+float(x)*stepN+float(y)*stepM)-depth*rayN)*planeScale;
         float g=exp(-plane)*pow16(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1));
         if(!(g>=1e-3))continue;
+        vec4 d4=texelFetch(currentDiffuse,q,0);
+        if(!(d4.a>.5))continue;
         float w=g*exp(-.5*float(x*x+y*y)/1.5);
-        vec3 d=texelFetch(currentDiffuse,q,0).rgb,r=reflections?texelFetch(currentReflection,q,0).rgb:vec3(0);
+        vec3 d=d4.rgb,r=reflections?texelFetch(currentReflection,q,0).rgb:vec3(0);
         sumDiffuse+=d*w;
         sumReflection+=r*w;
         weight+=w;
         mean+=d*g; square+=d*d*g; count+=g;
+    }
+    if(!(weight>0)) {
+        // Sparse far indirect: no traced same-surface sample within reach this frame (thin far features). The history
+        // is kept as it is (not aged); without one, the analytic estimate with no history length, so the a-trous
+        // passes take the converged neighbours.
+        bool kept=history.a>=1;
+        diffuse=kept?history.rgb:diffuse0;reflection=kept?historyReflection.rgb:reflection0.rgb;
+        diffuseHistory=vec4(diffuse,kept?history.a:0.);
+        reflectionHistory=vec4(reflection,kept?historyReflection.a:dot(diffuse,vec3(.299,.587,.114)));
+        color=vec4(max(raw+rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb),vec3(0)),1);
+        return;
     }
     diffuse=sumDiffuse/weight;reflection=sumReflection/weight;
 

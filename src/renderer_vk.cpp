@@ -80,6 +80,9 @@ class VulkanRenderer final:public Renderer {
  // once instead of once per overdrawn layer. Same image.
  VkPipeline prepass_pipeline_=VK_NULL_HANDLE,prepass_double_=VK_NULL_HANDLE,opaque_prepassed_=VK_NULL_HANDLE,opaque_prepassed_double_=VK_NULL_HANDLE;
  bool prepass_=false;
+ // NONCANONICAL wave 28 (horizon frame rate): guided-RT pixels beyond this view depth (units) trace their stochastic GI and
+ // reflection rays once in 16 frames, the resolve fills the rest (lighting.glsl `indirect`, temporal.frag).
+ float sparse_indirect_depth_=100.f;
  // shadow_ready_: the atlas was cleared once since create_targets (modes that never sample it skip the pass after that).
  bool shadow_ready_=false;
  VkSampler shadow_compare_=VK_NULL_HANDLE; // binding 5 sampler2DShadow: bilinear depth compare (hardware PCF) when supported
@@ -95,7 +98,7 @@ class VulkanRenderer final:public Renderer {
 // (copy_water, bindings 12/13), and water_pass_ continuing the scene pass with writable depth. water_ready_: in a sampled
 // layout (every scene draw binds them, also before the first copy).
 Image water_color_,water_depth_;VkRenderPass water_pass_=VK_NULL_HANDLE;bool water_ready_=false;
-static constexpr std::uint32_t scene_images=14; // combined image samplers per frame/material descriptor set
+static constexpr std::uint32_t scene_images=16; // combined image samplers per frame/material descriptor set
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
  // 2 motion (RG16F previousUV-UV, FSR or RT denoise), 3/4 RT illumination/reflection history, 5 FSR reactive (R8).
  std::vector<VkFormat> scene_colors_,after_colors_,temporal_colors_{VK_FORMAT_R16G16B16A16_SFLOAT};
@@ -944,6 +947,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      physical_rt_=rt_enabled_&&!original_lighting_&&options_.rt_style==RtStyle::physical;
      const char* denoise=SDL_getenv("IKV_RT_DENOISE");
      denoise_enabled_=rt_enabled_&&!original_lighting_&&(!denoise||std::strcmp(denoise,"0"));
+     // A/B knob: IKV_RT_SPARSE_GI=0 traces every pixel's indirect rays; a positive value moves the start depth.
+     if(const char* sparse=SDL_getenv("IKV_RT_SPARSE_GI"))sparse_indirect_depth_=std::max(0.f,std::strtof(sparse,nullptr));
      VkPhysicalDeviceFeatures available{};vkGetPhysicalDeviceFeatures(physical_,&available);
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
@@ -1079,7 +1084,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      if(depth_features.optimalTilingFeatures&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)sampler.magFilter=sampler.minFilter=VK_FILTER_LINEAR;
      sampler.compareEnable=VK_TRUE;sampler.compareOp=VK_COMPARE_OP_LESS_OR_EQUAL;
      checked(vkCreateSampler(device_,&sampler,nullptr,&shadow_compare_),"shadow compare sampler");
-     // Image bindings 1..14 (write_set): 10/11 temporal guides (white without denoise), 12/13 the water copy, 14 parallax height.
+     // Image bindings 1..16 (write_set): 10/11 temporal guides (white without denoise), 12/13 the water copy, 14 parallax height,
+     // 15/16 the previous frame's resolved RT indirect/reflection (sparse far indirect estimate; white without denoise).
      std::array<VkDescriptorSetLayoutBinding,scene_images+1> bindings{};
      bindings[0]={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,nullptr};
      const std::uint32_t binding_count=scene_images+1;
@@ -1370,7 +1376,11 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,6>* bound,unsig
                const Image* input_diffuse=nullptr,const Image* input_reflection=nullptr) {
      VkDescriptorBufferInfo buffer_info{uniform_.handle,0,sizeof(Frame)};
      std::array<VkDescriptorImageInfo,scene_images> images{};
-     const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_};
+     const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_,&white_,&white_};
+     // NONCANONICAL wave 28 sparse far indirect (lighting.glsl sparseIndirect): the last a-trous iteration's output (atrous_
+     // A pair) still holds the previous frame's resolved estimate when the scene pass samples it. Never for the passes that
+     // write it (post/temporal sets).
+     if(denoise_enabled_&&!post){maps[14]=&atrous_[0];maps[15]=&atrous_[1];}
      if(post)maps[0]=&hdr_[history];
      else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];maps[13]=(*bound)[5];}
     if(diffuse)maps[0]=diffuse;
@@ -1386,7 +1396,7 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,6>* bound,unsig
      writes[0].descriptorCount=1;writes[0].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
      writes[0].pBufferInfo=&buffer_info;
      for(unsigned i=0;i<image_count;++i) {
-         images[i]={i==4?shadow_compare_:i==6||i==9||i==10||i==12?shadow_sampler_:i==5||i==7||i==11||(post&&i<2)?linear_clamp_:sampler_,
+         images[i]={i==4?shadow_compare_:i==6||i==9||i==10||i==12?shadow_sampler_:i==5||i==7||i==11||i>=14||(post&&i<2)?linear_clamp_:sampler_,
              maps[i]->view,i==4||i==6?VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
          writes[i+1].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i+1].dstSet=set;writes[i+1].dstBinding=i+1;
          writes[i+1].descriptorCount=1;writes[i+1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -2190,7 +2200,10 @@ void set_particles(const ParticleFrame& frame)override {
      // A scene not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
      f.jitter[2]=continued?previous_jitter_[0]:f.jitter[0];f.jitter[3]=continued?previous_jitter_[1]:f.jitter[1];
      const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
-     f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_params={shadow_cascades.split,0,0,0};f.eye={eye[0],eye[1],eye[2],1};
+     // shadow_params.y: NONCANONICAL wave 28 sparse far indirect start depth (lighting.glsl `indirect`; guided RT only).
+     f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];
+     f.shadow_params={shadow_cascades.split,denoise_enabled_?sparse_indirect_depth_:0.f,0,0};
+     f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
      f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
      {const auto g=ground_marks_.uniforms(weather_,entities,options_.camera,float(source_ticks)*.001f);

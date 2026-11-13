@@ -159,6 +159,11 @@ vec4 sourceOceanSurface() {
 // Godot normal layers, GGX glints, edge foam. The v_ocean vertex displacement is kept.
 layout(set=0,binding=12) uniform sampler2D waterColor;
 layout(set=0,binding=13) uniform sampler2D waterDepth;
+#ifdef IKV_RT_GUIDED
+// NONCANONICAL wave 28 sparse far indirect: the previous frame's resolved indirect gain (a: history length) and reflection.
+layout(set=0,binding=15) uniform sampler2D previousIndirect;
+layout(set=0,binding=16) uniform sampler2D previousReflection;
+#endif
 vec3 waterSceneColor(vec2 uv){return textureLod(waterColor,uv,0).rgb;}
 float waterSceneDepth(vec2 uv){return textureLod(waterDepth,uv,0).r;}
 float waterNdcZ(float depth){return depth;}
@@ -211,6 +216,39 @@ outputReactive=draw.flags.w>0?0:min(texture(diffuseMap,texcoord).a*draw.color.a,
 #ifdef IKV_RT
 // Physical facet normal from screen derivatives, before any discard leaves helper lanes undefined.
 vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
+// NONCANONICAL wave 28 (horizon frame rate, analysis/porting-wave28/HorizonGI): beyond view depth shadowParams.y (0: off,
+// renderer_vk.cpp IKV_RT_SPARSE_GI) the stochastic GI and reflection rays are traced by one 2x2-pixel block of each
+// 4x4 group of blocks per frame (ordered-dither rotation, every pixel once in 16 frames); the others write
+// no sample (outputDiffuse.a 0) and the guided resolve (temporal.frag) fills them from traced same-surface neighbours and
+// their history. Far pixels were most of a horizon view's cost: incoherent rays from distant terrain, buildings and
+// canopies. The deterministic Sun ray is unchanged. Every pixel traces on a frame without history (params.z 0: the
+// first frame, lighting jumps), without the guided resolve and on untextured translucent draws (never resolved).
+bool indirect=true;
+vec3 sparseDiffuse=vec3(0),sparseReflection=vec3(0);bool sparseHistory=false;
+#ifdef IKV_RT_GUIDED
+if(frame.shadowParams.y>0&&frame.params.z>.5&&!(draw.extra.w>.75&&draw.flags.w<=0)&&
+   dot(worldPosition-frame.eye.xyz,frame.cameraForward.xyz)>frame.shadowParams.y) {
+    uvec2 q=(uvec2(gl_FragCoord.xy)>>1u)&3u;
+    indirect=uint[16](0u,8u,2u,10u,12u,4u,14u,6u,3u,11u,1u,9u,15u,7u,13u,5u)[q.y*4u+q.x]==(uint(frame.viewport.z)&15u);
+}
+// Untraced pixels take the previous frame's resolved estimate (reprojected; renderer_vk.cpp bindings 15/16) into the raw
+// colour, so whatever reads the raw colour (layers under blended foliage) sees no dither. A pixel with no resolved
+// history there (seabed under the water, which owns the guide; disocclusions) traces after all, so the water's
+// refraction copy keeps per-pixel samples.
+if(!indirect) {
+    vec4 c=frame.previousVP*vec4(worldPosition,1);
+    vec2 uv=c.w>0?c.xy/c.w*.5+.5:vec2(-1);
+    if(all(greaterThanEqual(uv,vec2(0)))&&all(lessThan(uv,vec2(1)))) {
+        ivec2 t=ivec2(uv*vec2(textureSize(previousIndirect,0)));
+        vec4 d=texelFetch(previousIndirect,t,0);
+        // History carries the fog weights the stochastic terms were drawn with (faithful record fog, weather fog): undo them.
+        float weight=(frame.params.x>1.5&&frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.)*
+            (weatherOn(frame.weatherMisc)?weatherFogTransmit(distance(frame.eye.xyz,worldPosition),frame.weather,frame.weatherMisc):1.);
+        if(d.a>=1&&weight>.01){sparseHistory=true;sparseDiffuse=d.rgb/weight;sparseReflection=texelFetch(previousReflection,t,0).rgb/weight;}
+    }
+    if(!sparseHistory)indirect=true;
+}
+#endif
 #endif
 #ifdef IKV_RT_GUIDED
 // rtUnit: zero/NaN source normals (degenerate meshes) would put NaN in the guide, which history and the a-trous
@@ -292,7 +330,8 @@ float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot
 if(frame.params.x<1.5){
 // Blended draws (extra.w 1, 1.5): foliage and grass trace their GI and reflection rays opaque (rt_lighting.glsl rtDiffuseLighting).
 uint secondaryFlags=draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u;
-RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags);
+RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags,indirect);
+if(sparseHistory){light.diffuse=sparseDiffuse;light.reflection=sparseReflection;} // untraced far pixel: resolved estimate
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
 rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):texel.rgb);
@@ -319,7 +358,8 @@ float sunShadow=!roofed&&!fogged&&dot(worldNormal,l)>0?rtSunVisibilityMasked(wor
 if(!roofed) {
     vec3 smoothNormal=rtUnit(dot(worldNormal,facet)<0?-worldNormal:worldNormal);
     vec3 diffuse=fogged?vec3(0):rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,
-        draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u); // foliage: opaque GI rays (rtDiffuseLighting)
+        draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u,indirect); // foliage: opaque GI rays (rtDiffuseLighting)
+    if(sparseHistory&&!fogged)diffuse=sparseDiffuse; // untraced far pixel: resolved estimate
     ambient=albedo*diffuse;
 #ifdef IKV_RT_GUIDED
     // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.
@@ -364,7 +404,7 @@ float guideDepth=max(dot(worldPosition-frame.eye.xyz,frame.cameraForward.xyz),.0
 bool translucent=draw.extra.w>.75&&draw.flags.w<=0;
 float coverage=draw.extra.w>.75?original.a:1.;
 outputGuide=vec4(rtGuideEncodeNormal(guideNormal),translucent?0:rtArtwork,translucent?-guideDepth:guideDepth);
-outputDiffuse=vec4(rtDiffuse*coverage,1);
+outputDiffuse=vec4(rtDiffuse*coverage,indirect?1:0); // a 0: no stochastic sample this frame (sparse far indirect)
 outputReflection=vec4(rtReflection*coverage,fract(draw.extra.w)>.25?1:0);
 #endif
 }
