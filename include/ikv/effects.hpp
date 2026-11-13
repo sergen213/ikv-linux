@@ -2,6 +2,7 @@
 
 #include "ikv/renderer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -87,6 +88,9 @@ public:
     // NONCANONICAL wave 28 (enhanced weather only): recent footsteps of visible characters near the camera target, newest first,
     // at most kMaxGroundMarks, aged every update(); empty while the weather is disabled and cleared on a new scene.
     std::span<const GroundMark> ground_marks() const { return marks_; }
+    // NONCANONICAL wave 28: entities in the update() list that are not standing characters (Ganimet loot sacks, corpses). They
+    // leave no footsteps, never drip and do not stop rain at head height. Replaces the previous list; call before update().
+    void set_weather_props(std::span<const std::uint32_t> ids) { props_.assign(ids.begin(), ids.end()); }
     void update(float dt,std::span<const RenderEntity> entities);
     const ParticleFrame& frame(const Camera&);
     std::size_t particle_count() const;
@@ -126,6 +130,8 @@ private:
     struct Stride { float x=0,z=0,travelled=0,side=1,soak=0,drip=0; bool seen=false; };
     std::unordered_map<std::uint32_t,Stride> strides_;
     std::vector<GroundMark> marks_;
+    std::vector<std::uint32_t> props_; // set_weather_props(); a handful of ids, searched linearly
+    bool weather_prop(std::uint32_t id) const { return std::find(props_.begin(), props_.end(), id) != props_.end(); }
     void character_weather(float dt,std::array<float,2> wind);
     // Coarse top-down surface grid (highest drawn static geometry per cell, water flag); see build_surface().
     struct Surface { float x0=0,z0=0,cell=1; std::uint32_t width=0,depth=0; std::vector<float> top; std::vector<std::uint8_t> water; bool built=false; };

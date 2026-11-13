@@ -853,8 +853,8 @@ void EffectSystem::weather_update(float dt) {
     };
     // Actors near the column (heads and shoulders): a cylinder of actor_radius up to ground + actor_top.
     near_.clear();
-    for (const auto& e : entities_)
-        if (std::hypot(e.x - focus_[0], e.z - focus_[2]) < weather_radius * 2) near_.push_back({e.x, e.ground_y + actor_top, e.z});
+    for (const auto& e : entities_) // wave 28: props (sacks, corpses) do not stop rain at head height
+        if (!weather_prop(e.id) && std::hypot(e.x - focus_[0], e.z - focus_[2]) < weather_radius * 2) near_.push_back({e.x, e.ground_y + actor_top, e.z});
     // Height band [lowest actor foot, highest head] holding every possible actor hit: a drop outside it cannot hit any actor,
     // so it skips the scan (same result as scanning near_, whose first hit wins).
     float band_low = INFINITY, band_high = -INFINITY;
@@ -898,7 +898,7 @@ void EffectSystem::character_weather(float dt, std::array<float, 2> wind) {
     for (auto& entry : strides_) entry.second.seen = false;
     for (const auto& e : entities_) {
         const float fx = e.x - focus_[0], fz = e.z - focus_[2];
-        if (!(fx * fx + fz * fz <= reach)) continue;
+        if (!(fx * fx + fz * fz <= reach) || weather_prop(e.id)) continue; // props: no footsteps, no drips
         // Open sky above the character: the surface grid top is its ground, not a roof or arcade overhead.
         float top = 0; bool water = false;
         const bool exposed = !surface_at(e.x, e.z, top, water) || top < e.ground_y + actor_top + 1;
@@ -1298,6 +1298,21 @@ void EffectSystem::self_test() {
         coat.set_ranges(INFINITY, 1, INFINITY);
         for (int i = 0; i < 40; ++i) { coat.set_weather(rain, true, {0, 0, 0}); coat.update(.05f, std::span(&stander, 1)); }
         require(drips() == 0 && coat.ground_marks().empty(), "no drips beyond the character effect range");
+        // Props (a Ganimet sack dragged along, a corpse) leave no footsteps, never drip and do not stop rain at head height.
+        coat.set_ranges(INFINITY, INFINITY, INFINITY);
+        const std::uint32_t sack_id = 70;
+        coat.set_weather_props(std::span(&sack_id, 1));
+        RenderEntity sack{sack_id, 0, 0, 0, 0};
+        rain.wetness = 1;
+        bool high_splash = false;
+        for (int i = 0; i < 80; ++i) {
+            sack.z += .3f; coat.set_weather(rain, true, {0, 0, sack.z}); coat.update(.05f, std::span(&sack, 1));
+            high_splash = high_splash || std::any_of(coat.splashes_.begin(), coat.splashes_.end(), [&](const Splash& s) { return s.position[1] > 1.5f && std::hypot(s.position[0], s.position[2] - sack.z) < 1.6f; });
+        }
+        require(coat.ground_marks().empty() && drips() == 0 && coat.strides_.empty() && !high_splash, "props leave no footsteps, never drip and do not catch rain");
+        coat.set_weather_props({});
+        for (int i = 0; i < 20; ++i) { sack.z += .3f; coat.set_weather(rain, true, {0, 0, sack.z}); coat.update(.05f, std::span(&sack, 1)); }
+        require(!coat.ground_marks().empty() && drips() > 0, "a character with the same id outside the prop list steps and drips");
     }
 }
 
