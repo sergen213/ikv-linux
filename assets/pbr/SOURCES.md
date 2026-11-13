@@ -29,7 +29,7 @@ No original game content is included or derived; original textures only select t
 | micro_stone | [ambientCG Rock023](https://ambientcg.com/view?id=Rock023) | CC0 1.0 | normal, orm | 48 |
 | micro_wood | [ambientCG Wood049](https://ambientcg.com/view?id=Wood049) | CC0 1.0 | normal, orm | 28 |
 | moss | [ambientCG Ground037](https://ambientcg.com/view?id=Ground037) | CC0 1.0 | albedo, height, normal, orm | 2 |
-| paving_herringbone | [ambientCG PavingStones098](https://ambientcg.com/view?id=PavingStones098) | CC0 1.0 | albedo, height, normal, orm | 1 |
+| paving_herringbone | [ambientCG PavingStones052](https://ambientcg.com/view?id=PavingStones052) | CC0 1.0 | albedo, height, normal, orm | 1 |
 | paving_hex | [ambientCG PavingStones075](https://ambientcg.com/view?id=PavingStones075) | CC0 1.0 | albedo, height, normal, orm | 2 |
 | paving_mossy | [ambientCG PavingStones082](https://ambientcg.com/view?id=PavingStones082) | CC0 1.0 | albedo, height, normal, orm | 2 |
 | paving_slab | [ambientCG PavingStones112](https://ambientcg.com/view?id=PavingStones112) | CC0 1.0 | albedo, height, normal, orm | 11 |
