@@ -59,11 +59,13 @@ static_assert(sizeof(Draw)==192 && offsetof(Draw,scroll)==112 && offsetof(Draw,p
 // Skinned meshes write staging[frame slot] on the host; the copy into vertices is recorded into that frame (upload).
 // previous: the pose the last frame drew (motion vectors; swapped with vertices on upload); previous_stale: previous
 // still differs from vertices.
-struct Geometry {Buffer vertices,indices,staging[2],previous;std::uint32_t count=0;std::uint64_t revision=0;std::array<float,4> bounds{};std::array<float,2> height{};bool upload=false,previous_stale=false;};
+// wave_*: NONCANONICAL wave 28 subdivided copy of a source ocean mesh (renderer.hpp subdivide_ocean_mesh), enhanced only.
+struct Geometry {Buffer vertices,indices,staging[2],previous,wave_vertices,wave_indices;std::uint32_t count=0,wave_count=0;std::uint64_t revision=0;std::array<float,4> bounds{};std::array<float,2> height{};bool upload=false,previous_stale=false;};
 // Two frames in flight: frame serial s records/submits slot s&1 and the CPU waits only for the frame two serials back.
 struct FrameSlot {VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquire=VK_NULL_HANDLE;bool pending=false;std::uint64_t serial=0;};
 // ocean: source ocean material (casts no shadow); water: enhanced water (ocean outside original appearance, drawn last).
-struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};bool ocean=false,water=false;};
+// waves: draw the subdivided ocean copy (Geometry::wave_*; renderer.hpp ocean_waves_on / kOceanWaveRange).
+struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};bool ocean=false,water=false,waves=false;};
 class VulkanRenderer final:public Renderer {
  SDL_Window* window_;RendererOptions options_;VkInstance instance_=VK_NULL_HANDLE;VkSurfaceKHR surface_=VK_NULL_HANDLE;VkPhysicalDevice physical_=VK_NULL_HANDLE;VkDevice device_=VK_NULL_HANDLE;VkQueue queue_=VK_NULL_HANDLE;std::uint32_t family_=0;
  VkSwapchainKHR swapchain_=VK_NULL_HANDLE;VkFormat swap_format_=VK_FORMAT_UNDEFINED;VkExtent2D extent_{},render_extent_{};std::vector<VkImage> swap_images_;std::vector<VkSemaphore> present_semaphores_;VkCommandPool pool_=VK_NULL_HANDLE;
@@ -119,6 +121,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  // backdrop_: the scene clear colour (linear; weather_backdrop under weather).
  std::array<float,3> backdrop_{.04f,.05f,.065f};
  WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
+ bool ocean_waves_=false; // NONCANONICAL wave 28: this frame draws subdivided ocean copies (renderer.hpp ocean_waves_on)
  GroundMarkTracker ground_marks_{std::getenv("IKV_RENDER_GROUND_MARKS")}; // NONCANONICAL wave 28 footsteps (+ capture-only trail)
  // IKV_GPU_TIMING: per slot one timestamp per TimingMark (wave 27: every pass, not only the scene pass); the 30-frame
  // averages are logged as "Vulkan gpu timing frames=30 scenePassMs=X <pass>Ms=..." (scenePassMs first and unchanged:
@@ -236,7 +239,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  void bind_set(VkDescriptorSet set) {
      vkCmdBindDescriptorSets(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&set,1,&uniform_offset_);
  }
- void destroy(Geometry& g){destroy(g.vertices);destroy(g.indices);for(auto& b:g.staging)destroy(b);destroy(g.previous);g.upload=g.previous_stale=false;}
+ void destroy(Geometry& g){destroy(g.vertices);destroy(g.indices);for(auto& b:g.staging)destroy(b);destroy(g.previous);destroy(g.wave_vertices);destroy(g.wave_indices);g.upload=g.previous_stale=false;}
  void wait_idle(const char* operation) {
      wait_frame(operation);drain_presents();
      // A frame fence does not retire WSI presentation/semaphore use. Keep real device idle
@@ -1591,8 +1594,8 @@ void clear_material_sets(SceneSet& set) {
          const auto remap=scene_mesh_remap(set.mesh_keys,s);
          std::vector<Geometry> kept(s.meshes.size());
          for(std::size_t i=0;i<remap.size();++i)if(remap[i]!=SIZE_MAX&&remap[i]<set.geometry.size())kept[i]=std::exchange(set.geometry[remap[i]],Geometry{});
-         for(auto& g:set.geometry)if(g.vertices.handle||g.indices.handle||g.staging[0].handle) {
-             retire(g.vertices);retire(g.indices);for(auto& b:g.staging)retire(b);retire(g.previous);++released_meshes;
+         for(auto& g:set.geometry)if(g.vertices.handle||g.indices.handle||g.staging[0].handle||g.wave_vertices.handle) {
+             retire(g.vertices);retire(g.indices);for(auto& b:g.staging)retire(b);retire(g.previous);retire(g.wave_vertices);retire(g.wave_indices);++released_meshes;
          }
          set.geometry=std::move(kept);
      }
@@ -1607,13 +1610,20 @@ void clear_material_sets(SceneSet& set) {
      // Full loads sub-allocate one pool; retained reloads (actor churn) allocate and retire destinations per resource.
      MemoryPool pool;
      UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
-     // NONCANONICAL wave 28: enhanced uploads the source ocean subdivided so it can carry the wind sea (renderer.hpp).
+     // NONCANONICAL wave 28: enhanced also uploads each source ocean mesh subdivided, to carry the wind sea (renderer.hpp).
      const auto ocean=options_.original_appearance?std::vector<bool>{}:ocean_wave_meshes(s);
+     std::optional<OceanBed> bed; // the wave copies' shore factors (renderer.hpp ocean_wave_mesh), built on first use
      for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
          if(mesh_index%1024==0)progress(); // uploads pump on their own
-         if(!ocean.empty()&&ocean[mesh_index]&&used[mesh_index]==2&&!set.geometry[mesh_index].vertices.handle)
-             new_meshes+=upload_mesh(set.geometry[mesh_index],subdivide_ocean_mesh(s.meshes[mesh_index]),used[mesh_index],batch);
-         else new_meshes+=upload_mesh(set.geometry[mesh_index],s.meshes[mesh_index],used[mesh_index],batch);
+         auto& g=set.geometry[mesh_index];
+         new_meshes+=upload_mesh(g,s.meshes[mesh_index],used[mesh_index],batch);
+         if(!ocean.empty()&&ocean[mesh_index]&&used[mesh_index]==2&&!g.wave_vertices.handle) {
+             Geometry wave;
+             if(!bed)bed=ocean_bed(s);
+             if(upload_mesh(wave,ocean_wave_mesh(s,mesh_index,*bed),2,batch)) {
+                 g.wave_vertices=std::exchange(wave.vertices,Buffer{});g.wave_indices=std::exchange(wave.indices,Buffer{});g.wave_count=wave.count;
+             }
+         }
      }
      set.textures.resize(s.textures.size());
      for(std::size_t i=retained_textures;i<s.textures.size();++i) {
@@ -1746,16 +1756,19 @@ void record_geometry_uploads(SceneSet& set) {
          const auto descriptor=material_sets_[item.material<material_sets_.size()?item.material:0];
          if(descriptor!=bound_set){vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&descriptor,1,&uniform_offset_);bound_set=descriptor;}
          vkCmdPushConstants(c,pipeline_layout_,VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,0,sizeof(draw),&draw);
+         // NONCANONICAL wave 28: the subdivided ocean copy where the wind sea shows (build_draws); its own binding key.
          auto& g=set.geometry[item.mesh];
-         if(item.mesh!=bound_mesh) {
+         const std::uint32_t mesh_key=item.waves?item.mesh|0x80000000u:item.mesh;
+         if(mesh_key!=bound_mesh) {
              // Binding 1 = the previous pose motion vectors compare against (skins only, once motion is rendered).
-             const VkBuffer buffers[2]{g.vertices.handle,motion_vectors_&&g.previous.handle?g.previous.handle:g.vertices.handle};
+             const VkBuffer vertices=item.waves?g.wave_vertices.handle:g.vertices.handle;
+             const VkBuffer buffers[2]{vertices,motion_vectors_&&g.previous.handle?g.previous.handle:vertices};
              const VkDeviceSize offsets[2]{};
              vkCmdBindVertexBuffers(c,0,2,buffers,offsets);
-             vkCmdBindIndexBuffer(c,g.indices.handle,0,VK_INDEX_TYPE_UINT32);
-             bound_mesh=item.mesh;
+             vkCmdBindIndexBuffer(c,item.waves?g.wave_indices.handle:g.indices.handle,0,VK_INDEX_TYPE_UINT32);
+             bound_mesh=mesh_key;
          }
-         vkCmdDrawIndexed(c,g.count,1,0,0,0);
+         vkCmdDrawIndexed(c,item.waves?g.wave_count:g.count,1,0,0,0);
      }
  }
  // depth: clear the depth attachment that follows the pass's colour attachments (location 0 clears to the backdrop,
@@ -2022,8 +2035,9 @@ void set_particles(const ParticleFrame& frame)override {
             (options_.original_appearance||!scene.materials[material].source_ocean);
          float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
          const bool ocean=material<scene.materials.size()&&scene.materials[material].source_ocean;
+         const bool water=ocean&&!options_.original_appearance;
          draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix,
-             ocean,ocean&&!options_.original_appearance});
+             ocean,water,water&&ocean_waves_&&set.geometry[mesh].wave_vertices.handle&&sphere_within(eye,matrix,set.geometry[mesh].bounds,kOceanWaveRange)});
      };
      if(scene.instances.empty()) {
          for(std::uint32_t i=0;i<scene.meshes.size();++i)
@@ -2171,6 +2185,7 @@ void set_particles(const ParticleFrame& frame)override {
      {SceneLighting lighting=scene.lighting;if(weather_override_)lighting.weather=*weather_override_;
       wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
       weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);
+      ocean_waves_=ocean_waves_on(weather_,ocean_waves_);
       backdrop_={.04f,.05f,.065f};
       if(weather_.active()){const auto b=weather_backdrop(weather_,lighting,{std::pow(.04f,1/2.2f),std::pow(.05f,1/2.2f),std::pow(.065f,1/2.2f)});
           for(unsigned i=0;i<3;++i)backdrop_[i]=std::pow(b[i],2.2f);}}

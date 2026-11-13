@@ -36,7 +36,7 @@ invariant gl_Position;
 void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
-    if(ocean)world=sourceOceanPosition(world);
+    if(ocean)world=sourceOceanPosition(world,secondaryUV); // NONCANONICAL wave 28: secondaryUV carries the shore factor
     // NONCANONICAL wave 27: wind sway of foliage-like draws (draw.scroll = renderer.hpp weather_sway; zero = rigid). The
     // previous position takes the same bend: sway adds no motion vectors.
     vec3 sway=ocean||draw.extra.y>.5?vec3(0):weatherSway(position.y,world.xyz,draw.scroll,frame.wind,frame.weatherMisc,frame.sourceTime.y);
@@ -74,7 +74,7 @@ void main(){
     motionCurrent=vec4(gl_Position.xy-frame.jitter.xy*gl_Position.w,gl_Position.zw);
     // Ocean displacement is evaluated at this frame's time for both: only the transform moves the water.
     vec4 previousWorld=draw.previousModel*vec4(previousPosition,1);
-    if(ocean)previousWorld=sourceOceanPosition(previousWorld);
+    if(ocean)previousWorld=sourceOceanPosition(previousWorld,secondaryUV);
     previousWorld.xyz+=sway;
     motionPrevious=frame.previousVP*previousWorld;
     motionPrevious.xy-=frame.jitter.zw*motionPrevious.w;

@@ -401,11 +401,12 @@ inline std::array<float, 4> mesh_bounds(const Mesh& mesh) {
     return s;
 }
 // NONCANONICAL wave 28 (enhanced appearance only): the source ocean meshes are coarse (Sivri Ada mean edges 26-130 units,
-// 6-32 m), too coarse to carry the wind sea's crests (frame.glsl oceanWindSwell): displaced, their flat facets drew
-// straight light bands across the shallows. The renderers upload these meshes (ocean_wave_meshes: any mesh drawn with a
-// source_ocean material) split by conforming longest-edge bisection until no edge exceeds max_edge (raised so that a mesh
-// stays near max_triangles). Every attribute is interpolated linearly, so undisplaced draws rasterise as before.
-inline Mesh subdivide_ocean_mesh(const Mesh& mesh, float max_edge = 32.f, std::size_t max_triangles = 300000) {
+// 6-32 m), too coarse to carry the wind sea's crests (frame.glsl oceanWindSwell). For any mesh drawn with a source_ocean
+// material (ocean_wave_meshes) the renderers also upload a copy split by conforming longest-edge bisection until no edge
+// exceeds max_edge (raised so that a mesh stays near max_triangles), and draw that copy only where ocean_waves_on and
+// kOceanWaveRange allow; everywhere else the source mesh draws exactly as before the wave. Every attribute is
+// interpolated linearly, so the copy differs only where it is displaced.
+inline Mesh subdivide_ocean_mesh(const Mesh& mesh, float max_edge = 24.f, std::size_t max_triangles = 400000) {
     if (mesh.indices.size() % 3 || !mesh.influences.empty()) return mesh;
     for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) return mesh; // the upload's validation reports it
     double area = 0;
@@ -474,6 +475,100 @@ inline std::vector<bool> ocean_wave_meshes(const Scene& scene) {
         if (instance.mesh < scene.meshes.size() && is_ocean(instance.material == UINT32_MAX ? scene.meshes[instance.mesh].material : instance.material))
             ocean[instance.mesh] = true;
     return ocean;
+}
+// The subdivided copy costs GPU time (Sivri Ada 40k -> ~650k ocean triangles), so it draws only while the wind sea exists:
+// weather active and wind above 2 m/s, off again below 1.5 m/s (no flapping), and only for ocean placements whose culling
+// sphere reaches within kOceanWaveRange of the eye (oceanWindWaves fades every wave out by then). At either switch the wind
+// sea is at most ~4 cm high or faded out, so the change is the source swell's finer sampling only.
+constexpr float kOceanWaveRange = 1920.f; // 8 x the longest wave: frame.glsl oceanWindWaves' fade end
+inline bool ocean_waves_on(const WeatherUniforms& w, bool was_on) { return w.active() && w.wind[2] > (was_on ? 1.5f : 2.f); }
+// NONCANONICAL wave 28: the bed under the ocean, so the wind waves die out toward shores, rocks, piers and hulls instead of
+// rising through them. A top-down grid (<= 2048^2 cells, >= 2 units) of the highest static non-ocean geometry, stamped like
+// effects.cpp's rain surface (cells whose centre a triangle covers, else its vertices' cells).
+struct OceanBed {
+    float x0 = 0, z0 = 0, cell = 1; std::uint32_t width = 0, depth = 0; std::vector<float> top;
+    // Highest bed within one cell around (x, z); -inf where nothing lies under the water.
+    float near(float x, float z) const {
+        if (top.empty()) return -INFINITY;
+        const auto ix = std::int64_t(std::floor((x - x0) / cell)), iz = std::int64_t(std::floor((z - z0) / cell));
+        float h = -INFINITY;
+        for (std::int64_t dz = -1; dz <= 1; ++dz) for (std::int64_t dx = -1; dx <= 1; ++dx) {
+            const auto cx = ix + dx, cz = iz + dz;
+            if (cx >= 0 && cz >= 0 && cx < std::int64_t(width) && cz < std::int64_t(depth)) h = std::max(h, top[std::size_t(cz) * width + std::size_t(cx)]);
+        }
+        return h;
+    }
+};
+inline OceanBed ocean_bed(const Scene& s) {
+    OceanBed g;
+    const auto ocean_draw = [&](const Instance& in) {
+        const auto material = in.material == UINT32_MAX ? s.meshes[in.mesh].material : in.material;
+        return in.ocean || (material < s.materials.size() && s.materials[material].source_ocean);
+    };
+    const auto usable = [&](const Instance& in) {
+        return in.entity_id == 0 && !in.occlusion_proxy && !in.sky && in.mesh < s.meshes.size() && s.meshes[in.mesh].influences.empty() &&
+               !ocean_draw(in) && scene_source_color_draw(s, in.mesh, in.material, in.source_ordinary_color_participates);
+    };
+    const auto world = [](const Matrix4& m, const Vertex& v) {
+        return std::array<float, 3>{m[0]*v.x + m[4]*v.y + m[8]*v.z + m[12], m[1]*v.x + m[5]*v.y + m[9]*v.z + m[13], m[2]*v.x + m[6]*v.y + m[10]*v.z + m[14]};
+    };
+    float lo[2]{INFINITY, INFINITY}, hi[2]{-INFINITY, -INFINITY};
+    for (const auto& in : s.instances) if (usable(in)) for (const auto& v : s.meshes[in.mesh].vertices) {
+        const auto p = world(in.transform.matrix, v);
+        if (!std::isfinite(p[0]) || !std::isfinite(p[2])) continue;
+        lo[0] = std::min(lo[0], p[0]); lo[1] = std::min(lo[1], p[2]); hi[0] = std::max(hi[0], p[0]); hi[1] = std::max(hi[1], p[2]);
+    }
+    if (!(lo[0] <= hi[0] && lo[1] <= hi[1])) return g;
+    g.cell = std::max(2.f, std::max(hi[0] - lo[0], hi[1] - lo[1]) / 2048); g.x0 = lo[0]; g.z0 = lo[1];
+    g.width = std::uint32_t((hi[0] - lo[0]) / g.cell) + 1; g.depth = std::uint32_t((hi[1] - lo[1]) / g.cell) + 1;
+    g.top.assign(std::size_t(g.width) * g.depth, -INFINITY);
+    const auto cell_of = [&](float v, float origin, std::uint32_t n) { return std::clamp<std::int64_t>(std::int64_t((v - origin) / g.cell), 0, std::int64_t(n) - 1); };
+    const auto stamp = [&](std::int64_t ix, std::int64_t iz, float y) { auto& t = g.top[std::size_t(iz) * g.width + std::size_t(ix)]; t = std::max(t, y); };
+    for (const auto& in : s.instances) {
+        if (!usable(in)) continue;
+        const auto& mesh = s.meshes[in.mesh];
+        for (std::size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            if (mesh.indices[t] >= mesh.vertices.size() || mesh.indices[t+1] >= mesh.vertices.size() || mesh.indices[t+2] >= mesh.vertices.size()) continue;
+            const auto a = world(in.transform.matrix, mesh.vertices[mesh.indices[t]]), b = world(in.transform.matrix, mesh.vertices[mesh.indices[t+1]]),
+                       c = world(in.transform.matrix, mesh.vertices[mesh.indices[t+2]]);
+            if (!std::isfinite(a[0] + a[1] + a[2] + b[0] + b[1] + b[2] + c[0] + c[1] + c[2])) continue;
+            const float area = (b[0] - a[0]) * (c[2] - a[2]) - (c[0] - a[0]) * (b[2] - a[2]);
+            bool covered = false;
+            if (std::abs(area) > 1e-6f) {
+                const auto x0 = cell_of(std::min({a[0], b[0], c[0]}), g.x0, g.width), x1 = cell_of(std::max({a[0], b[0], c[0]}), g.x0, g.width);
+                const auto z0 = cell_of(std::min({a[2], b[2], c[2]}), g.z0, g.depth), z1 = cell_of(std::max({a[2], b[2], c[2]}), g.z0, g.depth);
+                for (auto iz = z0; iz <= z1; ++iz) for (auto ix = x0; ix <= x1; ++ix) {
+                    const float px = g.x0 + (float(ix) + .5f) * g.cell, pz = g.z0 + (float(iz) + .5f) * g.cell;
+                    const float u = ((b[0] - px) * (c[2] - pz) - (c[0] - px) * (b[2] - pz)) / area, v = ((c[0] - px) * (a[2] - pz) - (a[0] - px) * (c[2] - pz)) / area, w = 1 - u - v;
+                    if (u < 0 || v < 0 || w < 0) continue;
+                    stamp(ix, iz, u * a[1] + v * b[1] + w * c[1]); covered = true;
+                }
+            }
+            if (!covered) for (const auto& p : {a, b, c}) stamp(cell_of(p[0], g.x0, g.width), cell_of(p[2], g.z0, g.depth), p[1]);
+        }
+    }
+    return g;
+}
+// The subdivided wave copy of ocean mesh `mesh` (first ocean placement's transform) with each vertex's shore factor in
+// uv1 = (-1, factor): 0 where the bed reaches the surface, 1 from kOceanShoreDepth of water (frame.glsl sourceOceanPosition
+// scales the wind waves by it; the -1 marks the copy, whose lightmap UVs no water draw reads).
+constexpr float kOceanShoreDepth = 16.f; // units (4 m): full wind waves from this depth
+inline Mesh ocean_wave_mesh(const Scene& s, std::size_t mesh, const OceanBed& bed) {
+    Mesh fine = subdivide_ocean_mesh(s.meshes[mesh]);
+    const Matrix4* model = nullptr;
+    for (const auto& in : s.instances)
+        if (in.mesh == mesh) {
+            const auto material = in.material == UINT32_MAX ? s.meshes[mesh].material : in.material;
+            if (material < s.materials.size() && s.materials[material].source_ocean) { model = &in.transform.matrix; break; }
+        }
+    static constexpr Matrix4 identity{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    const Matrix4& m = model ? *model : identity;
+    for (auto& v : fine.vertices) {
+        const float x = m[0]*v.x + m[4]*v.y + m[8]*v.z + m[12], y = m[1]*v.x + m[5]*v.y + m[9]*v.z + m[13], z = m[2]*v.x + m[6]*v.y + m[10]*v.z + m[14];
+        const float d = y - bed.near(x, z), f = std::clamp(d / kOceanShoreDepth, 0.f, 1.f);
+        v.uv1 = {-1.f, std::isfinite(d) ? f * f * (3 - 2 * f) : 1.f};
+    }
+    return fine;
 }
 using FrustumPlanes = std::array<std::array<float, 4>, 6>;
 // Normalized clip planes of a column-major view-projection, GL depth range. For the Vulkan [0,1]-depth projection of the
