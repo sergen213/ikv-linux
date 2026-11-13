@@ -1107,7 +1107,7 @@ void EffectSystem::self_test() {
         Scene yard; Mesh solid, pool;
         const auto quad = [](Mesh& m, float x0, float x1, float y) {
             const auto base = static_cast<std::uint32_t>(m.vertices.size());
-            for (const auto [x, z] : {std::pair{x0, -100.f}, {x1, -100.f}, {x1, 100.f}, {x0, 100.f}}) { Vertex v{}; v.x = x; v.y = y; v.z = z; m.vertices.push_back(v); }
+            for (const auto& [x, z] : {std::pair{x0, -100.f}, {x1, -100.f}, {x1, 100.f}, {x0, 100.f}}) { Vertex v{}; v.x = x; v.y = y; v.z = z; m.vertices.push_back(v); }
             m.indices.insert(m.indices.end(), {base, base + 1, base + 2, base, base + 2, base + 3});
         };
         quad(solid, -100, 100, 0); quad(solid, 10, 100, 12); quad(pool, -30, -12, 1);
