@@ -62,6 +62,7 @@ uniform vec4 source_time;
 uniform vec4 source_scroll;
 uniform mat4 light_view_projection;
 uniform mat4 far_light_view_projection;
+uniform mat3 normal_matrix; // transpose(inverse(mat3(object_matrix))), per draw on the CPU (set for enhanced non-sky draws)
 out vec3 fragment_position;
 out vec4 shadow_position;
 out vec4 far_shadow_position;
@@ -106,7 +107,7 @@ void main() {
     if(!original_appearance&&!sky) {
         // Normal-offset receiver: push the lookup up to 2 shadow texels out along the normal as the surface turns from the
         // sun, so curved actor skin stops self-shadowing against its own neighbouring shadow-map texels.
-        vec3 n=transpose(inverse(mat3(object_matrix)))*normal;float nl=length(n);
+        vec3 n=normal_matrix*normal;float nl=length(n);
         float texel=2.0/(2048.0*max(length(vec3(light_view_projection[0][0],light_view_projection[1][0],light_view_projection[2][0])),1e-6));
         float far_texel=2.0/(2048.0*max(length(vec3(far_light_view_projection[0][0],far_light_view_projection[1][0],far_light_view_projection[2][0])),1e-6));
         if(nl>0.00001){n/=nl;shadow_position+=light_view_projection*vec4(n*texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);
@@ -115,7 +116,7 @@ void main() {
     texcoord=uv;
     world_normal=normal;world_tangent=tangent;
     if(!original_appearance&&!sky) {
-        world_normal=transpose(inverse(mat3(object_matrix)))*normal;
+        world_normal=normal_matrix*normal;
         world_tangent=mat3(object_matrix)*tangent;
     }
     lightmap_uv=uv_lightmap;
@@ -454,6 +455,10 @@ void main(){
     if(alpha*material_color.a<=alpha_cutoff)discard;
 }
 )GLSL";
+// Casters without an alpha cutoff: no texture fetch and no discard, so early depth stays on (same depth as shadow_fragment).
+constexpr const char* shadow_depth_fragment = R"GLSL(#version 330 core
+void main(){}
+)GLSL";
 constexpr const char* overlay_vertex = R"GLSL(#version 330 core
 out vec2 texcoord;
 void main(){
@@ -600,8 +605,17 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLBLITFRAMEBUFFERPROC, glBlitFramebuffer);
     GL_ENTRY(PFNGLBLENDEQUATIONPROC, glBlendEquation);
     GL_ENTRY(PFNGLCOMPRESSEDTEXIMAGE2DPROC, glCompressedTexImage2D);
+    GL_ENTRY(PFNGLUNIFORMMATRIX3FVPROC, glUniformMatrix3fv);
+    GL_ENTRY(PFNGLGENQUERIESPROC, glGenQueries);
+    GL_ENTRY(PFNGLDELETEQUERIESPROC, glDeleteQueries);
+    GL_ENTRY(PFNGLBEGINQUERYPROC, glBeginQuery);
+    GL_ENTRY(PFNGLENDQUERYPROC, glEndQuery);
+    GL_ENTRY(PFNGLGETQUERYOBJECTIVPROC, glGetQueryObjectiv);
+    GL_ENTRY(PFNGLGETQUERYOBJECTUI64VPROC, glGetQueryObjectui64v);
 #undef GL_ENTRY
-    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
+    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0, stream=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
+    struct SkinStream { std::array<float,3> position,normal,tangent; }; // skinned attributes (upload_stream)
+    std::vector<SkinStream> skin_stream_;
     struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; };
     struct Draw { const Instance* instance; Matrix4 matrix; float distance; std::uint32_t material; bool fog; std::array<float,4> scroll; bool visible=true; };
     struct ContourDraw { std::uint32_t mesh; Matrix4 matrix; std::array<float,3> color; };
@@ -664,6 +678,36 @@ class GlRenderer final : public Renderer {
     struct View { std::vector<Draw> sky,opaque,alpha; };
     GlSet set_;
     View view_;
+    std::vector<const Draw*> opaque_order_; // visible non-water opaque draws, nearest first (render())
+    // Redundant-state filtering: the last value each cached helper set. Uniform values live in their program object and
+    // only these helpers write them, so they stay valid across frames; texture-unit, VAO and cull state is forgotten
+    // (state_reset) wherever other code may have changed it. NaN/INT_MIN sentinels force the first write.
+    struct UniformInt { GLint location=-1; int value=std::numeric_limits<int>::min(); };
+    struct UniformFloat { GLint location=-1; float value=std::numeric_limits<float>::quiet_NaN(); };
+    struct UniformVec4 { GLint location=-1; std::array<float,4> value{std::numeric_limits<float>::quiet_NaN()}; };
+    struct SceneUniforms { UniformInt sky,ocean,fog,normal,environment,lightmap,fade,height,texture; UniformFloat cutoff; UniformVec4 scroll,sway,color; } draw_uniforms_;
+    struct ShadowUniforms { UniformInt texture,fade,opaque; UniformFloat cutoff; UniformVec4 color,sway; } shadow_uniforms_;
+    UniformVec4 depth_sway_;
+    GLint normal_matrix_location_=-1,grayscale_location_=-1,contour_grayscale_location_=-1;
+    GLint particle_grayscale_location_=-1,particle_fog_enabled_location_=-1,particle_fog_start_location_=-1,particle_fog_end_location_=-1;
+    std::array<GLuint,10> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
+    // Shadow casters without an alpha cutoff draw with a depth-only program. Static casters (no entity, skin or sway) of a
+    // cascade are cached in shadow_static_*: while the light matrix and the static caster list are unchanged, the cached
+    // depth is restored only where last frame's dynamic casters drew, then the dynamic casters are drawn again (the depth
+    // min over casters is order independent, so the map equals a full redraw).
+    GLuint shadow_depth_program_=0,shadow_static_textures_[2]{},shadow_static_framebuffers_[2]{};
+    GLint depth_light_location_=-1,depth_object_location_=-1,depth_wind_location_=-1,depth_misc_location_=-1,depth_time_location_=-1;
+    struct ShadowKey { const Instance* instance; std::uint32_t mesh,material; std::uint64_t revision; Matrix4 matrix; bool operator==(const ShadowKey&) const=default; };
+    struct ShadowCache { bool valid=false,has_light=false; Matrix4 light{}; std::vector<ShadowKey> keys; std::vector<std::array<int,4>> dirty; };
+    std::array<ShadowCache,2> shadow_cache_;unsigned shadow_hits_=0,shadow_misses_=0; // cascade passes since the last timing line
+    double shadow_static_triangles_=0,shadow_dirty_texels_=0; // summed over those passes (IKV_GPU_TIMING line)
+    std::vector<std::array<int,4>> shadow_dirty_;std::vector<ShadowKey> shadow_keys_;std::vector<const Draw*> shadow_static_,shadow_dynamic_;
+    // IKV_GPU_TIMING: GL_TIME_ELAPSED per pass in a 4-frame ring, read only once available (never waits); the averages of 30
+    // complete frames are logged like Vulkan's "gpu timing" line. scenePassMs = opaque + water + alpha (Vulkan's scene pass).
+    enum TimedPass { timed_shadow,timed_opaque,timed_water,timed_alpha,timed_post,timed_passes };
+    static constexpr int timing_ring=4;
+    bool timing_=false;GLuint timing_queries_[timing_ring][timed_passes]{};unsigned timing_issued_[timing_ring]{};unsigned timing_frame_=0;
+    double timing_sum_[timed_passes]{};unsigned timing_frames_=0;
 public:
     GlRenderer(SDL_Window* window, const RendererOptions& options) : window_(window), options_(options) {
         if (!window_) throw std::invalid_argument("OpenGL requires an SDL window");
@@ -691,7 +735,8 @@ public:
             LOAD_GL(glBufferSubData);
             LOAD_GL(glGenFramebuffers); LOAD_GL(glBindFramebuffer); LOAD_GL(glFramebufferTexture2D); LOAD_GL(glCheckFramebufferStatus); LOAD_GL(glDeleteFramebuffers);
             LOAD_GL(glGenRenderbuffers); LOAD_GL(glBindRenderbuffer); LOAD_GL(glRenderbufferStorage); LOAD_GL(glFramebufferRenderbuffer); LOAD_GL(glDeleteRenderbuffers); LOAD_GL(glBlitFramebuffer);
-            LOAD_GL(glBlendEquation); LOAD_GL(glCompressedTexImage2D);
+            LOAD_GL(glBlendEquation); LOAD_GL(glCompressedTexImage2D); LOAD_GL(glUniformMatrix3fv);
+            LOAD_GL(glGenQueries); LOAD_GL(glDeleteQueries); LOAD_GL(glBeginQuery); LOAD_GL(glEndQuery); LOAD_GL(glGetQueryObjectiv); LOAD_GL(glGetQueryObjectui64v);
 #undef LOAD_GL
             glGetIntegerv(GL_MAX_TEXTURE_SIZE,&max_texture_size_);
             if(max_texture_size_<1) throw std::runtime_error("OpenGL texture limits unavailable");
@@ -734,6 +779,9 @@ public:
             glUniform1i_(uniform(program_,"shadow_far_map"),9);
             light_location_=uniform(program_,"light_view_projection");
             far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
+            normal_matrix_location_=uniform(program_,"normal_matrix");grayscale_location_=uniform(program_,"grayscale");
+            draw_uniforms_={{sky_location_},{ocean_location_},{fog_enabled_location_},{normal_location_},{environment_location_},{lightmap_location_},
+                {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_}};
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
             glGenTextures(1,&overlay_texture_);
@@ -755,6 +803,8 @@ public:
             particle_program_=link(particle_vertex,particle_fragment);
             particle_vp_location_=uniform(particle_program_,"view_projection");particle_bias_location_=uniform(particle_program_,"depth_bias");
             particle_reference_location_=uniform(particle_program_,"alpha_reference");
+            particle_grayscale_location_=uniform(particle_program_,"grayscale");particle_fog_enabled_location_=uniform(particle_program_,"fog_enabled");
+            particle_fog_start_location_=uniform(particle_program_,"fog_start");particle_fog_end_location_=uniform(particle_program_,"fog_end");
             glUseProgram_(particle_program_);glUniform1i_(uniform(particle_program_,"particle_map"),0);
             glGenVertexArrays_(1,&particle_vao_);glGenBuffers_(1,&particle_buffer_);
             glBindVertexArray_(particle_vao_);glBindBuffer_(GL_ARRAY_BUFFER,particle_buffer_);
@@ -765,6 +815,7 @@ public:
             contour_program_=link(contour_vertex,contour_fragment);
             contour_vp_location_=uniform(contour_program_,"view_projection");contour_object_location_=uniform(contour_program_,"object_matrix");
             contour_offset_location_=uniform(contour_program_,"offset");contour_color_location_=uniform(contour_program_,"contour");
+            contour_grayscale_location_=uniform(contour_program_,"grayscale");
             if(!options_.original_appearance) {
                 shadow_program_=link(shadow_vertex,shadow_fragment);
                 shadow_light_location_=uniform(shadow_program_,"light_view_projection");shadow_object_location_=uniform(shadow_program_,"object_matrix");
@@ -774,6 +825,11 @@ public:
                 shadow_wind_location_=uniform(shadow_program_,"weather_wind");shadow_misc_location_=uniform(shadow_program_,"weather_misc");
                 shadow_sway_location_=uniform(shadow_program_,"weather_sway");shadow_time_location_=uniform(shadow_program_,"source_time");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
+                shadow_uniforms_={{shadow_texture_location_},{shadow_fade_location_},{shadow_opaque_location_},{shadow_cutoff_location_},{shadow_color_location_},{shadow_sway_location_}};
+                shadow_depth_program_=link(shadow_vertex,shadow_depth_fragment);
+                depth_light_location_=uniform(shadow_depth_program_,"light_view_projection");depth_object_location_=uniform(shadow_depth_program_,"object_matrix");
+                depth_wind_location_=uniform(shadow_depth_program_,"weather_wind");depth_misc_location_=uniform(shadow_depth_program_,"weather_misc");
+                depth_time_location_=uniform(shadow_depth_program_,"source_time");depth_sway_.location=uniform(shadow_depth_program_,"weather_sway");
                 glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
                 for(int i=0;i<2;++i) {
                     glBindTexture(GL_TEXTURE_2D,shadow_textures_[i]);
@@ -788,10 +844,24 @@ public:
                     glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
                     if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL shadow framebuffer incomplete");
                 }
+                glGenTextures(2,shadow_static_textures_);glGenFramebuffers_(2,shadow_static_framebuffers_);
+                for(int i=0;i<2;++i) {
+                    glBindTexture(GL_TEXTURE_2D,shadow_static_textures_[i]);
+                    glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,2048,2048,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+                    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+                    glBindFramebuffer_(GL_FRAMEBUFFER,shadow_static_framebuffers_[i]);
+                    glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,shadow_static_textures_[i],0);
+                    glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+                    if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL static shadow framebuffer incomplete");
+                }
                 glBindFramebuffer_(GL_FRAMEBUFFER,0);check("allocating shadow map");
             }
             glGenFramebuffers_(1,&framebuffer_); glGenTextures(1,&color_); glGenRenderbuffers_(1,&depth_);
             glGenFramebuffers_(1,&water_framebuffer_);glGenTextures(2,water_textures_);
+            if(SDL_getenv("IKV_GPU_TIMING")) {
+                glGenQueries_(timing_ring*timed_passes,&timing_queries_[0][0]);timing_=true;
+                std::fprintf(stderr,"OpenGL gpu timing enabled (GL_TIME_ELAPSED, passes shadow/opaque/water/alpha/post)\n");
+            }
             int w=0,h=0;
             if(!SDL_GetWindowSizeInPixels(window_,&w,&h)) fail("SDL window extent");
             resize(w,h);
@@ -885,8 +955,9 @@ public:
         (void)self;
         if(!std::isfinite(dt) || dt<0) throw std::invalid_argument("invalid render delta");
         current();
+        timing_collect();
         auto& set=set_;
-        if(set.key!=&scene){release(set);set.key=&scene;}
+        if(set.key!=&scene){release(set);set.key=&scene;shadow_invalidate();}
         upload(set,scene);
         refresh(set,scene);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
@@ -896,7 +967,7 @@ public:
         glUseProgram_(program_);
         const auto vp=camera_view_projection(options_.camera,width_,height_);
         glUniform1i_(original_location_,options_.original_appearance?1:0);glUniform1f_(exposure_location_,options_.exposure);
-        glUniform1i_(uniform(program_,"grayscale"),grayscale_?1:0);
+        glUniform1i_(grayscale_location_,grayscale_?1:0);
         const auto& light=scene.lighting;
         validate_lighting(light);
         {SceneLighting lighting=light;if(weather_override_)lighting.weather=*weather_override_;
@@ -912,17 +983,23 @@ public:
         if(shadow_program_) {
             glUseProgram_(shadow_program_);glUniform4fv_(shadow_wind_location_,1,weather_.wind.data());
             glUniform4fv_(shadow_misc_location_,1,weather_.misc.data());glUniform4fv_(shadow_time_location_,1,source_time.data());
+            glUseProgram_(shadow_depth_program_);glUniform4fv_(depth_wind_location_,1,weather_.wind.data());
+            glUniform4fv_(depth_misc_location_,1,weather_.misc.data());glUniform4fv_(depth_time_location_,1,source_time.data());
             glUseProgram_(program_);
         }
         contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
         build(view_,set,scene,entities,vp,eye);
         if(shadow_program_) {
+            time_begin(timed_shadow);
             const auto cascades=shadow_light_cascades(options_.camera,enhanced_sun(light),options_.view_distance);
             shadow_split_=cascades.split;
             shadow_pass(0,set,scene,view_,cascades.light[0]);shadow_pass(1,set,scene,view_,cascades.light[1]);
+            time_end(timed_shadow);
         }
+        time_begin(timed_opaque);
         view_uniforms(scene,vp,eye);
+        state_reset();
         glDepthMask(GL_FALSE);
         for(const auto& draw:view_.sky) {
             if(scene.materials[draw.material].alpha){glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);}
@@ -933,15 +1010,30 @@ public:
         // NONCANONICAL enhanced water: source ocean draws after the rest of the opaque scene, which is copied first
         // (colour + depth) for its refraction and depth absorption (scene_fragment water_surface).
         const auto water=[&](const Draw& d){return !options_.original_appearance&&scene.materials[d.material].source_ocean;};
-        for(const auto& draw:view_.opaque) if(draw.visible&&!water(draw)) draw_instance(set,scene,draw);
-        if(std::any_of(view_.opaque.begin(),view_.opaque.end(),[&](const Draw& d){return d.visible&&water(d);})) {
+        // Enhanced opaque nearest first, as Vulkan build_draws: early depth rejects hidden fragments (parallax, PCF) before
+        // shading. Equal distances (parts of one placement) fall back to material, mesh and instance, so coplanar parts keep a
+        // stable order between frames and share state. Original appearance keeps instance order: its cheap shading gains
+        // nothing from depth order, while instance order keeps consecutive draws on shared state (measured faster).
+        opaque_order_.clear();bool any_water=false;
+        for(const auto& draw:view_.opaque) if(draw.visible){if(water(draw))any_water=true;else opaque_order_.push_back(&draw);}
+        if(!options_.original_appearance)std::sort(opaque_order_.begin(),opaque_order_.end(),[](const Draw* a,const Draw* b) {
+            if(a->distance!=b->distance)return a->distance<b->distance;
+            if(a->material!=b->material)return a->material<b->material;
+            if(a->instance->mesh!=b->instance->mesh)return a->instance->mesh<b->instance->mesh;
+            return a->instance<b->instance;
+        });
+        for(const auto* draw:opaque_order_) draw_instance(set,scene,*draw);
+        time_end(timed_opaque);
+        if(any_water) {
+            time_begin(timed_water);
             glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,water_framebuffer_);
             glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT,GL_NEAREST);
             glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);
-            glActiveTexture_(GL_TEXTURE6);glBindTexture(GL_TEXTURE_2D,water_textures_[0]);
-            glActiveTexture_(GL_TEXTURE7);glBindTexture(GL_TEXTURE_2D,water_textures_[1]);
+            bind_texture(6,water_textures_[0]);bind_texture(7,water_textures_[1]);
             for(const auto& draw:view_.opaque) if(draw.visible&&water(draw)) draw_instance(set,scene,draw);
+            time_end(timed_water);
         }
+        time_begin(timed_alpha);
         std::sort(view_.alpha.begin(),view_.alpha.end(),[](const Draw& a,const Draw& b){return a.distance>b.distance;});
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);glDepthMask(GL_FALSE);
         for(const auto& draw:view_.alpha) if(draw.visible) draw_instance(set,scene,draw);
@@ -952,9 +1044,9 @@ public:
             // Original 0049a780: depth test without depth write, no culling, per-system blend.
             glEnable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glEnable(GL_BLEND);
             glDisable(GL_CULL_FACE);glUseProgram_(particle_program_);glUniformMatrix4fv_(particle_vp_location_,1,GL_FALSE,vp.data());
-            glUniform1i_(uniform(particle_program_,"grayscale"),grayscale_?1:0);
-            glUniform1i_(uniform(particle_program_,"fog_enabled"),options_.original_appearance&&light.fog_enabled?1:0);
-            glUniform1f_(uniform(particle_program_,"fog_start"),light.fog_start);glUniform1f_(uniform(particle_program_,"fog_end"),light.fog_end);
+            glUniform1i_(particle_grayscale_location_,grayscale_?1:0);
+            glUniform1i_(particle_fog_enabled_location_,options_.original_appearance&&light.fog_enabled?1:0);
+            glUniform1f_(particle_fog_start_location_,light.fog_start);glUniform1f_(particle_fog_end_location_,light.fog_end);
             glBindVertexArray_(particle_vao_);glActiveTexture_(GL_TEXTURE0);
             for(const auto& batch:particle_batches_) {
                 if(batch.after_hdr!=after_hdr)continue;
@@ -978,7 +1070,7 @@ public:
             glEnable(GL_DEPTH_TEST);glDepthMask(GL_FALSE);glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
             glEnable(GL_CULL_FACE);glCullFace(GL_FRONT);
             glUseProgram_(contour_program_);glUniformMatrix4fv_(contour_vp_location_,1,GL_FALSE,vp.data());
-            glUniform1i_(uniform(contour_program_,"grayscale"),grayscale_?1:0);
+            glUniform1i_(contour_grayscale_location_,grayscale_?1:0);
             const float pulse=std::sin(static_cast<float>(ticks)*.004f)*.015f;
             for(int shell=3;shell>=1;--shell) {
                 glUniform1f_(contour_offset_location_,pulse+static_cast<float>(shell)*.02f);
@@ -991,6 +1083,8 @@ public:
             }
             glCullFace(GL_BACK);
         }
+        time_end(timed_alpha);
+        time_begin(timed_post);
         glDepthMask(GL_TRUE);
         if(options_.original_appearance) {
             glDisable(GL_DEPTH_TEST);glDisable(GL_CULL_FACE);glDisable(GL_BLEND);
@@ -1038,6 +1132,8 @@ public:
             glBindFramebuffer_(GL_READ_FRAMEBUFFER,framebuffer_);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,0);
             glBlitFramebuffer_(0,0,width_,height_,0,0,width_,height_,GL_COLOR_BUFFER_BIT,GL_NEAREST);
         }
+        time_end(timed_post);
+        if(timing_)++timing_frame_;
         progress();
         if(!SDL_GL_SwapWindow(window_)) fail("OpenGL presentation");
         rendered_=true;
@@ -1140,7 +1236,7 @@ private:
         gpu.vertex_count=source.vertices.size();gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);gpu.height=mesh_height_range(source);
         glGenBuffers_(1,&gpu.vertices);glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
         progress();
-        glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.vertices.size()*sizeof(Vertex)),source.vertices.data(),source.influences.empty()?GL_STATIC_DRAW:GL_DYNAMIC_DRAW);
+        glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.vertices.size()*sizeof(Vertex)),source.vertices.data(),GL_STATIC_DRAW);
         progress();
         glGenBuffers_(1,&gpu.indices);glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER,gpu.indices);glBufferData_(GL_ELEMENT_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.indices.size()*sizeof(std::uint32_t)),source.indices.data(),GL_STATIC_DRAW);
         progress();
@@ -1151,11 +1247,31 @@ private:
         glEnableVertexAttribArray_(4);glVertexAttribPointer_(4,3,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,tangent)));
         glEnableVertexAttribArray_(5);glVertexAttribPointer_(5,2,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,uv1)));
         glEnableVertexAttribArray_(6);glVertexAttribPointer_(6,4,GL_FLOAT,GL_FALSE,sizeof(Vertex),reinterpret_cast<const void*>(offsetof(Vertex,color)));
+        // Skinned meshes: skinning rewrites only position, normal and tangent (scene_animation.cpp), so those come from a
+        // separate 36-byte stream that refresh() re-specifies; uv, ambient, lightmap uv and colour stay in the static buffer.
+        if(!source.influences.empty()) {
+            glGenBuffers_(1,&gpu.stream);glBindBuffer_(GL_ARRAY_BUFFER,gpu.stream);
+            upload_stream(source);
+            glVertexAttribPointer_(0,3,GL_FLOAT,GL_FALSE,sizeof(SkinStream),reinterpret_cast<const void*>(offsetof(SkinStream,position)));
+            glVertexAttribPointer_(1,3,GL_FLOAT,GL_FALSE,sizeof(SkinStream),reinterpret_cast<const void*>(offsetof(SkinStream,normal)));
+            glVertexAttribPointer_(4,3,GL_FLOAT,GL_FALSE,sizeof(SkinStream),reinterpret_cast<const void*>(offsetof(SkinStream,tangent)));
+        }
         progress();
+    }
+    // Packs the skinned attributes and re-specifies (orphans) the bound GL_ARRAY_BUFFER: the driver neither stalls on nor
+    // copies around the previous frame's draws still reading it. GL_DYNAMIC_DRAW, not STREAM: Mesa radeonsi places STREAM
+    // buffers in system memory (GTT), which measured slower vertex fetch for the whole opaque pass.
+    void upload_stream(const Mesh& mesh) {
+        skin_stream_.resize(mesh.vertices.size());
+        for(std::size_t i=0;i<mesh.vertices.size();++i) {
+            const auto& v=mesh.vertices[i];skin_stream_[i]={{v.x,v.y,v.z},{v.nx,v.ny,v.nz},v.tangent};
+        }
+        glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(skin_stream_.size()*sizeof(SkinStream)),skin_stream_.data(),GL_DYNAMIC_DRAW);
     }
     void release(GpuMesh& mesh) noexcept {
         if(mesh.indices)glDeleteBuffers_(1,&mesh.indices);
         if(mesh.vertices)glDeleteBuffers_(1,&mesh.vertices);
+        if(mesh.stream)glDeleteBuffers_(1,&mesh.stream);
         if(mesh.vao)glDeleteVertexArrays_(1,&mesh.vao);
         mesh={};
     }
@@ -1168,6 +1284,7 @@ private:
     // and every texture; only a shrunk texture table reloads the set.
     void plan(GlSet& set,const Scene& scene) {
         progress();
+        shadow_invalidate();
         if(set.textures.size()>scene.textures.size())release(set);
         else if(set.planned) {
             const auto remap=scene_mesh_remap(set.mesh_keys,scene);
@@ -1227,7 +1344,9 @@ private:
             glBindVertexArray_(0);check("uploading original asset scene");
         }catch(...){release(set);throw;}
     }
-    // Skinned meshes whose vertices moved since their upload (Scene::geometry_revision).
+    // Meshes whose vertices moved since their upload (Scene::geometry_revision): skinned ones re-specify only their
+    // position/normal/tangent stream, others their whole buffer (both orphaned, never a sync stall). Bounds follow the new
+    // pose: skinned culling spheres (colour and shadow) were the upload pose's before wave 27.
     void refresh(GlSet& set,const Scene& scene) {
         if(set.geometry_revision==scene.geometry_revision)return;
         for(std::size_t i=0;i<set.meshes.size();++i) {
@@ -1238,10 +1357,10 @@ private:
             if(mesh.revision==gpu.revision)continue;
             validate_vertices(mesh);
             progress();
-            glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
-            glBufferSubData_(GL_ARRAY_BUFFER,0,static_cast<GLsizeiptr>(mesh.vertices.size()*sizeof(Vertex)),mesh.vertices.data());
+            if(gpu.stream){glBindBuffer_(GL_ARRAY_BUFFER,gpu.stream);upload_stream(mesh);}
+            else {glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(mesh.vertices.size()*sizeof(Vertex)),mesh.vertices.data(),GL_DYNAMIC_DRAW);}
             gpu.revision=mesh.revision;
-            if(mesh.influences.empty())gpu.bounds=mesh_bounds(mesh);
+            gpu.bounds=mesh_bounds(mesh);
             progress();
         }
         check("uploading recovered skeletal animation");set.geometry_revision=scene.geometry_revision;
@@ -1304,10 +1423,12 @@ private:
                 matrix={sky_cosine,0,-sky_sine,0,0,1,0,0,sky_sine,0,sky_cosine,0,eye[0],eye[1],eye[2],1};
                 if(!set.materials[material].diffuse&&!set.meshes[instance.mesh].texture)continue;
             }
-            // Frustum culling: sky, source ocean (vertex-displaced) and skinned (per-frame world-space) meshes always draw.
+            // Frustum culling: sky and source ocean (vertex-displaced) always draw. Skinned meshes ignore the view distance
+            // (as Vulkan) but are frustum-tested against their current-pose bounds (refresh()).
             // Culled alpha draws stay in alpha so its distance sort sees the unculled list.
-            const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||!mesh.influences.empty()||
-                (sphere_within(eye,matrix,set.meshes[instance.mesh].bounds,options_.view_distance)&&
+            const bool skinned=!mesh.influences.empty();
+            const bool visible=instance.sky||instance.ocean||scene.materials[material].source_ocean||
+                ((skinned||sphere_within(eye,matrix,set.meshes[instance.mesh].bounds,options_.view_distance))&&
                  sphere_visible(planes,matrix,set.meshes[instance.mesh].bounds));
             // Enhanced keeps off-screen opaque draws too: they still cast into the shadow map.
             if(!visible&&!scene.materials[material].alpha&&options_.original_appearance)continue;
@@ -1336,32 +1457,145 @@ private:
     }
     // Enhanced sun shadow slots 0/1: near/far; leaves both bound for program_.
     void shadow_pass(int slot,const GlSet& set,const Scene& scene,const View& view,const Matrix4& light_vp) {
-        shadow_lights_[static_cast<std::size_t>(slot)]=light_vp;
-        glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glViewport(0,0,2048,2048);
+        const auto s=static_cast<std::size_t>(slot);
+        shadow_lights_[s]=light_vp;
+        // NONCANONICAL enhanced water: the source ocean casts no shadow. Keep near-clamped casters, cull the rest by light.
+        // Static casters (no entity, skin or per-frame sway/scroll vector) go to the cascade's cache; the rest are dynamic.
+        const auto caster_planes=shadow_caster_planes(light_vp);
+        shadow_static_.clear();shadow_dynamic_.clear();shadow_keys_.clear();
+        // Shadow-map texel rectangles {x0,y0,x1,y1} covered by this frame's dynamic casters: light-space bounding square of each
+        // world sphere (grown by the sway amplitude) plus 2 texels. A cache hit restores only last frame's rectangles.
+        auto& dirty=shadow_dirty_;dirty.clear();
+        const float sx=std::sqrt(light_vp[0]*light_vp[0]+light_vp[4]*light_vp[4]+light_vp[8]*light_vp[8]);
+        const float sy=std::sqrt(light_vp[1]*light_vp[1]+light_vp[5]*light_vp[5]+light_vp[9]*light_vp[9]);
+        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list) {
+            const auto mesh=draw.instance->mesh;
+            if(scene.materials[draw.material].source_ocean||!sphere_visible(caster_planes,draw.matrix,set.meshes[mesh].bounds))continue;
+            if(draw.instance->entity_id!=0||!scene.meshes[mesh].influences.empty()||draw.scroll!=std::array<float,4>{}) {
+                shadow_dynamic_.push_back(&draw);
+                const auto w=world_sphere(draw.matrix,set.meshes[mesh].bounds);
+                const float r=w[3]+(draw.instance->ocean?INFINITY:std::abs(draw.scroll[2]));
+                const float cx=light_vp[0]*w[0]+light_vp[4]*w[1]+light_vp[8]*w[2]+light_vp[12];
+                const float cy=light_vp[1]*w[0]+light_vp[5]*w[1]+light_vp[9]*w[2]+light_vp[13];
+                const auto texel=[](float ndc,int bias){return static_cast<int>(std::clamp(std::floor((ndc*.5f+.5f)*2048.f),-4.f,2052.f))+bias;};
+                if(!std::isfinite(r*sx+r*sy+cx+cy))dirty.push_back({0,0,2048,2048});
+                else dirty.push_back({texel(cx-r*sx,-2),texel(cy-r*sy,-2),texel(cx+r*sx,3),texel(cy+r*sy,3)});
+                continue;
+            }
+            shadow_static_.push_back(&draw);
+            shadow_keys_.push_back({draw.instance,mesh,draw.material,scene.meshes[mesh].revision,draw.matrix});
+        }
+        double dirty_texels=0;
+        for(auto& rect:dirty) {
+            for(auto& v:rect)v=std::clamp(v,0,2048);
+            if(rect[2]>rect[0]&&rect[3]>rect[1])dirty_texels+=double(rect[2]-rect[0])*double(rect[3]-rect[1]);
+        }
+        // Many or mostly-covering rectangles: one full restore is cheaper than many overlapping ones.
+        if(dirty.size()>64||dirty_texels>2048.0*2048.0){dirty.assign(1,{0,0,2048,2048});dirty_texels=2048.0*2048.0;}
+        std::size_t static_indices=0;for(const auto* draw:shadow_static_)static_indices+=static_cast<std::size_t>(set.meshes[draw->instance->mesh].count);
+        shadow_static_triangles_+=double(static_indices)/3;shadow_dirty_texels_+=dirty_texels;
+        auto& cache=shadow_cache_[s];
+        // Stable: the same light matrix and static caster list as last frame. The cache is filled on the first stable frame
+        // and reused while stability lasts; animated static placements or a moving camera never pay for the copy.
+        // Worth caching only while restoring the dirty texels costs less than redrawing the static casters (RX 7900 XTX: a full
+        // 2048^2 depth restore measured about as costly as ~200k static triangles; wind-swayed foliage is dynamic and large).
+        const bool worth=double(static_indices)/3>0.05*dirty_texels;
+        const bool stable=cache.has_light&&cache.light==light_vp&&cache.keys==shadow_keys_&&worth;
+        const bool hit=cache.valid&&stable;
+        ++(hit?shadow_hits_:shadow_misses_);
+        state_reset();
+        glViewport(0,0,2048,2048);
         // Vulkan shadow pipeline: back faces culled, depth bias 1.25 constant / 1.75 slope. The light matrix keeps
         // Vulkan's Y flip, which reverses GL winding, so source CW front faces rasterise CCW here.
-        glDepthMask(GL_TRUE);glClear(GL_DEPTH_BUFFER_BIT);glFrontFace(GL_CCW);
+        glDepthMask(GL_TRUE);glFrontFace(GL_CCW);
         glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1.75f,1.25f);
         // Casters sunward of the light's near plane (light distance only max(50,3·zoom)) clamp to depth 0 and still cast:
         // clipped, a building's long low-sun shadow came and went with the camera zoom.
         glEnable(GL_DEPTH_CLAMP);
+        glUseProgram_(shadow_depth_program_);glUniformMatrix4fv_(depth_light_location_,1,GL_FALSE,light_vp.data());
         glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,light_vp.data());
-        // NONCANONICAL enhanced water: the source ocean casts no shadow. Keep near-clamped casters, cull the rest by light.
-        const auto caster_planes=shadow_caster_planes(light_vp);
-        for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list)
-            if(!scene.materials[draw.material].source_ocean&&
-               sphere_visible(caster_planes,draw.matrix,set.meshes[draw.instance->mesh].bounds))draw_shadow(set,scene,draw);
+        const auto blit_depth=[&](GLuint from,GLuint to,const std::array<int,4>& r) {
+            if(r[0]>=r[2]||r[1]>=r[3])return;
+            glBindFramebuffer_(GL_READ_FRAMEBUFFER,from);glBindFramebuffer_(GL_DRAW_FRAMEBUFFER,to);
+            glBlitFramebuffer_(r[0],r[1],r[2],r[3],r[0],r[1],r[2],r[3],GL_DEPTH_BUFFER_BIT,GL_NEAREST);
+        };
+        // Hit: the map holds the static depth plus last frame's dynamic casters inside cache.dirty; restore just those.
+        if(hit)for(const auto& rect:cache.dirty)blit_depth(shadow_static_framebuffers_[slot],shadow_framebuffers_[slot],rect);
+        else {
+            glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);glClear(GL_DEPTH_BUFFER_BIT);
+            draw_casters(set,scene,shadow_static_);
+            cache.valid=stable;
+            if(stable)blit_depth(shadow_framebuffers_[slot],shadow_static_framebuffers_[slot],{0,0,2048,2048});
+        }
+        cache.dirty.swap(dirty);
+        cache.keys.swap(shadow_keys_);
+        cache.light=light_vp;cache.has_light=true;
+        glBindFramebuffer_(GL_FRAMEBUFFER,shadow_framebuffers_[slot]);
+        draw_casters(set,scene,shadow_dynamic_);
         glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
         glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
         glUseProgram_(program_);shadow_bind();
         check("drawing shadow map");
     }
+    // Casters without an alpha cutoff first (depth-only program), then cutoff casters (alpha-tested shadow program).
+    void draw_casters(const GlSet& set,const Scene& scene,const std::vector<const Draw*>& casters) {
+        bool any_cutoff=false;
+        glUseProgram_(shadow_depth_program_);
+        for(const auto* draw:casters) {
+            if(scene.materials[draw->material].alpha_cutoff>0){any_cutoff=true;continue;}
+            set_cull(!scene.materials[draw->material].double_sided);
+            glUniformMatrix4fv_(depth_object_location_,1,GL_FALSE,draw->matrix.data());set4f(depth_sway_,draw->scroll);
+            const auto& gpu=set.meshes[draw->instance->mesh];
+            bind_vao(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+        }
+        if(!any_cutoff)return;
+        glUseProgram_(shadow_program_);
+        for(const auto* draw:casters) if(scene.materials[draw->material].alpha_cutoff>0) draw_shadow(set,scene,*draw);
+    }
+    void shadow_invalidate(){for(auto& cache:shadow_cache_){cache.valid=cache.has_light=false;cache.keys.clear();}}
     void shadow_bind() {
         glUniformMatrix4fv_(light_location_,1,GL_FALSE,shadow_lights_[0].data());
         glUniformMatrix4fv_(far_light_location_,1,GL_FALSE,shadow_lights_[1].data());
         glUniform1f_(shadow_split_location_,shadow_split_);
-        glActiveTexture_(GL_TEXTURE5);glBindTexture(GL_TEXTURE_2D,shadow_textures_[0]);
-        glActiveTexture_(GL_TEXTURE9);glBindTexture(GL_TEXTURE_2D,shadow_textures_[1]);
+        bind_texture(5,shadow_textures_[0]);bind_texture(9,shadow_textures_[1]);
+    }
+    // Cached state helpers (see draw_uniforms_).
+    void set1i(UniformInt& u,int v){if(u.value!=v){u.value=v;glUniform1i_(u.location,v);}}
+    void set1f(UniformFloat& u,float v){if(!(u.value==v)){u.value=v;glUniform1f_(u.location,v);}}
+    void set4f(UniformVec4& u,const std::array<float,4>& v){if(u.value!=v){u.value=v;glUniform4fv_(u.location,1,v.data());}}
+    void bind_texture(unsigned unit,GLuint texture) {
+        if(bound_textures_[unit]==texture)return;
+        if(active_unit_!=GL_TEXTURE0+unit){active_unit_=GL_TEXTURE0+unit;glActiveTexture_(active_unit_);}
+        glBindTexture(GL_TEXTURE_2D,texture);bound_textures_[unit]=texture;
+    }
+    void bind_vao(GLuint vao){if(bound_vao_!=vao){bound_vao_=vao;glBindVertexArray_(vao);}}
+    void set_cull(bool on){if(cull_!=int(on)){cull_=on;if(on)glEnable(GL_CULL_FACE);else glDisable(GL_CULL_FACE);}}
+    // Forgets texture-unit, active-unit, VAO and cull state (other code changed them directly).
+    void state_reset(){bound_textures_.fill(~GLuint{0});active_unit_=0;bound_vao_=~GLuint{0};cull_=-1;}
+    void time_begin(TimedPass pass){if(timing_)glBeginQuery_(GL_TIME_ELAPSED,timing_queries_[timing_frame_%timing_ring][pass]);}
+    void time_end(TimedPass pass){if(!timing_)return;glEndQuery_(GL_TIME_ELAPSED);timing_issued_[timing_frame_%timing_ring]|=1U<<pass;}
+    // Reads the ring slot about to be reused (issued timing_ring frames ago); a frame whose results are not yet available
+    // is dropped rather than waited for.
+    void timing_collect() {
+        if(!timing_)return;
+        const unsigned slot=timing_frame_%timing_ring,issued=timing_issued_[slot];
+        timing_issued_[slot]=0;
+        if(!issued)return;
+        double ms[timed_passes]{};
+        for(int pass=0;pass<timed_passes;++pass) {
+            if(!(issued&(1U<<pass)))continue;
+            GLint ready=0;glGetQueryObjectiv_(timing_queries_[slot][pass],GL_QUERY_RESULT_AVAILABLE,&ready);
+            if(!ready)return;
+            GLuint64 ns=0;glGetQueryObjectui64v_(timing_queries_[slot][pass],GL_QUERY_RESULT,&ns);ms[pass]=static_cast<double>(ns)*1e-6;
+        }
+        for(int pass=0;pass<timed_passes;++pass)timing_sum_[pass]+=ms[pass];
+        if(++timing_frames_<30)return;
+        const auto avg=[&](int pass){return timing_sum_[pass]/timing_frames_;};
+        std::fprintf(stderr,"OpenGL gpu timing frames=30 scenePassMs=%.4f shadowMs=%.4f opaqueMs=%.4f waterMs=%.4f alphaMs=%.4f postMs=%.4f totalMs=%.4f shadowCacheHits=%u/%u shadowStaticTris=%.0f shadowDirty=%.3f\n",
+            avg(timed_opaque)+avg(timed_water)+avg(timed_alpha),avg(timed_shadow),avg(timed_opaque),avg(timed_water),avg(timed_alpha),avg(timed_post),
+            avg(timed_shadow)+avg(timed_opaque)+avg(timed_water)+avg(timed_alpha)+avg(timed_post),shadow_hits_,shadow_hits_+shadow_misses_,
+            shadow_static_triangles_/std::max(1u,shadow_hits_+shadow_misses_),shadow_dirty_texels_/std::max(1u,shadow_hits_+shadow_misses_)/(2048.0*2048.0));
+        shadow_hits_=shadow_misses_=0;shadow_static_triangles_=shadow_dirty_texels_=0;timing_frames_=0;for(auto& sum:timing_sum_)sum=0;
     }
     void upload_texture(const Texture& source,GLuint& name) {
         if(source.width>static_cast<unsigned>(std::numeric_limits<int>::max()) || source.height>static_cast<unsigned>(std::numeric_limits<int>::max()))throw std::invalid_argument("oversized scene texture");
@@ -1406,41 +1640,52 @@ private:
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
         if(anisotropy_>1)glTexParameterf(GL_TEXTURE_2D,GL_TEXTURE_MAX_ANISOTROPY_EXT,anisotropy_);
     }
+    // Alpha-tested caster (shadow_program_ bound).
     void draw_shadow(const GlSet& set,const Scene& scene,const Draw& draw){
         const auto& material=scene.materials[draw.material];
-        if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
+        set_cull(!material.double_sided);
         const auto& gpu=set.meshes[draw.instance->mesh];const auto& maps=set.materials[draw.material];
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
-        glUniformMatrix4fv_(shadow_object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(shadow_color_location_,1,material.color.data());
-        glUniform1f_(shadow_cutoff_location_,material.alpha_cutoff);glUniform1i_(shadow_texture_location_,diffuse?1:0);
-        glUniform1i_(shadow_fade_location_,maps.fade?1:0);glUniform1i_(shadow_opaque_location_,maps.normal||maps.environment?1:0);
-        glUniform4fv_(shadow_sway_location_,1,draw.scroll.data()); // source ocean draws cast no shadow
-        glActiveTexture_(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,maps.fade);
-        glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);
-        glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+        auto& u=shadow_uniforms_;
+        glUniformMatrix4fv_(shadow_object_location_,1,GL_FALSE,draw.matrix.data());set4f(u.color,material.color);
+        set1f(u.cutoff,material.alpha_cutoff);set1i(u.texture,diffuse?1:0);
+        set1i(u.fade,maps.fade?1:0);set1i(u.opaque,maps.normal||maps.environment?1:0);
+        set4f(u.sway,draw.scroll); // source ocean draws cast no shadow
+        bind_texture(4,maps.fade);bind_texture(0,diffuse);
+        bind_vao(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+    }
+    // transpose(inverse(mat3(m))) = cofactor(m)/det(m), column-major for glUniformMatrix3fv.
+    static std::array<float,9> normal_matrix(const Matrix4& m) {
+        const auto at=[&](int r,int c){return m[static_cast<std::size_t>(c*4+r)];};
+        const float c00=at(1,1)*at(2,2)-at(1,2)*at(2,1),c01=at(1,2)*at(2,0)-at(1,0)*at(2,2),c02=at(1,0)*at(2,1)-at(1,1)*at(2,0);
+        const float c10=at(0,2)*at(2,1)-at(0,1)*at(2,2),c11=at(0,0)*at(2,2)-at(0,2)*at(2,0),c12=at(0,1)*at(2,0)-at(0,0)*at(2,1);
+        const float c20=at(0,1)*at(1,2)-at(0,2)*at(1,1),c21=at(0,2)*at(1,0)-at(0,0)*at(1,2),c22=at(0,0)*at(1,1)-at(0,1)*at(1,0);
+        const float inverse=1.f/(at(0,0)*c00+at(0,1)*c01+at(0,2)*c02);
+        return {c00*inverse,c10*inverse,c20*inverse,c01*inverse,c11*inverse,c21*inverse,c02*inverse,c12*inverse,c22*inverse};
     }
     void draw_instance(const GlSet& set,const Scene& scene,const Draw& draw){
         const auto& gpu=set.meshes[draw.instance->mesh];const auto& material=scene.materials[draw.material];const auto& maps=set.materials[draw.material];
-        if(material.double_sided)glDisable(GL_CULL_FACE);else glEnable(GL_CULL_FACE);
-        glUniform1i_(sky_location_,draw.instance->sky?1:0);
-        glUniform1i_(ocean_location_,material.source_ocean?1:0);
-        glUniform4fv_(scroll_location_,1,draw.scroll.data());
-        const std::array<float,4> rigid{};
-        glUniform4fv_(weather_sway_location_,1,(draw.instance->ocean||material.source_ocean?rigid:draw.scroll).data());
-        glUniform1i_(fog_enabled_location_,draw.fog?1:0);
-        glUniform1f_(cutoff_location_,material.alpha_cutoff);glUniform1i_(normal_location_,maps.normal?1:0);
+        auto& u=draw_uniforms_;
+        set_cull(!material.double_sided);
+        set1i(u.sky,draw.instance->sky?1:0);
+        set1i(u.ocean,material.source_ocean?1:0);
+        set4f(u.scroll,draw.scroll);
+        static constexpr std::array<float,4> rigid{};
+        set4f(u.sway,draw.instance->ocean||material.source_ocean?rigid:draw.scroll);
+        set1i(u.fog,draw.fog?1:0);
+        set1f(u.cutoff,material.alpha_cutoff);set1i(u.normal,maps.normal?1:0);
         const GLuint environment=draw.instance->sky
             ? (maps.environment?maps.environment:(maps.fade?maps.fade:maps.lightmap)):maps.environment;
-        glUniform1i_(environment_location_,environment?1:0);glUniform1i_(lightmap_location_,maps.lightmap?1:0);
-        glUniform1i_(fade_location_,maps.fade?1:0);glUniform1i_(height_location_,maps.height?1:0);
-        glActiveTexture_(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,maps.normal);
-        glActiveTexture_(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,environment);
-        glActiveTexture_(GL_TEXTURE3);glBindTexture(GL_TEXTURE_2D,maps.lightmap);
-        glActiveTexture_(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,maps.fade);
-        glActiveTexture_(GL_TEXTURE8);glBindTexture(GL_TEXTURE_2D,maps.height);
+        set1i(u.environment,environment?1:0);set1i(u.lightmap,maps.lightmap?1:0);
+        set1i(u.fade,maps.fade?1:0);set1i(u.height,maps.height?1:0);
+        bind_texture(1,maps.normal);bind_texture(2,environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);bind_texture(8,maps.height);
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
-        glUniformMatrix4fv_(object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(color_location_,1,material.color.data());glUniform1i_(texture_location_,diffuse?1:0);
-        glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
+        glUniformMatrix4fv_(object_location_,1,GL_FALSE,draw.matrix.data());set4f(u.color,material.color);set1i(u.texture,diffuse?1:0);
+        // scene_vertex reads normal_matrix only on its enhanced, non-sky, non-ocean path.
+        if(!options_.original_appearance&&!draw.instance->sky&&!material.source_ocean) {
+            const auto n=normal_matrix(draw.matrix);glUniformMatrix3fv_(normal_matrix_location_,1,GL_FALSE,n.data());
+        }
+        bind_texture(0,diffuse);bind_vao(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
     }
     void destroy() noexcept {
         if(!context_)return;
@@ -1465,8 +1710,12 @@ private:
             if(glow_textures_[0])glDeleteTextures(2,glow_textures_);
             if(glow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,glow_framebuffers_);
             if(shadow_program_ && glDeleteProgram_)glDeleteProgram_(shadow_program_);
+            if(shadow_depth_program_ && glDeleteProgram_)glDeleteProgram_(shadow_depth_program_);
             if(shadow_textures_[0])glDeleteTextures(2,shadow_textures_);
             if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,shadow_framebuffers_);
+            if(shadow_static_textures_[0])glDeleteTextures(2,shadow_static_textures_);
+            if(shadow_static_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(2,shadow_static_framebuffers_);
+            if(timing_queries_[0][0] && glDeleteQueries_)glDeleteQueries_(timing_ring*timed_passes,&timing_queries_[0][0]);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;
     }
