@@ -25,7 +25,7 @@ layout(set=0,binding=0,std140) uniform Frame {
     // xy: this frame's sub-pixel projection jitter in NDC (vp includes it); zw: the previous frame's (previousVP).
     vec4 jitter;
     mat4 farLightVP;
-    // x: near eye-distance limit.
+    // x: near eye-distance limit. y: NONCANONICAL wave 28 sparse far indirect start view depth (0: off; lighting.glsl).
     vec4 shadowParams;
     // NONCANONICAL wave 27 weather (renderer.hpp weather_uniforms; all zero while inactive, original appearance or roofed):
     vec4 wind; // xy unit dir (world X/Z), z speed m/s, w accumulated wind phase in metres (renderer integrates speed*dt)

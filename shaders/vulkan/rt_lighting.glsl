@@ -161,11 +161,15 @@ struct RtLight { vec3 sun; vec3 diffuse; vec3 reflection; };
 // ran the alpha test (rtAlphaOpaque) on every leaf and blade they passed, the bulk of a low or horizon view's frame
 // (analysis/porting-wave28/Horizon). Neighbouring leaf quads then occlude as whole quads; their denoised GI and
 // glossy reflection look the same there. The Sun ray keeps the alpha test (leaf-shaped shadows).
+// indirect false (NONCANONICAL wave 28, sparse far indirect: lighting.glsl `indirect`): no rays; the analytic sky
+// irradiance stands in, and the guided resolve (temporal.frag) takes this pixel's estimate from its traced neighbours
+// and its history instead.
 vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal,
-                       vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags) {
+                       vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags, bool indirect) {
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
     vec3 diffuse = vec3(0.0);
 #if IKV_RT_GI
+    if (!indirect) return rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
         vec3 direction = rtAboveSurface(rtHemisphere(normal, rtSequence(pixel, 1u, frame * uint(samples) + uint(sampleIndex))), smoothNormal);
         diffuse += rtIncoming(position, facet, direction, sunDir, secondaryFlags);
@@ -178,9 +182,9 @@ vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal
     return diffuse;
 }
 // facet: physical triangle normal facing the eye; smoothNormal: interpolated vertex normal; normal: authored
-// (normal-mapped) shading normal.
+// (normal-mapped) shading normal. indirect false: no GI or reflection rays (rtDiffuseLighting; reflection 0).
 RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, vec3 viewDir, float roughness,
-                   vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags) {
+                   vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags, bool indirect) {
     facet = rtUnit(facet);
     smoothNormal = rtUnit(dot(smoothNormal, facet) < 0.0 ? -smoothNormal : smoothNormal);
     normal = rtUnit(normal);
@@ -199,7 +203,7 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     // NONCANONICAL wave 27: cloud/fog light softens the sun shadow (weather.glsl; 0 without weather).
     visibility = mix(visibility, 1.0, frameShadowSoftness());
     light.sun = rtSunRadiance() * (cosine * visibility * 0.96 / 3.14159265359);
-    light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality, secondaryFlags);
+    light.diffuse = rtDiffuseLighting(position, facet, smoothNormal, normal, sunDir, pixel, frame, quality, secondaryFlags, indirect);
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
 #if IKV_RT_REFLECTIONS
     // GGX importance-sampled half vectors, Schlick Fresnel, Smith masking.
@@ -208,7 +212,7 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     float nDotV = max(dot(normal, viewDir), 0.0001);
     vec3 tangent = rtUnit(cross(abs(normal.y) < 0.99 ? vec3(0,1,0) : vec3(1,0,0), normal));
     vec3 bitangent = cross(normal, tangent);
-    for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
+    for (int sampleIndex = 0; indirect && sampleIndex < samples; ++sampleIndex) {
         vec2 u = rtSequence(pixel, 2u, frame * uint(samples) + uint(sampleIndex));
         float phi = 6.28318530718 * u.x;
         float cosTheta = sqrt((1.0 - u.y) / (1.0 + (alphaSquared - 1.0) * u.y));
