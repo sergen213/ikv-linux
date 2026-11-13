@@ -1,5 +1,6 @@
 #include "ikv/renderer.hpp"
 #include "ikv_gl_water.h" // generated from shaders/vulkan/water.glsl (CMakeLists.txt): #define IKV_GL_WATER
+#include "ikv_gl_weather.h" // generated from shaders/vulkan/weather.glsl: #define IKV_GL_WEATHER (NONCANONICAL wave 27)
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
@@ -29,7 +30,8 @@ vec4 source_ocean_position(vec4 world_position) {
     polynomial=polynomial*squared+vec3(-1.0,1.0,-1.0);
     float first=phase<0.25?1.0:0.0,third=phase>=0.75?1.0:0.0;
     float wave=-dot(polynomial,vec3(first,1.0-first-third,third));
-    if(abs(camera_position.y-world_position.y)<100.0)world_position.y+=wave*0.5;
+    // NONCANONICAL wave 27 (enhanced weather, Vulkan frame.glsl): the swell grows with the wind, up to x2.5 in a gale.
+    if(abs(camera_position.y-world_position.y)<100.0)world_position.y+=wave*0.5*(weatherOn(weather_misc)?1.0+1.5*weatherWindStrength(weather_wind,weather_misc):1.0);
     return world_position;
 }
 )GLSL"
@@ -75,7 +77,11 @@ out vec3 source_tangent_eye;
 out vec3 source_ambient_light; // source vertex light without the directional term (enhanced ambient, wave 19)
 out float sky_scatter;
 out float fade_blend;
-)GLSL" IKV_GL_SOURCE_OCEAN R"GLSL(
+// NONCANONICAL wave 27 weather (renderer.hpp weather_uniforms; zero = the pre-wave paths) and this draw's wind sway vector.
+uniform vec4 weather_wind;
+uniform vec4 weather_misc;
+uniform vec4 weather_sway;
+)GLSL" IKV_GL_WEATHER IKV_GL_SOURCE_OCEAN R"GLSL(
 void main() {
     if(source_ocean) {
         vec4 world_position=object_matrix*vec4(position,1.0);
@@ -94,6 +100,7 @@ void main() {
         return;
     }
     vec4 world_position=object_matrix*vec4(position,1.0);
+    if(!sky)world_position.xyz+=weatherSway(position.y,world_position.xyz,weather_sway,weather_wind,weather_misc,source_time.y); // wave 27
     gl_Position=view_projection*world_position;
     fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position;
     if(!original_appearance&&!sky) {
@@ -200,6 +207,13 @@ in vec3 fragment_position;
 in vec4 shadow_position;
 in vec4 far_shadow_position;
 in float sky_scatter;
+// NONCANONICAL wave 27 weather (renderer.hpp weather_uniforms; zero = the pre-wave paths); scene_fog: SceneLighting::fog_enabled.
+uniform vec4 weather_wind;
+uniform vec4 weather_state;
+uniform vec4 weather_misc;
+uniform bool scene_fog;
+uniform vec4 source_time;
+)GLSL" IKV_GL_WEATHER R"GLSL(
 // Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
 const float PI=3.14159265359;
 vec3 enhanced_environment(vec3 direction) {
@@ -275,15 +289,20 @@ vec4 original_surface(vec4 surface,float sun_visibility) {
     return surface;
 }
 // Vulkan frame.glsl enhancedSunScale/enhancedAmbientScale (NONCANONICAL wave 19): clock record relative to noon, linear.
-vec3 enhanced_sun_scale(){return source_lighting?pow(max(diffuse_multiplier*(255.0/vec3(126.0,105.0,110.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
-vec3 enhanced_ambient_scale(){return source_lighting?pow(max(ambient_multiplier*(255.0/vec3(200.0,157.0,142.0)),vec3(0.0)),vec3(2.2)):vec3(1.0);}
+// NONCANONICAL wave 27: the weather tints and dims the sun and sky light (weather.glsl weatherSunTint/AmbientTint).
+vec3 enhanced_sun_scale(){return (source_lighting?pow(max(diffuse_multiplier*(255.0/vec3(126.0,105.0,110.0)),vec3(0.0)),vec3(2.2)):vec3(1.0))*weatherSunTint(weather_state,weather_misc);}
+vec3 enhanced_ambient_scale(){return (source_lighting?pow(max(ambient_multiplier*(255.0/vec3(200.0,157.0,142.0)),vec3(0.0)),vec3(2.2)):vec3(1.0))*weatherAmbientTint(weather_state,weather_misc,source_time.y);}
+// Vulkan lighting.glsl weatherFogLinear.
+vec3 weather_fog_linear(){
+    vec3 c=pow(max(weatherFogColor(fog_color,scene_fog,weather_state,weather_misc),vec3(0.0)),vec3(2.2));
+    return scene_fog?c:c*min(enhanced_ambient_scale(),vec3(1.0));
+}
 // NONCANONICAL: enhanced source ocean, the shared OpenUnderworld water (shaders/vulkan/water.glsl, embedded at build time
 // as IKV_GL_WATER) over the opaque scene copy (water_*_map, blitted before the water draws). The copy holds tonemapped
 // display colour: inverted to linear before mixing.
 uniform sampler2D water_color_map;
 uniform sampler2D water_depth_map;
 uniform mat4 view_projection;
-uniform vec4 source_time;
 uniform mat4 light_view_projection;
 uniform mat4 far_light_view_projection;
 vec3 water_linear(vec3 y){y=min(pow(y,vec3(2.2)),vec3(0.99));vec3 a=2.43*y-2.51,b=0.59*y-0.03,c=0.14*y;return (-b-sqrt(b*b-4.0*a*c))/(2.0*a)/exposure;}
@@ -305,9 +324,11 @@ vec3 water_surface() {
     vec3 light=source_lighting?pow(min(ambient_multiplier+diffuse_multiplier*max(l.y,0.0),vec3(1.0)),vec3(2.2)):vec3(1.0);
     float sun=scene_roofed?0.0:shadow_visibility(vec3(0.0,1.0,0.0),l);
     float caustic=scene_roofed?0.0:0.8*min(max(sun_scale.r,max(sun_scale.g,sun_scale.b)),1.0);
+    sun=mix(sun,1.0,weatherShadowSoftness(weather_state,weather_misc)); // NONCANONICAL wave 27 (0 without weather)
     vec3 c=waterShade(p,camera_position,view_projection,gl_FragCoord.xy/vec2(textureSize(water_depth_map,0)),source_time.y,l,light,
-        fog_color,vec3(2.8,2.55,2.2)*sun_scale,sun,caustic);
+        fog_color,vec3(2.8,2.55,2.2)*sun_scale,sun,caustic,weather_wind,weather_state,weather_misc);
     c=mix(pow(max(fog_color,vec3(0.0)),vec3(2.2)),c,clamp(fog_blend,0.0,1.0));
+    if(weatherOn(weather_misc))c=mix(weather_fog_linear(),c,weatherFogTransmit(distance(camera_position,p),weather_state,weather_misc));
     c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
     return pow(c,vec3(1.0/2.2));
 }
@@ -329,9 +350,14 @@ void main() {
             *(1.0-clamp(facing,0.0,1.0));
         surface=vec4(diffuse+specular*sky_c*0.80000001,1.0);
     } else if(sky) {
-        vec3 second=has_environment_map?texture(environment_map,texcoord).rgb:vec3(0.0);
+        // NONCANONICAL wave 27 (enhanced weather): clouds drift with the wind; overcast, fog and lightning (weather.glsl).
+        bool weather=weatherOn(weather_misc);
+        vec2 sky_uv=weather?texcoord+weatherSkyScroll(weather_wind):texcoord;
+        if(weather&&has_texture)surface=material_color*texture(diffuse_map,sky_uv);
+        vec3 second=has_environment_map?texture(environment_map,sky_uv).rgb:vec3(0.0);
         vec3 clouds=surface.rgb*(1.0-clamp(sky_blend,0.0,1.0))+second*sky_blend;
         surface=vec4(mix(fog_color,clouds*source_vertex_light+vec3(sky_scatter),surface.a),1.0);
+        if(weather)surface.rgb=weatherSky(surface.rgb,weatherFogColor(fog_color,scene_fog,weather_state,weather_misc),weather_state,weather_misc,source_time.y);
     } else if(original_appearance) {
         if(!source_normal_path()&&!has_environment_map&&has_fade_map)surface=mix(texture(fade_map,texcoord),surface,fade_blend);
         surface=original_surface(surface,1.0);
@@ -353,15 +379,31 @@ void main() {
             if(dot(t,t)>1e-12){t=normalize(t);vec2 xy=texture(normal_map,surface_uv).xy*2.0-1.0;n=normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1.0-dot(xy,xy))));}
         } else n=normalize(n-parallax_gradient);
         vec3 v=normalize(camera_position-fragment_position),l=normalize(sun_direction),h=normalize(v+l);
-        const float roughness=0.65;
+        float roughness=0.65;
         vec3 albedo=pow(max(surface.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
+        // NONCANONICAL wave 27 (Vulkan lighting.glsl): season tint, rain wetness and snow cover on albedo and baked light.
+        bool weather=weatherOn(weather_misc);
+        float direct_roughness=roughness,puddle=0.0;
+        if(weather) {
+            WeatherSurface w=weatherSurface(albedo,n,nlength>0.00001?world_normal/nlength:n,fragment_position,roughness,source_time.y,weather_state,weather_misc);
+            baked=weatherBaked(baked,albedo,w,weather_misc)*weatherAmbientTint(weather_state,weather_misc,source_time.y);
+            puddle=w.puddle;
+            albedo=w.albedo;n=w.normal;roughness=w.roughness;direct_roughness=w.directRoughness;
+        }
         float ndl=max(dot(n,l),0.0),ndv=max(dot(n,v),0.001),ndh=max(dot(n,h),0.0),vdh=max(dot(v,h),0.0);
-        float a2=roughness*roughness*roughness*roughness,dd=ndh*ndh*(a2-1.0)+1.0,d=a2/(PI*dd*dd);
-        float k=(roughness+1.0)*(roughness+1.0)/8.0,g=(ndv/(ndv*(1.0-k)+k))*(ndl/(ndl*(1.0-k)+k));
+        float a2=direct_roughness*direct_roughness*direct_roughness*direct_roughness,dd=ndh*ndh*(a2-1.0)+1.0,d=a2/(PI*dd*dd);
+        float k=(direct_roughness+1.0)*(direct_roughness+1.0)/8.0,g=(ndv/(ndv*(1.0-k)+k))*(ndl/(ndl*(1.0-k)+k));
         vec3 f=vec3(0.04)+0.96*pow(1.0-vdh,5.0);
         vec3 direct=((1.0-f)*albedo/PI+d*g*f/max(4.0*ndv*ndl,0.001))*ndl*3.2;
-        vec3 c=1.5*((scene_roofed?vec3(0.0):direct*enhanced_sun_scale()*shadow_visibility(n,l))+baked+enhanced_environment(reflect(-v,n))*f*(1.0-roughness)*0.4*enhanced_ambient_scale());
+        // Weather (Vulkan lighting.glsl): softened sun shadows; puddles mirror the weather-tinted sky strongly.
+        float sun_shadow=shadow_visibility(n,l),reflection_gain=0.4;vec3 sky_reflection=enhanced_environment(reflect(-v,n));
+        if(weather){sun_shadow=mix(sun_shadow,1.0,weatherShadowSoftness(weather_state,weather_misc));reflection_gain=mix(0.4,2.5,puddle);
+            sky_reflection=mix(sky_reflection,weather_fog_linear(),max(weather_state.y,weather_misc.x));}
+        vec3 c=1.5*((scene_roofed?vec3(0.0):direct*enhanced_sun_scale()*sun_shadow)+baked+sky_reflection*f*(1.0-roughness)*reflection_gain*enhanced_ambient_scale());
         c=mix(pow(max(fog_color,vec3(0.0)),vec3(2.2)),c,clamp(fog_blend,0.0,1.0));
+        if(weather) { // weather fog
+            c=mix(weather_fog_linear(),c,weatherFogTransmit(distance(camera_position,fragment_position),weather_state,weather_misc));
+        }
         c*=exposure;c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),0.0,1.0);
         surface.rgb=pow(c,vec3(1.0/2.2));
     }
@@ -379,11 +421,18 @@ layout(location=2) in vec2 uv;
 layout(location=6) in vec4 diffuse_color;
 uniform mat4 light_view_projection;
 uniform mat4 object_matrix;
+// NONCANONICAL wave 27: swaying draws bend as in scene_vertex.
+uniform vec4 weather_wind;
+uniform vec4 weather_misc;
+uniform vec4 weather_sway;
+uniform vec4 source_time;
 out vec2 texcoord;
 out float fade_blend;
+)GLSL" IKV_GL_WEATHER R"GLSL(
 void main(){
     texcoord=uv;fade_blend=diffuse_color.a;
-    vec4 p=light_view_projection*object_matrix*vec4(position,1.0);
+    vec3 sway=weatherSway(position.y,(object_matrix*vec4(position,1.0)).xyz,weather_sway,weather_wind,weather_misc,source_time.y);
+    vec4 p=sway==vec3(0.0)?light_view_projection*object_matrix*vec4(position,1.0):light_view_projection*(object_matrix*vec4(position,1.0)+vec4(sway,0.0));
     gl_Position=vec4(p.xy,p.z*2.0-p.w,p.w);
 }
 )GLSL";
@@ -552,7 +601,7 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLBLENDEQUATIONPROC, glBlendEquation);
     GL_ENTRY(PFNGLCOMPRESSEDTEXIMAGE2DPROC, glCompressedTexImage2D);
 #undef GL_ENTRY
-    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; };
+    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0; GLsizei count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
     struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; };
     struct Draw { const Instance* instance; Matrix4 matrix; float distance; std::uint32_t material; bool fog; std::array<float,4> scroll; bool visible=true; };
     struct ContourDraw { std::uint32_t mesh; Matrix4 matrix; std::array<float,3> color; };
@@ -589,6 +638,10 @@ class GlRenderer final : public Renderer {
     GLint sky_location_=-1,sky_blend_location_=-1;
     GLint fade_location_=-1,height_location_=-1;
     GLint ocean_location_=-1,time_location_=-1,scroll_location_=-1,roofed_location_=-1;
+    // NONCANONICAL wave 27: weather uniforms, the integrated wind phase and the IKV_RENDER_WEATHER capture override.
+    GLint weather_wind_location_=-1,weather_state_location_=-1,weather_misc_location_=-1,weather_sway_location_=-1,scene_fog_location_=-1;
+    GLint shadow_wind_location_=-1,shadow_misc_location_=-1,shadow_sway_location_=-1,shadow_time_location_=-1;
+    WeatherUniforms weather_;double wind_phase_=0;std::optional<SceneWeather> weather_override_=parse_weather_override(std::getenv("IKV_RENDER_WEATHER"));
     GLuint water_framebuffer_=0,water_textures_[2]{}; // NONCANONICAL enhanced water scene copy: colour, depth
     bool overlay_present_=false,rendered_=false,grayscale_=false;
     int overlay_width_=0,overlay_height_=0; // overlay_texture_ storage size (sub-rectangle uploads need a matching one)
@@ -670,6 +723,9 @@ public:
             ocean_location_=uniform(program_,"source_ocean");time_location_=uniform(program_,"source_time");
             scroll_location_=uniform(program_,"source_scroll");
             roofed_location_=uniform(program_,"scene_roofed");
+            weather_wind_location_=uniform(program_,"weather_wind");weather_state_location_=uniform(program_,"weather_state");
+            weather_misc_location_=uniform(program_,"weather_misc");weather_sway_location_=uniform(program_,"weather_sway");
+            scene_fog_location_=uniform(program_,"scene_fog");
             glUseProgram_(program_); glUniform1i_(uniform(program_,"diffuse_map"),0);
             glUniform1i_(uniform(program_,"normal_map"),1);
             glUniform1i_(uniform(program_,"environment_map"),2);glUniform1i_(uniform(program_,"lightmap_map"),3);
@@ -715,6 +771,8 @@ public:
                 shadow_color_location_=uniform(shadow_program_,"material_color");shadow_cutoff_location_=uniform(shadow_program_,"alpha_cutoff");
                 shadow_texture_location_=uniform(shadow_program_,"has_texture");shadow_fade_location_=uniform(shadow_program_,"has_fade_map");
                 shadow_opaque_location_=uniform(shadow_program_,"opaque_alpha");
+                shadow_wind_location_=uniform(shadow_program_,"weather_wind");shadow_misc_location_=uniform(shadow_program_,"weather_misc");
+                shadow_sway_location_=uniform(shadow_program_,"weather_sway");shadow_time_location_=uniform(shadow_program_,"source_time");
                 glUseProgram_(shadow_program_);glUniform1i_(uniform(shadow_program_,"diffuse_map"),0);glUniform1i_(uniform(shadow_program_,"fade_map"),4);
                 glGenTextures(2,shadow_textures_);glGenFramebuffers_(2,shadow_framebuffers_);
                 for(int i=0;i<2;++i) {
@@ -835,16 +893,27 @@ public:
         glDisable(GL_SCISSOR_TEST);glDisable(GL_CULL_FACE);glDisable(GL_BLEND);glEnable(GL_DEPTH_TEST);glDepthFunc(GL_LESS);glDepthMask(GL_TRUE);
         // Source ADF triangles keep D3D clockwise front faces; Vulkan's signed-area sign and projection Y flip cancel, so both use CW.
         glFrontFace(GL_CW);glCullFace(GL_BACK);
-        glClearColor(0.045f,0.065f,0.085f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glUseProgram_(program_);
         const auto vp=camera_view_projection(options_.camera,width_,height_);
         glUniform1i_(original_location_,options_.original_appearance?1:0);glUniform1f_(exposure_location_,options_.exposure);
         glUniform1i_(uniform(program_,"grayscale"),grayscale_?1:0);
         const auto& light=scene.lighting;
         validate_lighting(light);
+        {SceneLighting lighting=light;if(weather_override_)lighting.weather=*weather_override_;
+         wind_phase_=advance_wind_phase(wind_phase_,lighting,options_.original_appearance,dt);
+         weather_=weather_uniforms(lighting,options_.original_appearance,wind_phase_);}
+        const auto backdrop=weather_backdrop(weather_,light,{0.045f,0.065f,0.085f}); // wave 27: skyless zones under weather
+        glClearColor(backdrop[0],backdrop[1],backdrop[2],1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         const auto ticks=static_cast<std::uint32_t>(SDL_GetTicks());
         const std::array<float,4> source_time{static_cast<float>(ticks),static_cast<float>(ticks)*0.001f,0.0f,0.0f}; // v_ocean c38
         glUniform4fv_(time_location_,1,source_time.data());
+        glUniform4fv_(weather_wind_location_,1,weather_.wind.data());glUniform4fv_(weather_state_location_,1,weather_.weather.data());
+        glUniform4fv_(weather_misc_location_,1,weather_.misc.data());glUniform1i_(scene_fog_location_,light.fog_enabled?1:0);
+        if(shadow_program_) {
+            glUseProgram_(shadow_program_);glUniform4fv_(shadow_wind_location_,1,weather_.wind.data());
+            glUniform4fv_(shadow_misc_location_,1,weather_.misc.data());glUniform4fv_(shadow_time_location_,1,source_time.data());
+            glUseProgram_(program_);
+        }
         contours_.clear();
         const auto eye=camera_basis(options_.camera).eye;
         build(view_,set,scene,entities,vp,eye);
@@ -1068,7 +1137,7 @@ private:
         const auto& source=scene.meshes[index];auto& gpu=set.meshes[index];
         gpu.texture=0; // Legacy texture residency is resolved lazily from the actual draw's material.
         gpu.count=static_cast<GLsizei>(source.indices.size());glGenVertexArrays_(1,&gpu.vao);glBindVertexArray_(gpu.vao);
-        gpu.vertex_count=source.vertices.size();gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);
+        gpu.vertex_count=source.vertices.size();gpu.revision=source.revision;gpu.bounds=mesh_bounds(source);gpu.height=mesh_height_range(source);
         glGenBuffers_(1,&gpu.vertices);glBindBuffer_(GL_ARRAY_BUFFER,gpu.vertices);
         progress();
         glBufferData_(GL_ARRAY_BUFFER,static_cast<GLsizeiptr>(source.vertices.size()*sizeof(Vertex)),source.vertices.data(),source.influences.empty()?GL_STATIC_DRAW:GL_DYNAMIC_DRAW);
@@ -1250,6 +1319,9 @@ private:
                     scene.nodes[instance.node].source_bounds_center;
                 fog=source_fog_enabled(instance.source_half_extents,center,matrix,eye,light.fog_start);
             }
+            // NONCANONICAL wave 27: non-ocean draws carry the wind sway vector in the (otherwise unused) scroll slot.
+            if(!instance.ocean&&!instance.sky)scroll=weather_sway(weather_,scene.materials[material],matrix,set.meshes[instance.mesh].height,
+                instance.entity_id!=0||!mesh.influences.empty());
             const float dx=matrix[12]-eye[0],dy=matrix[13]-eye[1],dz=matrix[14]-eye[2];
             Draw draw{&instance,matrix,dx*dx+dy*dy+dz*dz,material,fog,scroll,visible};
             // NONCANONICAL enhanced water (authored alpha-blended) is drawn opaque with depth over the scene copy.
@@ -1342,6 +1414,7 @@ private:
         glUniformMatrix4fv_(shadow_object_location_,1,GL_FALSE,draw.matrix.data());glUniform4fv_(shadow_color_location_,1,material.color.data());
         glUniform1f_(shadow_cutoff_location_,material.alpha_cutoff);glUniform1i_(shadow_texture_location_,diffuse?1:0);
         glUniform1i_(shadow_fade_location_,maps.fade?1:0);glUniform1i_(shadow_opaque_location_,maps.normal||maps.environment?1:0);
+        glUniform4fv_(shadow_sway_location_,1,draw.scroll.data()); // source ocean draws cast no shadow
         glActiveTexture_(GL_TEXTURE4);glBindTexture(GL_TEXTURE_2D,maps.fade);
         glActiveTexture_(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,diffuse);
         glBindVertexArray_(gpu.vao);glDrawElements(GL_TRIANGLES,gpu.count,GL_UNSIGNED_INT,nullptr);
@@ -1352,6 +1425,8 @@ private:
         glUniform1i_(sky_location_,draw.instance->sky?1:0);
         glUniform1i_(ocean_location_,material.source_ocean?1:0);
         glUniform4fv_(scroll_location_,1,draw.scroll.data());
+        const std::array<float,4> rigid{};
+        glUniform4fv_(weather_sway_location_,1,(draw.instance->ocean||material.source_ocean?rigid:draw.scroll).data());
         glUniform1i_(fog_enabled_location_,draw.fog?1:0);
         glUniform1f_(cutoff_location_,material.alpha_cutoff);glUniform1i_(normal_location_,maps.normal?1:0);
         const GLuint environment=draw.instance->sky

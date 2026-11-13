@@ -194,5 +194,30 @@ int main() {
             }
         }
     }
+    { // NONCANONICAL wave 27 weather inputs
+        ikv::SceneLighting light;
+        auto zero=[](const ikv::WeatherUniforms& u){for(const auto* v:{&u.wind,&u.weather,&u.misc})for(float f:*v)if(f!=0)return false;return true;};
+        assert(zero(ikv::weather_uniforms(light,false,5))); // inactive
+        light.weather=*ikv::parse_weather_override("season=winter,kind=storm,wind=0:-2:30,gust=.5,precip=1.5,cloud=.7,fog=.2,wet=.3,snow=1,temp=-4");
+        assert(light.weather.active&&light.weather.season==ikv::Season::winter&&light.weather.kind==ikv::WeatherKind::storm&&light.weather.temperature==-4);
+        assert(zero(ikv::weather_uniforms(light,true,5))); // original appearance
+        auto u=ikv::weather_uniforms(light,false,1030);
+        assert(u.active()&&u.wind[0]==0&&u.wind[1]==-1&&u.wind[2]==25&&std::abs(u.wind[3]-6)<1e-4f&&u.weather[0]==1&&u.misc[2]==3&&u.misc[3]==4);
+        assert(std::abs(ikv::advance_wind_phase(1020,light,false,.5f)-(1020+12.5-1024))<1e-9);
+        assert(ikv::advance_wind_phase(7,light,true,.5f)==7);
+        light.roofed=true;assert(zero(ikv::weather_uniforms(light,false,5))&&ikv::advance_wind_phase(7,light,false,.5f)==7);
+        light.roofed=false;
+        ikv::Material leaf;leaf.alpha_cutoff=.3f;leaf.diffuse="textures/AgacYeni.dds";
+        const ikv::Matrix4 identity{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        const auto sway=ikv::weather_sway(u,leaf,identity,{2,22},false);
+        assert(sway[0]==2&&std::abs(sway[1]-.05f)<1e-6f&&std::abs(sway[2]-.7f)<1e-5f);
+        assert(ikv::weather_sway(u,leaf,identity,{2,22},true)[2]==0&&ikv::weather_sway(u,leaf,identity,{0,200},false)[2]==0);
+        assert(ikv::weather_sway(u,ikv::Material{},identity,{2,22},false)[2]==0);
+        ikv::Material wall;wall.alpha_cutoff=.3f;wall.diffuse="textures/yenicami_duvar.dds";
+        assert(ikv::weather_sway(u,wall,identity,{2,22},false)[2]==0); // alpha-tested but not foliage/cloth
+        bool rejected=false;
+        try{ikv::parse_weather_override("kind=hail");}catch(const std::invalid_argument&){rejected=true;}
+        assert(rejected&&!ikv::parse_weather_override(nullptr)&&!ikv::parse_weather_override(""));
+    }
     return 0;
 }

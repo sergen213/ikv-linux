@@ -177,6 +177,12 @@ bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){
 #endif
     return false;
 }
+// NONCANONICAL wave 27: weather fog colour in linear (weather.glsl weatherFogColor); without record fog, a grey following
+// the clock's sky light.
+vec3 weatherFogLinear(){
+    vec3 c=pow(max(weatherFogColor(frame.fogColor.rgb,frame.fogColor.w>.5,frame.weather,frame.weatherMisc),vec3(0)),vec3(2.2));
+    return frame.fogColor.w>.5?c:c*min(enhancedAmbientScale(),vec3(1));
+}
 #include "water.glsl"
 vec3 waterSurface(){
     vec3 p=worldPosition,l=normalize(frame.sun.xyz),sunScale=enhancedSunScale();
@@ -188,9 +194,11 @@ vec3 waterSurface(){
     float sun=sceneRoofed()?0:shadowVisibility(vec3(0,1,0));
 #endif
     float caustic=sceneRoofed()?0:.8*min(max(sunScale.r,max(sunScale.g,sunScale.b)),1);
+    sun=mix(sun,1.,weatherShadowSoftness(frame.weather,frame.weatherMisc)); // NONCANONICAL wave 27 (0 without weather)
     vec3 c=waterShade(p,frame.eye.xyz,frame.vp,gl_FragCoord.xy/frame.viewport.xy,frame.sourceTime.y,l,light,
-        frame.fogColor.rgb,vec3(2.8,2.55,2.2)*sunScale,sun,caustic);
+        frame.fogColor.rgb,vec3(2.8,2.55,2.2)*sunScale,sun,caustic,frame.wind,frame.weather,frame.weatherMisc);
     if(frame.fogColor.w>.5&&draw.extra.z>.5)c=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),c,clamp(sourceFog,0,1));
+    if(weatherOn(frame.weatherMisc))c=mix(weatherFogLinear(),c,weatherFogTransmit(distance(frame.eye.xyz,p),frame.weather,frame.weatherMisc));
     return max(c,vec3(0));
 }
 void main(){
@@ -223,12 +231,17 @@ if(draw.extra.w>=2) {
 }
 vec4 texel=texture(diffuseMap,surfaceUV)*draw.color;
 if(draw.extra.y>.5) {
-    vec3 secondary=draw.flags.y>.5?texture(environmentMap,texcoord).rgb:vec3(0);
+    // NONCANONICAL wave 27: enhanced clouds drift with the wind (weather.glsl weatherSky*).
+    bool weather=weatherOn(frame.weatherMisc);
+    vec2 skyUV=weather?texcoord+weatherSkyScroll(frame.wind):texcoord;
+    if(weather)texel=texture(diffuseMap,skyUV)*draw.color;
+    vec3 secondary=draw.flags.y>.5?texture(environmentMap,skyUV).rgb:vec3(0);
     vec3 clouds=mix(texel.rgb,secondary,clamp(frame.fog.w,0,1));
     float mu=dot(normalize(frame.eye.xyz-worldPosition),-normalize(frame.sun.xyz));
     float scatter=(.001*(1+mu*mu)+(.039999995*.995)/(1.64-1.6*mu))*
         (1-pow(2.7182817,-.001)*pow(2.7182817,-.995))/.99599999;
     vec3 skyColor=mix(frame.fogColor.rgb,clouds*vertexAmbient.rgb+vec3(scatter),texel.a);
+    if(weather)skyColor=weatherSky(skyColor,weatherFogColor(frame.fogColor.rgb,frame.fogColor.w>.5,frame.weather,frame.weatherMisc),frame.weather,frame.weatherMisc,frame.sourceTime.y);
     outputColor=vec4(frame.params.x>.5?pow(max(skyColor,vec3(0)),vec3(2.2)):skyColor,1);
 #ifdef IKV_RT_GUIDED
     outputGuide=vec4(0);outputDiffuse=vec4(0);outputReflection=vec4(0);
@@ -253,7 +266,15 @@ if(frame.params.x<.5&&frame.sun.w>.5&&fract(draw.extra.w)<.25&&dot(worldNormal,f
 vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.rgb,sourceAlpha);
 if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
-if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=roughness*roughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(roughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
+if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));
+// NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl).
+bool weather=weatherOn(frame.weatherMisc);
+vec3 sourceAlbedo=albedo;float directRoughness=roughness;WeatherSurface weathered;
+if(weather) {
+    weathered=weatherSurface(albedo,n,dot(worldNormal,worldNormal)>1e-12?normalize(worldNormal):n,worldPosition,roughness,frame.sourceTime.y,frame.weather,frame.weatherMisc);
+    albedo=weathered.albedo;n=weathered.normal;roughness=weathered.roughness;directRoughness=weathered.directRoughness;
+}
+float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot(v,h),0);float a=directRoughness*directRoughness,a2=a*a;float d=a2/(PI*pow(ndh*ndh*(a2-1)+1,2));float k=pow(directRoughness+1,2)/8;float g=(ndv/(ndv*(1-k)+k))*(ndl/(ndl*(1-k)+k));vec3 f0=mix(vec3(.04),albedo,metallic);vec3 f=f0+(1-f0)*pow(1-vdh,5);vec3 specular=d*g*f/max(4*ndv*ndl,.001);vec3 direct=((1-f)*(1-metallic)*albedo/PI+specular)*ndl*3.2;
 #ifdef IKV_RT
 // params.x 1: physical RT (traced sun, GI, reflections). 2: faithful RT with enhanced appearance: enhanced direct
 // shading and diffuse GI below, with a deterministic Sun ray (scenery + actors, mask 3; ocean mask 4 casts none).
@@ -261,7 +282,7 @@ if(frame.params.x<1.5){
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.);
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
-rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(texel.rgb);
+rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):texel.rgb);
 #endif
 }else
 #endif
@@ -272,6 +293,8 @@ rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwo
 // ambient everywhere. The record fog is applied in linear like the original's (sky included).
 bool roofed=sceneRoofed();
 vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
+// Weather on the baked light: the same tint and wetness; snow takes the baked light level.
+if(weather)baked=weatherBaked(baked,sourceAlbedo,weathered,frame.weatherMisc)*weatherAmbientTint(frame.weather,frame.weatherMisc,frame.sourceTime.y);
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):
 // Eminönü noon 108 vs 115, every roofed interior above original (analysis/porting-wave19/LightingFixes/report.md).
 vec3 ambient=baked;
@@ -285,20 +308,33 @@ if(!roofed) {
 #ifdef IKV_RT_GUIDED
     // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.
     float fogWeight=frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.;
-    rtDiffuse=diffuse*fogWeight;rtArtwork=rtGuidePackArtwork(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)));
+    rtDiffuse=diffuse*fogWeight;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)));
 #endif
 }
 #else
 float sunShadow=shadowVisibility(n);
 #endif
+// Weather: cloud/fog light softens sun shadows; puddles mirror the (weather-tinted) sky strongly.
+float reflectionGain=.4;vec3 skyReflection=environment(reflect(-v,n));
+if(weather){sunShadow=mix(sunShadow,1.,weatherShadowSoftness(frame.weather,frame.weatherMisc));reflectionGain=mix(.4,2.5,weathered.puddle);
+    skyReflection=mix(skyReflection,weatherFogLinear(),max(frame.weather.y,frame.weatherMisc.x));}
 #ifdef IKV_RT
 // The guided resolve replaces exactly albedo*diffuse: unlike the deterministic enhanced terms, faithful GI has no x1.5.
-result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale())
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+skyReflection*f*(1-roughness)*reflectionGain*enhancedAmbientScale())
     +(roofed?1.5*baked:ambient);
 #else
-result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+ambient+environment(reflect(-v,n))*f*(1-roughness)*.4*enhancedAmbientScale());
+result=1.5*((roofed?vec3(0):direct*enhancedSunScale()*sunShadow)+ambient+skyReflection*f*(1-roughness)*reflectionGain*enhancedAmbientScale());
 #endif
 if(frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(pow(max(frame.fogColor.rgb,vec3(0)),vec3(2.2)),result,clamp(sourceFog,0,1));
+}
+// NONCANONICAL wave 27: the weather fog (both RT styles and raster); the guided resolve's stochastic terms carry the fog
+// weight they are drawn with.
+if(weather) {
+    float weatherFog=weatherFogTransmit(distance(frame.eye.xyz,worldPosition),frame.weather,frame.weatherMisc);
+    result=mix(weatherFogLinear(),result,weatherFog);
+#ifdef IKV_RT_GUIDED
+    rtDiffuse*=weatherFog;rtReflection*=weatherFog;
+#endif
 }
 }
 if(frame.params.x<.5&&frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(frame.fogColor.rgb,result,clamp(sourceFog,0,1));

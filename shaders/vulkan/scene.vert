@@ -34,6 +34,10 @@ void main(){
     vec4 world=draw.model*vec4(position,1);
     bool ocean=draw.extra.w>=2;
     if(ocean)world=sourceOceanPosition(world);
+    // NONCANONICAL wave 27: wind sway of foliage-like draws (draw.scroll = renderer.hpp weather_sway; zero = rigid). The
+    // previous position takes the same bend: sway adds no motion vectors.
+    vec3 sway=ocean||draw.extra.y>.5?vec3(0):weatherSway(position.y,world.xyz,draw.scroll,frame.wind,frame.weatherMisc,frame.sourceTime.y);
+    world.xyz+=sway;
     sourceOceanEye=ocean?normalize(frame.eye.xyz-world.xyz):vec3(0);
     sourceOceanUV=ocean?uv+draw.scroll.zw:vec2(0);
     worldPosition=world.xyz;
@@ -65,6 +69,7 @@ void main(){
     // Ocean displacement is evaluated at this frame's time for both: only the transform moves the water.
     vec4 previousWorld=draw.previousModel*vec4(previousPosition,1);
     if(ocean)previousWorld=sourceOceanPosition(previousWorld);
+    previousWorld.xyz+=sway;
     motionPrevious=frame.previousVP*previousWorld;
     motionPrevious.xy-=frame.jitter.zw*motionPrevious.w;
     sourceFog=1;

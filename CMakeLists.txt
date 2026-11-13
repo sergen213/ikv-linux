@@ -84,7 +84,14 @@ if(IKV_BUILD_CLIENT)
             -DNAME=IKV_GL_WATER -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
         VERBATIM)
-    target_sources(ikv-renderers PRIVATE "${ikv_gl_water}")
+    # NONCANONICAL wave 27 weather/wind/season shading, shared the same way.
+    set(ikv_gl_weather "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv_gl_weather.h")
+    add_custom_command(OUTPUT "${ikv_gl_weather}"
+        COMMAND "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/weather.glsl -DOUTPUT=${ikv_gl_weather}
+            -DNAME=IKV_GL_WEATHER -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/weather.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        VERBATIM)
+    target_sources(ikv-renderers PRIVATE "${ikv_gl_water}" "${ikv_gl_weather}")
     target_include_directories(ikv-renderers PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(IKV_BUILD_VULKAN)
         target_sources(ikv-renderers PRIVATE src/renderer_vk.cpp src/vulkan_rt.cpp)
@@ -97,7 +104,8 @@ if(IKV_BUILD_CLIENT)
             set(shader_includes)
             if(shader MATCHES "^(scene|shadow|particle|contour)\\.vert$" OR shader MATCHES "^scene.*\\.frag$" OR
                shader STREQUAL "post.frag" OR shader STREQUAL "overlay.frag" OR shader STREQUAL "temporal.frag" OR shader STREQUAL "particle.frag")
-                list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl")
+                list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/weather.glsl")
             endif()
             if(shader STREQUAL "scene.frag" OR shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/lighting.glsl"

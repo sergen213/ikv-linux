@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
@@ -121,6 +122,116 @@ inline std::array<float, 3> enhanced_sun(const SceneLighting& l) {
     return l.source_values ? l.sun_direction : std::array<float, 3>{.48f, .78f, .4f};
 }
 inline bool original_blob_shadows_enabled(bool original_appearance) { return original_appearance; }
+// NONCANONICAL wave 27: SceneLighting::weather as shader inputs (Vulkan frame.glsl Frame wind/weather/weatherMisc, OpenGL
+// weather_* uniforms). wind: xy unit direction (world X/Z the wind blows toward), z speed m/s, w accumulated wind phase in
+// metres (renderer integrates speed*dt, wrapped at kWeatherPhasePeriod; every shader use is periodic in it). weather: x
+// precipitation, y cloud cover, z wetness, w snow cover. misc: x fog density, y gust, z season 0..3, w kind+1 (0 inactive).
+// All zero (the exact pre-wave shader paths) while inactive, with original appearance, or in a roofed zone (interiors get
+// no precipitation, wind sway, wetness or snow).
+constexpr double kWeatherPhasePeriod = 1024;
+struct WeatherUniforms { std::array<float, 4> wind{}, weather{}, misc{}; bool active() const { return misc[3] > .5f; } };
+inline WeatherUniforms weather_uniforms(const SceneLighting& l, bool original_appearance, double phase) {
+    const auto& w = l.weather;
+    if (!w.active || original_appearance || l.roofed) return {};
+    auto unit = [](float v) { return std::isfinite(v) ? std::clamp(v, 0.f, 1.f) : 0.f; };
+    float dx = w.wind_direction[0], dz = w.wind_direction[1];
+    const float length = std::sqrt(dx*dx + dz*dz);
+    if (std::isfinite(length) && length > 1e-6f) { dx /= length; dz /= length; } else { dx = 1; dz = 0; }
+    const float speed = std::isfinite(w.wind_speed) ? std::clamp(w.wind_speed, 0.f, 25.f) : 0.f;
+    return {{dx, dz, speed, float(std::fmod(std::max(phase, 0.), kWeatherPhasePeriod))},
+            {unit(w.precipitation), unit(w.cloud_cover), unit(w.wetness), unit(w.snow_cover)},
+            {unit(w.fog_density), unit(w.gust), float(std::min(unsigned(w.season), 3u)), float(std::min(unsigned(w.kind), 5u) + 1)}};
+}
+// Backdrop (clear colour, display-referred) of zones without a sky dome under weather: weather.glsl weatherSky's overcast
+// pull toward the weather fog colour (weatherFogColor). Returns `clear` unchanged while weather is inactive.
+inline std::array<float, 3> weather_backdrop(const WeatherUniforms& u, const SceneLighting& l, std::array<float, 3> clear) {
+    if (!u.active()) return clear;
+    const auto& s = u.weather; const auto& m = u.misc;
+    std::array<float, 3> base = l.fog_enabled ? l.fog_color : std::array<float, 3>{.62f, .66f, .70f};
+    const float grey = base[0]*.299f + base[1]*.587f + base[2]*.114f, g = std::clamp(.5f*s[1] + .4f*m[0], 0.f, 1.f);
+    const float storm = m[3] > 3.5f && m[3] < 4.5f ? .75f : 1.f, amount = std::clamp(.9f*s[1] + .9f*m[0] + .2f*s[0], 0.f, 1.f);
+    const std::array<float, 3> tint{.96f, 1.f, 1.04f};
+    for (unsigned i = 0; i < 3; ++i) {
+        const float fog = (base[i] + (grey*tint[i] - base[i])*g) * (1 - .35f*s[1]) * storm;
+        clear[i] += (fog - clear[i]) * amount;
+    }
+    return clear;
+}
+// Wind phase after one frame: integrated (continuous when the speed changes), never speed*time.
+inline double advance_wind_phase(double phase, const SceneLighting& l, bool original_appearance, float dt) {
+    if (!l.weather.active || original_appearance || l.roofed || !std::isfinite(dt) || dt <= 0) return phase;
+    const float speed = std::isfinite(l.weather.wind_speed) ? std::clamp(l.weather.wind_speed, 0.f, 25.f) : 0.f;
+    return std::fmod(phase + double(speed) * std::min(dt, 1.f), kWeatherPhasePeriod);
+}
+// Mesh-space {lowest, highest} vertex y (wind sway weights vertices by height above the mesh base).
+inline std::array<float, 2> mesh_height_range(const Mesh& mesh) {
+    float lo = INFINITY, hi = -INFINITY;
+    for (const auto& v : mesh.vertices) if (std::isfinite(v.y)) { lo = std::min(lo, v.y); hi = std::max(hi, v.y); }
+    return lo <= hi ? std::array<float, 2>{lo, hi} : std::array<float, 2>{0, 0};
+}
+// NONCANONICAL wave 27 wind sway heuristic (enhanced): vegetation and cloth. The source has no such flag; alpha-tested
+// materials alone (the source cutoff) also cover mosque walls, railings, signs and skyline cards, so the material must also
+// name foliage or cloth in its diffuse texture or name (Turkish/English: agac tree, cimen grass, yaprak/leaf, cicek flower,
+// bitki plant, palm, tree, bayrak flag, perde/curtain). Static (unskinned, non-entity) placements 1..80 units (0.25..20 m)
+// tall bend downwind, weighted by the squared height above the mesh base; the bend at full wind is 3.5% of the height, at
+// most 1.2 units. Returns the per-draw sway vector {mesh-space base y, 1/mesh height, world bend amplitude, placement
+// seed}; zero = rigid. Colour and shadow passes share it; Vulkan RT draws stay rigid (renderer_vk.cpp).
+inline bool weather_sways(const Material& material) {
+    if (material.alpha_cutoff <= 0 || material.source_ocean) return false;
+    for (const auto* text : {&material.diffuse, &material.name}) {
+        std::string lower(*text);
+        for (auto& c : lower) c = char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        for (const char* hint : {"agac", "cimen", "yaprak", "leaf", "cicek", "bitki", "palm", "tree", "bayrak", "perde", "curtain"})
+            if (lower.find(hint) != std::string::npos) return true;
+    }
+    return false;
+}
+inline std::array<float, 4> weather_sway(const WeatherUniforms& u, const Material& material, const Matrix4& model,
+                                         const std::array<float, 2>& range, bool rigid) {
+    if (!u.active() || u.wind[2] <= 0 || rigid || !weather_sways(material)) return {};
+    const float height = range[1] - range[0];
+    const float scale = std::sqrt(model[4]*model[4] + model[5]*model[5] + model[6]*model[6]), world = height * scale;
+    if (!(world >= 1 && world <= 80) || !(height > 0)) return {};
+    const float seed = std::fmod(std::abs(model[12]*.0173f + model[14]*.0291f), 1.f);
+    return {range[0], 1 / height, std::min(world * .035f, 1.2f), std::isfinite(seed) ? seed : 0.f};
+}
+// Capture/test hook (NONCANONICAL wave 27): IKV_RENDER_WEATHER="season=winter,kind=snow,wind=1:0:8,gust=.3,precip=.8,
+// cloud=.9,fog=.2,wet=.5,snow=1,temp=-3" replaces SceneLighting::weather in the renderers (renders weather without a server).
+inline std::optional<SceneWeather> parse_weather_override(const char* text) {
+    if (!text || !*text) return {};
+    SceneWeather w; w.active = true;
+    const std::string s(text);
+    auto number = [](const std::string& v) {
+        std::size_t used = 0; const float f = std::stof(v, &used);
+        if (used != v.size() || !std::isfinite(f)) throw std::invalid_argument("IKV_RENDER_WEATHER number " + v);
+        return f;
+    };
+    for (std::size_t at = 0; at < s.size();) {
+        const auto end = std::min(s.find(',', at), s.size());
+        const auto item = s.substr(at, end - at), key = item.substr(0, item.find('='));
+        at = end + 1;
+        if (item.empty()) continue;
+        if (key.size() == item.size()) throw std::invalid_argument("IKV_RENDER_WEATHER item lacks '=': " + item);
+        const auto value = item.substr(key.size() + 1);
+        auto pick = [&](std::initializer_list<const char*> names) {
+            unsigned i = 0; for (auto n : names) { if (value == n) return i; ++i; }
+            throw std::invalid_argument("IKV_RENDER_WEATHER value " + value);
+        };
+        if (key == "season") w.season = Season(pick({"spring", "summer", "autumn", "winter"}));
+        else if (key == "kind") w.kind = WeatherKind(pick({"clear", "cloudy", "rain", "storm", "snow", "fog"}));
+        else if (key == "wind") {
+            const auto a = value.find(':'), b = a == std::string::npos ? a : value.find(':', a + 1);
+            if (b == std::string::npos) throw std::invalid_argument("IKV_RENDER_WEATHER wind=dx:dz:speed");
+            w.wind_direction = {number(value.substr(0, a)), number(value.substr(a + 1, b - a - 1))}; w.wind_speed = number(value.substr(b + 1));
+        }
+        else if (key == "gust") w.gust = number(value); else if (key == "precip") w.precipitation = number(value);
+        else if (key == "cloud") w.cloud_cover = number(value); else if (key == "fog") w.fog_density = number(value);
+        else if (key == "wet") w.wetness = number(value); else if (key == "snow") w.snow_cover = number(value);
+        else if (key == "temp") w.temperature = number(value);
+        else throw std::invalid_argument("IKV_RENDER_WEATHER key " + key);
+    }
+    return w;
+}
 // Enhanced raster shadow map (2048^2): orthographic sun view around the camera, Vulkan clip space (y down, z 0..1).
 inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun, float radius) {
     Camera light = camera;
