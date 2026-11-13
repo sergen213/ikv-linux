@@ -233,14 +233,17 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
-## 2026-11-13 wave 28 (surfaces): fewer puddles, footsteps in puddles and snow
+## 2026-11-13 wave 28 (0.14.0): wind-shaped sea, sparse puddles, footsteps in puddles and snow, dripping characters
 
-User request: puddles were far too widespread and walking through them caused nothing; characters should leave footprints in snow cover. NONCANONICAL, enhanced appearance only; inactive weather, original appearance and roofed zones keep the exact pre-wave paths.
+User requests: the sea must change shape in strong wind and calm down without wind; puddles were far too widespread and walking through them caused nothing; rain should drip off characters; characters should leave footprints only where there is snow. Three parallel slices (surfaces, character effects, sea) on a shared `renderer.hpp` contract (`GroundMark`, `kMaxGroundMarks`, `weather_puddle` CPU mirror), integrated on main with the client wiring `effects_->set_weather_props(...)` and `renderer_->set_ground_marks(effects_->ground_marks())`. Client-only: no server, database or wire change. All NONCANONICAL, enhanced appearance only; inactive weather, original appearance and roofed zones keep the exact pre-wave paths.
+
+### Surfaces: fewer puddles, footsteps in puddles and snow
 
 - **Puddles:** `weather.glsl weatherPuddle` (and its CPU mirror `renderer.hpp weather_puddle`, kept identical) now floods ~13 % of flat ground at full wetness (was ~62 %), ~2 % at a quarter. `render-math` checks the mirror's coverage and locks sampled values.
 - **Footsteps:** `Renderer::set_ground_marks()` (GL + Vulkan; `GroundMarkTracker`/`ground_mark_uniforms` in `renderer.hpp`) uploads up to 64 marks (Vulkan `Frame` grows to 1648 bytes: `groundMarkInfo/Bounds/groundMarks[64]`; GL `weather_mark*` uniforms) with each mark's ground height taken from the nearest entity when it appears. `weatherSteps` in `weatherSurface`: a step < 1.5 s old in a puddle sends two expanding rings (normal slope, rougher brighter crests, broken mirror); in snow cover each mark presses a ~0.28 m oriented, left/right-mirrored foot print (compacted bluish snow, rim normals) that fades over 30–85 s; `weatherBaked` uses the same masks. Cost bounded by a mark-bounds rectangle, per-mark 4-unit/0.5 m-height culling and the no-marks early-out.
 - **Capture-only:** `IKV_RENDER_GROUND_MARKS=1` replaces the marks by a fabricated 24-step trail through the camera target (in rain moved onto the nearest puddle). Evidence: `analysis/porting-wave28/Surfaces/` (`coverage-before-after.png` puddle coverage 0.13.0 vs wave 28, `rain-puddle-low/` rings, `snow-close/` and `after-marks/winter-snow/` prints; GL and Vulkan match).
-## 2026-11-13 wave 28 (character weather effects slice)
+
+### Character weather effects
 
 User request: puddle steps must react, rain must drip off characters, characters leave footprints in snow. NONCANONICAL, enhanced weather only (`EffectSystem::set_weather` enabled); original appearance, inactive weather and roofed zones keep the pre-wave paths.
 
@@ -250,7 +253,8 @@ User request: puddle steps must react, rain must drip off characters, characters
 - **Props:** `EffectSystem::set_weather_props(ids)` names entities in the effect list that are not standing characters (Ganimet loot sacks, corpses): they leave no footsteps, never drip and no longer stop rain at head height (the wave-27 actor cylinder).
 - Tests: effects self-test (stride spacing/side alternation/order, jump, cap, still-standing, 90 s ageing, disabled; puddle step splashes vs dry ground; drips in rain, after rain on wet ground, stop once dry, character range). The existing "rain splashes on heads" check now samples every step (a head splash lives ~0.3 s, so the end-state check depended on the random stream).
 - Evidence: `analysis/porting-wave28/Fx/` (capture build only: effects fed from `IKV_RENDER_WEATHER`; rain-gl-enhanced/, rain-vk-enhanced/, proof-*.png).
-## 2026-11-13 wave 28: wind-driven sea
+
+### Wind-driven sea
 
 User report: water bodies did not react to the wind. Root cause: the wave-27 wind response was too weak to read. The only geometry change was the original 1D `v_ocean` swell (50 m wavelength, ±0.12 m) scaled up to ×2.5. The ocean meshes are coarse (`ocean_ada_*` mean edges 26–130 units, 6–32 m), so they could not carry real wind waves. The shaded sea (afl waves, Godot chop) kept its wavelength, pattern and travel; wind only scaled the normals up from the pre-wave baseline. Calm air therefore never got calmer than 0.13.0's default sea, and a gale only looked brighter. All new behaviour is NONCANONICAL and enhanced-appearance-only; with inactive weather (`weatherMisc.w == 0`) the shaders take the exact pre-wave paths.
 
