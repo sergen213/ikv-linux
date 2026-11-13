@@ -46,6 +46,28 @@ vec3 enhancedAmbientScale(){return (frame.sun.w>.5?pow(max(frame.ambient.rgb*(25
 float frameShadowSoftness(){return weatherShadowSoftness(frame.weather,frame.weatherMisc);}
 // frame.ambient.w: 1 in a roofed zone (SceneLighting::roofed): enhanced keeps the original baked light, no shadow-mapped sun.
 bool sceneRoofed(){return frame.ambient.w>.5;}
+// NONCANONICAL wave 28 (enhanced weather; renderer_gl.cpp IKV_GL_OCEAN_WIND keeps a copy): the wind sea over the source
+// swell, displacing the ocean (the renderers upload it subdivided to <= 32-unit edges, renderer.hpp subdivide_ocean_mesh)
+// and shading it (water.glsl). Three peaked crests (40, 26 and 19 m) run downwind, their height rising with the square of
+// the wind (the longest about 1 m crest to trough in a 22 m/s gusting gale, ~20 cm at 10 m/s, none in still air). They
+// travel with the wind phase (wind.w, wrapping at 1024 m: 8, 11 and 14 crests per wrap, so no jump) and fade with eye
+// distance. waves: how many (the vertices take the two the subdivided mesh resolves, the shading all three). Returns
+// height (units) and its world x/z gradient; 0 inactive.
+vec3 oceanWindSwell(vec2 xz,vec3 eye,vec4 wind,vec4 misc,int waves){
+    if(misc.w<=.5||wind.z<=0.)return vec3(0);
+    float s=clamp(wind.z/25.,0.,1.),a=4.5*s*s*(1.+.5*misc.y),d=distance(eye.xz,xz);
+    vec2 w=normalize(wind.xy+vec2(1e-6,0));
+    vec3 r=vec3(0);
+    for(int i=0;i<waves;++i){
+        float k=float(i),lambda=160./(1.+.55*k),turn=k==1.?.35:k==2.?-.45:0.;
+        vec2 dir=mat2(cos(turn),sin(turn),-sin(turn),cos(turn))*w;
+        float amp=a*(k==0.?1.:k==1.?.55:.35)*(1.-smoothstep(5.*lambda,12.*lambda,d));
+        float x=6.28318530718*(dot(xz,dir)/lambda-wind.w*(8.+3.*k)/1024.);
+        float e=exp(sin(x)-1.); // afl_ext's peaked crest shape (water.glsl); .47 its mean, so the sea level stays
+        r+=amp*vec3(e-.47,e*cos(x)*(6.28318530718/lambda)*dir);
+    }
+    return r;
+}
 // Independently expressed v_ocean.vsh EXPP fraction and authored polynomial.
 vec4 sourceOceanPosition(vec4 world) {
     float phase=fract((world.x/32+world.y/13+frame.sourceTime.y)*.15915494-.25);
@@ -59,8 +81,10 @@ vec4 sourceOceanPosition(vec4 world) {
     wave=wave*q+vec3(-1,1,-1);
     float first=phase<.25?1:0,third=phase>=.75?1:0;
     float displacement=-dot(wave,vec3(first,1-first-third,third));
-    // NONCANONICAL wave 27 (enhanced weather): the swell grows with the wind, up to x2.5 in a gale.
-    if(abs(frame.eye.y-world.y)<100)world.y+=displacement*.5*(weatherOn(frame.weatherMisc)?1.+1.5*weatherWindStrength(frame.wind,frame.weatherMisc):1.);
+    // NONCANONICAL wave 27/28 (enhanced weather): the swell eases to x0.6 in still air and grows to ~x2.8 in a gusting gale;
+    // the wind sea (oceanWindSwell, its two longest crests) rises over it, everywhere (it fades with eye distance).
+    if(abs(frame.eye.y-world.y)<100)world.y+=displacement*.5*(weatherOn(frame.weatherMisc)?.6+2.*weatherWindStrength(frame.wind,frame.weatherMisc):1.);
+    if(weatherOn(frame.weatherMisc))world.y+=oceanWindSwell(world.xz,frame.eye.xyz,frame.wind,frame.weatherMisc,2).x;
     return world;
 }
 #endif

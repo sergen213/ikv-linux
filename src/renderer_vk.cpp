@@ -1604,9 +1604,13 @@ void clear_material_sets(SceneSet& set) {
      // Full loads sub-allocate one pool; retained reloads (actor churn) allocate and retire destinations per resource.
      MemoryPool pool;
      UploadBatch batch(*this,retain?command_:VK_NULL_HANDLE,retain?nullptr:&pool);
+     // NONCANONICAL wave 28: enhanced uploads the source ocean subdivided so it can carry the wind sea (renderer.hpp).
+     const auto ocean=options_.original_appearance?std::vector<bool>{}:ocean_wave_meshes(s);
      for(std::size_t mesh_index=0;mesh_index<s.meshes.size();++mesh_index) {
          if(mesh_index%1024==0)progress(); // uploads pump on their own
-         new_meshes+=upload_mesh(set.geometry[mesh_index],s.meshes[mesh_index],used[mesh_index],batch);
+         if(!ocean.empty()&&ocean[mesh_index]&&used[mesh_index]==2&&!set.geometry[mesh_index].vertices.handle)
+             new_meshes+=upload_mesh(set.geometry[mesh_index],subdivide_ocean_mesh(s.meshes[mesh_index]),used[mesh_index],batch);
+         else new_meshes+=upload_mesh(set.geometry[mesh_index],s.meshes[mesh_index],used[mesh_index],batch);
      }
      set.textures.resize(s.textures.size());
      for(std::size_t i=retained_textures;i<s.textures.size();++i) {

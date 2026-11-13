@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 struct SDL_Window;
@@ -305,6 +306,81 @@ inline std::array<float, 4> mesh_bounds(const Mesh& mesh) {
                            std::sqrt((hi[0]-lo[0])*(hi[0]-lo[0])+(hi[1]-lo[1])*(hi[1]-lo[1])+(hi[2]-lo[2])*(hi[2]-lo[2]))/2};
     for (float v : s) if (!std::isfinite(v)) return {0, 0, 0, INFINITY};
     return s;
+}
+// NONCANONICAL wave 28 (enhanced appearance only): the source ocean meshes are coarse (Sivri Ada mean edges 26-130 units,
+// 6-32 m), too coarse to carry the wind sea's crests (frame.glsl oceanWindSwell): displaced, their flat facets drew
+// straight light bands across the shallows. The renderers upload these meshes (ocean_wave_meshes: any mesh drawn with a
+// source_ocean material) split by conforming longest-edge bisection until no edge exceeds max_edge (raised so that a mesh
+// stays near max_triangles). Every attribute is interpolated linearly, so undisplaced draws rasterise as before.
+inline Mesh subdivide_ocean_mesh(const Mesh& mesh, float max_edge = 32.f, std::size_t max_triangles = 300000) {
+    if (mesh.indices.size() % 3 || !mesh.influences.empty()) return mesh;
+    for (const auto index : mesh.indices) if (index >= mesh.vertices.size()) return mesh; // the upload's validation reports it
+    double area = 0;
+    for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        const auto &a = mesh.vertices[mesh.indices[i]], &b = mesh.vertices[mesh.indices[i+1]], &c = mesh.vertices[mesh.indices[i+2]];
+        area += 0.5*std::abs(double(b.x-a.x)*(c.z-a.z)-double(c.x-a.x)*(b.z-a.z));
+    }
+    if (!std::isfinite(area)) return mesh;
+    // Bisected triangles average about max_edge^2/6.
+    const float limit = std::max(max_edge, float(std::sqrt(area*6/double(std::max<std::size_t>(max_triangles, 1)))));
+    Mesh out = mesh;
+    std::vector<std::array<std::uint32_t, 3>> triangles(mesh.indices.size()/3), next;
+    for (std::size_t i = 0; i < triangles.size(); ++i) triangles[i] = {mesh.indices[3*i], mesh.indices[3*i+1], mesh.indices[3*i+2]};
+    std::unordered_map<std::uint64_t, std::uint32_t> midpoints;
+    auto length = [&](std::uint32_t a, std::uint32_t b) {
+        const auto &p = out.vertices[a], &q = out.vertices[b];
+        return std::sqrt((p.x-q.x)*(p.x-q.x)+(p.y-q.y)*(p.y-q.y)+(p.z-q.z)*(p.z-q.z));
+    };
+    auto key = [](std::uint32_t a, std::uint32_t b) { return std::uint64_t(std::min(a, b)) << 32 | std::max(a, b); };
+    auto unit = [](float& x, float& y, float& z) { const float l = std::sqrt(x*x+y*y+z*z); if (l > 0) { x /= l; y /= l; z /= l; } };
+    auto midpoint = [&](std::uint32_t a, std::uint32_t b) {
+        const auto [it, added] = midpoints.try_emplace(key(a, b), std::uint32_t(out.vertices.size()));
+        if (added) {
+            const Vertex p = out.vertices[a], q = out.vertices[b];
+            Vertex m = p;
+            auto mix = [](float u, float v) { return 0.5f*(u+v); };
+            m.x = mix(p.x, q.x); m.y = mix(p.y, q.y); m.z = mix(p.z, q.z);
+            m.nx = mix(p.nx, q.nx); m.ny = mix(p.ny, q.ny); m.nz = mix(p.nz, q.nz); unit(m.nx, m.ny, m.nz);
+            m.u = mix(p.u, q.u); m.v = mix(p.v, q.v);
+            for (unsigned i = 0; i < 4; ++i) { m.ambient[i] = mix(p.ambient[i], q.ambient[i]); m.color[i] = mix(p.color[i], q.color[i]); }
+            for (unsigned i = 0; i < 3; ++i) m.tangent[i] = mix(p.tangent[i], q.tangent[i]);
+            unit(m.tangent[0], m.tangent[1], m.tangent[2]);
+            for (unsigned i = 0; i < 2; ++i) m.uv1[i] = mix(p.uv1[i], q.uv1[i]);
+            out.vertices.push_back(m);
+        }
+        return it->second;
+    };
+    // A triangle splits an edge another triangle already split (keeping the mesh conforming: no cracks once displaced),
+    // else its longest edge when that exceeds the limit. Only edges longer than the limit are ever split, so it ends.
+    for (bool changed = true; changed;) {
+        changed = false; next.clear(); next.reserve(triangles.size()*2);
+        for (const auto& t : triangles) {
+            int edge = -1; float best = -1;
+            for (int k = 0; k < 3; ++k)
+                if (midpoints.contains(key(t[k], t[(k+1)%3]))) { const float l = length(t[k], t[(k+1)%3]); if (l > best) { best = l; edge = k; } }
+            if (edge < 0) {
+                for (int k = 0; k < 3; ++k) { const float l = length(t[k], t[(k+1)%3]); if (l > best) { best = l; edge = k; } }
+                if (!(best > limit)) { next.push_back(t); continue; }
+            }
+            const std::uint32_t a = t[edge], b = t[(edge+1)%3], c = t[(edge+2)%3], m = midpoint(a, b);
+            next.push_back({a, m, c}); next.push_back({m, b, c});
+            changed = true;
+        }
+        triangles.swap(next);
+    }
+    out.indices.clear(); out.indices.reserve(triangles.size()*3);
+    for (const auto& t : triangles) out.indices.insert(out.indices.end(), t.begin(), t.end());
+    return out;
+}
+// Meshes drawn with a source_ocean material (renderers' draw material: the instance override, else the mesh's).
+inline std::vector<bool> ocean_wave_meshes(const Scene& scene) {
+    std::vector<bool> ocean(scene.meshes.size(), false);
+    auto is_ocean = [&](std::uint32_t material) { return material < scene.materials.size() && scene.materials[material].source_ocean; };
+    if (scene.instances.empty()) for (std::size_t i = 0; i < scene.meshes.size(); ++i) ocean[i] = is_ocean(scene.meshes[i].material);
+    for (const auto& instance : scene.instances)
+        if (instance.mesh < scene.meshes.size() && is_ocean(instance.material == UINT32_MAX ? scene.meshes[instance.mesh].material : instance.material))
+            ocean[instance.mesh] = true;
+    return ocean;
 }
 using FrustumPlanes = std::array<std::array<float, 4>, 6>;
 // Normalized clip planes of a column-major view-projection, GL depth range. For the Vulkan [0,1]-depth projection of the
