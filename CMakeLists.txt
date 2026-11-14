@@ -321,6 +321,13 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/realm_store_test.py"
             --auth "$<TARGET_FILE:ikv-auth>" --store-test "$<TARGET_FILE:realm-store-test>" --source "${CMAKE_CURRENT_SOURCE_DIR}")
     set_tests_properties(realm-store PROPERTIES TIMEOUT 240)
+    # NONCANONICAL wave 30: real auth + PostgreSQL + three shards (realm A x2 layers, realm B x1): phases, guests, bus features.
+    # Dungeon/raid parts need the original support grids and are skipped when original/app/base is absent.
+    add_test(NAME multi-shard
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/multi_shard.py"
+            --auth "$<TARGET_FILE:ikv-auth>" --server "$<TARGET_FILE:ikv-server>" --source "${CMAKE_CURRENT_SOURCE_DIR}"
+            --asset-root "${CMAKE_CURRENT_SOURCE_DIR}/original/app/base")
+    set_tests_properties(multi-shard PROPERTIES TIMEOUT 300)
     if(IKV_BUILD_ASSET_TOOLS)
         add_test(NAME asset-boundaries COMMAND ikv-assets --self-test)
         set_tests_properties(asset-boundaries PROPERTIES TIMEOUT 15)

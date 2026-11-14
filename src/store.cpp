@@ -515,6 +515,8 @@ void Store::world_status(const Json& status) {
 Json Store::take_world_commands(std::string_view instance,int realm){
     Impl::Connection connection(*impl_);Transaction transaction(connection);
     // NONCANONICAL wave 30: a command targets one shard (target_instance), the shards of a realm (target_realm) or any shard.
+    // A row targeted at a shard that stopped heartbeating (stopped or crashed after the fan-out) would stay pending forever.
+    if(!instance.empty())sql(connection,std::string("UPDATE world_commands c SET consumed_at=now(),result='{\"ok\":false,\"error\":\"Hedef sunucu kapalı.\"}' WHERE consumed_at IS NULL AND target_instance IS NOT NULL AND NOT EXISTS (SELECT 1 FROM world_instances s WHERE s.instance=c.target_instance AND ")+shard_live+")");
     auto result=instance.empty()
         ?sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text")
         :sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL AND (target_instance IS NULL OR target_instance=$1) AND (target_realm IS NULL OR target_realm=$2::integer) ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text",
@@ -721,7 +723,7 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
             auto lease=sql(connection,"SELECT lease_instance FROM characters WHERE id=$1::bigint AND lease_instance IS NOT NULL AND lease_expires_at>now()",{std::to_string(arguments.at("character_id").get<std::int64_t>())});
             targets.emplace_back(PQntuples(lease.get())?cell(lease,0,0):"",realm);
         }else if(broadcast.contains(command)){
-            auto live=sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE (NULLIF($1,'')::integer IS NULL OR s.realm_id=NULLIF($1,'')::integer) AND ")+shard_live+" ORDER BY s.instance",{realm});
+            auto live=sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE (NULLIF($1,'')::integer IS NULL OR s.realm_id=NULLIF($1,'')::integer) AND ")+shard_live+" ORDER BY s.updated_at DESC,s.instance",{realm});
             for(int i=0;i<PQntuples(live.get());++i)targets.emplace_back(cell(live,i,0),"");
             if(targets.empty())targets.emplace_back("",realm);
         }else targets.emplace_back("",realm);
@@ -899,6 +901,10 @@ void Store::register_shard(const ShardInfo& info) {
     sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint) "
         "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,updated_at=now()",
         {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players)});
+}
+void Store::retire_shard(std::string_view instance) {
+    Impl::Connection connection(*impl_);
+    sql(connection,"UPDATE world_instances SET updated_at=now()-interval '1 minute',players=0 WHERE instance=$1",{instance_name(instance)});
 }
 std::optional<ShardInfo> Store::pick_shard(int realm) {
     Impl::Connection connection(*impl_);
