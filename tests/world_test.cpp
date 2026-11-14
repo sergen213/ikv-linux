@@ -1476,6 +1476,24 @@ void wave29_npcs(const ikv::Json& config, const std::filesystem::path& assets) {
         if (n.at("source_uid")==16001) check(walk>=100 && walk<=125,"Fare strolls at its Fare_Walk planted-foot speed (2.0-2.5 u/s)");
     }
     check(strollers>=700,"spawn-group monsters stroll");
+    // Wave 29 follow-up: NPCs with a post (quests, quest turn-in/targets, shop, bank, clan guard, Jandarma/Muhafız/Bekçi) stand
+    // at their spot; only ambient townsfolk stroll.
+    std::set<uint32_t> referenced;
+    const std::function<void(const ikv::Json&,const std::string&)> refs=[&](const ikv::Json& v,const std::string& key){
+        if (v.is_object()) for (const auto& [k,x] : v.items()) refs(x,k);
+        else if (v.is_array()) for (const auto& x : v) refs(x,key);
+        else if (v.is_number_unsigned() && (key=="giver" || key=="turn_in" || key=="targets")) referenced.insert(v.get<uint32_t>()); };
+    refs(config.at("quests"),"");
+    int posts=0,ambient=0;
+    for (const auto& n : config.at("npcs")) {
+        if (n.at("kind")=="enemy") continue;
+        const auto name=n.at("name").get<std::string>();
+        const bool post=!n.at("quests").empty() || !n.at("shop").empty() || n.value("banker",false) || n.contains("aggro") || referenced.contains(n.at("id").get<uint32_t>()) ||
+                        name.find("Jandarma")!=std::string::npos || name.find("Muhaf")!=std::string::npos || name.find("Bekçi")!=std::string::npos;
+        if (post) { ++posts; check(n.value("idlewalktend",0)==0 && !n.contains("walk_speed"),("NPC "+name+" holds its post").c_str()); }
+        else if (n.value("idlewalktend",0)>0) ++ambient;
+    }
+    check(posts>=100 && ambient>=30,"posts stand, ambient townsfolk still stroll");
     if (!std::filesystem::exists(assets / "zone00.bin")) { std::cout << "wave29 pacing skipped: no original walk grids in " << assets << '\n'; return; }
     auto calm=config; for (auto& n : calm["npcs"]) if (n.contains("aggro")) n["aggro"]=1; // observe idle behaviour, not a chase
     std::map<std::string,std::shared_ptr<const ikv::Zone>> grids;

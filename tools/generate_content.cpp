@@ -10,6 +10,7 @@
 #include <cmath>
 #include <deque>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -1275,6 +1276,27 @@ int main(int argc, char** argv) try {
         "without a usable gamezonename (co-located locs), shop stock, drop tables, potion prices, dialogue, quest and respawn timers, idle walk "
         "timing/radius, idlewalktend 50 for spawn-group monsters without one, the idle walk speed (planted-foot speed of the walk clip, at most 7.5 u/s). "
         "Distances are wire units (1000 = one source scene unit; a source actor is ~7.5 units tall).";
+    // NONCANONICAL wave 29: an NPC with a post stands at its spot: quest givers, quest turn-in/target NPCs, merchants, bankers
+    // and clan guards (aggro). Only ambient townsfolk keep their classes.dat idlewalktend stroll (VOD 04:45: a Yeni Cami Dayı
+    // walks off). Before, Agah-style posts with idlewalktend 50/70 (Bankacı, Komutan, Arzuhalci, Yasemin, Işık, Sis, ...)
+    // strolled up to 12 units away and were found off their evidenced spots.
+    {
+        std::set<uint32_t> referenced;
+        const std::function<void(const Ordered&, const std::string&)> refs = [&](const Ordered& v, const std::string& key) {
+            if (v.is_object()) for (const auto& [k, x] : v.items()) refs(x, k);
+            else if (v.is_array()) for (const auto& x : v) refs(x, key);
+            else if (v.is_number_unsigned() && (key == "giver" || key == "turn_in" || key == "targets")) referenced.insert(v.get<uint32_t>());
+        };
+        refs(quests, "");
+        // Guards on duty (Jandarma at the bank, Zırhlı Jandarma at the Tünel Girişi, Muhafız/Bekçi at gates) hold their posts too.
+        const auto guard = [](const std::string& name) { return name.find("Jandarma") != std::string::npos || name.find("Muhaf") != std::string::npos || name.find("Bekçi") != std::string::npos; };
+        for (auto& n : npcs) {
+            if (n.at("kind") == "enemy" || !n.value("idlewalktend", 0)) continue;
+            if (!n.at("quests").empty() || !n.at("shop").empty() || n.value("banker", false) || n.contains("aggro") || referenced.contains(n.at("id").get<uint32_t>()) || guard(n.at("name").get<std::string>())) {
+                n["idlewalktend"] = 0; n.erase("walk_speed");
+            }
+        }
+    }
     config["defaults"] = std::move(defaults); config["zones"] = std::move(zones); config["items"] = std::move(used); config["prefixes"] = std::move(used_prefixes);
     config["quests"] = std::move(quests); config["npcs"] = std::move(npcs); config["recipes"] = std::move(recipes);
 
