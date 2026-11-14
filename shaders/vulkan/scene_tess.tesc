@@ -59,7 +59,8 @@ void main(){
             gl_TessLevelOuter[0]=gl_TessLevelOuter[1]=gl_TessLevelOuter[2]=gl_TessLevelInner[0]=0.;
             return;
         }
-        float e0=rigid?1.:edgeLevel(vWorld[1],vWorld[2]),e1=rigid?1.:edgeLevel(vWorld[2],vWorld[0]),e2=rigid?1.:edgeLevel(vWorld[0],vWorld[1]);
+        // precise: the depth prepass pipeline (no fragment stage) must split each patch exactly like the shading one.
+        precise float e0=rigid?1.:edgeLevel(vWorld[1],vWorld[2]),e1=rigid?1.:edgeLevel(vWorld[2],vWorld[0]),e2=rigid?1.:edgeLevel(vWorld[0],vWorld[1]);
         gl_TessLevelOuter[0]=e0;gl_TessLevelOuter[1]=e1;gl_TessLevelOuter[2]=e2;
         gl_TessLevelInner[0]=max(e0,max(e1,e2));
     }

@@ -91,10 +91,13 @@ class VulkanRenderer final:public Renderer {
  VkPipeline water_pipeline_=VK_NULL_HANDLE,water_double_=VK_NULL_HANDLE;
  // NONCANONICAL wave 29 PBR pack (pbr.hpp): loaded with the first enhanced scene (null: none or invalid). tess_enabled_:
  // enhanced, RendererOptions::tessellation and the device's tessellationShader; then the tessellated relief draws through
- // opaque_tess_* / shadow_tess_* (scene_tess.*; no depth prepass) and push constants reach the tessellation stages.
+ // opaque_tess_* / shadow_tess_* (scene_tess.*) and push constants reach the tessellation stages. With prepass_ they also
+ // write the depth prepass (prepass_tess_*, no fragment stage) and shade through opaque_tess_prepassed_* (depth writes
+ // off): without it every tessellated terrain layer under the visible one ran the RT fragment shader (+2.2 ms RT physical).
  std::shared_ptr<const PbrPack> pbr_pack_;bool pbr_loaded_=false,tess_enabled_=false;
  VkShaderStageFlags push_stages_=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
  VkPipeline opaque_tess_=VK_NULL_HANDLE,opaque_tess_double_=VK_NULL_HANDLE,shadow_tess_=VK_NULL_HANDLE,shadow_tess_double_=VK_NULL_HANDLE;
+ VkPipeline prepass_tess_=VK_NULL_HANDLE,prepass_tess_double_=VK_NULL_HANDLE,opaque_tess_prepassed_=VK_NULL_HANDLE,opaque_tess_prepassed_double_=VK_NULL_HANDLE;
  bool prepass_=false;
  // NONCANONICAL wave 28 (horizon frame rate): guided-RT pixels beyond this view depth (units) trace their stochastic GI and
  // reflection rays once in 16 frames, the resolve fills the rest (lighting.glsl `indirect`, temporal.frag).
@@ -1218,7 +1221,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      for(auto* p:{&opaque_,&alpha_,&shadow_pipeline_,&post_pipeline_,&overlay_pipeline_,&hud_pipeline_,
                  &opaque_double_,&alpha_double_,&shadow_double_,&temporal_pipeline_,&contour_pipeline_,&glow_pipeline_,&glow_composite_pipeline_,
                  &shadow_depth_,&shadow_depth_double_,&prepass_pipeline_,&prepass_double_,&opaque_prepassed_,&opaque_prepassed_double_,
-                 &water_pipeline_,&water_double_,&opaque_tess_,&opaque_tess_double_,&shadow_tess_,&shadow_tess_double_}) {
+                 &water_pipeline_,&water_double_,&opaque_tess_,&opaque_tess_double_,&shadow_tess_,&shadow_tess_double_,
+                 &prepass_tess_,&prepass_tess_double_,&opaque_tess_prepassed_,&opaque_tess_prepassed_double_}) {
          if(*p)vkDestroyPipeline(device_,*p,nullptr);
          *p=VK_NULL_HANDLE;
      }
@@ -1427,6 +1431,12 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          prepass_double_=pipeline("scene.vert",nullptr,scene_pass_,true,false,true,false,true);
          opaque_prepassed_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,false,false);
          opaque_prepassed_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true,false);
+         if(tess_enabled_) {
+             prepass_tess_=pipeline("scene_tess.vert",nullptr,scene_pass_,true,false,true,false,false,true,{},false,false,false,true);
+             prepass_tess_double_=pipeline("scene_tess.vert",nullptr,scene_pass_,true,false,true,false,true,true,{},false,false,false,true);
+             opaque_tess_prepassed_=pipeline("scene_tess.vert",scene_shader,scene_pass_,true,false,true,false,false,false,{},false,false,false,true);
+             opaque_tess_prepassed_double_=pipeline("scene_tess.vert",scene_shader,scene_pass_,true,false,true,false,true,false,{},false,false,false,true);
+         }
      }
     for(unsigned i=0;i<4;++i)sky_pipeline_[i]=pipeline("scene.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0,false);
     for(unsigned i=0;i<5;++i)particle_pipeline_[i]=pipeline("particle.vert","particle.frag",scene_pass_,true,true,true,false,true,false,ParticleBlend(i));
@@ -1896,7 +1906,7 @@ void record_geometry_uploads(SceneSet& set) {
  // Opaque colour draws the depth prepass covers: visible, not sky/water/blended, no alpha cutoff (lighting.glsl may
  // discard those, so they keep their own depth writes).
  bool prepassed(const Scene& scene,const DrawItem& item)const {
-     if(!prepass_||!item.visible||item.sky||item.alpha||item.ocean||item.tess)return false;
+     if(!prepass_||!item.visible||item.sky||item.alpha||item.ocean||(item.tess&&!prepass_tess_))return false;
      return item.material>=scene.materials.size()||!(scene.materials[item.material].alpha_cutoff>0);
  }
 // items: a slice of set.draws. casters: the shadow cascade's light volume, with near-clamped casters retained.
@@ -1926,7 +1936,8 @@ void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<cons
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
          const bool tess=item.tess&&(!shadow||tess_casters);
-         auto selected=tess?(shadow?(double_sided?shadow_tess_double_:shadow_tess_):(double_sided?opaque_tess_double_:opaque_tess_)):
+         auto selected=tess?(shadow?(double_sided?shadow_tess_double_:shadow_tess_):prepass?(double_sided?prepass_tess_double_:prepass_tess_):
+                 prepassed(scene,item)?(double_sided?opaque_tess_prepassed_double_:opaque_tess_prepassed_):(double_sided?opaque_tess_double_:opaque_tess_)):
              shadow?(draw.flags[3]>0?(double_sided?shadow_double_:shadow_pipeline_):(double_sided?shadow_depth_double_:shadow_depth_)):
              prepass?(double_sided?prepass_double_:prepass_pipeline_):
              item.sky?sky_pipeline_[variant]:

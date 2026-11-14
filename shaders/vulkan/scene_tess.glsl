@@ -10,6 +10,9 @@ layout(triangles,fractional_odd_spacing,ccw) in;
 #include "frame.glsl"
 layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; mat4 cascadeLight; vec4 pbr; } draw;
 #else
+// NONCANONICAL wave 29: tessellated draws join the depth prepass (renderer_vk.cpp prepass_tess_*): the depth-only and the
+// shading pipeline must generate bit-identical positions, as scene.vert does.
+invariant gl_Position;
 #include "scene_vertex.glsl"
 #endif
 #include "pbr.glsl"

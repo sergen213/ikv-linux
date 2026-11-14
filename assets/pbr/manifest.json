@@ -36,7 +36,7 @@
     3.0,
     3.0
    ],
-   "height_scale": 0.05,
+   "height_scale": 0.07,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
@@ -236,7 +236,7 @@
     0.9,
     0.9
    ],
-   "height_scale": 0.015,
+   "height_scale": 0.025,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
