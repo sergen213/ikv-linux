@@ -64,7 +64,7 @@ Everything lives in Qt's AppLocalData (`~/.local/share/IKVCommunity/IKVLauncher/
 | `state.json`, `server.log` | Written by the supervisor: phase (`starting`, `database`, `auth`, `register`, `bootstrap`, `world`, `running`, `stopping`, `stopped`, `failed` + Turkish message), pid and actual ports; service output (rotated at 4 MiB). |
 | `supervisor.lock`, `launcher.lock` | `flock` locks: the supervisor holds `supervisor.lock` exclusively (content: its pid); every open launcher holds `launcher.lock` shared. |
 
-**Supervisor.** The server runs in one detached process, `ikv-launcher --host-supervisor DIR --asset-root PATH` (inside an AppImage `"$APPIMAGE" --host-supervisor …`, so it has its own mount). It daemonizes (double fork, `setsid`), takes `supervisor.lock` (a second start fails with "zaten çalışıyor"), starts PostgreSQL, `ikv-auth` (management always `127.0.0.1`), then `ikv-server` (`--bots N`). On first creation the administrator password arrives on the supervisor's stdin only: it registers that account over the pinned CA, restarts auth once with `--admin-bootstrap USERNAME` and records `admin`. Services are its children with `PR_SET_PDEATHSIG`. A world exit 75 (management **restart**) relaunches the world; exit 0 (management **shutdown**) stops the server; crashes after the first successful start are restarted up to 3 times in 10 minutes. SIGTERM (**Durdur**) stops world, then auth (SIGTERM, exit0), then `pg_ctl stop -m fast`, and records `stopped`.
+**Supervisor.** The server runs in one detached process, `ikv-launcher --host-supervisor DIR --asset-root PATH` (inside an AppImage `"$APPIMAGE" --host-supervisor …`, so it has its own mount). It daemonizes (double fork, `setsid`), takes `supervisor.lock` (a second start fails with "zaten çalışıyor"), starts PostgreSQL, `ikv-auth` (management always `127.0.0.1`), then `ikv-server` (`--bots N`). On first creation the administrator password arrives on the supervisor's stdin only: it registers that account over the pinned CA, restarts auth once with `--admin-bootstrap USERNAME` and records `admin`. Services are its children with `PR_SET_PDEATHSIG`. A world exit 75 (management **restart**) relaunches the world; exit 0 (management **shutdown**) stops the server; crashes after the first successful start are restarted up to 3 times in 10 minutes. SIGTERM (**Durdur**) stops world, then auth (SIGTERM, exit0), then `pg_ctl stop -m fast`, and records `stopped`. **Automatic updates:** every 30 seconds (and at once when a newer launcher writes `upgrade.request`) the supervisor looks for a newer verified release in its install root; it then queues an announced world restart (`host.json` `update_delay_seconds`, default 60; players see the countdown), the world saves and exits 75, and the supervisor stops auth and PostgreSQL and hands over to the new release's supervisor (`state.json` phase `upgrading`, then the new `version`). This keeps working with the launcher closed (keep-alive) and repeats for every release ([Launcher updates](LAUNCHER_UPDATES.md#self-update)).
 
 **Başlatıcı kapanınca da çalışsın** (`keep_alive`, off by default): without it the supervisor stops within about a second once no launcher holds `launcher.lock` (also after a launcher crash), and a closing launcher waits for that clean stop. With it the server keeps running; the next launcher sees the held `supervisor.lock`, reads `state.json` and reattaches (status chip, profile, log tail, panel). The pid is only signalled while its lock is held, so a reused pid is never killed. **Başlatıcı açılınca yerel sunucuyu otomatik başlat** (`autostart`) starts a stopped server when the launcher opens.
 
@@ -229,6 +229,35 @@ python3 analysis/native_systemd_smoke.py --source "$PWD" --build-dir "$PWD/build
 ```
 
 `--asset-root` is optional **only for the helper**: omitting it deliberately selects a disposable assetless mechanics config, not the production Source0/1 config or production server defaults. The command above keeps the unchanged installed production gameplay, binds originals read-only into its unique strict sandbox, uses OS-assigned loopback ports and a disposable Unix-socket-only PostgreSQL cluster. It stops/removes only its owned units, links, runtime/state/install directories and database; originals remain untouched. Its bootstrap PostgreSQL superuser fixture is not a production role recommendation. The current proof records two simultaneous native Source1 transfers, persisted restart and **one-character reentry**, not a two-character systemd reentry result.
+
+## Automatic updates
+
+Launcher-hosted servers update themselves (above). Dedicated servers run `deploy/ikv-auto-update.sh` periodically; it uses only signed releases and changes nothing when a check fails:
+
+1. `ikv-launcher --update-once --server --install-root /var/lib/ikv-release` checks the channel and installs a newer signed AppImage (manifest, Ed25519 signature, per-channel sequence highwater) into `/var/lib/ikv-release/releases/<version>` — exit 10 when it installed one, 0 when the root's current release is the newest, 1 on failure (the running release is kept).
+2. A newly current release is extracted once (`--appimage-extract`, no FUSE needed by the sandboxed services) to `extracted/<version>`, and the `active` symlink is switched atomically.
+3. `ikv-auth` restarts (it applies new migrations), then the world receives the management **restart** command with a countdown (`IKV_UPDATE_DELAY`, default 60 s) on behalf of the first administrator account: every online player sees **Sunucu N saniye içinde yeniden başlatılacak. Sunucu vX sürümüne güncelleniyor; karakterleriniz kaydedilir.**, the world saves every character and exits 75, and systemd (`Restart=on-failure`) or Compose (`restart: on-failure`) starts it again from the new release. Without an administrator account the world is restarted by SIGTERM, which also saves.
+
+**systemd** (root-owned release root; the services keep running as `ikv`):
+
+```sh
+sudo install -d -m 0755 /var/lib/ikv-release /usr/local/libexec/ikv
+sudo install -m 0755 deploy/ikv-auto-update.sh /usr/local/libexec/ikv/
+sudo install -m 0644 deploy/ikv-update.service deploy/ikv-update.timer /etc/systemd/system/
+sudo install -D -m 0644 deploy/release-units/ikv-auth.service.d/10-release.conf /etc/systemd/system/ikv-auth.service.d/10-release.conf
+sudo install -D -m 0644 deploy/release-units/ikv-server.service.d/10-release.conf /etc/systemd/system/ikv-server.service.d/10-release.conf
+# First release: run the check once with a launcher (a source build's or a downloaded AppImage's).
+sudo env IKV_LAUNCHER="/path/to/IKV-Linux-X.Y.Z-x86_64.AppImage ikv-launcher" /usr/local/libexec/ikv/ikv-auto-update.sh
+sudo systemctl daemon-reload && sudo systemctl enable --now ikv-update.timer
+```
+
+The drop-ins run `/var/lib/ikv-release/active/AppRun ikv-auth|ikv-server` with the release's own `config/gameplay.json`, migrations and web panel; later checks use the active release's launcher. `/etc/ikv/update.env` may set `IKV_UPDATE_DELAY`, `IKV_UPDATE_ARGS` (`--channel`, `--repo`, `--trust`, `--update-ca`, `--release-api`) and `IKV_DSN_FILE` (default `/etc/ikv/dsn`; the password goes to `psql` through `PGPASSWORD`, never argv).
+
+**Docker Compose:** `docker compose -f compose.yaml -f deploy/compose.release.yaml up -d` mounts `/var/lib/ikv-release` read-only and sets `IKV_RELEASE=/opt/ikv-release/active`, which makes `deploy/container-entrypoint.sh` run the release's `AppRun ikv-auth|ikv-server`. Run the script with `IKV_UPDATE_MODE=compose IKV_COMPOSE_DIR=/path/to/checkout` from a host timer or cron; it restarts `auth` and announces through `docker compose exec database psql`.
+
+**Windows:** the launcher-hosted server (Sunucu Yönetimi) updates itself exactly as on Linux; the installed launcher installs the signed Windows package and the supervisor hands over to the new release's `bin\ikv-launcher.exe`.
+
+Proof boundary: `tests/update_integration.py` runs `ikv-auto-update.sh` against an owned HTTPS origin with `systemctl`/`psql` stand-ins (install, extraction, `active` switch, auth restart, the queued announced restart, no-op when current, tampered manifest refused with nothing touched); `tests/hosted_update.py` proves the launcher-hosted upgrade with real PostgreSQL/auth/world and a connected player. The production systemd units, the Compose override and the Windows supervisor handover were not run on a real host by these tests.
 
 ## Offline tools and distribution
 
