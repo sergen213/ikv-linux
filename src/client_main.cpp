@@ -118,7 +118,7 @@ struct Options {
     std::uint16_t port=7000;
     std::uint64_t character=0;
     int width=1280,height=800,dx=0,dy=0,ticks=0;
-    bool headless=false,session_stdin=false,fullscreen=false,parallax=true;
+    bool headless=false,session_stdin=false,fullscreen=false,parallax=true,tessellation=true;
     float volume=.5f,music_volume=1; // master device gain; original MusicVolume (music + ambient beds)
     // Ayarlar sliders 3-7 (original globals 0x5eabc0..0x5eabdc, 0..1): Karakter Detay Mes., Görüş Mesafesi (fog distance
     // scale, floor .1), Ortam Efektleri / Karakter Efektleri (particle range² = pref·160000), Ölü Yok Olma Süresi.
@@ -184,6 +184,7 @@ Options parse_options(int argc,char** argv) {
                 "  fsr3: AMD FidelityFX Super Resolution 3.1.4 temporal upscaling (Vulkan only; replaces --render-scale)\n"
                 "[--frame-generation on|off]  FSR 3.1.4 frame generation (Vulkan + --upscaler fsr3; default off)\n"
                 "[--parallax on|off]  enhanced parallax occlusion relief on static zone surfaces (NONCANONICAL; default on)\n"
+                "[--tessellation on|off]  enhanced tessellated PBR-pack relief where supported (NONCANONICAL; default on)\n"
                 "[--texture-detail 0|1|2 --lightmap-detail 0|1|2]  original texture/lightmap packs _4/_2/_1 (default 2 and 1)\n"
                 "Ground click moves; WASD/arrows control camera; F1 displays recovered Turkish help.\n"
                 "Graphical scene, grid and character appearance follow the admitted authoritative source registry.\n";
@@ -194,7 +195,7 @@ Options parse_options(int argc,char** argv) {
         if (flag=="--fullscreen") { o.fullscreen=true; continue; }
         if (flag!="--host" && flag!="--port" && flag!="--ca" && flag!="--character" && flag!="--auth" &&
             flag!="--asset-root" && flag!="--renderer" && flag!="--appearance" && flag!="--rt" && flag!="--rt-style" && flag!="--render-scale" &&
-            flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" && flag!="--parallax" &&
+            flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" && flag!="--parallax" && flag!="--tessellation" &&
             flag!="--texture-detail" && flag!="--lightmap-detail" &&
             flag!="--settings" && flag!="--width" && flag!="--height" && flag!="--ticks" &&
             flag!="--commands" && flag!="--screenshot" && flag!="--audio" && flag!="--dx" && flag!="--dy" &&
@@ -223,6 +224,10 @@ Options parse_options(int argc,char** argv) {
         else if (flag=="--parallax") {
             if (value!="on" && value!="off") throw std::invalid_argument("--parallax requires on|off");
             o.parallax=value=="on";
+        }
+        else if (flag=="--tessellation") {
+            if (value!="on" && value!="off") throw std::invalid_argument("--tessellation requires on|off");
+            o.tessellation=value=="on";
         }
         else if (flag=="--texture-detail") o.texture_detail=number(value,0,2);
         else if (flag=="--lightmap-detail") o.lightmap_detail=number(value,0,2);
@@ -965,7 +970,7 @@ private:
         ro.render_scale=static_cast<float>(options_.render_scale);
         ro.upscaler=options_.upscaler=="fsr3"?ikv::Upscaler::fsr3:ikv::Upscaler::bilinear;
         ro.fsr_quality=fsr_quality(options_.fsr_mode); ro.fsr_sharpness=static_cast<float>(options_.fsr_sharpness);
-        ro.frame_generation=options_.frame_generation; ro.parallax=options_.parallax;
+        ro.frame_generation=options_.frame_generation; ro.parallax=options_.parallax; ro.tessellation=options_.tessellation;
         ro.view_distance=view_distances[static_cast<std::size_t>(options_.view_distance)];
         ro.progress=[this]{load_progress();};
 #if IKV_HAS_VULKAN

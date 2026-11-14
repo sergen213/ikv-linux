@@ -183,6 +183,9 @@ def inside(args) -> None:
     shutil.rmtree(appdir, ignore_errors=True)
     run("cmake", "--install", build, "--prefix", appdir / "usr", "--strip")
     usr = appdir / "usr"
+    # NONCANONICAL wave 29 enhanced PBR texture pack (CMake installs assets/pbr; usr/bin/../share/ikv/pbr at run time).
+    if (src / "assets/pbr/manifest.json").is_file() and not (usr / "share/ikv/pbr/manifest.json").is_file():
+        raise SystemExit("assets/pbr PBR pack missing from the AppImage")
     helper = src / "packaging/helper-innoextract"
     shutil.copyfile(helper / "bin/amd64/innoextract", usr / "bin/innoextract")
     (usr / "bin/innoextract").chmod(0o755)

@@ -1,7 +1,9 @@
 # User-owned proprietary originals and extracted assets: never publish.
 /istanbulkur6_0.exe
 /original/
-/assets/
+/assets/*
+# NONCANONICAL wave 29: CC0 PBR pack (no original content), tools/pbr_pack.py.
+!/assets/pbr/
 /extracted/
 *.exe
 *.dll

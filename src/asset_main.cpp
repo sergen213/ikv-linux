@@ -2,6 +2,10 @@
 #include "ikv/assets.hpp"
 #include "ikv/scene.hpp"
 #include <nlohmann/json.hpp>
+#include <set>
+#include <cmath>
+#include <algorithm>
+#include "ikv/pbr.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -76,6 +80,7 @@ void self_test() {
     ikv::assets::decoder_self_test();
     ikv::scene_decoder_self_test();
     ikv::EffectSystem::self_test();
+    ikv::pbr_self_test();
     std::cout << "DDS/ADF/scene/animation/zone/Turkish-resource/particle-effect decoder self-tests passed\n";
 }
 void print_quoted(std::string_view text) {
@@ -158,6 +163,57 @@ int main(int argc, char** argv) {
             for(const auto& t:scene.textures)texture_bytes+=t.data.size();
             std::cout << "{\"meshes\":" << scene.meshes.size() << ",\"vertices\":" << vertices << ",\"indices\":" << indices << ",\"instances\":" << scene.instances.size() << ",\"materials\":" << scene.materials.size() << ",\"textures\":" << scene.textures.size() << ",\"texture_bytes\":" << texture_bytes << ",\"nodes\":" << scene.nodes.size() << ",\"animation_keys\":" << keys << ",\"skin_influences\":" << influences << ",\"help_pages\":" << scene.help.size() << ",\"geometry_revision\":" << scene.geometry_revision << ",\"diagnostics\":";
             std::cout << nlohmann::json(scene.diagnostics).dump() << "}\n";return 0;
+        }
+        if(command=="pbr-keys"&&argc==3) { // NONCANONICAL wave 29: every PBR-pack-eligible diffuse key of the original zones
+            nlohmann::json keys=nlohmann::json::object();std::set<std::string> loaded;
+            for(unsigned id=0;id<71;++id) {
+                const auto& d=ikv::source_scene_descriptor(id);
+                if(d.members.empty()||!loaded.insert(d.members.front()).second)continue;
+                const auto scene=ikv::load_source_scene(argv[2],id);
+                const auto zone=ikv::load_zone(argv[2],d.support_id);
+                const auto eligible=ikv::pbr_eligible_materials(scene);
+                std::vector<std::size_t> uses(scene.materials.size());
+                for(const auto& in:scene.instances){const auto m=in.material==UINT32_MAX?scene.meshes[in.mesh].material:in.material;if(m<uses.size())++uses[m];}
+                // Largest placement per material: world centre of its mesh's AABB (capture spawn hints).
+                std::vector<std::array<float,4>> largest(scene.materials.size(),{0,0,0,-1});
+                for(const auto& in:scene.instances){
+                    const auto m=in.material==UINT32_MAX?scene.meshes[in.mesh].material:in.material;
+                    if(m>=largest.size()||scene.meshes[in.mesh].vertices.empty())continue;
+                    float lo[3]{INFINITY,INFINITY,INFINITY},hi[3]{-INFINITY,-INFINITY,-INFINITY};
+                    for(const auto& v:scene.meshes[in.mesh].vertices){const auto& t=in.transform.matrix;
+                        const float w[3]{t[0]*v.x+t[4]*v.y+t[8]*v.z+t[12],t[1]*v.x+t[5]*v.y+t[9]*v.z+t[13],t[2]*v.x+t[6]*v.y+t[10]*v.z+t[14]};
+                        for(int k=0;k<3;++k){lo[k]=std::min(lo[k],w[k]);hi[k]=std::max(hi[k],w[k]);}}
+                    const float r=std::hypot(hi[0]-lo[0],hi[2]-lo[2]);
+                    if(!(std::isfinite(r)&&r>largest[m][3]))continue;
+                    // The up-facing walkable (zone grid) triangle nearest the AABB centre: a capture spawn on the surface (x,z x 1000 = wire).
+                    const auto& mesh=scene.meshes[in.mesh];const auto& t=in.transform.matrix;float cx=(lo[0]+hi[0])/2,cz=(lo[2]+hi[2])/2,best=INFINITY;
+                    std::array<float,3> at{};
+                    for(std::size_t i=0;i+2<mesh.indices.size();i+=3){float c[3]{},n=0;
+                        for(int k=0;k<3;++k){const auto& v=mesh.vertices[mesh.indices[i+k]];c[0]+=(t[0]*v.x+t[4]*v.y+t[8]*v.z+t[12])/3;c[1]+=(t[1]*v.x+t[5]*v.y+t[9]*v.z+t[13])/3;c[2]+=(t[2]*v.x+t[6]*v.y+t[10]*v.z+t[14])/3;n+=(t[1]*v.nx+t[5]*v.ny+t[9]*v.nz)/3;}
+                        const float gap=(c[0]-cx)*(c[0]-cx)+(c[2]-cz)*(c[2]-cz);const auto ground=ikv::zone_height(zone,c[0],c[2]);if(std::abs(n)>.5f&&ground&&std::abs(*ground-c[1])<6&&gap<best){best=gap;at={c[0],c[1],c[2]};}}
+                    if(std::isfinite(best))largest[m]={at[0],at[1],at[2],r}; // placements without a walkable point are skipped
+                }
+                for(std::size_t m=0;m<scene.materials.size();++m) {
+                    if(!eligible[m])continue;
+                    const auto key=ikv::pbr_texture_key(scene.materials[m].diffuse);auto& entry=keys[key];
+                    if(entry.is_null()){entry={{"zones",nlohmann::json::array()},{"placements",0},{"materials",nlohmann::json::array()}};
+                        for(const auto& t:scene.textures)if(t.name==scene.materials[m].diffuse){entry["width"]=t.width;entry["height"]=t.height;break;}}
+                    if(std::find(entry["zones"].begin(),entry["zones"].end(),d.key.substr(0,d.key.find_first_of("0123456789")))==entry["zones"].end())
+                        entry["zones"].push_back(d.key.substr(0,d.key.find_first_of("0123456789")));
+                    entry["placements"]=entry["placements"].get<std::size_t>()+uses[m];
+                    if(largest[m][3]>=0&&(!entry.contains("largest")||entry["largest"]["extent"].get<float>()<largest[m][3]))
+                        entry["largest"]={{"zone",d.key},{"center",{largest[m][0],largest[m][1],largest[m][2]}},{"extent",largest[m][3]}};
+                    if(!scene.materials[m].name.empty()&&std::find(entry["materials"].begin(),entry["materials"].end(),scene.materials[m].name)==entry["materials"].end())
+                        entry["materials"].push_back(scene.materials[m].name);
+                    // The MAT+14 secondary fade layer drawn under this key (renderers map its own pack material too).
+                    if(ikv::pbr_fade_layer(scene.materials[m])) {
+                        if(!entry.contains("fade_layers"))entry["fade_layers"]=nlohmann::json::array();
+                        const auto fade=ikv::pbr_texture_key(scene.materials[m].luminance);
+                        if(std::find(entry["fade_layers"].begin(),entry["fade_layers"].end(),fade)==entry["fade_layers"].end())entry["fade_layers"].push_back(fade);
+                    }
+                }
+            }
+            std::cout<<keys.dump(1)<<"\n";return 0;
         }
         if (!((command == "list" && argc == 3) || (command == "inspect" && argc == 4))) {
             usage();
