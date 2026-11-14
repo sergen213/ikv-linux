@@ -347,7 +347,11 @@ if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosit
 float pbrAo=1.;
 if(pbrOn){
     if(textureSize(pbrAlbedoMap,0).x>1) {
-        vec3 low=textureLod(diffuseMap,texcoord,max(float(textureQueryLevels(diffuseMap))-4.,0.)).rgb*draw.color.rgb-enhancedLightmapShadow(texel.a);
+        vec3 low=textureLod(diffuseMap,texcoord,max(float(textureQueryLevels(diffuseMap))-4.,0.)).rgb;
+        // Terrain blends the MAT+14 secondary layer by vertex alpha (texel above): the low-frequency colour follows the blend.
+        if(draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5)
+            low=mix(textureLod(fadeMap,texcoord,max(float(textureQueryLevels(fadeMap))-4.,0.)).rgb,low,fadeWeight);
+        low=low*draw.color.rgb-enhancedLightmapShadow(texel.a);
         albedo=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,albedo,pbrTintKeep(draw.pbr));
     }
     if(textureSize(pbrOrmMap,0).x>1){vec3 orm=textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb;pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;}

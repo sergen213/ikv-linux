@@ -459,7 +459,11 @@ void main() {
         if(pbr_on) {
             if(pbr_maps.x>0.5) {
                 ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
-                vec3 low=(has_texture?textureLod(diffuse_map,texcoord,max(levels-4.0,0.0)).rgb:vec3(1.0))*material_color.rgb-lightmap_shadow;
+                vec3 low=has_texture?textureLod(diffuse_map,texcoord,max(levels-4.0,0.0)).rgb:vec3(1.0);
+                // Terrain's MAT+14 secondary layer (vertex-alpha blend above): the low-frequency colour follows the blend.
+                if(has_fade_map&&!has_normal_map&&!has_environment_map){ivec2 fs=textureSize(fade_map,0);
+                    low=mix(textureLod(fade_map,texcoord,max(floor(log2(float(max(max(fs.x,fs.y),1))))-3.0,0.0)).rgb,low,fade_blend);}
+                low=low*material_color.rgb-lightmap_shadow;
                 albedo=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,albedo,pbrTintKeep(pbr));
             }
             if(pbr_maps.z>0.5){vec3 orm=textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb;pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;}
