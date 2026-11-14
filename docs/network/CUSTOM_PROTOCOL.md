@@ -1,9 +1,11 @@
-# Custom v2 application protocol (state/action JSON)
+# Custom v3 application protocol (state/action JSON)
 
 ## Scope and provenance
 
 - Independent wire for the native client (`src/client_session.cpp`) and world server (`src/server_main.cpp`, `src/world.cpp`). It is **not** the original İKV protocol and not an original opcode reconstruction (see [PACKET_CATALOG.md](PACKET_CATALOG.md) for original evidence).
 - Transport, framing, binary message layouts, decoder poisoning and EOF rules: [PROTOCOL_SPECIFICATION.md](PROTOCOL_SPECIFICATION.md#independent-authenticated-custom-wire-version-2). Connection state machine: [MESSAGE_STATE_MACHINE.md](MESSAGE_STATE_MACHINE.md). This file documents the JSON carried by `state` (type 6) and `action` (type 8) as implemented now.
+- **Frame version (wave 30, NONCANONICAL).** Every frame body starts with version byte `3` (`ikv::protocol_version`, `include/ikv/protocol.hpp`); version 2 layouts are otherwise unchanged. A version-2 byte is decodable only for a `hello` (an outdated client; `Message::version == ikv::legacy_protocol_version`) and a `goodbye`; every other version-2 frame, and any other version byte, fails decode. The server answers a version-2 hello with `ikv::outdated_goodbye_message(release)`: a **version-2** goodbye (so 0.15 clients decode it) carrying `{"reason": "Sunucu sürümü vX.Y.Z; istemciniz eski. Yeni sürüm hazır; oyun güncelleniyor.", "code": "outdated_client", "version": "X.Y.Z", "protocol": 3}`, then closes. Old clients show `reason` verbatim; current clients expose `code`/`version` as `ClientSession::farewell_code`/`farewell_version` (≤ 64 bytes each).
+- **Realms (wave 30, NONCANONICAL).** The original server list lived in launcher.exe; the native client takes the launcher's `--realm ID` (1..32767, default 1), lists only that realm's characters (`GET /v1/characters` rows carry `realm_id`, absent = 1) and creates characters with `realm_id`. After selection it asks `GET /v1/characters/{id}/world` → `{host, port, instance}` (host 0..253 printable ASCII, empty = the account service's host; port 1..65535; instance 1..128 bytes) and connects there; a 404 (pre-realm server) keeps the configured `--host`/`--port`, any other refusal (503 `realm_full`/`realm_offline`) returns to the character screen with the server's message (`src/client_realms.cpp`, `src/client_main.cpp` `choose_character`).
 - TLS ≥ 1.2 on both ends, no compression; server also disables renegotiation (`src/server_main.cpp:376-380`). Client verifies the chain against the configured CA plus host/IP SAN (`src/client_session.cpp:426-469`).
 - Every gameplay rule and number below is independent. `config/gameplay.json` is NONCANONICAL as a whole (`src/world.cpp:97` requires the word in `provenance`); rules whose code comments say NONCANONICAL are marked so.
 - Coordinates are integer "wire units": 1000 per original scene unit, range ±1,536,000 (`include/ikv/protocol.hpp:15`).
@@ -13,17 +15,18 @@
 | Step | Behaviour | Code |
 | --- | --- | --- |
 | Connect | TLS accept; a peer without a player id 5 s after accept is closed (`handshake_timeout`). Max 64 connections. | `src/server_main.cpp:39,434,469` |
-| hello | Must be the first message (`handshake_state` otherwise). `session` = 64 lowercase hex, `character_id` ∈ [1, INT64_MAX]. | `src/server_main.cpp:285-286`, `src/protocol.cpp:42-47` |
+| hello | Must be the first message (`handshake_state` otherwise). `session` = 64 lowercase hex, `character_id` ∈ [1, INT64_MAX], optional `ticket` (wave 30) = exactly 64 lowercase hex (a 138-byte body instead of 74; only in version 3). With a ticket the server redeems the single-use shard-transfer ticket instead of a fresh entry. | `src/server_main.cpp:285-286`, `src/protocol.cpp` `validate` |
 | Admission | Joined players < 32 and id space left (`player_limit`); `Store::authenticate`, `Store::enter_character` (lease), `World::add` (character validation, `src/world.cpp:681-795`). Store failure → `authentication_or_store`; World rejection → `protocol`. | `src/server_main.cpp:287-296,316-317` |
 | welcome | `{id, tick}`; id ∈ 1..0x7fffffff, then the first `state` is sent immediately (always with `catalogs`). | `src/server_main.cpp:297-300` |
 | Tick stream | Every 50 ms tick (≤ 4 catch-up steps per loop) each joined peer gets `state` then `snapshot`. | `src/server_main.cpp:493-508` |
 | input / destination | Sequence must strictly increase per connection, else `sequence` close; World also ignores non-increasing sequences. | `src/server_main.cpp:301-305`, `src/world.cpp:804-819` |
 | action | ≤ 40 per 1-second window per connection, else `action_rate` close. Each action is handled by `World::action`, then an extra `state` is sent immediately (several states may share one tick). | `src/server_main.cpp:306-311` |
 | Heartbeat | Every 1 s: session re-authenticated (`session_revoked`/`identity_changed` close), external mute refreshed. | `src/server_main.cpp:518-530` |
-| goodbye | Client: queued on `stop()`, then 2 s to drain (`src/client_session.cpp:702-711`). Server: graceful close `goodbye`. | `src/server_main.cpp:312-313` |
+| goodbye | Client: queued on `stop()`, then 2 s to drain (`src/client_session.cpp:702-711`). Server: graceful close `goodbye`; a server goodbye may carry `{"reason", "code"?, "version"?}` (≤ 512 bytes) shown to the player. | `src/server_main.cpp:312-313` |
+| Shard transfer (wave 30, NONCANONICAL) | The server queues a state whose events contain `{type:"transfer",host,port,ticket,reason,realm}`, then a goodbye `{"reason":"transfer"}` (`ikv::transfer_goodbye`) and closes. The client shows the door loading screen, waits for the close (at most 5 s, `ClientSession::handoff_grace`), then connects to `host:port` (empty `host` = the host it already reaches) and sends `hello` with the same session and character plus `ticket`. Chat history, open windows and party frames are kept. A refused or unreachable destination ends the session; with `--auth` the client returns to character selection showing the server's message. | `src/client_session.cpp` `parse_transfer`/`handoff_due`, `src/client_main.cpp` `hand_off`, `headless` |
 | Kick | A state containing a `kick` event is queued, then graceful close `admin_kick`. | `src/server_main.cpp:255-260` |
 
-There is **no server→client close message**. The client sees TLS `close_notify`/EOF. Close reasons are server log strings only (`peer=N close=<reason>`, `src/server_main.cpp:119`):
+The server may end a session with a `goodbye` carrying `{"reason": text}` before its TLS `close_notify`; otherwise the client sees TLS `close_notify`/EOF. Close reasons below are server log strings (`peer=N close=<reason>`, `src/server_main.cpp:119`):
 
 | Kind | Reasons |
 | --- | --- |
@@ -36,11 +39,11 @@ Client-side: 5 s read silence fails the session; outgoing queue ≤ 256 KiB and 
 
 | Type | Dir | Payload | Notes |
 | --- | --- | --- | --- |
-| `hello` 1 | C→S | `session`, `character_id` | Only once, first. |
+| `hello` 1 | C→S | `session`, `character_id`, optional `ticket` (64 lowercase hex, wave 30) | Only once, first. |
 | `welcome` 2 | S→C | `id`, `tick` | Client requires it before anything else (`src/client_session.cpp:535-538`). |
 | `input` 3 | C→S | `sequence`, `dx`, `dy` | Cardinal only; `(0,0)` stops. Diagonal fails decode → `protocol` close (`World::input` would also reject it as `movement`, `src/world.cpp:808`). Moving clears auto-attack. |
 | `snapshot` 4 | S→C | `tick`, `players[{id,x,y}]` | Self plus at most 31 AOI players (same zone, within `aoi`; group members first, then nearest — the same set as the state's player entities), ID-sorted (`World::snapshot`). Server-side bots are ordinary player entities. |
-| `goodbye` 5 | C→S | — | |
+| `goodbye` 5 | C↔S | optional JSON `{reason, code?, version?}` ≤ 512 bytes (server only) | Version 2 or 3. |
 | `state` 6 | S→C | JSON object, below | |
 | `destination` 7 | C→S | `sequence`, `x`, `y` | Routed by `World::route` (direct segment, or bounded A* in source zones; a player's click budget is `click_route_nodes`, beyond it the route ends at the explored cell nearest the goal); no progress at all → `correction{reason:"blocked_destination"}`. One destination is routed per tick per connection; the newest of any later ones is held and routed next tick. |
 | `action` 8 | C→S | JSON object `{ "action": NAME, ...fields }` | Table below. |
@@ -93,7 +96,7 @@ Client-side: 5 s read silence fails the session; outgoing queue ≤ 256 KiB and 
 
 ### Entities
 
-Player (`src/world.cpp:1628-1637`): `id`, `kind:"player"`, `name`, `appearance`, `class_id`, `equipment` (visible array), `x`, `y`, `hp`, `max_hp`, `level`, `alive`, `clan` (0 = none), `kabadayi`, `guild` (guild **name**, only if in a guild), `posture` (optional 1..255: held RP clip from `social.postures` — sit/lay — until the player moves, fights or dies; late joiners play it).
+Player (`src/world.cpp:1628-1637`): `id`, `kind:"player"`, `name`, `appearance`, `class_id`, `equipment` (visible array), `x`, `y`, `hp`, `max_hp`, `level`, `alive`, `clan` (0 = none), `kabadayi`, `guild` (guild **name**, only if in a guild), `posture` (optional 1..255: held RP clip from `social.postures` — sit/lay — until the player moves, fights or dies; late joiners play it), `realm` (optional, wave 30 NONCANONICAL: the home realm name, 1..64 bytes without control characters, present for a player from another realm than the viewer; the client renders `Ad (Realm)`). The connected `party` rows carry the same optional `realm`.
 
 NPC (`src/world.cpp:1640-1651`): `id` (> 0x7fffffff), `kind` ∈ `enemy|merchant|questgiver|node` (gathering node) `|anvil` (örs) `|door` (classes.dat `<loc>` door/crystal/barrier/elevator; client shows `cursor_interact`, a click sends `interact`) `|summon` (Boz Ayı/Tesla Küresi/Çağrı, ids from 0xf0000000, carries `master` = caster id; friendly, not attackable), `name`, `appearance` (`{}` default), `equipment:[]`, `source_uid`, `source_class`, `x`, `y`, `hp`, `max_hp`, `alive`, `quests`, `shop`, `owner` (loot claimant, 0 = none), `looted`, `clan` (clan NPCs: recruiters, clan merchants, Er Meydanı guardians and banners; relation 00478090/00478050 makes one hostile to a player of the other nonzero clan: the client gives it the attack cursor, attacks it on click and offers no İşlemler items), `recruiter:true` (classes.dat claninviter, entity flag 0x20000: İşlemler Klana Katıl/Klandan Ayrıl), `banker:true` (banker only; the configured banker is a `questgiver`). A state carries at most 96 entities (nearest NPCs first). An instance copy's state reports `zone` `<zone><n>` and that copy's `source_registry_id` (e.g. `migrat3` → 29).
 
@@ -154,14 +157,15 @@ Common NPC check `npc()`: exists (`target`), within `interaction_range` (`range`
 | `trade_offer` | `items[{uid,quantity}]`, `currency` | Open phase only (`trade`); ≤ 32 items, unique uids (`trade`), owned, quantity 1..1000 ≤ owned (`quantity`), not equipped (0x591bf0, `equipped`), not bound: item `flags` bits 2/4 except source uid 14000 ("Bu eşya size bağlanmıştır. Kimseye veremezsiniz.", `bound`, 00431220); currency ≤ own (`currency`). New revision, clears both confirmations. | `trade` (both) |
 | `trade_cancel` | — | Active trade (`trade`). | ack + `trade_cancel` (both) |
 | `chat` | `channel`, `text` ≤ 512 B or `link` (uid), `to` (private) | Not muted (`muted`); one message/emote per 10 ticks (`rate`); no control chars except tab (`chat`). Channels: `local`, `roleplay` (AOI), `zone`, `private` (`to` online; echoed to sender), `group` (`group`), `guild` (`guild`), `clan` (`clan`); else `chat`. `zone` (Bölge) and `guild` (Lonca) need Plus Paket (`plus`, guide; refusal wording NONCANONICAL). `link`: Ctrl-click item link (0042e8c0) of the sender's own bag/worn entry (`ownership`), not on `roleplay`; delivered as `link {item, definition, prefixes?}`. `local`/`roleplay` text `/name` = emote from `social.emotes` (`emote`, `dead`). Listeners ignoring the speaker receive nothing. | `chat` / `emote` |
-| `group_invite` | `target` | Online, ≠ self, ungrouped (`group`); within `aoi` (`range`); sender leader or ungrouped, group < 6 (`group`). | ack + `group_invite` |
+| `chat` private by name (wave 30, NONCANONICAL) | `channel:"private"`, `text` or `link`, `name` (1..64 B), `realm?` (1..64 B) instead of `to` | Sent by the native client when the recipient is not a visible entity: `/f Ad ` or `/f Ad-Realm ` (the first `-` separates; original names contain none). The server resolves the online character (any shard, via the bus) and relays it. | `chat` |
+| `group_invite` | `target`, or (wave 30, NONCANONICAL) `name` + `realm?` | Online, ≠ self, ungrouped (`group`); within `aoi` (`range`); sender leader or ungrouped, group < 6 (`group`). The by-name form invites a player on another shard or realm (native `/davet Ad[-Realm]`); acceptance phases the joiner to the leader's shard (state event `transfer`). | ack + `group_invite` |
 | `group_accept` | — | Pending invite, ungrouped (`group`); inviter in `aoi` (`range`) and still leader; group < 6 (`group`). | `group` (members) |
 | `group_leave` | — | Always succeeds; first remaining member becomes leader; a group left with one member dissolves. | ack + `group` |
 | `group_kick` | `target` | Sender leads a group containing `target` ≠ self (`group`). Original İşlemler "Gruptan Çıkar". | ack + `group` |
 | `complain` | `target` | Online player ≠ self (`target`); at most 3 per session, 10 for a Plus Paket account (guide; NONCANONICAL per-session count, `complain`). Original "Şikayet Et" (`lpmc`); NONCANONICAL delivery to online administrators. | ack; admins get `complaint` |
 | `teleport_here` | `target` | Admin only (`permission`); online target ≠ self. Moves the target to the administrator's zone/position (original GM "Yanına Işınla", `|tele`). | ack |
 | `guild_create` | `name` 2..32 B | Not in a guild (`guild`). | ack + `guild` |
-| `guild_invite` | `target` | Sender leader; target unguilded; < 64 members (`guild`). | ack + `guild_invite` |
+| `guild_invite` | `target`, or (wave 30, NONCANONICAL) `name` + `realm?` | Sender leader; target unguilded; < 64 members (`guild`). Guilds are cross-realm; the by-name form (native `/lonca Ad[-Realm]`) reaches another shard or realm. | ack + `guild_invite` |
 | `guild_accept` | — | Pending invite; inviting leader online; < 64 (`guild`). | ack + `guild` |
 | `guild_leave` | — | Member (`guild`); leader passes to first remaining member. | ack + `guild` |
 | `guild_kick` | `target` | Sender leader; target member (`guild`). | ack + `guild` |
@@ -200,17 +204,17 @@ Delivery: **self** = sender only; **AOI** = every player in the same zone within
 | `correction` | `x`, `y`, `reason` (`blocked_destination`\|`collision`) | self | `:817,1459` |
 | `dialogue` | `target`, `text`, `quests` (offer for this player, see `quest_accept`), `shop`, `bank` | self | `World::handle` interact |
 | `quest` | `quest`, `stage` (`accepted`\|`progress`\|`ready`\|`completed`\|`expired`), `name`, `level`, `progress`, `count`, `text` (completed, optional) | self | quest block (`World::quest_*`); kills credit every rewarded group member |
-| `trade` | `peer`, `peer_name`, `initiator`, `phase` (`invited`\|`open`), `revision`, `own`/`other` `{items[{uid,item,name,quantity}], currency, accepted}` | both parties | `:826-852` |
+| `trade` | `peer`, `peer_name`, `peer_realm?` (wave 30: a peer from another realm; exactly 8 fields, 9 with it), `initiator`, `phase` (`invited`\|`open`), `revision`, `own`/`other` `{items[{uid,item,name,quantity}], currency, accepted}` | both parties | `:826-852` |
 | `trade_invite` | `from`, `phase`, `revision` | recipient | `:1279` |
 | `trade_cancel` | — | both parties | `:824` |
 | `trade_complete` | `peer` | both parties | `:1316` |
 | `group` | `leader` (0 = none), `members` | members | `:872-874,1409` |
-| `group_invite` | `from`, `name` | target | `group_invite` action |
+| `group_invite` | `from`, `name`, `realm?` (wave 30) | target | `group_invite` action |
 | `guild` | `guild` (object or null for the departing member) | affected online characters | `:1370` |
-| `guild_invite` | `from`, `name`, `guild` | target | `guild_invite` action |
+| `guild_invite` | `from`, `name`, `realm?` (wave 30), `guild` | target | `guild_invite` action |
 | `complaint` | `from`, `name`, `target`, `target_name` | online administrators | `complain` action |
 | `announce` | `text` (≤256 bytes) | every online player | private web administration `announce` command and restart/shutdown countdown warnings (NONCANONICAL) |
-| `chat` | `channel`, `from`, `name`, `text` | channel recipients | `:1376-1400` |
+| `chat` | `channel`, `from`, `name`, `realm?` (wave 30: sender from another realm; `from` may be 0 for a relayed cross-shard whisper), `text` | channel recipients | `:1376-1400` |
 | `emote` | `entity`, `source`, `target`, `clip` | AOI | `:1381` |
 | `combat` | `entity`, `source`, `target`, `damage`, `hp`, `owner`, `miss?`, `critical?` (player→NPC; a summon's bite carries the summon id as `entity`/`source`, kill credit to its master); `entity`, `source`, `target`, `damage`, `hp`, `miss?`, `critical?` (hit on a player, or an NPC's bite on a summon). Hit chance = Saldırı/(Saldırı+Savunma) clamped to `formulas.hit_percent`; a `miss` carries `damage` 0 and plays the target's Dodge clip | AOI | `World::swing`/`strike`/`combat` |
 | `skill` | `skill`, `kind` (skill target type), `skill_source` (skills.dat `[classindex 0..2, skillno 0..15]`; skillno 15 is Boz Ayı's slot-8 variant record, so observers outside the caster's class can animate and voice it), `entity`, `source`, `target` (+ `damage`, `hp`, `owner` for single-target damage). A Şef (`boss` NPC) casting one of its NONCANONICAL `skills` sends the same event with its NPC id as `entity`/`source`, `kind` `enemy` (target = its victim) or `enemies` (target = itself, area cast); its damage follows as `combat` events and its effect as a harmful buff | AOI | `:1163-1165,1207`, `World::boss_skills` |
@@ -228,6 +232,7 @@ Delivery: **self** = sender only; **AOI** = every player in the same zone within
 | `gather` | `phase` (`start`\|`cancel`\|`done`), `entity`, `source`, `target`, `items` (done) | AOI | `:1711,1749,1762` |
 | `moderation` | `operation` (`mute`\|`unmute`), `by` | target | `:1421-1422` |
 | `kick` | `by` | target | `:1423` |
+| `transfer` (wave 30, NONCANONICAL) | `host` (0..253 printable ASCII; empty = the current host), `port` 1..65535, `ticket` (64 lowercase hex, single use, 60 s), `reason` (`party`\|`home`\|`layer`\|`instance`), `realm?` (destination realm name ≤ 64 B) | self, critical; followed by goodbye `{"reason":"transfer"}` and the close | `server_main.cpp` shard transfer |
 | `arena` | `text` (system chat line), `arenas`/`stake` (list), `winner` (match end, 0 = draw) | self / every player in the arena | `World::arena*` (`src/world.cpp` activities block) |
 | `arena_stake` | `code`, `stake`, `text` (Dikkat confirmation wording, NONCANONICAL) | self | `World::arena` (`arena_stake` action) |
 
@@ -237,7 +242,8 @@ Queue rules (`World::emit`, `src/world.cpp:354-377`): critical = `trade`, `trade
 
 | Limit | Value | Code |
 | --- | --- | --- |
-| Frame body | 2..65,535 bytes | `include/ikv/protocol.hpp:14`, `src/protocol.cpp:205,266` |
+| Frame body | 2..65,535 bytes; version byte 3 (2 only for hello/goodbye) | `include/ikv/protocol.hpp:14`, `src/protocol.cpp` `validate`/`decode` |
+| Realm name on rows | `realm` / `peer_realm` 1..64 bytes, no control characters (client rejects the frame otherwise) | `src/client_session.cpp` `realm_field` |
 | State/action JSON | 1..65,533 bytes, one object, nesting ≤ 32, raw NUL rejected (`\u0000` escape allowed) | `src/protocol.cpp:14-39` |
 | Coordinates | ±1,536,000 | `include/ikv/protocol.hpp:15` |
 | Snapshot players | ≤ 32 | `src/protocol.cpp:56,227` |

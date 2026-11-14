@@ -238,7 +238,7 @@ def rejected_peer(services, payload):
             pass
         if received:
             length = struct.unpack("!I", received[:4])[0]
-            assert len(received) == length + 4 and received[4:6] == bytes((2, 5)) and json.loads(received[6:])["reason"], "malformed or unauthorized peer received a record"
+            assert len(received) == length + 4 and received[4] in (2, 3) and received[5] == 5 and json.loads(received[6:])["reason"], "malformed or unauthorized peer received a record"
 
 
 def revoked_world_peer(peer, timeout=12):
@@ -278,7 +278,7 @@ def world(services, users, characters):
         generator = random.Random(0x1A2B3C)
         for _ in range(32):
             payload = generator.randbytes(generator.randrange(0, 128))
-            rejected_peer(services, frame(generator.randrange(1, 256), payload, version=generator.randrange(3, 256)))
+            rejected_peer(services, frame(generator.randrange(1, 256), payload, version=generator.randrange(4, 256)))
         # Simultaneous idle TLS peers must not starve authenticated simulation.
         with ExitStack() as load:
             for _ in range(8):

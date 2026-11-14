@@ -178,5 +178,15 @@ int main() {
         for (auto& row : invalid[side]["items"]) row["name"] = std::string(128, 'x');
     check(trade.receive(invalid, 9) && trade.offer() == invalid,
           "all sixty-four legal rows remain retained even above old eight-KiB envelope");
+    // NONCANONICAL wave 30: a cross-realm peer adds peer_realm (1..64 bytes); anything else stays rejected.
+    ikv::ClientTrade realm;
+    auto cross = offer(); cross["peer_realm"] = "Galata";
+    check(realm.receive(cross, 9) && realm.offer().at("peer_realm") == "Galata", "cross-realm trade peer accepted");
+    for (const Json& bad : {Json(""), Json(std::string(65, 'r')), Json(5)}) {
+        ikv::ClientTrade refused; auto wrong = offer(); wrong["peer_realm"] = bad;
+        check(!refused.receive(wrong, 9), "malformed peer_realm rejected");
+    }
+    ikv::ClientTrade extra; auto unknown = offer(); unknown["peer_shard"] = "a1";
+    check(!extra.receive(unknown, 9), "unknown ninth trade field still rejected");
     return 0;
 }

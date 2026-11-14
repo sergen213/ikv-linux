@@ -77,13 +77,19 @@ Json character_row(const Json& c) {
             visual.push_back({{"slot", item.at("slot")}, {"source_uid", item.at("source_uid")}});
         }
     }
+    // NONCANONICAL wave 30: home realm; servers before realms omit it (everything lived on realm 1).
+    std::int64_t realm = 1;
+    if (c.contains("realm_id")) {
+        if (!c.at("realm_id").is_number_integer() || c.at("realm_id").get<std::int64_t>() < 1 || c.at("realm_id").get<std::int64_t>() > 32767)
+            throw std::runtime_error("account service returned an invalid character row");
+        realm = c.at("realm_id").get<std::int64_t>();
+    }
     return {{"id", c.at("id").get<std::uint64_t>()}, {"name", text(c.at("name"), 64)}, {"class_id", c.at("class_id")},
             {"appearance", c.at("appearance")}, {"level", std::clamp<std::int64_t>(level, 1, 1000)},
             {"zone", state.contains("zone") && state.at("zone").is_string() ? state.at("zone").get<std::string>().substr(0, 64) : std::string{}},
-            {"visual", std::move(visual)}};
+            {"visual", std::move(visual)}, {"realm_id", realm}};
 }
 } // namespace
-
 CharacterApi::CharacterApi(std::string_view origin, std::filesystem::path ca, std::string_view token)
     : ca_(std::move(ca)), token_(token) {
     // Origin only: https://host[:port][/]; no credentials, path, query or fragment.
@@ -153,7 +159,7 @@ Json CharacterApi::request(std::string_view method, const std::string& target, c
         std::string message;
         if (value.is_object() && value.contains("error") && value.at("error").is_object() && value.at("error").contains("message") &&
             value.at("error").at("message").is_string()) message = value.at("error").at("message").get<std::string>().substr(0, 256);
-        throw std::runtime_error(message.empty() ? "Hesap sunucusu isteği reddetti (" + std::to_string(status) + ")" : message);
+        throw ApiStatusError(message.empty() ? "Hesap sunucusu isteği reddetti (" + std::to_string(status) + ")" : message, static_cast<int>(status));
     }
     if (value.is_discarded()) throw std::runtime_error("account service returned invalid JSON");
     return value;
@@ -166,8 +172,13 @@ Json CharacterApi::list() {
     for (const auto& c : value.at("characters")) rows.push_back(character_row(c));
     return rows;
 }
-void CharacterApi::create(std::string_view name, int class_id, const Json& appearance) {
-    (void)character_row(request("POST", "/v1/characters", {{"name", name}, {"class_id", class_id}, {"appearance", appearance}}));
+void CharacterApi::create(std::string_view name, int class_id, const Json& appearance, int realm_id) {
+    (void)character_row(request("POST", "/v1/characters",
+        {{"name", name}, {"class_id", class_id}, {"appearance", appearance}, {"realm_id", realm_id}}));
+}
+std::optional<WorldEndpoint> CharacterApi::world(std::uint64_t id) {
+    try { return parse_world_endpoint(request("GET", "/v1/characters/" + std::to_string(id) + "/world", nullptr)); }
+    catch (const ApiStatusError& e) { if (e.status == 404) return std::nullopt; throw; }
 }
 void CharacterApi::remove(std::uint64_t id, std::string_view confirm_name) {
     (void)request("DELETE", "/v1/characters/" + std::to_string(id), {{"confirm_name", confirm_name}});
@@ -302,9 +313,9 @@ struct Hit { int x, y, w, h; std::string value; };
 class Screen {
 public:
     Screen(SDL_Window* window, Renderer& renderer, GameAudio& audio, EffectSystem* effects, Scene& scene,
-           const std::filesystem::path& installation, const CharacterScreenArt& art, CharacterApi& api)
+           const std::filesystem::path& installation, const CharacterScreenArt& art, CharacterApi& api, int realm)
         : window_(window), renderer_(renderer), audio_(audio), effects_(effects), scene_(scene),
-          installation_(installation), art_(art), api_(api) {
+          installation_(installation), art_(art), api_(api), realm_(realm) {
         for (const auto& node : scene_.nodes) {
             const auto& m = node.world.matrix;
             // Slot nodes rotate about Y; RenderEntity yaw uses the same Ry convention (actors face local -Z).
@@ -315,8 +326,9 @@ public:
         }
         if (effects_) effects_->attach_scene(scene_);
     }
-    std::optional<std::uint64_t> run(const std::function<bool()>& cancelled) {
+    std::optional<std::uint64_t> run(const std::function<bool()>& cancelled, std::string_view message) {
         refresh();
+        if (!message.empty()) notice(std::string(message));
         auto last = std::chrono::steady_clock::now();
         float elapsed = 0;
         bool announced = false;
@@ -357,7 +369,9 @@ private:
     float k_ = 1;
     std::array<std::array<float, 4>, 4> slots_{};
     std::array<float, 4> preview_{};
-    Json rows_ = Json::array();
+    Json rows_ = Json::array(); // the launcher-selected realm's characters
+    // NONCANONICAL wave 30: the realm the launcher selected (--realm; the original server list lived in launcher.exe).
+    int realm_ = 1;
     std::vector<std::uint32_t> attached_;
     int selected_ = -1;
     bool creating_ = false, editing_ = false, dirty_ = true, quit_ = false, credits_ = false; // credits_: roll visible
@@ -400,10 +414,14 @@ private:
         set_actor_action(scene_, id, 2, 0); // original PC Idle clip
         attached_.push_back(id);
     }
-    // cModuleCharsel: the account's first four characters stand on c_character0..3, dressed in their worn items.
+    // cModuleCharsel: the account's first four characters (of the launcher's realm) stand on c_character0..3, dressed in
+    // their worn items.
     void refresh() {
-        try { rows_ = api_.list(); }
-        catch (const std::exception& e) { rows_ = Json::array(); notice(e.what()); }
+        Json all = Json::array();
+        try { all = api_.list(); }
+        catch (const std::exception& e) { notice(e.what()); }
+        rows_ = Json::array();
+        for (const auto& row : all) if (row.at("realm_id") == realm_) rows_.push_back(row);
         detach_all();
         for (std::size_t i = 0; i < rows_.size() && i < slots_.size(); ++i) {
             try { attach(slot_entity + static_cast<std::uint32_t>(i), rows_[i].at("class_id").get<int>(), rows_[i].at("appearance"), rows_[i].at("visual")); }
@@ -430,7 +448,7 @@ private:
     void submit_create() {
         if (const auto error = original_character_name_error(name_); !error.empty()) { notice(error); return; }
         try {
-            api_.create(name_, class_, creation_appearance());
+            api_.create(name_, class_, creation_appearance(), realm_);
             end_create();
             for (std::size_t i = 0; i < rows_.size(); ++i) if (rows_[i].at("name") == name_) selected_ = static_cast<int>(i);
         } catch (const std::exception& e) { notice(e.what()); }
@@ -788,8 +806,8 @@ std::optional<std::uint64_t> run_character_screen(SDL_Window* window, Renderer& 
                                                   EffectSystem* effects, Scene& scene,
                                                   const std::filesystem::path& installation,
                                                   const CharacterScreenArt& art, CharacterApi& api,
-                                                  const std::function<bool()>& cancelled) {
-    Screen screen(window, renderer, audio, effects, scene, installation, art, api);
-    return screen.run(cancelled);
+                                                  const std::function<bool()>& cancelled, int realm, std::string_view message) {
+    Screen screen(window, renderer, audio, effects, scene, installation, art, api, realm);
+    return screen.run(cancelled, message);
 }
 } // namespace ikv

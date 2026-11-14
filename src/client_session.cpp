@@ -166,6 +166,15 @@ void text(const Json& value, std::size_t maximum, bool allow_empty = false) {
 void array_limit(const Json& value, std::size_t maximum) {
     if (!value.is_array() || value.size() > maximum) invalid();
 }
+bool control_free(std::string_view text) {
+    return std::none_of(text.begin(), text.end(), [](unsigned char c) { return c < 32 || c == 127; });
+}
+// NONCANONICAL wave 30 realm name on a player/party/chat row: optional, 1..64 bytes, no control characters.
+void realm_field(const Json& row) {
+    if (!row.contains("realm")) return;
+    text(row.at("realm"), 64);
+    if (!control_free(row.at("realm").get_ref<const std::string&>())) invalid();
+}
 using Bounds = std::array<std::int32_t, 4>;
 Bounds zone_bounds(const Json& body) {
     text(body.at("zone"), 128);
@@ -403,7 +412,7 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
         text(entity.at("kind"), 32);
         text(entity.at("name"), 128);
         const auto& kind = entity.at("kind").get_ref<const std::string&>();
-        if (kind == "player") { integer(entity.at("class_id"), 1, 3); if (entity.contains("posture")) integer(entity.at("posture"), 1, 255); } // held RP clip
+        if (kind == "player") { integer(entity.at("class_id"), 1, 3); if (entity.contains("posture")) integer(entity.at("posture"), 1, 255); realm_field(entity); } // held RP clip
         else if (kind == "enemy" || kind == "merchant" || kind == "questgiver" || kind == "node" || kind == "anvil" || kind == "door" || kind == "summon" || kind == "trap" || kind == "reset" || kind == "prop") { // node/anvil/door/reset/prop: classes.dat <loc>; summon: Boz Ayı/Tesla Küresi/Çağrı; trap: Labirent Tuzağı
             integer(entity.at("source_uid"), 1, UINT32_MAX);
             integer(entity.at("source_class"), 1, 65535); // classes.dat classid reaches 527
@@ -427,6 +436,7 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
             if (const auto& source = member.at("source_registry_id"); !source.is_null()) integer(source, 0, 70);
             if (!member.at("alive").is_boolean() || member.at("alive").get<bool>() != (member.at("hp").get<std::int64_t>() > 0)) invalid();
             for (const char* key : {"x", "y"}) if (member.contains(key)) integer(member.at(key), -coordinate_limit, coordinate_limit); // wave 29 servers
+            realm_field(member);
         }
     }
     const auto& events = body.at("events");
@@ -448,6 +458,9 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
             integer(source[0], 0, 2); integer(source[1], 0, 15); // skillno 15: Boz Ayı, the slot-8 variant record
         }
         if (type == "equip" || type == "unequip") visual_equipment(event.at("equipment"));
+        if (type == "transfer") (void)parse_transfer(event);
+        if (type == "chat" || type == "group_invite" || type == "guild_invite") realm_field(event);
+        if (type == "trade" && event.contains("peer_realm")) { text(event.at("peer_realm"), 64); if (!control_free(event.at("peer_realm").get_ref<const std::string&>())) invalid(); }
     }
     return bounds;
 }
@@ -472,6 +485,51 @@ void validate_snapshot(const Json& body, std::span<const Player> players, std::u
     if (players.size() != expected) invalid();
 }
 } // namespace
+
+Transfer parse_transfer(const Json& event) {
+    try {
+        if (!event.is_object() || event.value("type", std::string{}) != "transfer") invalid();
+        Transfer transfer;
+        // An empty host (a shard started without --public-host) means: the host this session already reaches.
+        text(event.at("host"), 253, true);
+        transfer.host = event.at("host").get<std::string>();
+        if (std::any_of(transfer.host.begin(), transfer.host.end(), [](unsigned char c) { return c <= 32 || c >= 127; })) invalid();
+        transfer.port = static_cast<std::uint16_t>(integer(event.at("port"), 1, 65535));
+        text(event.at("ticket"), 64);
+        transfer.ticket = event.at("ticket").get<std::string>();
+        if (transfer.ticket.size() != 64 || !std::all_of(transfer.ticket.begin(), transfer.ticket.end(),
+            [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); })) invalid();
+        text(event.at("reason"), 16);
+        transfer.reason = event.at("reason").get<std::string>();
+        if (transfer.reason != "party" && transfer.reason != "home" && transfer.reason != "layer" && transfer.reason != "instance") invalid();
+        if (event.contains("realm")) {
+            text(event.at("realm"), 64, true);
+            transfer.realm = event.at("realm").get<std::string>();
+            if (!control_free(transfer.realm)) invalid();
+        }
+        return transfer;
+    } catch (const Json::exception&) { invalid(); }
+}
+std::string realm_label(const Json& row, const char* name_key, const char* realm_key) {
+    std::string name = row.is_object() && row.contains(name_key) && row.at(name_key).is_string() ? row.at(name_key).get<std::string>() : std::string{};
+    if (row.is_object() && row.contains(realm_key) && row.at(realm_key).is_string() && !row.at(realm_key).get_ref<const std::string&>().empty())
+        name += " (" + row.at(realm_key).get<std::string>() + ")";
+    return name;
+}
+std::optional<RealmName> split_realm_name(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.remove_suffix(1);
+    if (text.empty() || text.size() > 129 || !control_free(text)) return std::nullopt;
+    const auto dash = text.find('-');
+    RealmName result{std::string(text.substr(0, dash)), dash == std::string_view::npos ? std::string{} : std::string(text.substr(dash + 1))};
+    if (result.name.empty() || result.name.size() > 64 || result.name.find(' ') != std::string::npos ||
+        (dash != std::string_view::npos && (result.realm.empty() || result.realm.size() > 64))) return std::nullopt;
+    return result;
+}
+void address_by_name(Json& action, const RealmName& who) {
+    action["name"] = who.name;
+    if (!who.realm.empty()) action["realm"] = who.realm;
+}
 
 struct ClientSession::Impl {
     struct Frame {
@@ -511,6 +569,7 @@ struct ClientSession::Impl {
     int dy = 0;
     Clock::time_point read_deadline = Clock::now() + io_timeout;
     Clock::time_point stop_deadline{};
+    Clock::time_point transfer_seen{}; // arrival of the wave-30 transfer event
     Json book, vault; // last Type::catalog parts: recipes / Banka (null until the world sends one)
     // Fold the parts into a state: their item definitions join catalogs.items, the recipes become catalogs.recipes, the
     // open Banka tab becomes "bank" (the shape the world's state carried before the parts left the state frame).
@@ -642,29 +701,44 @@ struct ClientSession::Impl {
 };
 
 ClientSession::ClientSession(std::string host, std::uint16_t port, std::filesystem::path ca,
-                             std::string_view token, std::uint64_t character)
+                             std::string_view token, std::uint64_t character, std::string_view ticket)
     : impl_(std::make_unique<Impl>()) {
+    const auto hex = [](std::string_view value) {
+        return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    };
     if (host.empty() || host.size() > 253 || host.find('\0') != std::string::npos ||
         std::any_of(host.begin(), host.end(), [](unsigned char c) { return c <= 32 || c >= 127; }) ||
         port == 0 || ca.empty() || ca.native().find('\0') != std::string::npos ||
-        character == 0 || character > INT64_MAX || token.size() != 64 ||
-        !std::all_of(token.begin(), token.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }))
+        character == 0 || character > INT64_MAX || !hex(token) || (!ticket.empty() && !hex(ticket)))
         throw std::invalid_argument("invalid secure connection configuration");
     impl_->connect_to(host, port, ca);
     Message hello{};
     hello.type = Type::hello;
     hello.session.assign(token);
+    hello.ticket.assign(ticket);
     hello.character_id = character;
+    const auto cleanse = [&] {
+        OPENSSL_cleanse(hello.session.data(), hello.session.size());
+        if (!hello.ticket.empty()) OPENSSL_cleanse(hello.ticket.data(), hello.ticket.size());
+    };
     try { impl_->queue(hello, true); }
-    catch (...) { OPENSSL_cleanse(hello.session.data(), hello.session.size()); throw; }
-    OPENSSL_cleanse(hello.session.data(), hello.session.size());
+    catch (...) { cleanse(); throw; }
+    cleanse();
 }
 ClientSession::~ClientSession() = default;
 
 void ClientSession::receive(Message message) {
     try {
         if (message.type == Type::goodbye) { // the server ends the session; its reason precedes the close
-            if (!message.json.empty()) farewell = Json::parse(message.json).value("reason", std::string{});
+            if (!message.json.empty()) {
+                const auto bye = Json::parse(message.json);
+                const auto field = [&](const char* key) {
+                    auto value = bye.is_object() && bye.contains(key) && bye.at(key).is_string() ? bye.at(key).get<std::string>() : std::string{};
+                    return value.size() <= 64 && control_free(value) ? value : std::string{};
+                };
+                farewell = bye.is_object() ? bye.value("reason", std::string{}) : std::string{};
+                farewell_code = field("code"); farewell_version = field("version");
+            }
             return;
         }
         if (self == 0) {
@@ -713,6 +787,9 @@ void ClientSession::receive(Message message) {
             impl_->state_seen = true;
             impl_->bounds = bounds;
             state = std::move(body);
+            if (!transfer) // the first transfer event wins; the server closes right after it
+                for (const auto& event : state.at("events"))
+                    if (event.at("type") == "transfer") { transfer = parse_transfer(event); impl_->transfer_seen = Clock::now(); break; }
         } else if (message.type == Type::catalog) {
             auto part = Json::parse(message.json);
             validate_catalog(part);
@@ -855,4 +932,8 @@ void ClientSession::stop() {
     impl_->stop_deadline = Clock::now() + std::chrono::seconds(2);
 }
 bool ClientSession::drained() const noexcept { return impl_->stopping && (eof || impl_->finished); }
+// The old shard's close (after its goodbye "transfer") starts the handoff; a shard that never closes is left after the grace.
+bool ClientSession::handoff_due(Clock::time_point now) const noexcept {
+    return transfer && (eof || impl_->finished || impl_->read_closed || now - impl_->transfer_seen >= handoff_grace);
+}
 } // namespace ikv
