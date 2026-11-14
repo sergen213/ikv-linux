@@ -46,6 +46,31 @@ For host-native client/launcher `--ca`, host `curl --cacert`, and browser trust 
 
 The player listener returns404 for `/admin` and `/v1/admin` even to an administrator. Management is separately bound on loopback/private infrastructure and requires the account's server-assigned admin role. Register an independent account, stop auth and restart it once with `--admin-bootstrap EXISTING_USERNAME` to elevate that explicitly named account locally; remove the bootstrap argument after use. There is no default admin/password or public role parameter. [Authentication/database](AUTH_DATABASE.md) defines management/reset and moderation routes.
 
+### Several realms and shards (NONCANONICAL, wave 30)
+
+The original game listed several independent servers in its launcher (`launcher.exe` `0x0048dbe0`; see `analysis/porting-wave30/Realms/original_servers.md`). Here a **realm** is a row in the shared database (characters and their names belong to one home realm; guilds and trading are cross-realm) and a **shard** is one `ikv-server` process serving one realm with at most 32 players. A realm may have several shards (layers); login picks the least-loaded live shard of the character's home realm. Everything runs against **one** `ikv-auth` and **one** PostgreSQL database; there is no extra coordinator service. One realm with one shard (the commands above, `--realm` defaulting to 1, the seeded `Eminönü`) behaves exactly as before.
+
+1. Create realms in the management panel's **Sunucular** tab (or `POST /v1/admin/realms {"action":"create","name":"Galata","sort":1}`, [AUTH_DATABASE](AUTH_DATABASE.md)). The tab lists every realm with its status, launcher population label, character count and the shards seen within the last hour (instance, address, players/capacity, heartbeat age); **Yeniden adlandır** renames a realm.
+2. Start one `ikv-server` per shard, each on its **own world port**, all with the same certificate, DSN file and gameplay file:
+
+```sh
+# realm 1 (Eminönü): two shards (layers)
+build/ikv-server --bind 0.0.0.0 --port 7000 --realm 1 --public-host game.example.org --capacity 32 \
+  --cert /private/tls-cert --key /private/tls-key --dsn-file /private/dsn --gameplay config/gameplay.json --asset-root /owned/readable/original
+build/ikv-server --bind 0.0.0.0 --port 7001 --realm 1 --public-host game.example.org --capacity 32 ...same files...
+# realm 2 (Galata): one shard on another machine
+build/ikv-server --bind 0.0.0.0 --port 7000 --realm 2 --public-host galata.example.org --capacity 32 ...same files...
+```
+
+- `--realm ID` (1–32767) must name an existing realm; the shard refuses to start otherwise.
+- `--public-host NAME` is the address players connect to for this shard. Empty (the default) tells clients to use the account service's HTTPS host, which is right only when the shard runs on that host. The certificate must cover every public host name.
+- `--capacity N` (1–32, default 32) is the advertised player limit used for shard selection and the population label (`Sakin`/`Normal`/`Yoğun`/`Dolu`).
+- Each shard writes a heartbeat row every second; a row older than 15 s is never chosen, so a stopped shard drops out by itself. A realm without a live shard shows as `Kapalı` in the launcher and the panel, and entering it returns `realm_offline`.
+- Open every shard's world port in the firewall, plus the account port (7443). The management port (7444) stays private.
+- Administrator `world_commands` (announce, kick, give item, …) are taken by whichever shard polls first; the panel's player tables list the players of every live shard.
+
+The launcher lists the realms of the selected server profile after login and passes the chosen realm to the client ([LAUNCHER_UPDATES](LAUNCHER_UPDATES.md#using-the-launcher)). The launcher's own **Sunucu Kur** hosting still runs a single shard.
+
 ## Launcher-hosted local server (Sunucu Kur / Sunucu Yönetimi)
 
 The Qt launcher's header **server chip** (`Sunucu Kur` until a server exists, then `● Sunucu: Çalışıyor · N oyuncu`, `○ Sunucu: Kapalı`, `◌ Başlatılıyor…` or `✕ Hata`; also opened by the install page's opt-in **Bu bilgisayarda yerel sunucu da kur** after a successful import) opens one dialog. Implementation: `src/launcher_server.cpp`. It needs the imported original assets (the world reads `<install-root>/assets`), `ikv-auth`/`ikv-server` beside the launcher (source build, signed release or AppImage), the installed or source-tree `config/gameplay.json`, `database/migrations` and `web`, `openssl`, and PostgreSQL server tools (`initdb`, `pg_ctl`, `psql` from `PATH` or Debian's newest `/usr/lib/postgresql/N/bin`; the AppImage bundles them). Missing tools are reported in Turkish with the install command.
