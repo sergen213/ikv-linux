@@ -95,7 +95,7 @@ class WorldProxy(AbstractContextManager):
                         assert 2 <= size <= 65535, "invalid actual world frame length"
                         if len(pending) >= 4 + size:
                             self.target = bytes(pending[:4 + size])
-                            assert self.target[4] == 2, "unexpected actual world wire version"
+                            assert self.target[4] == 3, "unexpected actual world wire version"
                             if self.fault_kind is not None and self.target[5] != self.fault_kind:
                                 self.records.append(self.target)
                                 client.sendall(self.target)
@@ -113,7 +113,7 @@ class WorldProxy(AbstractContextManager):
                         break
                     record = bytes(pending[:4 + size])
                     del pending[:4 + size]
-                    assert record[4] == 2, "unexpected actual world wire version"
+                    assert record[4] == 3, "unexpected actual world wire version"
                     assert record[5] in (2, 4, 5, 6), "unexpected actual world record type"
                     if not self.records:
                         assert record[5] == 2, "world did not welcome authenticated native client first"
