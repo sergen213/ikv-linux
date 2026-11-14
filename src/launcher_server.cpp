@@ -421,6 +421,28 @@ QString since(qint64 seconds) {
     return QString("%1 sa %2 dk %3 sn").arg(seconds / 3600).arg(seconds / 60 % 60).arg(seconds % 60);
 }
 QString countText(const QJsonValue& value) { return value.isDouble() ? QString::number(value.toInteger()) : QString("—"); }
+// NONCANONICAL wave 30 hosting layout: host.json "realms" = [{"id":N,"shards":K,"capacity":C}] in hosting order. Missing or
+// empty (every pre-wave-30 host.json) = realm 1 with one 32-player shard, exactly the old single ikv-server.
+struct RealmLayout { int id = 1, shards = 1, capacity = 32; };
+constexpr int maxShardsPerRealm = 16, maxShards = 64;
+QList<RealmLayout> hostLayout(const QJsonObject& host) {
+    QList<RealmLayout> layout;
+    int total = 0;
+    for (const auto& value : host.value("realms").toArray()) {
+        const auto realm = value.toObject();
+        const int id = realm.value("id").toInt(), shards = std::clamp(realm.value("shards").toInt(1), 0, maxShardsPerRealm);
+        if (id < 1 || id > 32767 || std::any_of(layout.begin(), layout.end(), [id](const RealmLayout& r) { return r.id == id; })) continue;
+        layout.append({id, std::min(shards, maxShards - total), std::clamp(realm.value("capacity").toInt(32), 1, 32)});
+        total += layout.last().shards;
+    }
+    if (layout.isEmpty() || total == 0) layout = {RealmLayout{}};
+    return layout;
+}
+QJsonArray layoutJson(const QList<RealmLayout>& layout) {
+    QJsonArray array;
+    for (const auto& realm : layout) array.append(QJsonObject{{"id", realm.id}, {"shards", realm.shards}, {"capacity", realm.capacity}});
+    return array;
+}
 
 // ---- Supervisor: one detached process owns PostgreSQL, ikv-auth and ikv-server ----
 volatile std::sig_atomic_t stopRequested = 0;
@@ -445,8 +467,14 @@ public:
                 shutdown({});
                 return;
             }
+            if (!upgradeLauncher_.isEmpty() && upgradeDeadline_.hasExpired()) { // a shard that never took its restart
+                upgradeDeadline_ = QDeadlineTimer(QDeadlineTimer::Forever);
+                for (auto& shard : shards_)
+                    if (shard->process) { say(shard->name() + " güncelleme yeniden başlatmasını almadı; kaydedip durduruluyor"); askChildStop(shard->process); }
+            }
+            reconcile(); // the panel may change the realm/shard layout while the server runs
             // Automatic updates (docs/LAUNCHER_UPDATES.md): a newer verified release in the install root, or one a newer
-            // launcher asks for (upgrade.request), is announced, the world saves, and the supervisor hands over to it.
+            // launcher asks for (upgrade.request), is announced, every shard saves and the supervisor hands over to it.
             if (QFileInfo::exists(dir_ + "/upgrade.request") || ticks_ % 120 == 0) checkUpgrade();
         });
     }
@@ -484,17 +512,29 @@ public:
 
 private:
     enum class Auth { Plain, Register, Bootstrap };
+    // NONCANONICAL wave 30: one ikv-server process per shard (docs/SELF_HOSTING.md "Realms and shards").
+    struct Shard {
+        int realm = 1, index = 1, capacity = 32, port = 0, actualPort = 0;
+        QProcess* process = nullptr;
+        bool ready = false, failed = false, retired = false;
+        QList<qint64> crashes;
+        QString problem;
+        QString name() const { return QString("ikv-server[%1-%2]").arg(realm).arg(index); }
+    };
     QString dir_, assets_, admin_, bin_;
     QByteArray password_;
     QJsonObject config_;
-    QProcess *auth_{}, *world_{};
-    bool stopping_ = false, everRunning_ = false;
-    int authPort_ = 0, adminPort_ = 0, worldPort_ = 0, ticks_ = 0;
+    QProcess* auth_{};
+    std::vector<std::unique_ptr<Shard>> shards_;
+    bool stopping_ = false, running_ = false;
+    int authPort_ = 0, adminPort_ = 0, ticks_ = 0;
     qint64 started_ = QDateTime::currentMSecsSinceEpoch();
-    QList<qint64> crashes_;
+    QList<qint64> authCrashes_;
+    QString layoutSeen_; // host.json layout the failed shards were given up for
     QNetworkAccessManager network_;
     QTimer watch_;
-    QString upgradeLauncher_, upgradeVersion_; // set once the announced world restart for an upgrade is queued
+    QString upgradeLauncher_, upgradeVersion_; // set once the announced restart of every shard for an upgrade is queued
+    QDeadlineTimer upgradeDeadline_{QDeadlineTimer::Forever};
 
     static void say(const QString& line) {
         std::fprintf(stdout, "%s supervisor: %s\n", QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toUtf8().constData(), line.toUtf8().constData());
@@ -502,25 +542,44 @@ private:
     }
     // Linux: SIGTERM. Windows (NONCANONICAL wave 19): console children get no SIGTERM; closing their stdin
     // (--stop-on-stdin-eof) is the graceful stop, so ikv-server still saves characters.
-    static void stopChild(QProcess* process, int milliseconds) {
+    static void askChildStop(QProcess* process) {
 #ifdef _WIN32
         process->closeWriteChannel();
 #else
         process->terminate();
 #endif
+    }
+    static void stopChild(QProcess* process, int milliseconds) {
+        askChildStop(process);
         if (!process->waitForFinished(milliseconds)) { process->kill(); process->waitForFinished(5000); }
     }
+    int worldPort() const { // the first hosted shard (realm 1 shard 1 by default): the pre-wave-30 single world port
+        for (const auto& shard : shards_) if (shard->ready) return shard->actualPort;
+        return 0;
+    }
+    bool shardProcesses() const { return std::any_of(shards_.begin(), shards_.end(), [](const auto& shard) { return shard->process; }); }
     void phase(const QString& name, const QString& message = {}) {
         say("aşama " + name + (message.isEmpty() ? QString() : ": " + message));
+        writeState(name, message);
+    }
+    QString phase_ = "starting", message_;
+    void writeState(const QString& name, const QString& message) {
+        phase_ = name; message_ = message;
+        QJsonArray shards;
+        for (const auto& shard : shards_)
+            shards.append(QJsonObject{{"realm", shard->realm}, {"index", shard->index}, {"capacity", shard->capacity},
+                {"port", shard->ready ? shard->actualPort : shard->port}, {"pid", shard->process ? shard->process->processId() : 0},
+                {"state", shard->failed ? "failed" : shard->ready ? "running" : shard->process ? "starting" : "stopped"}, {"problem", shard->problem}});
         try {
             saveJson(dir_ + "/state.json", {{"pid", static_cast<qint64>(::getpid())}, {"phase", name}, {"message", message},
                 {"host", config_.value("host")}, {"bind", config_.value("bind")}, {"auth_port", authPort_}, {"admin_port", adminPort_},
-                {"world_port", worldPort_}, {"started_at", started_}, {"version", ikv::release::version}, {"upgrades", true}});
+                {"world_port", worldPort()}, {"shards", shards}, {"started_at", started_}, {"version", ikv::release::version}, {"upgrades", true}});
         } catch (const std::exception& e) { say(failure(e)); }
     }
-    QProcess* spawn(const QString& name, const QStringList& args, const QString& pattern, int seconds,
-                    std::function<void(const QRegularExpressionMatch&)> ready) {
-        auto* process = new QProcess(this); process->setProgram(binary(name.toLatin1().constData()));
+    void shardsChanged() { if (!stopping_) writeState(phase_, message_); }
+    QProcess* spawn(const QString& program, const QString& name, const QStringList& args, const QString& pattern, int seconds,
+                    std::function<void(const QRegularExpressionMatch&)> ready, std::function<void()> late) {
+        auto* process = new QProcess(this); process->setProgram(binary(program.toLatin1().constData()));
         auto environment = QProcessEnvironment::systemEnvironment(); // auth backups run the cluster's own pg_dump
         environment.insert("PATH", bin_ + QDir::listSeparator() + environment.value("PATH"));
         process->setProcessEnvironment(environment);
@@ -538,7 +597,7 @@ private:
         process->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); }); // never orphaned by a killed supervisor
 #endif
         auto* timer = new QTimer(process); timer->setSingleShot(true);
-        connect(timer, &QTimer::timeout, this, [this, name] { shutdown(name + " hazır olmadı (zaman aşımı); Kayıt sekmesine bakın"); });
+        connect(timer, &QTimer::timeout, this, std::move(late));
         auto pending = std::make_shared<QByteArray>();
         auto fired = std::make_shared<bool>(false);
         connect(process, &QProcess::readyRead, this, [this, process, name, pending, fired, timer, ready = std::move(ready), expression = QRegularExpression(pattern)] {
@@ -558,11 +617,17 @@ private:
         connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
             [this, process, name](int code, QProcess::ExitStatus status) { exited(process, name, code, status); });
         connect(process, &QProcess::errorOccurred, this, [this, process, name](QProcess::ProcessError error) {
-            if (error == QProcess::FailedToStart && (process == auth_ || process == world_)) shutdown(name + " başlatılamadı: " + process->errorString());
+            if (error != QProcess::FailedToStart) return;
+            if (process == auth_) { shutdown(name + " başlatılamadı: " + process->errorString()); return; }
+            if (auto* shard = shardOf(process)) { shard->process = nullptr; process->deleteLater(); giveUp(*shard, name + " başlatılamadı: " + process->errorString()); }
         });
         timer->start(seconds * 1000);
         process->start();
         return process;
+    }
+    Shard* shardOf(QProcess* process) {
+        for (auto& shard : shards_) if (shard->process == process) return shard.get();
+        return nullptr;
     }
     QStringList tls() const {
         return {"--cert", dir_ + "/secrets/tls-cert", "--key", dir_ + "/secrets/tls-key", "--dsn-file", dir_ + "/secrets/dsn"};
@@ -573,15 +638,16 @@ private:
         args << tls() << "--migrations" << hostResource("database/migrations") << "--web-root" << hostResource("web") << "--backup-dir" << dir_ + "/backups";
         if (mode == Auth::Bootstrap) args << "--admin-bootstrap" << admin_;
         phase(mode == Auth::Bootstrap ? "bootstrap" : "auth");
-        auth_ = spawn("ikv-auth", args, "READY auth_port=(\\d+) admin_port=(\\d+)", 120, [this, mode](const QRegularExpressionMatch& match) {
+        auth_ = spawn("ikv-auth", "ikv-auth", args, "READY auth_port=(\\d+) admin_port=(\\d+)", 120, [this, mode](const QRegularExpressionMatch& match) {
             authPort_ = match.captured(1).toInt(); adminPort_ = match.captured(2).toInt();
             if (mode == Auth::Register) { registerAdmin(); return; }
             if (mode == Auth::Bootstrap) {
                 auto saved = readJson(dir_ + "/host.json"); saved.insert("admin", admin_); saveJson(dir_ + "/host.json", saved);
                 say("yönetici yetkisi verildi: " + admin_);
             }
-            if (world_) phase("running"); else startWorld();
-        });
+            if (running_) phase("running"); else phase("world");
+            reconcile();
+        }, [this] { shutdown("ikv-auth hazır olmadı (zaman aşımı); Kayıt sekmesine bakın"); });
     }
     void post(const QString& path, const QJsonObject& body, std::function<void(int, const QJsonObject&)> done) {
         const auto bind = config_.value("bind").toString();
@@ -613,42 +679,155 @@ private:
             });
         });
     }
-    void startWorld() {
-        QStringList args{"--bind", config_.value("bind").toString(), "--port", QString::number(config_.value("world_port").toInt())};
+    // Next free world port from host.json world_port (0 = OS-assigned for every shard), skipping the account/admin ports
+    // and the other shards' ports, in hosting order: realm 1 shard 1 = world_port, the next shard the next free port.
+    int shardPort(const Shard& self) const {
+        const int base = config_.value("world_port").toInt();
+        if (base == 0) return 0;
+        QList<int> used{config_.value("auth_port").toInt(), config_.value("admin_port").toInt(), authPort_, adminPort_};
+        for (const auto& shard : shards_) if (shard.get() != &self) used << shard->port << shard->actualPort;
+        const QHostAddress address(config_.value("bind").toString());
+        for (int port = base; port < std::min(65536, base + 400); ++port) {
+            if (used.contains(port)) continue;
+            QTcpServer probe;
+            if (probe.listen(address, static_cast<quint16>(port))) return port;
+        }
+        throw hostIssue(QString("Dünya portu %1 ve sonraki 400 port dolu").arg(base));
+    }
+    // Start shards the layout adds, retire (save and stop) the ones it removes; a changed layout retries given-up shards.
+    void reconcile() {
+        if (stopping_ || !upgradeLauncher_.isEmpty() || !auth_ || !authPort_) return;
+        const auto host = readJson(dir_ + "/host.json");
+        if (host.isEmpty()) return;
+        const auto layout = hostLayout(host);
+        const auto signature = QJsonDocument(layoutJson(layout)).toJson(QJsonDocument::Compact);
+        const bool changed = signature != layoutSeen_;
+        layoutSeen_ = signature;
+        bool touched = false;
+        for (auto& shard : shards_) {
+            const auto it = std::find_if(layout.begin(), layout.end(), [&](const RealmLayout& r) { return r.id == shard->realm; });
+            if (shard->retired || (it != layout.end() && shard->index <= it->shards)) {
+                if (it != layout.end()) shard->capacity = it->capacity; // applies at the shard's next (re)start
+                continue;
+            }
+            shard->retired = touched = true;
+            say(shard->name() + " yerleşimden çıkarıldı; kaydedip durduruluyor");
+            if (shard->process) {
+                askChildStop(shard->process);
+                QTimer::singleShot(20000, shard->process, [process = QPointer<QProcess>(shard->process)] { if (process) process->kill(); });
+            }
+        }
+        std::erase_if(shards_, [](const auto& shard) { return shard->retired && !shard->process; });
+        for (const auto& realm : layout)
+            for (int index = 1; index <= realm.shards; ++index) {
+                const auto it = std::find_if(shards_.begin(), shards_.end(), [&](const auto& s) { return s->realm == realm.id && s->index == index && !s->retired; });
+                if (it != shards_.end()) {
+                    if ((*it)->failed && changed) { (*it)->failed = false; (*it)->crashes.clear(); (*it)->problem.clear(); startShard(**it); touched = true; }
+                    continue;
+                }
+                auto shard = std::make_unique<Shard>();
+                shard->realm = realm.id; shard->index = index; shard->capacity = realm.capacity;
+                shards_.push_back(std::move(shard));
+                try { shards_.back()->port = shardPort(*shards_.back()); startShard(*shards_.back()); }
+                catch (const std::exception& e) { giveUp(*shards_.back(), failure(e)); }
+                touched = true;
+            }
+        if (touched) shardsChanged();
+    }
+    void startShard(Shard& shard) {
+        const auto bind = config_.value("bind").toString();
+        QStringList args{"--bind", bind, "--port", QString::number(shard.port), "--realm", QString::number(shard.realm),
+                         "--capacity", QString::number(shard.capacity)};
+        if (bind == "0.0.0.0") args << "--public-host" << config_.value("host").toString(); // LAN players reach every shard here
+        const bool first = shards_.front().get() == &shard; // server-side bots (NONCANONICAL) live on the first shard only
         args << tls() << "--gameplay" << hostResource("config/gameplay.json") << "--asset-root" << assets_
-             << "--bots" << QString::number(readJson(dir_ + "/host.json").value("bots").toInt());
-        phase("world");
-        world_ = spawn("ikv-server", args, "READY world_port=(\\d+)", 600, [this](const QRegularExpressionMatch& match) {
-            worldPort_ = match.captured(1).toInt(); everRunning_ = true;
-            phase("running");
+             << "--bots" << QString::number(first ? readJson(dir_ + "/host.json").value("bots").toInt() : 0);
+        say(shard.name() + " başlatılıyor: port " + QString::number(shard.port));
+        shard.ready = false;
+        Shard* self = &shard;
+        shard.process = spawn("ikv-server", shard.name(), args, "READY world_port=(\\d+)", 600, [this, self](const QRegularExpressionMatch& match) {
+            self->actualPort = match.captured(1).toInt(); self->ready = true;
+            settle();
+        }, [this, self] {
+            if (!self->process) return;
+            auto* process = std::exchange(self->process, nullptr);
+            process->disconnect(this); stopChild(process, 20000); process->deleteLater();
+            giveUp(*self, self->name() + " hazır olmadı (zaman aşımı); Kayıt sekmesine bakın");
         });
+        shardsChanged();
+    }
+    // "running" once every shard of the first start is ready or given up; afterwards a restarting shard keeps it.
+    void settle() {
+        if (stopping_) return;
+        if (!running_ && std::all_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready || s->failed || s->retired; })) {
+            if (std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready; })) return;
+            running_ = true;
+        }
+        if (running_ && phase_ != "running") phase("running", message_);
+        else shardsChanged();
+    }
+    void giveUp(Shard& shard, const QString& problem) {
+        say(problem);
+        shard.failed = true; shard.ready = false; shard.problem = problem;
+        if (std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->process || (!s->failed && !s->retired); })) {
+            shutdown(problem);
+            return;
+        }
+        settle();
     }
     void exited(QProcess* process, const QString& name, int code, QProcess::ExitStatus status) {
         say(QString("%1 çıktı: kod=%2%3").arg(name).arg(code).arg(status == QProcess::CrashExit ? " (sinyal/çökme)" : ""));
         process->deleteLater();
-        const bool world = process == world_;
-        if (process == auth_) auth_ = nullptr; else if (world) world_ = nullptr; else return; // planned restarts
-        if (stopping_) return;
-        if (world && status == QProcess::NormalExit && code == 75 && !upgradeLauncher_.isEmpty()) { upgrade(); return; }
-        if (world && status == QProcess::NormalExit && code == 75) { say("yönetici yeniden başlatması"); startWorld(); return; }
-        if (world && status == QProcess::NormalExit && code == 0) { say("yönetici kapatması"); shutdown({}); return; }
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        crashes_.erase(std::remove_if(crashes_.begin(), crashes_.end(), [now](qint64 at) { return now - at > 600000; }), crashes_.end());
-        crashes_.append(now);
-        if (!everRunning_ || crashes_.size() > 3) {
-            shutdown(QString("%1 beklenmedik biçimde kapandı (kod=%2); son satırlar için Kayıt sekmesine bakın").arg(name).arg(code));
+        if (process == auth_) {
+            auth_ = nullptr;
+            if (stopping_) return;
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            authCrashes_.erase(std::remove_if(authCrashes_.begin(), authCrashes_.end(), [now](qint64 at) { return now - at > 600000; }), authCrashes_.end());
+            authCrashes_.append(now);
+            if (!running_ || authCrashes_.size() > 3) { shutdown(QString("ikv-auth beklenmedik biçimde kapandı (kod=%1); son satırlar için Kayıt sekmesine bakın").arg(code)); return; }
+            say("ikv-auth yeniden başlatılıyor");
+            startAuth(Auth::Plain);
             return;
         }
+        Shard* shard = shardOf(process);
+        if (!shard) return; // planned restarts
+        shard->process = nullptr;
+        const bool wasReady = std::exchange(shard->ready, false);
+        if (stopping_) return;
+        if (!upgradeLauncher_.isEmpty()) { // announced, saved and closed for the upgrade: hand over once every shard has
+            shardsChanged();
+            if (!shardProcesses()) upgrade();
+            return;
+        }
+        if (shard->retired) { std::erase_if(shards_, [shard](const auto& s) { return s.get() == shard; }); shardsChanged(); return; }
+        if (status == QProcess::NormalExit && code == 75) { say(name + ": yönetici yeniden başlatması"); startShard(*shard); return; }
+        if (status == QProcess::NormalExit && code == 0) { // the administrator's shutdown reaches every shard
+            say(name + ": yönetici kapatması");
+            shard->failed = true; shard->problem = "yönetici kapatması";
+            if (!shardProcesses()) shutdown({}); else shardsChanged();
+            return;
+        }
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto& crashes = shard->crashes;
+        crashes.erase(std::remove_if(crashes.begin(), crashes.end(), [now](qint64 at) { return now - at > 600000; }), crashes.end());
+        crashes.append(now);
+        if (!wasReady && !running_) { giveUp(*shard, QString("%1 beklenmedik biçimde kapandı (kod=%2); son satırlar için Kayıt sekmesine bakın").arg(name).arg(code)); return; }
+        if (crashes.size() > 3) { giveUp(*shard, QString("%1 10 dakikada 4 kez çöktü (kod=%2); yerleşim değişene kadar yeniden başlatılmıyor").arg(name).arg(code)); return; }
         say(name + " yeniden başlatılıyor");
-        if (world) startWorld(); else startAuth(Auth::Plain);
+        startShard(*shard);
     }
     void stopServices() {
-        for (QProcess** slot : {&world_, &auth_}) // world first: it persists characters through auth's database
-            if (auto* process = std::exchange(*slot, nullptr)) stopChild(process, 20000);
+        for (auto& shard : shards_) if (shard->process) askChildStop(shard->process); // every shard saves in parallel
+        for (auto& shard : shards_) // shards first: they persist characters through auth's database
+            if (auto* process = std::exchange(shard->process, nullptr)) {
+                if (!process->waitForFinished(20000)) { process->kill(); process->waitForFinished(5000); }
+                shard->ready = false;
+            }
+        if (auto* process = std::exchange(auth_, nullptr)) stopChild(process, 20000);
         if (!bin_.isEmpty()) {
             try { stopPostgres(dir_, bin_); say("PostgreSQL durduruldu"); } catch (const std::exception& e) { say(failure(e)); }
         }
-        authPort_ = adminPort_ = worldPort_ = 0;
+        authPort_ = adminPort_ = 0;
     }
     void shutdown(const QString& problem) {
         if (stopping_) return;
@@ -675,10 +854,10 @@ private:
         const auto installed = ikv::launcher_release::installed(installRoot, ikv::launcher_release::trustSetting(), true);
         return {installed.launcher, installed.version};
     }
-    // Queue the world's own announced restart (the management "restart" command: countdown announcements to every online
-    // player, then the world saves every character and exits 75) on behalf of the server's administrator.
+    // Queue every live shard's own announced restart (the management "restart" command targeted at that shard: countdown
+    // announcements to its online players, then it saves every character and exits 75) on behalf of the administrator.
     void checkUpgrade() {
-        if (stopping_ || !upgradeLauncher_.isEmpty() || !world_ || !worldPort_) return;
+        if (stopping_ || !upgradeLauncher_.isEmpty() || !running_ || !worldPort()) return;
         QString launcher, version;
         try { std::tie(launcher, version) = upgradeTarget(); }
         catch (const std::exception& e) { say("kurulu güncelleme kullanılamadı: " + failure(e)); return; }
@@ -695,27 +874,32 @@ private:
         if (const auto match = secret.match(dsn); match.hasMatch()) { password = match.captured(1); dsn.remove(match.capturedStart(), match.capturedLength()); }
         auto environment = QProcessEnvironment::systemEnvironment();
         if (!password.isEmpty()) environment.insert("PGPASSWORD", password); // child environment only, never argv
-        const QByteArray sql = "WITH queued AS (INSERT INTO world_commands(command, arguments, actor_id) "
-            "SELECT 'restart', jsonb_build_object('delay_seconds', " + QByteArray::number(delay) + ", 'message', :'message'), id "
-            "FROM accounts WHERE username = :'admin' RETURNING id) SELECT count(*) FROM queued;\n";
+        // One targeted restart per live shard (world_commands.target_instance, migration 009); a shard that already has a
+        // pending restart keeps it (ON CONFLICT: the per-shard single-pending index) and closes the same way.
+        const QByteArray sql = "WITH queued AS (INSERT INTO world_commands(command, arguments, actor_id, target_instance) "
+            "SELECT 'restart', jsonb_build_object('delay_seconds', " + QByteArray::number(delay) + ", 'message', :'message'), a.id, s.instance "
+            "FROM accounts a CROSS JOIN world_instances s WHERE a.username = :'admin' AND s.kind = 'world' AND s.port > 0 "
+            "AND s.updated_at > now() - interval '15 seconds' ON CONFLICT DO NOTHING RETURNING id) SELECT count(*) FROM queued;\n";
         QByteArray output;
+        int queued = 0;
         try {
             const int code = runCode(bin_ + "/psql", {"--no-psqlrc", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1",
                                                        "--set", "message=" + message, "--set", "admin=" + host.value("admin").toString(),
                                                        "--file", "-", "--dbname", dsn}, &output, sql, environment);
-            if (code != 0 || output.trimmed() != "1") throw hostIssue("psql: " + QString::fromUtf8(output.right(500)).trimmed());
+            queued = output.trimmed().toInt();
+            if (code != 0 || queued < 1) throw hostIssue("psql: " + QString::fromUtf8(output.right(500)).trimmed());
         } catch (const std::exception& e) { say("güncelleme duyurusu kuyruğa alınamadı (yeniden denenecek): " + failure(e)); return; }
         upgradeLauncher_ = launcher; upgradeVersion_ = version;
-        say(QString("v%1 hazır: dünya %2 sn sonra yeniden başlatılacak (oyunculara duyuruldu), sonra yeni sürüme geçilecek").arg(version).arg(delay));
+        upgradeDeadline_ = QDeadlineTimer((delay + 120) * 1000LL);
+        say(QString("v%1 hazır: %2 parça %3 sn sonra yeniden başlatılacak (oyunculara duyuruldu), sonra yeni sürüme geçilecek").arg(version).arg(queued).arg(delay));
         phase("running", "güncelleme v" + version + " (" + QString::number(delay) + " sn)");
     }
-    // The world announced, saved and exited 75: stop auth and PostgreSQL, release supervisor.lock and run the new
-    // release's supervisor with the same server directory and assets (it restarts PostgreSQL, ikv-auth, ikv-server).
+    // Every shard announced, saved and exited: stop auth and PostgreSQL, release supervisor.lock and run the new release's
+    // supervisor with the same server directory and assets (it restarts PostgreSQL, ikv-auth and every shard).
     void upgrade() {
         stopping_ = true; watch_.stop();
         phase("upgrading", "v" + upgradeVersion_);
         stopServices();
-        phase("upgrading", "v" + upgradeVersion_);
         say("yeni sürüm gözetmeni başlatılıyor: " + upgradeLauncher_);
         if (supervisorLock >= 0) ::close(std::exchange(supervisorLock, -1));
         try { ikv::launcher_release::execInto(upgradeLauncher_, {"--host-supervisor", dir_, "--asset-root", assets_}); }
@@ -785,7 +969,10 @@ private:
     QCheckBox *keepAlive_{}, *autostart_{}, *lanMode_{};
     QLineEdit *announce_{}, *banReason_{}, *accountSearch_{};
     QComboBox* banDuration_{};
-    QTableWidget *playersTable_{}, *accounts_{};
+    QTableWidget *playersTable_{}, *accounts_{}, *realmsTable_{}, *shardsTable_{};
+    QSpinBox* shardCount_{};
+    QJsonArray realms_; // GET /v1/admin/realms (with each realm's registered shards), while an admin session exists
+    QJsonValue shardsSeen_;
     QSpinBox *botTarget_{}, *xp_{}, *drop_{}, *regen_{};
     QListWidget *zonesList_{}, *backups_{};
     QPlainTextEdit* logs_{};
@@ -969,6 +1156,35 @@ private:
         botRow->addStretch();
         tabs->addTab(people, "Oyuncular");
 
+        // NONCANONICAL wave 30 (docs/SELF_HOSTING.md "Realms and shards"): realms come from /v1/admin/realms, the hosting
+        // layout (shards per realm) lives in host.json and the supervisor applies it live.
+        auto* realmsPage = new QWidget; auto* dv = new QVBoxLayout(realmsPage);
+        auto* realmIntro = new QLabel("Her diyar bir veya daha fazla parçada çalışır (her parça ayrı bir ikv-server, en çok 32 oyuncu). "
+                                      "Parça sayısı çalışan sunucuya hemen uygulanır; kaldırılan parça oyuncularını kaydedip kapanır.");
+        realmIntro->setWordWrap(true); dv->addWidget(realmIntro);
+        realmsTable_ = named(new QTableWidget(0, 5), "hostRealmsTable");
+        realmsTable_->setHorizontalHeaderLabels({"Diyar", "Tür", "Durum", "Parça sayısı", "Kapasite"});
+        shardsTable_ = named(new QTableWidget(0, 5), "hostShardsTable");
+        shardsTable_->setHorizontalHeaderLabels({"Diyar", "Parça", "Port", "Oyuncu", "Durum"});
+        for (auto* table : {realmsTable_, shardsTable_}) {
+            table->setSelectionBehavior(QAbstractItemView::SelectRows); table->setSelectionMode(QAbstractItemView::SingleSelection);
+            table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->horizontalHeader()->setStretchLastSection(true); table->verticalHeader()->setVisible(false);
+        }
+        dv->addWidget(realmsTable_, 1);
+        auto* realmRow = new QHBoxLayout; dv->addLayout(realmRow);
+        button(realmRow, "Diyar ekle…", "hostRealmAdd", [this] { addRealm(); });
+        realmRow->addWidget(new QLabel("Seçili diyarın parça sayısı"));
+        shardCount_ = named(new QSpinBox, "hostShardCount"); shardCount_->setRange(0, maxShardsPerRealm); shardCount_->setValue(1); realmRow->addWidget(shardCount_);
+        button(realmRow, "Uygula", "hostShardApply", [this] { const auto row = selected(realmsTable_, "diyar"); setShards(row.value(0).toInt(), shardCount_->value()); });
+        realmRow->addStretch();
+        connect(realmsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
+            const auto rows = realmsTable_->selectionModel()->selectedRows();
+            if (const auto* item = rows.isEmpty() ? nullptr : realmsTable_->item(rows.first().row(), 3)) shardCount_->setValue(item->data(Qt::UserRole).toInt());
+        });
+        dv->addWidget(new QLabel("Parçalar:"));
+        dv->addWidget(shardsTable_, 1);
+        tabs->addTab(realmsPage, "Diyarlar");
+
         auto* accountsPage = new QWidget; auto* av = new QVBoxLayout(accountsPage);
         auto* search = new QHBoxLayout; av->addLayout(search);
         accountSearch_ = named(new QLineEdit, "hostAccountSearch"); accountSearch_->setPlaceholderText("kullanıcı adında ara (boş = ilk 100)");
@@ -1026,10 +1242,11 @@ private:
         connect(tabs, &QTabWidget::currentChanged, this, [this, tabs](int index) {
             if (session_.isEmpty()) return;
             const auto title = tabs->tabText(index);
+            if (title == "Diyarlar") refreshRealms();
             if (title == "Hesaplar") refreshAccounts(); else if (title == "Yedekler") refreshBackups(); else if (title == "Oranlar") loadSettings();
         });
         needsSession_ = {announce_, playersTable_, banReason_, banDuration_, botTarget_, accounts_, accountSearch_, xp_, drop_, regen_, zonesList_, backups_};
-        for (auto* name : {"hostAnnounce", "hostKick", "hostPlayerItems", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
+        for (auto* name : {"hostAnnounce", "hostKick", "hostPlayerItems", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostRealmAdd", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
                            "hostSettingsSave", "hostSettingsRefresh", "hostBackupCreate", "hostBackupRefresh", "hostBackupRestore"})
             needsSession_ << managePage_->findChild<QPushButton*>(QString::fromLatin1(name));
     }
@@ -1124,19 +1341,27 @@ private:
         try {
             call("GET", admin ? "/v1/admin/status" : "/v1/status", {}, [this, admin, finished](const QJsonObject& reply) {
                 polling_ = false;
-                if (admin) render(reply);
+                if (admin) { render(reply); refreshRealms(); }
                 else { players_now_ = reply.value("online").toBool() ? reply.value("world").toObject().value("player_count").toInt(0) : -1; players_->setText(players_now_ < 0 ? "—" : QString::number(players_now_)); }
                 finished({});
             }, 15000, finished);
         } catch (const std::exception& e) { finished(failure(e)); } // a timer tick never throws into Qt
     }
     void render(const QJsonObject& reply) {
+        // Every live shard reports its own status row; players and bots are summed, the rest comes from the first live shard.
         QJsonObject world;
-        for (const auto& value : reply.value("worlds").toArray()) if (world.isEmpty() || value.toObject().value("online").toBool()) world = value.toObject();
+        QJsonArray online, bots;
+        for (const auto& value : reply.value("worlds").toArray()) {
+            const auto row = value.toObject();
+            if (!row.value("online").toBool()) { if (world.isEmpty()) world = row; continue; }
+            if (!world.value("online").toBool()) world = row;
+            for (const auto& player : row.value("status").toObject().value("online").toArray()) online.append(player);
+            for (const auto& bot : row.value("status").toObject().value("bots").toArray()) bots.append(bot);
+        }
         const bool live = world.value("online").toBool();
         const auto status = world.value("status").toObject();
-        const auto online = status.value("online").toArray(), zones = status.value("zones").toArray();
-        bots_now_ = status.value("bots").toArray();
+        const auto zones = status.value("zones").toArray();
+        bots_now_ = bots;
         players_now_ = live ? static_cast<int>(online.size()) : -1;
         players_->setText(live ? QString::number(online.size()) : QString("Dünya çevrimdışı"));
         botCount_->setText(live ? QString::number(bots_now_.size()) : QString("—"));
@@ -1400,6 +1625,89 @@ private:
         connect(close, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
         dialog->open();
         try { refresh(); find->click(); } catch (const std::exception& e) { say(failure(e), true); }
+    }
+    void refreshRealms() {
+        if (session_.isEmpty() || !alive()) { renderRealms(); return; }
+        call("GET", "/v1/admin/realms", {}, [this](const QJsonObject& reply) { realms_ = reply.value("realms").toArray(); renderRealms(); },
+             15000, [this](const QString& issue) { notice_->setText(issue.toHtmlEscaped()); });
+    }
+    // Realm rows: the API's realms (name, kind, population) joined with the host.json layout; shard rows: the supervisor's
+    // shards (state.json) with the players each one registered (matched by port).
+    void renderRealms() {
+        const auto layout = hostLayout(readJson(dir() + "/host.json"));
+        const auto state = readJson(dir() + "/state.json");
+        const bool up = alive();
+        QMap<int, QJsonObject> known;
+        for (const auto& value : realms_) known.insert(value.toObject().value("id").toInt(), value.toObject());
+        QList<int> ids;
+        for (const auto& realm : layout) ids << realm.id;
+        for (auto it = known.cbegin(); it != known.cend(); ++it) if (!ids.contains(it.key())) ids << it.key();
+        static const QMap<QString, QString> population{{"low", "Sakin"}, {"medium", "Normal"}, {"high", "Yoğun"}, {"full", "Dolu"}};
+        const auto realmName = [&](int id) { return known.contains(id) ? QString("%1 (#%2)").arg(known.value(id).value("name").toString()).arg(id) : QString("#%1").arg(id); };
+        QList<QStringList> rows, keys;
+        for (const int id : ids) {
+            const auto realm = known.value(id);
+            const auto hosted = std::find_if(layout.begin(), layout.end(), [id](const RealmLayout& r) { return r.id == id; });
+            const int shards = hosted == layout.end() ? 0 : hosted->shards, capacity = hosted == layout.end() ? 32 : hosted->capacity;
+            const QString status = realm.isEmpty() ? QString("—") : realm.value("status").toString() != "online" ? QString("Kapalı")
+                                 : population.value(realm.value("population").toString(), realm.value("population").toString());
+            rows << QStringList{realmName(id), realm.value("kind").toString("—"), status, QString::number(shards), QString::number(capacity)};
+            keys << QStringList{QString::number(id), {}, {}, QString::number(shards)};
+        }
+        const auto chosen = realmsTable_->selectionModel()->selectedRows();
+        const int keep = chosen.isEmpty() ? -1 : chosen.first().row();
+        fill(realmsTable_, rows, keys);
+        if (keep >= 0 && keep < realmsTable_->rowCount()) realmsTable_->selectRow(keep);
+        rows.clear(); keys.clear();
+        static const QMap<QString, QString> words{{"running", "Çalışıyor"}, {"starting", "Başlatılıyor"}, {"failed", "Hata"}, {"stopped", "Durdu"}};
+        for (const auto& value : up ? state.value("shards").toArray() : QJsonArray{}) {
+            const auto shard = value.toObject();
+            const int realm = shard.value("realm").toInt(), port = shard.value("port").toInt();
+            QString players = "—";
+            for (const auto& entry : known.value(realm).value("shards").toArray())
+                if (entry.toObject().value("port").toInt() == port && entry.toObject().value("online").toBool())
+                    players = QString("%1 / %2").arg(entry.toObject().value("players").toInt()).arg(entry.toObject().value("capacity").toInt());
+            const auto problem = shard.value("problem").toString();
+            rows << QStringList{realmName(realm), QString::number(shard.value("index").toInt()), port ? QString::number(port) : QString("—"), players,
+                                words.value(shard.value("state").toString(), shard.value("state").toString()) + (problem.isEmpty() ? QString() : ": " + problem)};
+            keys << QStringList{QString::number(realm)};
+        }
+        fill(shardsTable_, rows, keys);
+    }
+    void setShards(int realm, int count) {
+        auto config = readJson(dir() + "/host.json");
+        if (config.isEmpty()) throw hostIssue("Sunucu henüz kurulmadı");
+        auto layout = hostLayout(config);
+        const auto it = std::find_if(layout.begin(), layout.end(), [realm](const RealmLayout& r) { return r.id == realm; });
+        if (it == layout.end()) layout.append({realm, count, 32}); else it->shards = count;
+        int total = 0;
+        for (const auto& entry : layout) total += entry.shards;
+        if (total < 1) throw hostIssue("En az bir parça çalışmalı");
+        if (total > maxShards) throw hostIssue(QString("En çok %1 parça barındırılabilir").arg(maxShards));
+        config.insert("realms", layoutJson(layout));
+        saveJson(dir() + "/host.json", config);
+        info(QString("Diyar #%1: %2 parça%3").arg(realm).arg(count).arg(alive() ? QString(" (çalışan sunucuya uygulanıyor)") : QString(" (sunucu başlayınca)")));
+        renderRealms();
+    }
+    void addRealm() {
+        QDialog dialog(this); dialog.setObjectName("hostRealmDialog"); dialog.setWindowTitle("Diyar ekle");
+        auto* form = new QFormLayout(&dialog);
+        auto* name = named(new QLineEdit, "hostRealmName"); name->setMaxLength(32); name->setPlaceholderText("2–32 karakter, ör. Galata"); form->addRow("İsim", name);
+        auto* kind = named(new QComboBox, "hostRealmKind"); kind->addItems({"normal", "pvp", "rp"}); form->addRow("Tür", kind);
+        auto* shards = named(new QSpinBox, "hostRealmShards"); shards->setRange(0, maxShardsPerRealm); shards->setValue(1); form->addRow("Parça sayısı", shards);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Ok)->setText("Diyar ekle"); form->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+            if (name->text().trimmed().size() < 2) QMessageBox::warning(&dialog, "Diyar ekle", "Diyar adı en az 2 karakter olmalı"); else dialog.accept();
+        });
+        if (dialog.exec() != QDialog::Accepted) return;
+        const auto title = name->text().trimmed(); const int count = shards->value();
+        call("POST", "/v1/admin/realms", {{"action", "create"}, {"name", title}, {"kind", kind->currentText()}}, [this, title, count](const QJsonObject& reply) {
+            const int id = static_cast<int>(reply.value("id").toInteger());
+            info(QString("Diyar eklendi: %1 (#%2)").arg(title).arg(id));
+            if (count > 0) setShards(id, count);
+            refreshRealms();
+        });
     }
     // Live bot count: spawn (≤50 per command) or despawn the newest bots (≤64 ids per command); also kept for the next start.
     void applyBots(int target) {
@@ -1739,8 +2047,10 @@ private:
             ? QString(" — DİKKAT: sunucu %1 ile çalışıyor (başlatıcı v%2); yeni özellikler için Durdur, sonra Başlat")
                   .arg(serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion, QString::fromLatin1(ikv::release::version))
             : QString();
+        const auto shardRows = state.value("shards").toArray();
+        const QString shardText = shardRows.size() > 1 ? QString(" (+%1 parça)").arg(shardRows.size() - 1) : QString();
         status_->setText(running ? QString("Çalışıyor — hesap %1:%2, yönetim 127.0.0.1:%3, dünya %1:%4")
-                                       .arg(state.value("host").toString()).arg(state.value("auth_port").toInt()).arg(state.value("admin_port").toInt()).arg(state.value("world_port").toInt()) + stale
+                                       .arg(state.value("host").toString()).arg(state.value("auth_port").toInt()).arg(state.value("admin_port").toInt()).arg(state.value("world_port").toInt()) + shardText + stale
                          : up ? (phase == "stopping" ? QString("Durduruluyor…") : "Başlatılıyor (" + phaseText + ")…")
                          : mode_ == Mode::Launching || mode_ == Mode::Busy ? QString("Hazırlanıyor…")
                          : phase == "failed" ? "Durduruldu (hata: " + state.value("message").toString() + ")"
@@ -1781,6 +2091,9 @@ private:
         for (QWidget* widget : std::initializer_list<QWidget*>{local_, lan_, lanName_}) widget->setEnabled(!provisioned && mode_ == Mode::Idle);
         if (provisioned && !admin) { lan_->setChecked(config.value("bind").toString() != "127.0.0.1"); local_->setChecked(!lan_->isChecked()); }
         tailLog();
+        if (const QJsonValue seen = QJsonObject{{"up", up}, {"shards", state.value("shards")}, {"layout", config.value("realms")}}; seen != shardsSeen_) {
+            shardsSeen_ = seen; renderRealms();
+        }
         if (running && ++ticks_ % 4 == 1) poll();
         refreshButtons();
         updateChip();

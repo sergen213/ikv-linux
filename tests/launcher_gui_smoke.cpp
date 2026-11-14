@@ -2,9 +2,9 @@
 // Host mode ("mode":"host-server"): required install_root (new/empty owned dir), source (owned
 // genuine asset directory to import), admin_username, admin_password; optional bots (default 2), base_port
 // (default 27400; base..base+3 must be free), timeout_seconds, lan_address and PNG paths install_/host_/creating_/accounts_/rates_/
-// host_running_/chip_/players_/backups_/reattached_/log_screenshot_path. It drives install opt-in + import,
+// host_running_/chip_/players_/backups_/reattached_/realms_/log_screenshot_path. It drives install opt-in + import,
 // guided creation (base_port deliberately occupied), auto-login, the native Sunucu Yönetimi panel (status,
-// live bots, broadcast, backup, restore), keep-alive reattach, stop, auto-start and Sunucuyu sil (see
+// live bots, broadcast, backup, restore), keep-alive reattach, realms/shards (Diyarlar), stop, auto-start and Sunucuyu sil (see
 // hostServerSmoke). Needs ikv-launcher (supervisor), ikv-auth and ikv-server beside it.
 // Required: install_root, source, auth_url, world_host, world_port, ca,
 // username, password (optional trust: update-key override). world_host/world_port are the expected
@@ -26,6 +26,7 @@
 #define main ikv_launcher_entrypoint
 #include "../src/launcher_main.cpp"
 #undef main
+#include <QSet>
 #include <QDesktopServices>
 #include <QTextBrowser>
 
@@ -493,6 +494,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         {
             auto aged = json(serverDir + "/state.json");
             aged["version"] = "0.0.0";
+            aged.remove("upgrades"); // a pre-wave-30 supervisor: it cannot hand over itself, so the launcher stops and starts it
             QFile file(serverDir + "/state.json");
             if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(QJsonDocument(aged).toJson()) < 0) throw std::runtime_error("Cannot age state.json");
         }
@@ -505,6 +507,70 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         click("hostLogin");
         waitUntil([&] { return label("hostIdentity").startsWith(QString::fromUtf8("Yönetici:")) && botCount() == bots + 1; }, 60, "admin login after reattach");
         capture(dialog(), "reattached_screenshot_path");
+
+        // NONCANONICAL wave 30: add a realm through the panel (/v1/admin/realms), host realm 1 on two shards and realm 2 on one;
+        // the supervisor applies the layout live, every shard registers, and a killed shard is restarted.
+        stage = "realms";
+        tab("Diyarlar");
+        click("hostRealmAdd");
+        waitUntil([&] {
+            for (auto* widget : QApplication::topLevelWidgets())
+                if (auto* open = qobject_cast<QDialog*>(widget); open && open->isVisible() && open->objectName() == "hostRealmDialog") {
+                    open->findChild<QLineEdit*>("hostRealmName")->setText(QString::fromUtf8("Galata"));
+                    open->findChild<QSpinBox*>("hostRealmShards")->setValue(1);
+                    open->accept();
+                    return true;
+                }
+            return false;
+        }, 10, "the Diyar ekle dialog");
+        auto* realmsTable = ctl(static_cast<QTableWidget*>(nullptr), "hostRealmsTable");
+        auto* shardsTable = ctl(static_cast<QTableWidget*>(nullptr), "hostShardsTable");
+        waitUntil([&] { return realmsTable->rowCount() == 2 && realmsTable->item(1, 0)->text().startsWith("Galata"); }, 30, "the new realm row");
+        realmsTable->selectRow(0);
+        ctl(static_cast<QSpinBox*>(nullptr), "hostShardCount")->setValue(2);
+        click("hostShardApply");
+        const auto shardsReady = [&] {
+            if (shardsTable->rowCount() != 3) return false;
+            for (int row = 0; row < 3; ++row)
+                if (!shardsTable->item(row, 4)->text().startsWith(QString::fromUtf8("Çalışıyor")) || !shardsTable->item(row, 3)->text().endsWith("/ 32")) return false;
+            return true;
+        };
+        waitUntil(shardsReady, 600, "three registered shards (realm 1 x2, realm 2 x1) in the shard table");
+        {
+            const auto layout = json(serverDir + "/host.json").value("realms").toArray();
+            if (layout.size() != 2 || layout[0].toObject().value("shards").toInt() != 2 || layout[1].toObject().value("shards").toInt() != 1)
+                throw std::runtime_error("host.json did not store the realm layout");
+            const auto realms = pinned("GET", QString("https://127.0.0.1:%1/v1/admin/realms").arg(json(serverDir + "/state.json").value("admin_port").toInt()),
+                                       serverDir + "/secrets/client-ca.pem", {}, adminToken()).value("realms").toArray();
+            QSet<QString> online, hosted; // (realm, port) of every live registry row / every supervisor shard
+            for (const auto& realm : realms)
+                for (const auto& shard : realm.toObject().value("shards").toArray())
+                    if (shard.toObject().value("online").toBool()) online << QString("%1:%2").arg(shard.toObject().value("realm_id").toInt()).arg(shard.toObject().value("port").toInt());
+            for (const auto& shard : json(serverDir + "/state.json").value("shards").toArray())
+                hosted << QString("%1:%2").arg(shard.toObject().value("realm").toInt()).arg(shard.toObject().value("port").toInt());
+            if (hosted.size() != 3 || !online.contains(hosted))
+                throw std::runtime_error("Not every shard registered: " + QStringList(online.begin(), online.end()).join(',').toStdString() + " vs " + QStringList(hosted.begin(), hosted.end()).join(',').toStdString());
+        }
+        capture(dialog(), "realms_screenshot_path");
+        qint64 killed = 0;
+        for (const auto& value : json(serverDir + "/state.json").value("shards").toArray())
+            if (value.toObject().value("realm").toInt() == 1 && value.toObject().value("index").toInt() == 2) killed = value.toObject().value("pid").toInteger();
+        if (killed <= 1) throw std::runtime_error("state.json lacks shard 1-2's pid");
+#ifdef _WIN32
+        if (const HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(killed))) { TerminateProcess(process, 9); CloseHandle(process); }
+#else
+        ::kill(static_cast<pid_t>(killed), SIGKILL);
+#endif
+        waitUntil([&] {
+            for (const auto& value : json(serverDir + "/state.json").value("shards").toArray()) {
+                const auto shard = value.toObject();
+                if (shard.value("realm").toInt() == 1 && shard.value("index").toInt() == 2)
+                    return shard.value("pid").toInteger() != killed && shard.value("state").toString() == "running" && shardsReady();
+            }
+            return false;
+        }, 600, "the killed shard to be restarted");
+        std::fprintf(stderr, "TRACE host-server %s\n", QJsonDocument(QJsonObject{{"run", "realms"}, {"state", json(serverDir + "/state.json")}}).toJson(QJsonDocument::Compact).constData());
+
         tab("Hesaplar");
         waitUntil([&] { return ctl(static_cast<QTableWidget*>(nullptr), "hostAccountsTable")->rowCount() >= 1; }, 30, "the account list");
         capture(dialog(), "accounts_screenshot_path");
@@ -524,8 +590,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
             QFile log(serverDir + "/server.log"); // the world finished its loop and saved (not killed after the 20 s grace)
             const auto text = log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()) : QString();
             const auto at = text.lastIndexOf(QString::fromUtf8("durdurma isteği alındı"));
-            if (at < 0 || text.indexOf("ikv-server: STOP tick=", at) < 0 || text.indexOf(QString::fromUtf8("ikv-server çıktı: kod=0"), at) < 0)
-                throw std::runtime_error("Durdur did not stop the world gracefully (STOP tick + exit 0)");
+            for (const char* shard : {"ikv-server[1-1]", "ikv-server[1-2]", "ikv-server[2-1]"}) // every shard saves (wave 30 layout below)
+                if (at < 0 || text.indexOf(QString::fromLatin1(shard) + ": STOP tick=", at) < 0 || text.indexOf(QString::fromLatin1(shard) + QString::fromUtf8(" çıktı: kod=0"), at) < 0)
+                    throw std::runtime_error(std::string("Durdur did not stop ") + shard + " gracefully (STOP tick + exit 0)");
         }
 
         stage = "autostart";
@@ -551,7 +618,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         waitUntil([&] { return control<QPushButton>(*launcher, "hostButton")->text() == "Sunucu Kur"; }, 5, "chip reset");
         result = 0;
         reason = "Install opt-in, guided creation with port auto-pick, auto-login, native panel status, live bots, broadcast, backup, "
-                 "restore, keep-alive reattach, admin re-login, stop, auto-start, close-stops-server and delete passed";
+                 "restore, keep-alive reattach, admin re-login, realm add + 2x(2,1) shards + killed-shard restart, stop, auto-start, close-stops-server and delete passed";
     } catch (const std::exception& error) {
         reason = QString::fromUtf8(error.what());
         if (launcher) reason += "; host status=" + label("hostStatus") + "; notice=" + label("hostNotice") + "; logs=" + ctl(static_cast<QPlainTextEdit*>(nullptr), "hostLogs")->toPlainText().right(2500);

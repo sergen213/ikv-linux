@@ -4,6 +4,11 @@ notices a newer signed release N+1 installed into its install root, queues the w
 player receives the countdown), the world saves every character, and the supervisor hands over to N+1's supervisor,
 which restarts PostgreSQL, ikv-auth and ikv-server; the character's saved position survives.
 
+Wave 30 (default): the supervisor hosts realm 1 on two shards; the test adds realm 2 over /v1/admin/realms and one shard
+for it through host.json (applied live), checks that every shard registers (/v1/realms, /v1/admin/realms), kills a shard
+and waits for its restart, then connects one player to every shard: each announces, saves and runs the new release.
+--single keeps a pre-wave-30 host.json (no "realms" layout) and one player.
+
     python3 tests/hosted_update.py --old build-full/ikv-launcher --new build-next/ikv-launcher \
         --helper build-full/ikv-updater --client build-full/ikv-client --assets original/app/base
 
@@ -57,7 +62,7 @@ def pg_bin():
     raise SystemExit("PostgreSQL server tools (initdb, pg_ctl, psql) are required")
 
 
-def provision(server, bin_dir):
+def provision(server, bin_dir, layout=None):
     """The same layout provisionHost() creates in src/launcher_server.cpp (Linux)."""
     secrets_dir, socket_dir, pg = server / "secrets", server / "sock", server / "pg"
     for path in (server, secrets_dir, socket_dir, server / "backups"):
@@ -97,6 +102,8 @@ def provision(server, bin_dir):
     host = {"bind": "127.0.0.1", "lan_name": "", "keep_alive": True, "autostart": False, "name": "Güncelleme Testi", "bots": 0,
             "auth_port": free_port(), "admin_port": free_port(), "world_port": free_port(),
             "sans": ["DNS:localhost", "IP:127.0.0.1"], "host": "localhost", "update_delay_seconds": 5}
+    if layout is not None:
+        host["realms"] = layout
     (server / "host.json").write_text(json.dumps(host))
     (server / "host.json").chmod(0o600)
 
@@ -106,6 +113,18 @@ def state(server):
         return json.loads((server / "state.json").read_text())
     except (OSError, ValueError):
         return {}
+
+
+def write_host(server, host):
+    """Atomic like the panel's QSaveFile: the running supervisor reads host.json every second."""
+    temporary = server / "host.json.tmp"
+    temporary.write_text(json.dumps(host))
+    temporary.chmod(0o600)
+    temporary.replace(server / "host.json")
+
+
+def shards_of(server):
+    return {(shard["realm"], shard["index"]): shard for shard in state(server).get("shards", [])}
 
 
 def wait_for(predicate, seconds, what):
@@ -122,6 +141,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ("old", "new", "helper", "client", "assets"):
         parser.add_argument("--" + name, required=True, type=lambda p: Path(p).resolve())
+    parser.add_argument("--single", action="store_true", help="pre-wave-30 host.json: one realm, one shard, no layout key")
     args = parser.parse_args()
     old_version, new_version = version_of(args.old), version_of(args.new)
     assert old_version != new_version, "--new must report a different (higher) version"
@@ -144,7 +164,7 @@ def main():
         (config / "IKVLauncher.conf").write_text(f"[updates]\ntrust={public}\n")
         environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", XDG_CONFIG_HOME=str(work / "config"))
         environment.pop("IKV_UPDATE_HANDOFF", None)
-        provision(server, bin_dir)
+        provision(server, bin_dir, None if args.single else [{"id": 1, "shards": 2}])
         host = json.loads((server / "host.json").read_text())
 
         # Release N's supervisor creates the administrator (password on stdin only) and runs the server.
@@ -163,21 +183,66 @@ def main():
                                              headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + session} if session else {})})
             with urllib.request.urlopen(request, context=tls, timeout=30) as response:
                 return json.loads(response.read())
+        def admin_api(method, path, body=None, session=None):
+            request = urllib.request.Request(f"https://127.0.0.1:{state(server)['admin_port']}{path}", method=method,
+                                             data=None if body is None else json.dumps(body).encode(),
+                                             headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + session} if session else {})})
+            with urllib.request.urlopen(request, context=tls, timeout=30) as response:
+                return json.loads(response.read())
         api("POST", "/v1/register", {"username": "gezgin_test", "password": PASSWORD})
         session = api("POST", "/v1/login", {"username": "gezgin_test", "password": PASSWORD})["session"]
-        character = api("POST", "/v1/characters", {"name": "Gezgin", "class_id": 1, "appearance": {}}, session=session)["id"]
-        before = api("GET", "/v1/characters", session=session)["characters"][0]["state"]
 
-        # A connected player walking east until the world closes for the upgrade.
-        client = subprocess.Popen([args.client, "--headless", "--host", "localhost", "--port", str(host["world_port"]),
-                                   "--ca", server / "secrets/client-ca.pem", "--session-stdin", "--character", str(character),
-                                   "--dx", "1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        client.stdin.write(session + "\n")
-        client.stdin.close()
-        lines = []
-        reader = threading.Thread(target=lambda: lines.extend(client.stdout), daemon=True)
-        reader.start()
-        wait_for(lambda: any('"players"' in line for line in lines), 60, "player admitted")
+        expected = {(1, 1)} if args.single else {(1, 1), (1, 2), (2, 1)}
+        killed = None
+        if not args.single:
+            # Realm 2 through the management API, then one shard for it in the hosting layout (applied without a restart).
+            admin_session = admin_api("POST", "/v1/login", {"username": "hostadmin", "password": PASSWORD})["session"]
+            realm = admin_api("POST", "/v1/admin/realms", {"action": "create", "name": "Galata"}, admin_session)["id"]
+            assert realm == 2, realm
+            layout = json.loads((server / "host.json").read_text())
+            layout["realms"] = [{"id": 1, "shards": 2}, {"id": 2, "shards": 1}]
+            write_host(server, layout)
+        def all_running():
+            shards = shards_of(server)
+            return shards if set(shards) == expected and all(s["state"] == "running" for s in shards.values()) else None
+        shards = wait_for(all_running, 600, "every shard running")
+        ports = sorted(shard["port"] for shard in shards.values())
+        assert shards[(1, 1)]["port"] == host["world_port"] and len(set(ports)) == len(ports), shards
+        if not args.single:
+            realms = {r["id"]: r for r in api("GET", "/v1/realms", session=session)}
+            assert realms[1]["status"] == realms[2]["status"] == "online", realms
+            def registered():
+                listed = {r["id"]: r for r in admin_api("GET", "/v1/admin/realms", session=admin_session)["realms"]}
+                online = {rid: sorted(s["port"] for s in r["shards"] if s["online"]) for rid, r in listed.items()}
+                return online if online.get(1) == sorted([shards[(1, 1)]["port"], shards[(1, 2)]["port"]]) and \
+                    online.get(2) == [shards[(2, 1)]["port"]] else None
+            registry = wait_for(registered, 30, "every shard in /v1/admin/realms")
+            # A crashed shard is restarted on its port.
+            killed = shards[(1, 2)]
+            os.kill(killed["pid"], signal.SIGKILL)
+            restarted = wait_for(lambda: shards_of(server).get((1, 2)) if shards_of(server).get((1, 2), {}).get("pid") not in (None, 0, killed["pid"])
+                                 and shards_of(server)[(1, 2)]["state"] == "running" else None, 600, "the killed shard restarted")
+            assert restarted["port"] == killed["port"], (killed, restarted)
+            assert "ikv-server[1-2] yeniden başlatılıyor" in (server / "server.log").read_text(errors="replace")
+            shards = shards_of(server)
+
+        # One connected player per shard, walking east until its shard closes for the upgrade.
+        players = []
+        for (realm, index) in sorted(expected):
+            name = "Gezgin" if index == 1 else "Yolcu"  # the same name in two realms is allowed (per-realm names)
+            character = api("POST", "/v1/characters", {"name": name, "class_id": 1, "appearance": {}, "realm_id": realm}, session=session)["id"]
+            client = subprocess.Popen([args.client, "--headless", "--host", "localhost", "--port", str(shards[(realm, index)]["port"]),
+                                       "--ca", server / "secrets/client-ca.pem", "--session-stdin", "--character", str(character),
+                                       "--dx", "1"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            client.stdin.write(session + "\n")
+            client.stdin.close()
+            lines = []
+            reader = threading.Thread(target=lambda client=client, lines=lines: lines.extend(client.stdout), daemon=True)
+            reader.start()
+            players.append({"shard": (realm, index), "character": character, "client": client, "lines": lines, "reader": reader})
+        for player in players:
+            wait_for(lambda: any('"players"' in line for line in player["lines"]), 60, f"player admitted on shard {player['shard']}")
+        before = {c["id"]: c["state"] for c in api("GET", "/v1/characters", session=session)["characters"]}
 
         # Release N+1 arrives in the install root (what the launcher's automatic update installs): a signed stand-in
         # AppImage that runs the --new launcher.
@@ -207,32 +272,44 @@ def main():
              "--trust", public, "--root", install])
         installed_at = time.monotonic()
 
-        # The supervisor (polling every 30 s) announces, the world saves and exits, and N+1's supervisor takes over.
-        def announced():
-            return [line for line in lines if f"v{new_version}" in line and "announce" in line]
-        notice = wait_for(announced, 90, "announce event at the connected player")
-        assert "saniye içinde yeniden başlatılacak" in notice[0], notice[0]
-        assert client.wait(timeout=60) is not None
-        reader.join(timeout=5)
-        positions = [player for line in lines if line.startswith('{"players"') or '"self"' in line
-                     for snapshot in [json.loads(line)] if "self" in snapshot
-                     for player in snapshot["players"] if player["id"] == snapshot["self"]]
-        assert positions and positions[-1]["x"] != positions[0]["x"], "the player did not move before the upgrade"
+        # The supervisor (polling every 30 s) queues one restart per shard: every shard announces, saves and exits.
+        notices, last = {}, {}
+        for player in players:
+            lines = player["lines"]
+            notice = wait_for(lambda: [line for line in lines if f"v{new_version}" in line and "announce" in line], 90,
+                              f"announce event at the player on shard {player['shard']}")
+            assert "saniye içinde yeniden başlatılacak" in notice[0], notice[0]
+            notices[player["shard"]] = notice[0]
+        for player in players:
+            assert player["client"].wait(timeout=60) is not None
+            player["reader"].join(timeout=5)
+            positions = [p for line in player["lines"] if line.startswith('{"players"') or '"self"' in line
+                         for snapshot in [json.loads(line)] if "self" in snapshot
+                         for p in snapshot["players"] if p["id"] == snapshot["self"]]
+            assert positions and positions[-1]["x"] != positions[0]["x"], f"the player on shard {player['shard']} did not move"
+            last[player["character"]] = positions[-1]
         upgraded = wait_for(lambda: state(server) if state(server).get("phase") == "running"
                             and state(server).get("version") == new_version else None, 900, "release N+1 running")
         supervisor_pid = upgraded["pid"]
+        wait_for(all_running, 600, "every shard running on release N+1")
         log = (server / "server.log").read_text(errors="replace")
         assert "yeni sürüm gözetmeni başlatılıyor" in log and "PostgreSQL durduruldu" in log, log[-4000:]
+        handover = log[:log.index("yeni sürüm gözetmeni başlatılıyor")]
+        for realm, index in expected:  # every shard closed through its own announced restart (exit 75)
+            assert f"ikv-server[{realm}-{index}] çıktı: kod=75" in handover, (realm, index, handover[-4000:])
 
-        # The character's saved state survived the upgrade (the world saved it before exiting 75).
+        # Every character's saved state survived the upgrade (its shard saved it before exiting 75).
         session = api("POST", "/v1/login", {"username": "gezgin_test", "password": PASSWORD})["session"]
-        after = api("GET", "/v1/characters", session=session)["characters"][0]["state"]
-        assert (after.get("x"), after.get("y")) == (positions[-1]["x"], positions[-1]["y"]), \
-            ("saved position differs from the last position before the upgrade", positions[-1], after)
-        print(json.dumps({"old": old_version, "new": new_version, "announce": json.loads(notice[0]).get("state", {}).get("events", notice[0])
-                          if notice[0].startswith("{") else notice[0], "seconds_after_install": round(time.monotonic() - installed_at, 1),
-                          "last_position": positions[-1], "state_before": {k: before.get(k) for k in ("x", "y", "zone")},
-                          "state_after": {k: after.get(k) for k in ("x", "y", "zone")}}, ensure_ascii=False, default=str))
+        after = {c["id"]: c["state"] for c in api("GET", "/v1/characters", session=session)["characters"]}
+        for character, position in last.items():
+            assert (after[character].get("x"), after[character].get("y")) == (position["x"], position["y"]), \
+                ("saved position differs from the last position before the upgrade", character, position, after[character])
+        print(json.dumps({"old": old_version, "new": new_version, "shards": sorted(f"{r}-{i}" for r, i in expected),
+                          "killed_and_restarted": None if killed is None else "1-2",
+                          "announces": {f"{r}-{i}": text[max(0, text.find("saniye içinde") - 40):][:160] for (r, i), text in notices.items()},
+                          "seconds_after_install": round(time.monotonic() - installed_at, 1),
+                          "state_before": {c: {k: before[c].get(k) for k in ("x", "y", "zone")} for c in last},
+                          "state_after": {c: {k: after[c].get(k) for k in ("x", "y", "zone")} for c in last}}, ensure_ascii=False, default=str))
         print("hosted server automatic upgrade check passed")
     finally:
         if supervisor_pid:
