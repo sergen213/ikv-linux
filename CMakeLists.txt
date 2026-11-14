@@ -177,7 +177,7 @@ if(IKV_BUILD_CLIENT)
     endif()
     # Original Ogg decoding: vendored stb_vorbis (third_party/stb_vorbis), compiled as C++ like upstream sources (-w).
     set_source_files_properties(third_party/stb_vorbis/stb_vorbis.c PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-w")
-    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_charsel.cpp src/audio.cpp
+    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_realms.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_charsel.cpp src/audio.cpp
         third_party/stb_vorbis/stb_vorbis.c)
     target_link_libraries(ikv-client PRIVATE ikv-renderers Freetype::Freetype ${ikv_client_platform_libs} PkgConfig::TurboJPEG OpenSSL::SSL OpenSSL::Crypto Threads::Threads Boost::headers)
     if(WIN32)
@@ -352,6 +352,16 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
         list(APPEND ikv_targets client-mutation-check)
         add_test(NAME client-pending-mutations COMMAND client-mutation-check)
         set_tests_properties(client-pending-mutations PROPERTIES TIMEOUT 15)
+        # NONCANONICAL wave 30 realms: transfer event / world endpoint / --realm parsers and Ad-Realm addressing, then the
+        # headless client's shard handoff against two stub TLS shards (ticketed hello, refusal, grace, malformed event).
+        add_executable(client-realm-check tests/client_realm_check.cpp src/client_session.cpp src/client_realms.cpp)
+        target_link_libraries(client-realm-check PRIVATE ikv-protocol OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+        list(APPEND ikv_targets client-realm-check)
+        add_test(NAME client-realm-contract COMMAND client-realm-check)
+        set_tests_properties(client-realm-contract PROPERTIES TIMEOUT 15)
+        add_test(NAME client-shard-transfer
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/client_transfer.py" --client "$<TARGET_FILE:ikv-client>")
+        set_tests_properties(client-shard-transfer PROPERTIES TIMEOUT 120)
         add_test(NAME authenticated-multiplayer
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_multiplayer.py"
                 --auth "$<TARGET_FILE:ikv-auth>" --server "$<TARGET_FILE:ikv-server>"

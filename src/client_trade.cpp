@@ -44,7 +44,8 @@ bool same_terms(const Json& a, const Json& b) {
         if (a.at(side).at("items") != b.at(side).at("items") ||
             a.at(side).at("currency") != b.at(side).at("currency")) return false;
     }
-    return a.at("initiator") == b.at("initiator") && a.at("peer_name") == b.at("peer_name");
+    return a.at("initiator") == b.at("initiator") && a.at("peer_name") == b.at("peer_name") &&
+           a.value("peer_realm", std::string{}) == b.value("peer_realm", std::string{});
 }
 } // namespace
 
@@ -92,7 +93,9 @@ bool ClientTrade::receive(const Json& event, std::uint32_t self) {
         (invite && (phase != "invited" || event.size() != 4))) return reject();
     bool recipient = invite;
     if (!invite) {
-        if (event.size() != 8 || !event.contains("initiator") ||
+        // NONCANONICAL wave 30: a peer from another realm adds peer_realm (1..64 bytes) beside peer_name.
+        const bool realm = event.contains("peer_realm");
+        if (event.size() != (realm ? 9U : 8U) || (realm && !text(event.at("peer_realm"), 64)) || !event.contains("initiator") ||
             !number(event.at("initiator"), 1, INT32_MAX) || !event.contains("peer_name") ||
             !text(event.at("peer_name"), 128) || !event.contains("own") || !event.contains("other") ||
             !terms(event.at("own")) || !terms(event.at("other"))) return reject();

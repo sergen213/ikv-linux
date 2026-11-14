@@ -37,24 +37,53 @@ ikv::Message authenticated_hello() {
     return message;
 }
 std::vector<std::uint8_t> json_body(ikv::Type type, const std::string& json) {
-    std::vector<std::uint8_t> body{2, static_cast<std::uint8_t>(type)};
+    std::vector<std::uint8_t> body{3, static_cast<std::uint8_t>(type)};
     body.insert(body.end(), json.begin(), json.end());
     return body;
 }
-void independent_v2_bytes() {
-    std::vector<std::uint8_t> hello{2, 1};
+constexpr char ticket_hex[] = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+void independent_v3_bytes() {
+    std::vector<std::uint8_t> hello{3, 1};
     const std::string session = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     hello.insert(hello.end(), session.begin(), session.end());
     hello.insert(hello.end(), {1, 2, 3, 4, 5, 6, 7, 8});
     const auto received = ikv::decode(hello);
-    require(received.session == session && received.character_id == 0x0102030405060708ULL,
-            "independent hello identity decoded incorrectly");
+    require(received.session == session && received.character_id == 0x0102030405060708ULL && received.ticket.empty() &&
+            received.version == ikv::protocol_version, "independent hello identity decoded incorrectly");
     auto encoded = ikv::encode(received);
     require(encoded.size() == 78 && encoded[0] == 0 && encoded[1] == 0 && encoded[2] == 0 &&
             encoded[3] == 74 && std::equal(hello.begin(), hello.end(), encoded.begin() + 4),
-            "hello encoder violates fixed v2 layout");
+            "hello encoder violates fixed v3 layout");
+    // NONCANONICAL wave 30: the transfer ticket follows the character id as 64 lowercase hex bytes.
+    auto ticketed = hello;
+    ticketed.insert(ticketed.end(), ticket_hex, ticket_hex + 64);
+    const auto transfer = ikv::decode(ticketed);
+    require(transfer.session == session && transfer.character_id == 0x0102030405060708ULL && transfer.ticket == ticket_hex,
+            "ticketed hello decoded incorrectly");
+    encoded = ikv::encode(transfer);
+    require(encoded.size() == 142 && encoded[3] == 138 && std::equal(ticketed.begin(), ticketed.end(), encoded.begin() + 4),
+            "ticketed hello encoder violates v3 layout");
+    // Version 2: an outdated client's hello stays decodable (the server answers it) and a v2 goodbye carries that answer.
+    auto legacy = hello;
+    legacy[0] = 2;
+    const auto old = ikv::decode(legacy);
+    require(old.version == ikv::legacy_protocol_version && old.session == session, "legacy hello not identified");
+    encoded = ikv::encode(old);
+    require(encoded[4] == 2 && std::equal(legacy.begin(), legacy.end(), encoded.begin() + 4), "legacy hello re-encoded differently");
+    ikv::Message update{ikv::Type::goodbye};
+    update.version = ikv::legacy_protocol_version;
+    update.json = R"({"reason":"update"})";
+    encoded = ikv::encode(update);
+    require(encoded[4] == 2 && encoded[5] == 5 && consume(encoded).json == update.json, "legacy goodbye lost");
+    const auto outdated = ikv::encode(ikv::outdated_goodbye_message("0.16.0"));
+    const auto refusal = nlohmann::json::parse(consume(outdated).json);
+    require(outdated[4] == 2 && refusal.at("code") == "outdated_client" && refusal.at("version") == "0.16.0" &&
+            refusal.at("protocol") == 3 && refusal.at("reason").get<std::string>().find("v0.16.0") != std::string::npos,
+            "outdated-client goodbye malformed");
+    for (const auto* bad : {"", "0.16 0", "v\n", "0123456789012345678901234567890123"})
+        rejects([&] { ikv::outdated_goodbye_message(bad); });
 
-    const std::array<std::uint8_t, 14> destination{2, 7, 1, 2, 3, 4,
+    const std::array<std::uint8_t, 14> destination{3, 7, 1, 2, 3, 4,
                                                 0xff, 0xe8, 0x90, 0, 0, 0x17, 0x70, 0};
     const auto target = ikv::decode(destination);
     require(target.sequence == 0x01020304U && target.x == -1536000 && target.y == 1536000,
@@ -191,6 +220,48 @@ void appearance_contract() {
 void hello_destination_rejections() {
     const auto frame = ikv::encode(authenticated_hello());
     const auto valid = std::vector<std::uint8_t>(frame.begin() + 4, frame.end());
+    // Ticket: exactly 64 lowercase hex after the character id; any other length, case or byte is rejected.
+    auto ticketed = valid;
+    ticketed.insert(ticketed.end(), ticket_hex, ticket_hex + 64);
+    require(ikv::decode(ticketed).ticket == ticket_hex, "valid ticket rejected");
+    for (const std::size_t at : {74U, 100U, 137U})
+        for (const std::uint8_t bad : {std::uint8_t{'A'}, std::uint8_t{'g'}, std::uint8_t{0}, std::uint8_t{128}, std::uint8_t{' '}}) {
+            auto body = ticketed;
+            body[at] = bad;
+            rejects([&] { ikv::decode(body); });
+        }
+    for (std::size_t cut = 75; cut < ticketed.size(); ++cut) rejects([&] { ikv::decode(std::span(ticketed).first(cut)); });
+    auto longer = ticketed;
+    longer.push_back('0');
+    rejects([&] { ikv::decode(longer); });
+    auto legacy_ticket = ticketed;
+    legacy_ticket[0] = 2;
+    rejects([&] { ikv::decode(legacy_ticket); });
+    auto hello = authenticated_hello();
+    for (const auto& ticket : std::vector<std::string>{
+             std::string(63, 'a'), std::string(65, 'a'), std::string(64, 'A'), std::string(64, 'g'),
+             std::string(63, 'a') + '\0', std::string(128, 'a')}) {
+        hello.ticket = ticket;
+        rejects([&] { ikv::encode(hello); });
+    }
+    hello.ticket = ticket_hex;
+    hello.version = ikv::legacy_protocol_version;
+    rejects([&] { ikv::encode(hello); });
+    ikv::Message goodbye{ikv::Type::goodbye};
+    goodbye.ticket = ticket_hex;
+    rejects([&] { ikv::encode(goodbye); });
+    for (const std::uint8_t version : {std::uint8_t{0}, std::uint8_t{1}, std::uint8_t{4}, std::uint8_t{255}}) {
+        goodbye = ikv::Message{ikv::Type::goodbye};
+        goodbye.version = version;
+        rejects([&] { ikv::encode(goodbye); });
+    }
+    for (const auto type : {ikv::Type::welcome, ikv::Type::input, ikv::Type::snapshot, ikv::Type::state,
+                            ikv::Type::destination, ikv::Type::action, ikv::Type::catalog}) {
+        ikv::Message message{type};
+        message.id = 1; message.sequence = 1; message.json = "{}";
+        message.version = ikv::legacy_protocol_version;
+        rejects([&] { ikv::encode(message); });
+    }
     for (const std::uint8_t bad : {std::uint8_t{'A'}, std::uint8_t{'g'}, std::uint8_t{0}, std::uint8_t{128}}) {
         auto body = valid;
         body[2] = bad;
@@ -211,7 +282,10 @@ void hello_destination_rejections() {
     body.push_back(0);
     rejects([&] { ikv::decode(body); });
 
-    std::vector<std::uint8_t> target{2, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    std::vector<std::uint8_t> target{3, 7, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    auto legacy_target = target;
+    legacy_target[0] = 2;
+    rejects([&] { ikv::decode(legacy_target); });
     for (const auto offset : {6U, 10U}) {
         auto invalid = target;
         invalid[offset] = 0;
@@ -286,7 +360,7 @@ void round_trip_semantics() {
     require(consume(ikv::encode({ikv::Type::goodbye})).type == ikv::Type::goodbye, "goodbye lost");
 
     // Independent bytes exercise endian and signed decoding, not only self-round-trips.
-    const std::array<std::uint8_t, 20> body{2, 4, 0, 0, 1, 2, 0, 1, 0, 0, 0, 9,
+    const std::array<std::uint8_t, 20> body{3, 4, 0, 0, 1, 2, 0, 1, 0, 0, 0, 9,
                                            0xff, 0xe8, 0x90, 0, 0, 0x17, 0x70, 0};
     received = ikv::decode(body);
     require(received.tick == 258 && received.players[0].id == 9 && received.players[0].x == -1536000 &&
@@ -416,12 +490,12 @@ void invalid_encoding() {
 }
 void invalid_decoding() {
     for (const auto& body : std::vector<std::vector<std::uint8_t>>{
-             {}, {2}, {1, 5}, {3, 5}, {2, 0}, {2, 9}, {2, 5, 0}, {2, 1}, {2, 1, 2, 'a'},
-             {2, 2, 0, 0, 0, 0, 0, 0, 0, 0},
-             {2, 3, 0, 0, 0, 0, 0, 0}, {2, 3, 0, 0, 0, 1, 255, 1},
-             {2, 3, 0, 0, 0, 1, 128, 0}, {2, 4, 0, 0, 0, 0, 0, 33},
-             {2, 4, 0, 0, 0, 0, 0, 1}, {2, 4, 0, 0, 0, 0, 0, 0, 0},
-             {2, 7}, {2, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}}) {
+             {}, {3}, {1, 5}, {4, 5}, {3, 0}, {3, 9}, {3, 5, 0}, {2, 5, 0}, {3, 1}, {3, 1, 2, 'a'},
+             {3, 2, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 2, 0, 0, 0, 1, 0, 0, 0, 0},
+             {3, 3, 0, 0, 0, 0, 0, 0}, {3, 3, 0, 0, 0, 1, 255, 1},
+             {3, 3, 0, 0, 0, 1, 128, 0}, {3, 4, 0, 0, 0, 0, 0, 33},
+             {3, 4, 0, 0, 0, 0, 0, 1}, {3, 4, 0, 0, 0, 0, 0, 0, 0}, {2, 4, 0, 0, 0, 0, 0, 0},
+             {3, 7}, {3, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, {2, 6, '{', '}'}, {2, 8, '{', '}'}}) {
         rejects([&] { ikv::decode(body); });
     }
     for (std::uint32_t length : {0U, 1U, ikv::max_body_size + 1, 0xffffffffU}) {
@@ -475,6 +549,7 @@ void generated_codec_properties() {
             message.character_id |= random();
             message.character_id &= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
             message.character_id |= 1;
+            if (random() % 2) for (int i = 0; i < 64; ++i) message.ticket.push_back(hex[random() % 16]);
             break;
         case ikv::Type::welcome:
             message.id = random() | 1U;
@@ -529,11 +604,11 @@ void generated_codec_properties() {
         expected_frames.push_back(frame);
 
         auto bad_body = std::vector<std::uint8_t>(body.begin(), body.end());
-        bad_body[0] = static_cast<std::uint8_t>(random() % 253 + 3);
+        bad_body[0] = static_cast<std::uint8_t>(random() % 252 + 4);
         rejects([&] { ikv::decode(bad_body); });
         bad_body[0] = 1;
         rejects([&] { ikv::decode(bad_body); });
-        bad_body[0] = 2;
+        bad_body[0] = 3;
         bad_body[1] = static_cast<std::uint8_t>(random() % 246 + 10);
         rejects([&] { ikv::decode(bad_body); });
         bad_body[1] = static_cast<std::uint8_t>(message.type);
@@ -575,7 +650,7 @@ void generated_codec_properties() {
 }
 int main() {
     try {
-        independent_v2_bytes();
+        independent_v3_bytes();
         json_bounds_and_validation();
         hello_destination_rejections();
         appearance_contract();

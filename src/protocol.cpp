@@ -37,13 +37,21 @@ void validate_json(std::string_view json) {
     }
     if (quoted || depth != 0 || !nlohmann::json::accept(json.begin(), json.end())) invalid();
 }
+bool lower_hex(std::string_view text, std::size_t size) {
+    return text.size() == size && std::all_of(text.begin(), text.end(),
+        [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
 void validate(const Message& message) {
+    // Version 2 frames exist only as an outdated client's hello and the goodbye answering it.
+    const bool legacy_allowed = message.type == Type::hello || message.type == Type::goodbye;
+    if (message.version != protocol_version && !(legacy_allowed && message.version == legacy_protocol_version)) invalid();
+    if (message.type != Type::hello && !message.ticket.empty()) invalid();
     switch (message.type) {
     case Type::hello:
-        if (message.session.size() != 64 || message.character_id == 0 ||
+        if (!lower_hex(message.session, 64) || message.character_id == 0 ||
             message.character_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) invalid();
-        for (const unsigned char c : message.session)
-            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) invalid();
+        // NONCANONICAL wave 30 transfer ticket: absent, or exactly 32 random bytes as lowercase hex; v2 has none.
+        if (!message.ticket.empty() && (message.version != protocol_version || !lower_hex(message.ticket, 64))) invalid();
         break;
     case Type::welcome:
         if (message.id == 0) invalid();
@@ -95,6 +103,18 @@ std::uint32_t read_u32(std::span<const std::uint8_t> bytes, std::size_t offset) 
 std::uint64_t read_u64(std::span<const std::uint8_t> bytes, std::size_t offset) {
     return (static_cast<std::uint64_t>(read_u32(bytes, offset)) << 32) | read_u32(bytes, offset + 4);
 }
+}
+Message outdated_goodbye_message(std::string_view server_version) {
+    if (server_version.empty() || server_version.size() > 32 ||
+        std::any_of(server_version.begin(), server_version.end(), [](unsigned char c) { return c <= 32 || c >= 127; }))
+        throw std::invalid_argument("invalid server release version");
+    const std::string version(server_version);
+    Message bye{Type::goodbye};
+    bye.version = legacy_protocol_version;
+    bye.json = nlohmann::json{{"reason", "Sunucu sürümü v" + version + "; istemciniz eski. Yeni sürüm hazır; oyun güncelleniyor."},
+                              {"code", outdated_goodbye}, {"version", version}, {"protocol", protocol_version}}.dump();
+    validate(bye);
+    return bye;
 }
 std::string original_character_name_error(std::string_view utf8) {
     if (utf8.empty() || utf8 == "isimsiz") return "Karakter ismi isimsiz olamaz!";
@@ -153,7 +173,7 @@ std::vector<std::uint8_t> encode(const Message& message) {
     validate(message);
     std::uint32_t length = 2;
     switch (message.type) {
-    case Type::hello: length += 72; break;
+    case Type::hello: length += message.ticket.empty() ? 72 : 136; break;
     case Type::welcome: length += 8; break;
     case Type::input: length += 6; break;
     case Type::snapshot: length += 6 + static_cast<std::uint32_t>(message.players.size()) * 12; break;
@@ -166,12 +186,13 @@ std::vector<std::uint8_t> encode(const Message& message) {
     std::vector<std::uint8_t> bytes;
     bytes.reserve(length + 4);
     u32(bytes, length);
-    bytes.push_back(2);
+    bytes.push_back(message.version);
     bytes.push_back(static_cast<std::uint8_t>(message.type));
     switch (message.type) {
     case Type::hello:
         bytes.insert(bytes.end(), message.session.begin(), message.session.end());
         u64(bytes, message.character_id);
+        bytes.insert(bytes.end(), message.ticket.begin(), message.ticket.end());
         break;
     case Type::welcome:
         u32(bytes, message.id);
@@ -207,13 +228,17 @@ std::vector<std::uint8_t> encode(const Message& message) {
     return bytes;
 }
 Message decode(std::span<const std::uint8_t> body) {
-    if (body.size() < 2 || body.size() > max_body_size || body[0] != 2) invalid();
+    if (body.size() < 2 || body.size() > max_body_size ||
+        (body[0] != protocol_version && body[0] != legacy_protocol_version)) invalid();
     Message message{static_cast<Type>(body[1])};
+    message.version = body[0];
     switch (message.type) {
     case Type::hello:
-        if (body.size() != 74) invalid();
+        // v3: 74 bytes, or 138 with the transfer ticket; v2: exactly 74 (validate rejects a v2 ticket).
+        if (body.size() != 74 && body.size() != 138) invalid();
         message.session.assign(reinterpret_cast<const char*>(body.data() + 2), 64);
         message.character_id = read_u64(body, 66);
+        if (body.size() == 138) message.ticket.assign(reinterpret_cast<const char*>(body.data() + 74), 64);
         break;
     case Type::welcome:
         if (body.size() != 10) invalid();
