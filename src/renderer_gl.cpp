@@ -1,6 +1,9 @@
 #include "ikv/renderer.hpp"
 #include "ikv_gl_water.h" // generated from shaders/vulkan/water.glsl (CMakeLists.txt): #define IKV_GL_WATER
 #include "ikv_gl_weather.h" // generated from shaders/vulkan/weather.glsl: #define IKV_GL_WEATHER (NONCANONICAL wave 27)
+#include "ikv_gl_pbr.h" // generated from shaders/vulkan/pbr.glsl: #define IKV_GL_PBR (NONCANONICAL wave 29)
+#include "ikv/pbr.hpp"
+#include "renderer_gl_tess.hpp"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_opengl.h>
 #include <SDL3/SDL_opengl_glext.h>
@@ -9,6 +12,8 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -247,7 +252,14 @@ uniform vec4 weather_mark_info;
 uniform vec4 weather_mark_bounds;
 uniform vec4 weather_marks[64];
 uniform vec4 source_time;
-)GLSL" IKV_GL_WEATHER R"GLSL(
+// NONCANONICAL wave 29 PBR pack (Vulkan lighting.glsl; pbr.glsl): pbr as Vulkan draw.pbr, pbr_maps xyz = albedo/normal/ORM
+// bound (units 11..13).
+uniform vec4 pbr;
+uniform vec4 pbr_maps;
+uniform sampler2D pbr_albedo_map;
+uniform sampler2D pbr_normal_map;
+uniform sampler2D pbr_orm_map;
+)GLSL" IKV_GL_WEATHER IKV_GL_PBR R"GLSL(
 // Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
 const float PI=3.14159265359;
 vec3 enhanced_environment(vec3 direction) {
@@ -269,28 +281,40 @@ float shadow_visibility(vec3 n,vec3 l) {
     return shadow_pcf(shadow_far_map,far_shadow_position.xyz/far_shadow_position.w,n,l);
 }
 out vec4 output_color;
-// NONCANONICAL parallax occlusion: Vulkan lighting.glsl parallax() (derived relief of static zone materials, enhanced only).
+// NONCANONICAL parallax occlusion: Vulkan lighting.glsl parallax() (derived relief of static zone materials, enhanced only;
+// wave 29: the PBR pack's own relief and its pbr_uv frame).
 uniform sampler2D height_map;
 uniform bool has_height_map;
-vec2 surface_uv;
+vec2 surface_uv,pbr_uv,pbr_du1=vec2(0.0),pbr_du2=vec2(0.0);
+vec3 pbr_pu=vec3(0.0),pbr_pv=vec3(0.0);
+bool pbr_on=false;
 vec3 parallax_gradient=vec3(0.0);
 void parallax() {
-    surface_uv=texcoord;
-    if(!has_height_map||original_appearance||sky||source_ocean)return;
+    surface_uv=texcoord;pbr_uv=texcoord;
+    if(original_appearance||sky||source_ocean)return;
+    pbr_on=pbrActive(pbr);
+    if(pbr_on&&pbr.x>0.0)pbr_uv=pbrWorldUV(fragment_position,world_normal,pbr.xy);
+    vec2 base=pbr_on?pbr_uv:texcoord;
     vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),nf=cross(dp1,dp2),v=camera_position-fragment_position;
-    vec2 du1=dFdx(texcoord),du2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    pbr_du1=du1;pbr_du2=du2;
     if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0.0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
+    pbr_pu=pu;pbr_pv=pv;
+    if(!has_height_map||(pbr_on&&!pbrParallax(pbr)))return;
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
-    float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6);
+    float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
+        (pbr_on?min(pbr.z,1.0):min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
-    int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,texcoord,du1,du2).r,last_t=0.0,last_f=h-1.0;
-    for(int i=0;i<steps&&t<1.0-h;++i){last_t=t;last_f=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(height_map,texcoord+shift*t,du1,du2).r;}
+    int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,base,du1,du2).r,last_t=0.0,last_f=h-1.0;
+    for(int i=0;i<steps&&t<1.0-h;++i){last_t=t;last_f=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(height_map,base+shift*t,du1,du2).r;}
     float f=t-(1.0-h);if(f>0.0&&last_f<0.0)t=mix(last_t,t,last_f/(last_f-f));
-    surface_uv=texcoord+shift*t;
-    vec2 slope=(textureGrad(height_map,surface_uv,du1,du2).gb-0.5)*0.5*vec2(textureSize(height_map,0));
+    vec2 shifted=base+shift*t;
+    if(!pbr_on||pbr.x<=0.0)surface_uv=shifted;
+    if(pbr_on)pbr_uv=shifted;
+    vec2 slope=(textureGrad(height_map,shifted,du1,du2).gb-0.5)*0.5*vec2(textureSize(height_map,0));
     parallax_gradient=0.7*depth*(slope.x*gu+slope.y*gv);
 }
 bool source_normal_path(){return has_normal_map&&source_lighting&&length(source_tangent_eye)>0.00001;}
@@ -422,14 +446,24 @@ void main() {
         if(has_normal_map||has_environment_map)surface.a=1.0;
         float nlength=length(world_normal);
         vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
-        if(has_normal_map) {
+        if(pbr_on&&pbr_maps.y>0.5)n=pbrNormal(n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb); // wave 29
+        else if(has_normal_map) {
             vec3 t=world_tangent-n*dot(n,world_tangent);
             // Source normal maps carry only xy (b specular, a illumination): z rebuilt as original_surface (Vulkan mappedNormal).
             if(dot(t,t)>1e-12){t=normalize(t);vec2 xy=texture(normal_map,surface_uv).xy*2.0-1.0;n=normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1.0-dot(xy,xy))));}
         } else n=normalize(n-parallax_gradient);
         vec3 v=normalize(camera_position-fragment_position),l=normalize(sun_direction),h=normalize(v+l);
-        float roughness=0.65;
+        float roughness=0.65,metallic=0.0,pbr_ao=1.0;
         vec3 albedo=pow(max(surface.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
+        // NONCANONICAL wave 29 PBR pack (Vulkan lighting.glsl): albedo, roughness, metallic, ambient occlusion.
+        if(pbr_on) {
+            if(pbr_maps.x>0.5) {
+                ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
+                vec3 low=(has_texture?textureLod(diffuse_map,texcoord,max(levels-4.0,0.0)).rgb:vec3(1.0))*material_color.rgb-lightmap_shadow;
+                albedo=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,albedo,pbrTintKeep(pbr));
+            }
+            if(pbr_maps.z>0.5){vec3 orm=textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb;pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;}
+        }
         // NONCANONICAL wave 27 (Vulkan lighting.glsl): season tint, rain wetness and snow cover on albedo and baked light.
         bool weather=weatherOn(weather_misc);
         float direct_roughness=roughness,puddle=0.0;
@@ -446,13 +480,13 @@ void main() {
         float ndl=max(dot(n,l),0.0),ndv=max(dot(n,v),0.001),ndh=max(dot(n,h),0.0),vdh=max(dot(v,h),0.0);
         float a2=direct_roughness*direct_roughness*direct_roughness*direct_roughness,dd=ndh*ndh*(a2-1.0)+1.0,d=a2/(PI*dd*dd);
         float k=(direct_roughness+1.0)*(direct_roughness+1.0)/8.0,g=(ndv/(ndv*(1.0-k)+k))*(ndl/(ndl*(1.0-k)+k));
-        vec3 f=vec3(0.04)+0.96*pow(1.0-vdh,5.0);
-        vec3 direct=((1.0-f)*albedo/PI+d*g*f/max(4.0*ndv*ndl,0.001))*ndl*3.2;
+        vec3 f0=mix(vec3(0.04),albedo,metallic),f=f0+(1.0-f0)*pow(1.0-vdh,5.0);
+        vec3 direct=((1.0-f)*(1.0-metallic)*albedo/PI+d*g*f/max(4.0*ndv*ndl,0.001))*ndl*3.2;
         // Weather (Vulkan lighting.glsl): softened sun shadows; puddles mirror the weather-tinted sky strongly.
         float sun_shadow=shadow_visibility(n,l),reflection_gain=0.4;vec3 sky_reflection=enhanced_environment(reflect(-v,n));
         if(weather){sun_shadow=mix(sun_shadow,1.0,weatherShadowSoftness(weather_state,weather_misc));reflection_gain=mix(0.4,2.5,puddle);
             sky_reflection=mix(sky_reflection,weather_fog_linear(),max(weather_state.y,weather_misc.x));}
-        vec3 c=1.5*((scene_roofed?vec3(0.0):direct*enhanced_sun_scale()*sun_shadow)+baked+sky_reflection*f*(1.0-roughness)*reflection_gain*enhanced_ambient_scale());
+        vec3 c=1.5*((scene_roofed?vec3(0.0):direct*enhanced_sun_scale()*sun_shadow)+baked*pbr_ao+sky_reflection*f*(1.0-roughness)*reflection_gain*enhanced_ambient_scale());
         c=mix(pow(max(fog_color,vec3(0.0)),vec3(2.2)),c,clamp(fog_blend,0.0,1.0));
         if(weather) { // weather fog
             c=mix(weather_fog_linear(),c,weatherFogTransmit(distance(camera_position,fragment_position),weather_state,weather_misc));
@@ -664,12 +698,20 @@ class GlRenderer final : public Renderer {
     GL_ENTRY(PFNGLENDQUERYPROC, glEndQuery);
     GL_ENTRY(PFNGLGETQUERYOBJECTIVPROC, glGetQueryObjectiv);
     GL_ENTRY(PFNGLGETQUERYOBJECTUI64VPROC, glGetQueryObjectui64v);
+    // NONCANONICAL wave 29 tessellation (optional: loaded without failing; null = no tessellated relief).
+    GL_ENTRY(PFNGLPATCHPARAMETERIPROC, glPatchParameteri);
+    GL_ENTRY(PFNGLGETACTIVEUNIFORMPROC, glGetActiveUniform);
+    GL_ENTRY(PFNGLGETUNIFORMFVPROC, glGetUniformfv);
+    GL_ENTRY(PFNGLGETUNIFORMIVPROC, glGetUniformiv);
+    GL_ENTRY(PFNGLUNIFORM2FVPROC, glUniform2fv);
 #undef GL_ENTRY
     // wave_*: NONCANONICAL wave 28 subdivided copy of a source ocean mesh (renderer.hpp subdivide_ocean_mesh), enhanced only.
-    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0, stream=0, wave_vao=0, wave_vertices=0, wave_indices=0; GLsizei count=0, wave_count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
+    // tess_*: NONCANONICAL wave 29 tessellation copy (pbr.hpp pbr_tessellation_mesh) for tessellated PBR pack materials.
+    struct GpuMesh { GLuint vao=0, vertices=0, indices=0, texture=0, stream=0, wave_vao=0, wave_vertices=0, wave_indices=0, tess_vao=0, tess_vertices=0, tess_indices=0; GLsizei count=0, wave_count=0, tess_count=0; std::size_t vertex_count=0; std::uint64_t revision=0; std::array<float,4> bounds{}; std::array<float,2> height{}; };
     struct SkinStream { std::array<float,3> position,normal,tangent; }; // skinned attributes (upload_stream)
     std::vector<SkinStream> skin_stream_;
-    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; };
+    // pbr*: NONCANONICAL wave 29 PBR pack material and maps (0 = absent).
+    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; const PbrMaterial* pbr=nullptr; GLuint pbr_albedo=0,pbr_normal=0,pbr_orm=0; };
     struct Draw { const Instance* instance; Matrix4 matrix; float distance; std::uint32_t material; bool fog; std::array<float,4> scroll; bool visible=true; };
     struct ContourDraw { std::uint32_t mesh; Matrix4 matrix; std::array<float,3> color; };
     SDL_Window* window_;
@@ -733,6 +775,9 @@ class GlRenderer final : public Renderer {
         std::vector<bool> ocean_meshes; // NONCANONICAL wave 28: enhanced also uploads these subdivided (renderer.hpp ocean_wave_mesh)
         std::optional<OceanBed> ocean_bed; // their shore factors' bed grid, built on the first wave mesh upload
         GLuint shore_texture=0;std::array<float,4> shore_grid{};float shore_level=0; // that grid's shore field (renderer.hpp ocean_shore_field)
+        // NONCANONICAL wave 29: each material's PBR pack material (plan()), the pack maps uploaded (albedo, normal, ORM,
+        // height) and per mesh whether a tessellated pack material draws it (0 no, 1 original UVs, 2 world projection).
+        std::vector<const PbrMaterial*> pbr;std::map<const PbrMaterial*,std::array<GLuint,4>> pbr_textures;std::vector<std::uint8_t> tess_meshes;
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -746,12 +791,12 @@ class GlRenderer final : public Renderer {
     struct UniformInt { GLint location=-1; int value=std::numeric_limits<int>::min(); };
     struct UniformFloat { GLint location=-1; float value=std::numeric_limits<float>::quiet_NaN(); };
     struct UniformVec4 { GLint location=-1; std::array<float,4> value{std::numeric_limits<float>::quiet_NaN()}; };
-    struct SceneUniforms { UniformInt sky,ocean,fog,normal,environment,lightmap,fade,height,texture; UniformFloat cutoff; UniformVec4 scroll,sway,color; } draw_uniforms_;
+    struct SceneUniforms { UniformInt sky,ocean,fog,normal,environment,lightmap,fade,height,texture; UniformFloat cutoff; UniformVec4 scroll,sway,color,pbr,pbr_maps; } draw_uniforms_;
     struct ShadowUniforms { UniformInt texture,fade,opaque; UniformFloat cutoff; UniformVec4 color,sway; } shadow_uniforms_;
     UniformVec4 depth_sway_;
     GLint normal_matrix_location_=-1,grayscale_location_=-1,contour_grayscale_location_=-1;
     GLint particle_grayscale_location_=-1,particle_fog_enabled_location_=-1,particle_fog_start_location_=-1,particle_fog_end_location_=-1;
-    std::array<GLuint,11> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
+    std::array<GLuint,14> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
     // Shadow casters without an alpha cutoff draw with a depth-only program. Static casters (no entity, skin or sway) of a
     // cascade are cached in shadow_static_*: while the light matrix and the static caster list are unchanged, the cached
     // depth is restored only where last frame's dynamic casters drew, then the dynamic casters are drawn again (the depth
@@ -767,6 +812,14 @@ class GlRenderer final : public Renderer {
     // complete frames are logged like Vulkan's "gpu timing" line. scenePassMs = opaque + water + alpha (Vulkan's scene pass).
     enum TimedPass { timed_shadow,timed_opaque,timed_water,timed_alpha,timed_post,timed_passes };
     static constexpr int timing_ring=4;
+    // NONCANONICAL wave 29 PBR pack (pbr.hpp), loaded with the first enhanced scene; tess_program_: scene_fragment behind the
+    // renderer_gl_tess.hpp stages (GL >= 4.0, enhanced, RendererOptions::tessellation). Its uniforms mirror program_'s:
+    // tess_sync_ copies every shared uniform's current program_ value before the tessellated draws (draw_tess); tess_u_
+    // are its per-draw locations. Shadow casters stay untessellated (the outward relief never sinks under its caster depth).
+    std::shared_ptr<const PbrPack> pbr_pack_;bool pbr_loaded_=false;
+    GLuint tess_program_=0;struct TessSync{GLint from,to;GLenum type;GLint count;};std::vector<TessSync> tess_sync_;
+    struct TessUniforms { GLint object,normal_matrix,color,texture,normal,environment,lightmap,fade,height,cutoff,ocean,sky,fog,sway,scroll,pbr,pbr_maps,view; } tess_u_{};
+    std::vector<const Draw*> tess_draws_;
     bool timing_=false;GLuint timing_queries_[timing_ring][timed_passes]{};unsigned timing_issued_[timing_ring]{};unsigned timing_frame_=0;
     double timing_sum_[timed_passes]{};unsigned timing_frames_=0;
 public:
@@ -799,6 +852,10 @@ public:
             LOAD_GL(glBlendEquation); LOAD_GL(glCompressedTexImage2D); LOAD_GL(glUniformMatrix3fv);
             LOAD_GL(glGenQueries); LOAD_GL(glDeleteQueries); LOAD_GL(glBeginQuery); LOAD_GL(glEndQuery); LOAD_GL(glGetQueryObjectiv); LOAD_GL(glGetQueryObjectui64v);
 #undef LOAD_GL
+#define LOAD_OPTIONAL_GL(name) name##_ = reinterpret_cast<decltype(name##_)>(SDL_GL_GetProcAddress(#name))
+            LOAD_OPTIONAL_GL(glPatchParameteri); LOAD_OPTIONAL_GL(glGetActiveUniform); LOAD_OPTIONAL_GL(glGetUniformfv);
+            LOAD_OPTIONAL_GL(glGetUniformiv); LOAD_OPTIONAL_GL(glUniform2fv);
+#undef LOAD_OPTIONAL_GL
             glGetIntegerv(GL_MAX_TEXTURE_SIZE,&max_texture_size_);
             if(max_texture_size_<1) throw std::runtime_error("OpenGL texture limits unavailable");
             s3tc_=SDL_GL_ExtensionSupported("GL_EXT_texture_compression_s3tc");
@@ -840,12 +897,15 @@ public:
             glUniform1i_(uniform(program_,"fade_map"),4);glUniform1i_(uniform(program_,"shadow_map"),5);
             glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
             glUniform1i_(uniform(program_,"shadow_far_map"),9);glUniform1i_(uniform(program_,"water_shore_map"),10);
+            glUniform1i_(uniform(program_,"pbr_albedo_map"),11);glUniform1i_(uniform(program_,"pbr_normal_map"),12);glUniform1i_(uniform(program_,"pbr_orm_map"),13);
             water_shore_grid_location_=uniform(program_,"water_shore_grid");water_shore_level_location_=uniform(program_,"water_shore_level");
             light_location_=uniform(program_,"light_view_projection");
             far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
             normal_matrix_location_=uniform(program_,"normal_matrix");grayscale_location_=uniform(program_,"grayscale");
             draw_uniforms_={{sky_location_},{ocean_location_},{fog_enabled_location_},{normal_location_},{environment_location_},{lightmap_location_},
-                {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_}};
+                {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_},
+                {uniform(program_,"pbr")},{uniform(program_,"pbr_maps")}};
+            if(!options_.original_appearance&&options_.tessellation)link_tess();
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
             glGenTextures(1,&overlay_texture_);
@@ -1094,7 +1154,9 @@ public:
             if(a->instance->mesh!=b->instance->mesh)return a->instance->mesh<b->instance->mesh;
             return a->instance<b->instance;
         });
-        for(const auto* draw:opaque_order_) draw_instance(set,scene,*draw);
+        tess_draws_.clear(); // NONCANONICAL wave 29: tessellated PBR relief draws after the rest, with tess_program_
+        for(const auto* draw:opaque_order_){if(tessellated(set,scene,*draw,eye))tess_draws_.push_back(draw);else draw_instance(set,scene,*draw);}
+        if(!tess_draws_.empty())draw_tess(set,scene);
         time_end(timed_opaque);
         if(any_water) {
             time_begin(timed_water);
@@ -1288,7 +1350,41 @@ private:
         set.materials[index]={find_texture(set,material.diffuse),find_texture(set,material.normal),
             find_texture(set,material.environment),find_texture(set,material.lightmap),find_texture(set,material.luminance),
             options_.parallax&&!options_.original_appearance?find_texture(set,material.height):0,true};
+        // NONCANONICAL wave 29 PBR pack maps; the pack's own relief replaces the derived one (as Vulkan material_maps).
+        if(const auto* p=index<set.pbr.size()?set.pbr[index]:nullptr) {
+            auto [found,added]=set.pbr_textures.try_emplace(p,std::array<GLuint,4>{});
+            if(added){const Texture* maps[4]{&p->albedo,&p->normal,&p->orm,&p->height};for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())upload_texture(*maps[k],found->second[k]);state_reset();}
+            auto& gpu=set.materials[index];
+            gpu.pbr=p;gpu.pbr_albedo=found->second[0];gpu.pbr_normal=found->second[1];gpu.pbr_orm=found->second[2];
+            gpu.height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_program_)?found->second[3]:0;
+        }
         progress();
+    }
+    // NONCANONICAL wave 29: scene materials -> PBR pack materials (pbr.hpp eligibility + manifest key), enhanced only, and
+    // the meshes needing a tessellation copy.
+    void plan_pbr(GlSet& set,const Scene& scene) {
+        set.pbr.assign(scene.materials.size(),nullptr);set.tess_meshes.assign(scene.meshes.size(),0);
+        if(options_.original_appearance)return;
+        if(!pbr_loaded_) {
+            pbr_loaded_=true;
+            const auto root=pbr_pack_root(SDL_GetBasePath());
+            if(!root.empty())try {
+                pbr_pack_=load_pbr_pack(root);
+                for(const auto& d:pbr_pack_->diagnostics)std::fprintf(stderr,"PBR pack: %s\n",d.c_str());
+                std::fprintf(stderr,"PBR pack root=%s materials=%zu keys=%zu\n",root.string().c_str(),pbr_pack_->materials.size(),pbr_pack_->textures.size());
+            } catch(const std::exception& e){std::fprintf(stderr,"PBR pack disabled: %s\n",e.what());pbr_pack_.reset();}
+        }
+        if(!pbr_pack_)return;
+        const auto eligible=pbr_eligible_materials(scene);
+        std::size_t mapped=0;
+        for(std::size_t i=0;i<scene.materials.size();++i)if(eligible[i]&&(set.pbr[i]=pbr_pack_->find(scene.materials[i].diffuse)))++mapped;
+        std::size_t tessellated=0;
+        if(tess_program_)for(const auto& in:scene.instances) {
+            if(in.mesh>=scene.meshes.size())continue;
+            const auto m=in.material==UINT32_MAX?scene.meshes[in.mesh].material:in.material;
+            if(m<set.pbr.size()&&set.pbr[m]&&set.pbr[m]->tessellate&&!set.tess_meshes[in.mesh]){set.tess_meshes[in.mesh]=set.pbr[m]->world_uv?2:1;++tessellated;}
+        }
+        std::fprintf(stderr,"PBR scene materialsMapped=%zu tessellatedMeshes=%zu tessellation=%d\n",mapped,tessellated,tess_program_?1:0);
     }
     void validate_mesh(const Scene& scene,std::size_t index) const {
         const auto& mesh=scene.meshes[index];
@@ -1339,6 +1435,10 @@ private:
             const Mesh fine=ocean_wave_mesh(scene,index,*set.ocean_bed);
             static_buffers(gpu.wave_vao,gpu.wave_vertices,gpu.wave_indices,fine);gpu.wave_count=static_cast<GLsizei>(fine.indices.size());
         }
+        if(index<set.tess_meshes.size()&&set.tess_meshes[index]&&!gpu.tess_vao) { // NONCANONICAL wave 29
+            const Mesh copy=pbr_tessellation_mesh(source,set.tess_meshes[index]==2);
+            static_buffers(gpu.tess_vao,gpu.tess_vertices,gpu.tess_indices,copy);gpu.tess_count=static_cast<GLsizei>(copy.indices.size());
+        }
         static_buffers(gpu.vao,gpu.vertices,gpu.indices,source);
         // Skinned meshes: skinning rewrites only position, normal and tangent (scene_animation.cpp), so those come from a
         // separate 36-byte stream that refresh() re-specifies; uv, ambient, lightmap uv and colour stay in the static buffer.
@@ -1369,12 +1469,16 @@ private:
         if(mesh.wave_indices)glDeleteBuffers_(1,&mesh.wave_indices);
         if(mesh.wave_vertices)glDeleteBuffers_(1,&mesh.wave_vertices);
         if(mesh.wave_vao)glDeleteVertexArrays_(1,&mesh.wave_vao);
+        if(mesh.tess_indices)glDeleteBuffers_(1,&mesh.tess_indices);
+        if(mesh.tess_vertices)glDeleteBuffers_(1,&mesh.tess_vertices);
+        if(mesh.tess_vao)glDeleteVertexArrays_(1,&mesh.tess_vao);
         mesh={};
     }
     void release(GlSet& set) noexcept {
         for(auto& mesh:set.meshes)release(mesh);
         if(!set.textures.empty())glDeleteTextures(static_cast<GLsizei>(set.textures.size()),set.textures.data());
         if(set.shore_texture)glDeleteTextures(1,&set.shore_texture);
+        for(auto& [material,names]:set.pbr_textures)for(auto name:names)if(name)glDeleteTextures(1,&name);
         GlSet empty;empty.key=set.key;set=std::move(empty);
     }
     // Upload plan for the Scene's current structure. Actor attach/detach/replacement keeps every other mesh (moved by key)
@@ -1399,6 +1503,7 @@ private:
         set.meshes.resize(scene.meshes.size());
         set.mesh_plan.assign(scene.meshes.size(),0);set.next_mesh=0;
         set.ocean_meshes=options_.original_appearance?std::vector<bool>(scene.meshes.size(),false):ocean_wave_meshes(scene);set.ocean_bed.reset();
+        plan_pbr(set,scene);
         if(scene.instances.empty()) {
             for(std::uint32_t i=0;i<scene.meshes.size();++i) {
                 if((i&1023U)==0)progress();
@@ -1779,6 +1884,9 @@ private:
         set1i(u.environment,environment?1:0);set1i(u.lightmap,maps.lightmap?1:0);
         set1i(u.fade,maps.fade?1:0);set1i(u.height,maps.height?1:0);
         bind_texture(1,maps.normal);bind_texture(2,environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);bind_texture(8,maps.height);
+        set4f(u.pbr,options_.original_appearance?std::array<float,4>{0,0,0,-1}:pbr_draw_params(maps.pbr,options_.parallax,false)); // wave 29
+        if(maps.pbr){set4f(u.pbr_maps,{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f});
+            bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);}
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
         glUniformMatrix4fv_(object_location_,1,GL_FALSE,draw.matrix.data());set4f(u.color,material.color);set1i(u.texture,diffuse?1:0);
         // scene_vertex reads normal_matrix only on its enhanced, non-sky, non-ocean path.
@@ -1789,12 +1897,104 @@ private:
         const bool waves=material.source_ocean&&!options_.original_appearance&&ocean_waves_&&gpu.wave_vao&&sphere_within(ocean_eye_,draw.matrix,gpu.bounds,kOceanWaveRange);
         bind_texture(0,diffuse);bind_vao(waves?gpu.wave_vao:gpu.vao);glDrawElements(GL_TRIANGLES,waves?gpu.wave_count:gpu.count,GL_UNSIGNED_INT,nullptr);
     }
+    // NONCANONICAL wave 29: tessellated relief program (renderer_gl_tess.hpp + scene_fragment as GLSL 400). Unsupported (GL < 4.0,
+    // missing entry points, compile failure) leaves tess_program_ 0: those materials keep their parallax fallback.
+    void link_tess() {
+        GLint major=0;glGetIntegerv(GL_MAJOR_VERSION,&major);
+        if(major<4||!glPatchParameteri_||!glGetActiveUniform_||!glGetUniformfv_||!glGetUniformiv_||!glUniform2fv_) {
+            std::fprintf(stderr,"OpenGL tessellation unavailable (GL %d)\n",major);return;
+        }
+        std::string fragment(scene_fragment);
+        fragment.replace(fragment.find("#version 330 core"),17,"#version 400 core");
+        GLuint shaders[4]{};GLuint p=0;
+        try {
+            shaders[0]=compile(GL_VERTEX_SHADER,gl_tess_vertex);shaders[1]=compile(GL_TESS_CONTROL_SHADER,gl_tess_control);
+            shaders[2]=compile(GL_TESS_EVALUATION_SHADER,gl_tess_evaluation);shaders[3]=compile(GL_FRAGMENT_SHADER,fragment.c_str());
+            p=glCreateProgram_();if(!p)throw std::runtime_error("OpenGL program allocation failed");
+            for(auto shader:shaders)glAttachShader_(p,shader);
+            glLinkProgram_(p);GLint good=0;glGetProgramiv_(p,GL_LINK_STATUS,&good);
+            if(!good){GLint length=0;glGetProgramiv_(p,GL_INFO_LOG_LENGTH,&length);std::string log(static_cast<std::size_t>(std::max(length,1)),'\0');glGetProgramInfoLog_(p,length,nullptr,log.data());throw std::runtime_error("OpenGL tessellation program linking: "+log);}
+        } catch(const std::exception& e) {
+            if(p)glDeleteProgram_(p);
+            for(auto shader:shaders)if(shader)glDeleteShader_(shader);
+            std::fprintf(stderr,"OpenGL tessellation disabled: %s\n",e.what());while(glGetError()!=GL_NO_ERROR){}
+            return;
+        }
+        for(auto shader:shaders)glDeleteShader_(shader);
+        // Every active uniform the main program also has is mirrored (draw_tess); the rest are the tessellation's own.
+        GLint count=0;glGetProgramiv_(p,GL_ACTIVE_UNIFORMS,&count);
+        tess_sync_.clear();
+        for(GLint i=0;i<count;++i) {
+            char name[256];GLsizei length=0;GLint size=0;GLenum type=0;
+            glGetActiveUniform_(p,static_cast<GLuint>(i),sizeof(name),&length,&size,&type,name);
+            std::string base(name,static_cast<std::size_t>(length));
+            if(const auto bracket=base.find('[');bracket!=std::string::npos)base.resize(bracket);
+            for(GLint element=0;element<size;++element) {
+                const std::string item=size>1?base+"["+std::to_string(element)+"]":base;
+                const GLint from=glGetUniformLocation_(program_,item.c_str()),to=glGetUniformLocation_(p,item.c_str());
+                if(from>=0&&to>=0)tess_sync_.push_back({from,to,type,1});
+            }
+        }
+        const auto location=[&](const char* name){return glGetUniformLocation_(p,name);};
+        tess_u_={location("object_matrix"),location("normal_matrix"),location("material_color"),location("has_texture"),location("has_normal_map"),
+            location("has_environment_map"),location("has_lightmap"),location("has_fade_map"),location("has_height_map"),location("alpha_cutoff"),
+            location("source_ocean"),location("sky"),location("fog_enabled"),location("weather_sway"),location("source_scroll"),location("pbr"),
+            location("pbr_maps"),location("tess_view")};
+        tess_program_=p;
+        std::fprintf(stderr,"OpenGL tessellation enabled (GL %d, %zu mirrored uniforms)\n",major,tess_sync_.size());
+        check("linking tessellation program");
+    }
+    bool tessellated(const GlSet& set,const Scene& scene,const Draw& draw,const std::array<float,3>& eye) const {
+        if(!tess_program_||draw.instance->sky||draw.instance->ocean)return false;
+        const auto& maps=set.materials[draw.material];const auto& gpu=set.meshes[draw.instance->mesh];
+        return maps.pbr&&maps.pbr->tessellate&&gpu.tess_vao&&!scene.materials[draw.material].source_ocean&&sphere_within(eye,draw.matrix,gpu.bounds,kPbrTessRange);
+    }
+    // The tessellated opaque draws (tess_draws_), after program_'s: its current uniform values copied once, then per draw.
+    void draw_tess(const GlSet& set,const Scene& scene) {
+        glUseProgram_(tess_program_);
+        for(const auto& u:tess_sync_) {
+            switch(u.type) {
+            case GL_FLOAT:case GL_FLOAT_VEC2:case GL_FLOAT_VEC3:case GL_FLOAT_VEC4:case GL_FLOAT_MAT3:case GL_FLOAT_MAT4: {
+                float v[16]{};glGetUniformfv_(program_,u.from,v);
+                if(u.type==GL_FLOAT)glUniform1f_(u.to,v[0]);else if(u.type==GL_FLOAT_VEC2)glUniform2fv_(u.to,1,v);
+                else if(u.type==GL_FLOAT_VEC3)glUniform3fv_(u.to,1,v);else if(u.type==GL_FLOAT_VEC4)glUniform4fv_(u.to,1,v);
+                else if(u.type==GL_FLOAT_MAT3)glUniformMatrix3fv_(u.to,1,GL_FALSE,v);else glUniformMatrix4fv_(u.to,1,GL_FALSE,v);
+                break;
+            }
+            default: {GLint v=0;glGetUniformiv_(program_,u.from,&v);glUniform1i_(u.to,v);}
+            }
+        }
+        const std::array<float,2> view{float(height_),std::tan(options_.camera.fov*0.008726646259971648f)};
+        glUniform2fv_(tess_u_.view,1,view.data());
+        glPatchParameteri_(GL_PATCH_VERTICES,3);
+        for(const auto* draw:tess_draws_) {
+            const auto& gpu=set.meshes[draw->instance->mesh];const auto& material=scene.materials[draw->material];const auto& maps=set.materials[draw->material];
+            set_cull(!material.double_sided);
+            const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
+            glUniformMatrix4fv_(tess_u_.object,1,GL_FALSE,draw->matrix.data());
+            const auto n=normal_matrix(draw->matrix);glUniformMatrix3fv_(tess_u_.normal_matrix,1,GL_FALSE,n.data());
+            glUniform4fv_(tess_u_.color,1,material.color.data());glUniform1i_(tess_u_.texture,diffuse?1:0);
+            glUniform1i_(tess_u_.normal,maps.normal?1:0);glUniform1i_(tess_u_.environment,maps.environment?1:0);
+            glUniform1i_(tess_u_.lightmap,maps.lightmap?1:0);glUniform1i_(tess_u_.fade,maps.fade?1:0);glUniform1i_(tess_u_.height,maps.height?1:0);
+            glUniform1f_(tess_u_.cutoff,material.alpha_cutoff);glUniform1i_(tess_u_.ocean,0);glUniform1i_(tess_u_.sky,0);
+            glUniform1i_(tess_u_.fog,draw->fog?1:0);
+            static constexpr std::array<float,4> zero{};
+            glUniform4fv_(tess_u_.sway,1,zero.data());glUniform4fv_(tess_u_.scroll,1,zero.data());
+            const auto params=pbr_draw_params(maps.pbr,options_.parallax,true);glUniform4fv_(tess_u_.pbr,1,params.data());
+            const std::array<float,4> present{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f};glUniform4fv_(tess_u_.pbr_maps,1,present.data());
+            bind_texture(0,diffuse);bind_texture(1,maps.normal);bind_texture(2,maps.environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);
+            bind_texture(8,maps.height);bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);
+            bind_vao(gpu.tess_vao);glDrawElements(GL_PATCHES,gpu.tess_count,GL_UNSIGNED_INT,nullptr);
+        }
+        glUseProgram_(program_);
+    }
     void destroy() noexcept {
         if(!context_)return;
         if(SDL_GL_MakeCurrent(window_,context_)){
             // Before entry points are loaded the context itself owns all remaining allocations.
             if(glDeleteBuffers_ && glDeleteVertexArrays_)release(set_);
             if(program_ && glDeleteProgram_)glDeleteProgram_(program_);
+            if(tess_program_ && glDeleteProgram_)glDeleteProgram_(tess_program_);
             if(overlay_program_ && glDeleteProgram_)glDeleteProgram_(overlay_program_);
             if(particle_program_ && glDeleteProgram_)glDeleteProgram_(particle_program_);
             if(contour_program_ && glDeleteProgram_)glDeleteProgram_(contour_program_);

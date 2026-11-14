@@ -30,7 +30,8 @@ layout(location=1) out vec4 outputGuide;
 layout(location=3) out vec4 outputDiffuse;
 layout(location=4) out vec4 outputReflection;
 #endif
-layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; } draw;
+layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; mat4 previousModel; vec4 pbr; } draw;
+#include "pbr.glsl"
 layout(set=0,binding=1) uniform sampler2D diffuseMap;
 layout(set=0,binding=2) uniform sampler2D normalMap;
 layout(set=0,binding=3) uniform sampler2D environmentMap;
@@ -52,29 +53,47 @@ float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 u
 // UVs feed diffuse/normal/fade samples, never the lightmap; geometry, depth, motion vectors and RT rays stay on the true
 // surface. parallaxGradient: world gradient of the relief, tilting the enhanced lighting normal.
 layout(set=0,binding=14) uniform sampler2D heightMap;
-vec2 surfaceUV;
+// NONCANONICAL wave 29 PBR pack (pbr.glsl; draw.pbr): albedo, normal and ORM maps (1x1 white = absent), sampled at pbrUV
+// (the original UVs or a world projection) with pbrDu1/pbrDu2 as gradients; pbrPu/pbrPv the surface's dP/du, dP/dv. A pack
+// height map replaces the derived relief in heightMap (with pbrParallax only; tessellated draws carry it in geometry).
+layout(set=0,binding=18) uniform sampler2D pbrAlbedoMap;
+layout(set=0,binding=19) uniform sampler2D pbrNormalMap;
+layout(set=0,binding=20) uniform sampler2D pbrOrmMap;
+vec2 surfaceUV,pbrUV,pbrDu1=vec2(0),pbrDu2=vec2(0);
+vec3 pbrPu=vec3(0),pbrPv=vec3(0);
+bool pbrOn=false;
 vec3 parallaxGradient=vec3(0);
 void parallax(){
-    surfaceUV=texcoord;
-    if(frame.params.x<.5||textureSize(heightMap,0).x<2)return;
+    surfaceUV=texcoord;pbrUV=texcoord;
+    if(frame.params.x<.5)return;
+    pbrOn=pbrActive(draw.pbr);
+    if(pbrOn&&draw.pbr.x>0.)pbrUV=pbrWorldUV(worldPosition,worldNormal,draw.pbr.xy);
+    vec2 base=pbrOn?pbrUV:texcoord;
     vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),nf=cross(dp1,dp2),v=frame.eye.xyz-worldPosition;
-    vec2 du1=dFdx(texcoord),du2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    pbrDu1=du1;pbrDu2=du2;
     if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det; // dP/du, dP/dv
+    pbrPu=pu;pbrPv=pv;
+    if(textureSize(heightMap,0).x<2||(pbrOn&&!pbrParallax(draw.pbr)))return;
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
-    float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6);
+    float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
+        (pbrOn?min(draw.pbr.z,1.):min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
-    int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,texcoord,du1,du2).r,lastT=0,lastF=h-1;
-    for(int i=0;i<steps&&t<1-h;++i){lastT=t;lastF=t-(1-h);t+=1./steps;h=textureGrad(heightMap,texcoord+shift*t,du1,du2).r;}
+    int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,base,du1,du2).r,lastT=0,lastF=h-1;
+    for(int i=0;i<steps&&t<1-h;++i){lastT=t;lastF=t-(1-h);t+=1./steps;h=textureGrad(heightMap,base+shift*t,du1,du2).r;}
     float f=t-(1-h);if(f>0&&lastF<0)t=mix(lastT,t,lastF/(lastF-f)); // secant refinement
-    surfaceUV=texcoord+shift*t;
-    vec2 slope=(textureGrad(heightMap,surfaceUV,du1,du2).gb-.5)*.5*vec2(textureSize(heightMap,0)); // dh/du, dh/dv
+    vec2 shifted=base+shift*t;
+    if(!pbrOn||draw.pbr.x<=0.)surfaceUV=shifted; // the original maps follow only when they share the pack's UVs
+    if(pbrOn)pbrUV=shifted;
+    vec2 slope=(textureGrad(heightMap,shifted,du1,du2).gb-.5)*.5*vec2(textureSize(heightMap,0)); // dh/du, dh/dv
     parallaxGradient=.7*depth*(slope.x*gu+slope.y*gv);
 }
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
+    if(pbrOn&&textureSize(pbrNormalMap,0).x>1)return pbrNormal(n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb);
     if(draw.flags.x<.5)return normalize(n-parallaxGradient);
     // Zero/degenerate-tangent source meshes (e.g. NPC staff tips) skip normal mapping, as GL does: a screen-derivative
     // tangent is per-triangle, so it rotated the map differently on every facet.
@@ -324,6 +343,15 @@ vec4 original=frame.params.x<.5?originalSurface(texel,sunVisibility):vec4(texel.
 if(draw.flags.w>0&&original.a<=draw.flags.w)discard;
 vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));
+// NONCANONICAL wave 29 PBR pack: albedo (pbr.glsl pbrAlbedo), roughness, metallic and ambient occlusion.
+float pbrAo=1.;
+if(pbrOn){
+    if(textureSize(pbrAlbedoMap,0).x>1) {
+        vec3 low=textureLod(diffuseMap,texcoord,max(float(textureQueryLevels(diffuseMap))-4.,0.)).rgb*draw.color.rgb-enhancedLightmapShadow(texel.a);
+        albedo=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,albedo,pbrTintKeep(draw.pbr));
+    }
+    if(textureSize(pbrOrmMap,0).x>1){vec3 orm=textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb;pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;}
+}
 // NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl);
 // NONCANONICAL wave 28: footstep rings in puddles and prints in snow (frame.groundMarks).
 bool weather=weatherOn(frame.weatherMisc);
@@ -344,10 +372,11 @@ if(frame.params.x<1.5){
 // Blended draws (extra.w 1, 1.5): foliage and grass trace their GI and reflection rays opaque (rt_lighting.glsl rtDiffuseLighting).
 uint secondaryFlags=draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u;
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags,indirect);
+light.diffuse*=pbrAo; // NONCANONICAL wave 29 (history already carries it)
 if(sparseHistory){light.diffuse=sparseDiffuse;light.reflection=sparseReflection;} // untraced far pixel: resolved estimate
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
-rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):texel.rgb);
+rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather||pbrOn?pow(albedo,vec3(1/2.2)):texel.rgb);
 #endif
 }else
 #endif
@@ -362,7 +391,7 @@ vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
 if(weather)baked=weatherBaked(baked,sourceAlbedo,weathered,frame.weatherMisc)*weatherAmbientTint(frame.weather,frame.weatherMisc,frame.sourceTime.y);
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):
 // Eminönü noon 108 vs 115, every roofed interior above original (analysis/porting-wave19/LightingFixes/report.md).
-vec3 ambient=baked;
+vec3 ambient=baked*pbrAo;
 #ifdef IKV_RT
 vec3 facet=rtUnit(rtFacet);if(dot(facet,v)<0)facet=-facet;
 // Fully record-fogged (the fog mix below keeps none of the lit colour; fogWeight 0 for the resolve): no rays (wave 27 perf).
@@ -372,12 +401,13 @@ if(!roofed) {
     vec3 smoothNormal=rtUnit(dot(worldNormal,facet)<0?-worldNormal:worldNormal);
     vec3 diffuse=fogged?vec3(0):rtDiffuseLighting(worldPosition,facet,smoothNormal,n,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,
         draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u,indirect); // foliage: opaque GI rays (rtDiffuseLighting)
+    diffuse*=pbrAo; // NONCANONICAL wave 29 (history already carries it)
     if(sparseHistory&&!fogged)diffuse=sparseDiffuse; // untraced far pixel: resolved estimate
     ambient=albedo*diffuse;
 #ifdef IKV_RT_GUIDED
     // rawHDR = deterministic + albedo*diffuse; after the fog mix the stochastic share also carries this weight.
     float fogWeight=frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.;
-    rtDiffuse=diffuse*fogWeight;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)));
+    rtDiffuse=diffuse*fogWeight;rtArtwork=rtGuidePackArtwork(weather||pbrOn?pow(albedo,vec3(1/2.2)):max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)));
 #endif
 }
 #else

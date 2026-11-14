@@ -58,6 +58,10 @@ struct RendererOptions {
     // NONCANONICAL enhanced parallax occlusion on static zone materials with a derived height (Material::height); original
     // appearance never applies it.
     bool parallax = true;
+    // NONCANONICAL wave 29: hardware tessellation of PBR pack materials with tessellate=true (assets/pbr), enhanced only and
+    // where the device supports it; off (or unsupported) = their parallax occlusion fallback. The pack (enhanced only) maps
+    // a material by its diffuse key = Material::diffuse as loaded (lowercase archive path, '/'): include/ikv/pbr.hpp.
+    bool tessellation = true;
     // Main-thread transport progress only: must not reenter Scene/UI/Renderer; may throw.
     std::function<void()> progress;
 };

@@ -117,6 +117,9 @@ def inside(args) -> None:
     stage = out / "stage"
     shutil.rmtree(stage, ignore_errors=True)
     run("cmake", "--install", build, "--prefix", stage, "--strip")
+    # NONCANONICAL wave 29 enhanced PBR texture pack (CMake installs assets/pbr to share/ikv/pbr; bin/../share/ikv/pbr at run time).
+    if (src / "assets/pbr/manifest.json").is_file() and not (stage / "share/ikv/pbr/manifest.json").is_file():
+        raise SystemExit("assets/pbr PBR pack missing from the staged install")
     bin_dir = stage / "bin"
     shutil.copyfile("/opt/w64/innoextract/innoextract.exe", bin_dir / "innoextract.exe")
     shutil.copyfile("/opt/w64/bin/openssl.exe", bin_dir / "openssl.exe")  # launcher hosting: development CA and leaf

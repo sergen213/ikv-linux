@@ -35,8 +35,10 @@ add_library(ikv-assets-lib STATIC src/assets.cpp src/audio_asset.cpp src/adf_cod
 target_include_directories(ikv-assets-lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(ikv-assets-lib PUBLIC cxx_std_20)
 target_link_libraries(ikv-assets-lib PUBLIC ZLIB::ZLIB)
-add_library(ikv-scene STATIC src/scene.cpp src/scene_animation.cpp src/scene_resources.cpp src/effects.cpp)
-target_link_libraries(ikv-scene PUBLIC ikv-assets-lib PRIVATE Boost::headers)
+add_library(ikv-scene STATIC src/scene.cpp src/scene_animation.cpp src/scene_resources.cpp src/effects.cpp src/pbr.cpp)
+target_link_libraries(ikv-scene PUBLIC ikv-assets-lib PRIVATE Boost::headers nlohmann_json::nlohmann_json)
+# NONCANONICAL wave 29: enhanced PBR texture pack (include/ikv/pbr.hpp); the source tree copy is found first, like shaders.
+target_compile_definitions(ikv-scene PRIVATE IKV_PBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/pbr")
 list(APPEND ikv_targets ikv-protocol ikv-assets-lib ikv-scene)
 set(ikv_install_targets)
 if(IKV_BUILD_SERVER)
@@ -91,13 +93,21 @@ if(IKV_BUILD_CLIENT)
             -DNAME=IKV_GL_WEATHER -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
         DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/weather.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
         VERBATIM)
-    target_sources(ikv-renderers PRIVATE "${ikv_gl_water}" "${ikv_gl_weather}")
+    # NONCANONICAL wave 29 PBR pack shading helpers, shared the same way.
+    set(ikv_gl_pbr "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv_gl_pbr.h")
+    add_custom_command(OUTPUT "${ikv_gl_pbr}"
+        COMMAND "${CMAKE_COMMAND}" -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/pbr.glsl -DOUTPUT=${ikv_gl_pbr}
+            -DNAME=IKV_GL_PBR -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/pbr.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedGlsl.cmake"
+        VERBATIM)
+    target_sources(ikv-renderers PRIVATE "${ikv_gl_water}" "${ikv_gl_weather}" "${ikv_gl_pbr}")
     target_include_directories(ikv-renderers PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     if(IKV_BUILD_VULKAN)
         target_sources(ikv-renderers PRIVATE src/renderer_vk.cpp src/vulkan_rt.cpp)
         target_link_libraries(ikv-renderers PUBLIC Vulkan::Vulkan)
         target_compile_definitions(ikv-renderers PRIVATE IKV_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan")
-        set(ikv_vulkan_shaders scene.vert scene.frag scene_rt.frag scene_rt_guided.frag shadow.vert shadow.frag fullscreen.vert temporal.frag post.frag overlay.frag particle.vert particle.frag contour.vert contour.frag glow.frag)
+        set(ikv_vulkan_shaders scene.vert scene.frag scene_rt.frag scene_rt_guided.frag shadow.vert shadow.frag fullscreen.vert temporal.frag post.frag overlay.frag particle.vert particle.frag contour.vert contour.frag glow.frag
+            scene_tess.vert scene_tess.tesc scene_tess.tese shadow_tess.tese) # NONCANONICAL wave 29: tessellated PBR relief
         set(ikv_spirv)
         foreach(shader IN LISTS ikv_vulkan_shaders)
             set(output "${CMAKE_CURRENT_BINARY_DIR}/shaders/vulkan/${shader}.spv")
@@ -109,7 +119,12 @@ if(IKV_BUILD_CLIENT)
             endif()
             if(shader STREQUAL "scene.frag" OR shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/lighting.glsl"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl")
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/water.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/pbr.glsl")
+            endif()
+            if(shader STREQUAL "scene.vert" OR shader MATCHES "_tess\\.(tesc|tese)$")
+                list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/frame.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/weather.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/scene_vertex.glsl" "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/pbr.glsl"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/scene_tess.glsl")
             endif()
             if(shader STREQUAL "scene_rt.frag" OR shader STREQUAL "scene_rt_guided.frag")
                 list(APPEND shader_includes "${CMAKE_CURRENT_SOURCE_DIR}/shaders/vulkan/rt_lighting.glsl")
@@ -379,6 +394,9 @@ foreach(target IN LISTS ikv_targets)
     endif()
 endforeach()
 install(TARGETS ${ikv_install_targets} RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+if(IKV_BUILD_CLIENT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/pbr")
+    install(DIRECTORY assets/pbr/ DESTINATION "${CMAKE_INSTALL_DATADIR}/ikv/pbr") # NONCANONICAL wave 29 PBR pack
+endif()
 if(IKV_BUILD_SERVER)
     install(DIRECTORY config/ DESTINATION "${CMAKE_INSTALL_DATADIR}/ikv/config")
     install(DIRECTORY database/migrations/ DESTINATION "${CMAKE_INSTALL_DATADIR}/ikv/database/migrations")
