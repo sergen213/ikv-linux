@@ -7,9 +7,10 @@
 # 2. A newly current release is extracted once to $IKV_RELEASE_ROOT/extracted/<version> and the `active` symlink is
 #    switched atomically; the services run `active/AppRun ikv-auth|ikv-server` (deploy/release-units drop-ins or
 #    deploy/compose.release.yaml).
-# 3. ikv-auth restarts (it applies new migrations); the world gets the management "restart" command with a countdown:
-#    it announces to every online player, saves all characters and exits 75, and systemd/Compose restarts it from the
-#    new release. Without an administrator account the world is restarted by SIGTERM (it still saves).
+# 3. ikv-auth restarts (it applies new migrations); every live shard (ikv-server.service, each ikv-server@REALM-SHARD,
+#    each Compose world* service) gets its own management "restart" command with a countdown (world_commands
+#    target_instance): it announces to its online players, saves all characters and exits 75, and systemd/Compose
+#    restarts it from the new release. Without an administrator account every shard is restarted by SIGTERM (it saves).
 #
 # Configuration (environment, e.g. /etc/ikv/update.env):
 #   IKV_RELEASE_ROOT   root-owned release root (default /var/lib/ikv-release; must not be group/world writable)
@@ -64,11 +65,14 @@ ln -sfn "extracted/$version" "$root/.active-new"
 mv -T "$root/.active-new" "$root/active"
 log "v$version active; restarting services"
 
-announce() { # stdin SQL client; prints the number of queued commands
-    printf '%s\n' "WITH queued AS (INSERT INTO world_commands(command, arguments, actor_id)
-SELECT 'restart', jsonb_build_object('delay_seconds', $delay, 'message', 'Sunucu v$version sürümüne güncelleniyor; karakterleriniz kaydedilir.'), id
-FROM accounts WHERE admin ORDER BY id LIMIT 1 RETURNING id) SELECT count(*) FROM queued;"
+announce() { # stdin SQL client; prints the number of queued commands (one per live shard; a pending restart is kept)
+    printf '%s\n' "WITH admin AS (SELECT id FROM accounts WHERE admin ORDER BY id LIMIT 1),
+queued AS (INSERT INTO world_commands(command, arguments, actor_id, target_instance)
+SELECT 'restart', jsonb_build_object('delay_seconds', $delay, 'message', 'Sunucu v$version sürümüne güncelleniyor; karakterleriniz kaydedilir.'), admin.id, s.instance
+FROM admin CROSS JOIN world_instances s WHERE s.kind = 'world' AND s.port > 0 AND s.updated_at > now() - interval '15 seconds'
+ON CONFLICT DO NOTHING RETURNING id) SELECT count(*) FROM queued;"
 }
+announced() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -ge 1 ]; }
 if [ "$mode" = systemd ]; then
     systemctl restart ikv-auth.service
     dsn=$(cat "${IKV_DSN_FILE:-/etc/ikv/dsn}")
@@ -76,11 +80,11 @@ if [ "$mode" = systemd ]; then
     conninfo=$(printf '%s' "$dsn" | sed 's/ password=[^ ]*//')
     queued=$(announce | PGPASSWORD=$password psql --no-psqlrc --quiet --tuples-only --no-align --set ON_ERROR_STOP=1 \
         --dbname "$conninfo" --file - 2>&1 || true)
-    if [ "$queued" = 1 ]; then
-        log "world restarts in $delay s (announced to online players; exit 75 restarts it from v$version)"
+    if announced "$queued"; then
+        log "$queued shard(s) restart in $delay s (announced to online players; exit 75 restarts each from v$version)"
     else
-        log "no announced restart possible ($queued); restarting the world (it saves on SIGTERM)"
-        systemctl restart ikv-server.service
+        log "no announced restart possible ($queued); restarting every shard (they save on SIGTERM)"
+        systemctl try-restart ikv-server.service 'ikv-server@*.service'
     fi
 else
     cd "${IKV_COMPOSE_DIR:-.}"
@@ -88,10 +92,11 @@ else
     $compose restart auth
     queued=$(announce | $compose exec -T database psql -U postgres -d ikv --no-psqlrc --quiet --tuples-only --no-align \
         --set ON_ERROR_STOP=1 --file - 2>&1 || true)
-    if [ "$queued" = 1 ]; then
-        log "world restarts in $delay s (announced to online players; restart: on-failure restarts it from v$version)"
+    if announced "$queued"; then
+        log "$queued shard(s) restart in $delay s (announced to online players; restart: on-failure restarts each from v$version)"
     else
-        log "no announced restart possible ($queued); restarting the world (it saves on SIGTERM)"
-        $compose restart world
+        log "no announced restart possible ($queued); restarting every world shard (they save on SIGTERM)"
+        # shellcheck disable=SC2046 # one word per Compose service
+        $compose restart $($compose ps --services | grep '^world')
     fi
 fi

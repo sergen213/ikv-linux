@@ -6,7 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# Root: it owns the release root (/var/lib/ikv-release, verified by ikv-updater) and restarts ikv-auth/ikv-server.
+# Root: it owns the release root (/var/lib/ikv-release, verified by ikv-updater) and restarts ikv-auth and every
+# world shard (ikv-server.service, ikv-server@REALM-SHARD.service).
 EnvironmentFile=-/etc/ikv/update.env
 Environment=HOME=/var/lib/ikv-release-home
 StateDirectory=ikv-release-home

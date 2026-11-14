@@ -490,7 +490,8 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases, smoke=
         log = calls.read_text()
         assert "systemctl restart ikv-auth.service" in log and "password" not in log.split("psql", 1)[1].split("\n")[0], log
         assert "'restart', jsonb_build_object('delay_seconds', 7" in log and "v3.0.0" in log, log
-        assert "systemctl restart ikv-server.service" not in log, "announced restart fell back to SIGTERM"
+        assert "target_instance" in log and "s.instance" in log, "the restart is not queued per live shard"
+        assert "ikv-server.service" not in log, "announced restart fell back to SIGTERM"
         # Current: no install, no service restart.
         calls.write_text("")
         result = run(["sh", script], env=script_env, timeout=60)

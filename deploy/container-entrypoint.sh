@@ -40,7 +40,12 @@ case "$service" in
             echo "world requires a readable original asset directory at IKV_ASSET_ROOT: $asset_root" >&2
             exit 1
         }
-        run ikv-server --bind 0.0.0.0 --port 7000 \
+        # NONCANONICAL wave 30 shards (deploy/compose.release.yaml profile "realms"): IKV_REALM, IKV_WORLD_PORT (container
+        # port = published port: the shard registers it for clients), IKV_CAPACITY and IKV_PUBLIC_HOST (the address
+        # players reach the shard at; default: the account service's host).
+        if [ -n "${IKV_PUBLIC_HOST:-}" ]; then set -- --public-host "$IKV_PUBLIC_HOST" "$@"; fi
+        run ikv-server --bind 0.0.0.0 --port "${IKV_WORLD_PORT:-7000}" \
+            --realm "${IKV_REALM:-1}" --capacity "${IKV_CAPACITY:-32}" \
             --cert /run/ikv/tls-cert --key /run/ikv/tls-key --dsn-file /run/ikv/dsn \
             --gameplay "$share/config/gameplay.json" --asset-root "$asset_root" "$@"
         ;;
