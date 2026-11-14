@@ -1584,12 +1584,21 @@ int main(int argc, char** argv) {
             check(event(world.state(1),"error","quest"),"abandon requires an unfinished quest");
             world.action(1, {{"action", "quest_accept"}, {"target", 2147493649u}, {"quest", "first_hunt"}});
             check(event(world.state(1), "ack"), "abandoned quest can be accepted again");
+            // NONCANONICAL wave 29 catalogs.map: the giver lists the taken quest as pending ('?' grey), the rat spawn is its
+            // objective area, doors carry no internal name and enemies are not listed.
+            const auto map=world.state(1).at("catalogs").at("map");
+            const auto row=[&](std::uint32_t npc)->ikv::Json{for(const auto& n:map.at("npcs"))if(n.at("id")==npc)return n;return nullptr;};
+            check(row(2147493649u).value("mark",0)==1 && row(2147493649u).at("name").is_string() && row(2147493650u).at("kind")=="merchant","map lists NPCs with quest marks");
+            check(row(2147493652u).at("kind")=="door" && !row(2147493652u).contains("name") && row(2147493651u).is_null(),"doors without names; enemies are not listed");
+            check(map.at("objectives").size()==1 && map.at("objectives")[0].at("quest")=="first_hunt" && map.at("objectives")[0].at("r").get<int>()>=20000,"kill objective area from the spawn");
         }
         // Click-to-attack from outside weapon reach: the server walks the player in and repeats swings until the kill.
         world.action(1, {{"action", "attack"}, {"target", 2147493651u}}); ticks(world, 40);
         auto killed=world.state(1);
         check(killed.at("character").at("state").at("x").get<int>() > 200, "auto-attack approaches the target");
         check(killed.at("character").at("state").at("quests").at("first_hunt").at("progress") == 1, "kill objective");
+        check(killed.at("catalogs").at("map").at("objectives").empty(),"a finished objective leaves the map");
+        for(const auto& n:killed.at("catalogs").at("map").at("npcs"))if(n.at("id")==2147493649u)check(n.value("mark",0)==3,"a finished quest is ready at its giver");
         check(authority_event(killed,"combat",1,1,2147493651u) && authority_event(killed,"death",2147493651u,1,2147493651u),
               "combat and NPC death project high uint32 target identity");
         check(entity(killed,2147493651u).at("alive")==false,"NPC death changes visible life state");

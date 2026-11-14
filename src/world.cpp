@@ -683,6 +683,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         // Other players and NPC entities (with the shop/loot items they introduce) are admitted in state() within the remaining
         // frame budget: group members first, then nearest-first. The static bound covers what is never budgeted: own state,
         // stats, catalogs, the critical-event reserve and the up to five other group members (groups hold six).
+        map_index(); // NONCANONICAL wave 29 catalogs.map (world_map.cpp); budgeted in state(), not part of this static bound
         Json entity_bounds=Json::array();
         for(int player=0;player<5;++player)entity_bounds.push_back(player_bound);
         std::vector<std::pair<size_t,std::string>> item_sizes;
@@ -727,7 +728,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         // A group member travels as a player entity when in view, else as a "party" row (state()), never both: five
         // player_bound entities above bound either form.
         const Json party_row={{"id",UINT32_MAX},{"name",std::string(32,'"')},{"level",INT32_MAX},{"class_id",3},{"hp",INT32_MAX},{"max_hp",INT32_MAX},{"mana",INT32_MAX},{"max_mana",INT32_MAX},
-                              {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true}};
+                              {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true},{"x",-coordinate_limit},{"y",-coordinate_limit}}; // x,y: NONCANONICAL wave 29 map
         require(party_row.dump().size()<=player_bound.dump().size(),"config","Party row exceeds the player entity bound");
         { // Type::catalog parts (recipe_book(), bank_view()), each its own frame: recipe_limit largest recipes with every item
           // a recipe names, and a full Banka tab of the largest stacks with the largest item definitions.
@@ -2886,7 +2887,8 @@ Json World::state(uint32_t id) {
         if(leader)for(auto member:groups_.at(leader))if(member!=id && std::none_of(players.begin(),players.end(),[&](const auto& p){return std::get<2>(p)==member;})) {
             const auto& m=actors_.at(member);const auto& s=m.character.at("state");
             party.push_back({{"id",member},{"name",m.character.at("name")},{"level",s.at("level")},{"class_id",m.character.at("class_id")},{"hp",s.at("hp")},{"max_hp",s.at("max_hp")},{"mana",s.at("mana")},{"max_mana",s.at("max_mana")},
-                             {"zone",s.at("zone")},{"source_registry_id",config_.at("zones").at(s.at("zone").get<std::string>()).value("source_registry_id",Json(nullptr))},{"alive",s.at("hp").get<int>()>0}});
+                             {"zone",s.at("zone")},{"source_registry_id",config_.at("zones").at(s.at("zone").get<std::string>()).value("source_registry_id",Json(nullptr))},{"alive",s.at("hp").get<int>()>0},
+                             {"x",s.at("x")},{"y",s.at("y")}}); // x,y: NONCANONICAL wave 29 Dünya Haritası party dots
         }
         result["party"]=std::move(party);
     }
@@ -2908,6 +2910,11 @@ Json World::state(uint32_t id) {
         if(stranger && used+bytes>65533)continue;
         used+=bytes;result["entities"].push_back(std::move(e));
     }
+    // NONCANONICAL wave 29 catalogs.map (world_map.cpp) is budgeted like the NPCs it precedes: the static bound above leaves
+    // no room for it, so a frame too full for it goes without (the client then marks only what it sees). Catalogs are resent
+    // only when they change.
+    { Json map=map_view(id);const size_t bytes=map.dump().size()+7; // 7: ,"map":
+      if(used+bytes<=65533){used+=bytes;result["catalogs"]["map"]=std::move(map);} }
     // Nearest NPCs first, each only while it and the catalog items it introduces still fit beside every queued event.
     auto& catalog_items=result["catalogs"]["items"];auto& catalog_quests=result["catalogs"]["quests"];
     for(const auto& [d,other]:visible) {

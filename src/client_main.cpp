@@ -1,6 +1,7 @@
 #include "ikv/audio.hpp"
 #include "ikv/effects.hpp"
 #include "ikv/client_admin.hpp"
+#include "ikv/client_map.hpp"
 #include "ikv/client_charsel.hpp"
 #include "ikv/client_session.hpp"
 #include "ikv/client_mutation.hpp"
@@ -666,6 +667,12 @@ class Application {
     int map_zoom_=1,cursor_=-1,chat_previous_=3;
     std::array<int,2> map_center_{};
     std::array<int,4> map_rect_{};
+    // NONCANONICAL wave 29 quest markers and Dünya Haritası (M): data (ikv::ClientMap), marker art, window/view rectangles.
+    ikv::ClientMap map_;
+    ikv::assets::DdsImage map_arrow_{},map_disc_{},map_ring_{};
+    bool world_map_open_=false,map_panning_=false;
+    std::array<int,4> world_map_frame_{},world_map_area_{};
+    float pan_x_=0,pan_y_=0;
     Clock::time_point map_painted_{},loading_painted_{};
     std::array<SDL_Cursor*,5> cursors_{};
     struct LoadingArt { ikv::assets::DdsImage art{},logo{}; std::vector<ikv::assets::DdsImage> frames; } loading_art_;
@@ -895,7 +902,7 @@ private:
         }
         poll_assembly();
         const bool changed_state=state_pending_;
-        if (changed_state) { state_=session_->state; state_pending_=false; }
+        if (changed_state) { state_=session_->state; state_pending_=false; map_.update(state_,session_->self,group_members_); }
         bool changed_snapshot=false;
         if (snapshot_source_!=scene_.source_registry_id ||
             (!state_.empty() && session_->tick<state_.at("tick").get<std::uint32_t>())) {
@@ -3074,12 +3081,223 @@ private:
         const float hour=scene_.lighting.source_hour>=0?scene_.lighting.source_hour:scene_.lighting.source_minute/60;
         char clock[16]; std::snprintf(clock,sizeof(clock),"%d:%.2d",static_cast<int>(hour),std::min(59,static_cast<int>(std::fmod(hour,1.f)*60)));
         label(left,static_cast<int>(iy+ih)-lh()-S(3),clock);
+        paint_quest_markers({ix,iy,iw,ih},cu-half,cv-half,2*half,false); // NONCANONICAL wave 29, above the view cone and texts
         const int x=static_cast<int>(fx),y=static_cast<int>(fy);
         map_rect_={x,y,S(186),S(203)};
         hits_.push_back({x,y,S(186),S(203),nullptr,-1,{}});
         hits_.push_back({x+S(146),y+S(7),S(16),S(16),nullptr,-1,"help-book:Map"}); // 004b5725 -> 004b36d0
         hits_.push_back({x+S(164),y+S(7),S(16),S(16),nullptr,-1,"map"});
+        // NONCANONICAL wave 29: Dünya Haritası button left of the help '?' (hotkey M).
+        map_button(x+S(127),y+S(7),S(16));
         map_center_={static_cast<int>(cu),static_cast<int>(cv)}; map_painted_=Clock::now();
+    }
+    // ---- NONCANONICAL wave 29: quest markers (minimap and Dünya Haritası) and the Dünya Haritası window (M). The original
+    // had neither; data comes from ikv::ClientMap (server catalogs.map, else the visible NPCs). Marker art is procedural. ----
+    static constexpr Rgba mark_available_rgba{255,214,40,255},mark_ready_rgba{255,214,40,255},mark_pending_rgba{170,170,170,255},
+        objective_rgba{255,150,40,255},party_rgba{80,230,80,255},door_rgba{110,220,255,255},self_rgba{255,60,50,255};
+    void ensure_map_art() {
+        if (map_arrow_.mips.empty()) { map_arrow_=ikv::ClientMap::arrow_image(); map_disc_=ikv::ClientMap::disc_image(); map_ring_=ikv::ClientMap::ring_image(); }
+    }
+    // An axis-aligned image clipped to `clip` (x,y,w,h) with its UVs cut to match.
+    void clipped_image(const ikv::assets::DdsImage& image,float x,float y,float w,float h,const std::array<float,4>& clip,Rgba tint) {
+        const float x0=std::max(x,clip[0]),y0=std::max(y,clip[1]),x1=std::min(x+w,clip[0]+clip[2]),y1=std::min(y+h,clip[1]+clip[3]);
+        if (x1<=x0 || y1<=y0 || w<=0 || h<=0) return;
+        const float u0=(x0-x)/w,u1=(x1-x)/w,v0=(y0-y)/h,v1=(y1-y)/h;
+        ui_->image(image,{x0,y0,x1-x0,y1-y0},{{{u0,v0},{u1,v0},{u0,v1},{u1,v1}}},tint);
+    }
+    // An image of size `size` centred at (cx,cy) whose texture-up points along screen angle `theta` (eye.dds convention above).
+    void rotated_image(const ikv::assets::DdsImage& image,float cx,float cy,float size,float theta,Rgba tint) {
+        const float c=std::cos(theta),sn=std::sin(theta);
+        std::array<std::array<float,2>,4> uv{{{-.5f,-.5f},{.5f,-.5f},{-.5f,.5f},{.5f,.5f}}};
+        for (auto& o:uv) o={.5f+c*o[0]+sn*o[1],.5f-sn*o[0]+c*o[1]};
+        ui_->image(image,{cx-size/2,cy-size/2,size,size},uv,tint);
+    }
+    // A quest mark: disc in the mark colour with '!' or '?' in black.
+    void quest_badge(float cx,float cy,float size,int mark) {
+        const auto color=mark==ikv::ClientMap::mark_available?mark_available_rgba:mark==ikv::ClientMap::mark_ready?mark_ready_rgba:mark_pending_rgba;
+        ui_->image(map_disc_,{cx-size/2,cy-size/2,size,size},{{{0,0},{1,0},{0,1},{1,1}}},color);
+        const char* glyph=mark==ikv::ClientMap::mark_available?"!":"?";
+        const int px=ui_->pixel_size(); ui_->set_pixel_size(std::max(8,static_cast<int>(size*.8f))); ui_->set_bold(true);
+        ui_->text(static_cast<int>(cx)-ui_->text_width(glyph)/2,static_cast<int>(cy)-ui_->line_height()/2,glyph,{0,0,0,255});
+        ui_->set_bold(false); ui_->set_pixel_size(px);
+    }
+    void map_button(int x,int y,int size) {
+        ui_->rect(x,y,size,size,{20,24,28,235}); outline(x,y,size,size,world_map_open_?Rgba{255,220,90,255}:Rgba{150,130,90,255});
+        const int px=ui_->pixel_size(); ui_->set_pixel_size(std::max(8,size-S(4)));
+        ui_->text(x+(size-ui_->text_width("M"))/2,y+(size-ui_->line_height())/2,"M",gold_rgba);
+        ui_->set_pixel_size(px);
+        hits_.push_back({x,y,size,size,nullptr,-1,"worldmap-toggle"});
+        if (hovered(x,y,size,size)) tip_={{"Dünya Haritası (M)",white_rgba}};
+    }
+    // Objective areas, then quest marks, over a map view: `view` x,y,w,h on screen shows texels u0..u0+span (square).
+    // Off-view targets sit on the view edge with an arrow pointing to them (the world map lists only on-view ones).
+    void paint_quest_markers(const std::array<float,4>& view,float u0,float v0,float span,bool world) {
+        ensure_map_art();
+        const float scale=view[2]/span,badge=(world?17:13)*s_,inset=badge*.75f;
+        const auto screen=[&](float x,float z){ const auto t=ikv::ClientMap::texel(x,z); return std::array<float,2>{view[0]+(t[0]-u0)*scale,view[1]+(t[1]-v0)*scale}; };
+        const auto edge=[&](const std::array<float,2>& p){ return ikv::ClientMap::clamp_to_rect(p[0],p[1],view[0],view[1],view[0]+view[2],view[1]+view[3],inset); };
+        const auto pointer=[&](const ikv::ClientMap::Edge& e,Rgba color) {
+            const float dx=std::cos(e.angle),dy=std::sin(e.angle);
+            rotated_image(map_arrow_,e.x+dx*badge*.35f,e.y+dy*badge*.35f,badge*.9f,e.angle+1.5707963f,color);
+            return std::array<float,2>{e.x-dx*badge*.45f,e.y-dy*badge*.45f};
+        };
+        for (const auto& o:map_.objectives()) {
+            const auto p=screen(o.x,o.z); const float r=std::max(4*s_,o.r*(2.f/3)*scale);
+            if (const auto e=edge(p); e.clamped && std::hypot(p[0]-e.x,p[1]-e.y)>r) { pointer(e,objective_rgba); continue; }
+            clipped_image(map_disc_,p[0]-r,p[1]-r,2*r,2*r,view,{objective_rgba[0],objective_rgba[1],objective_rgba[2],80});
+            clipped_image(map_ring_,p[0]-r,p[1]-r,2*r,2*r,view,{objective_rgba[0],objective_rgba[1],objective_rgba[2],210});
+            if (world && p[0]>=view[0] && p[1]>=view[1] && p[0]<=view[0]+view[2] && p[1]<=view[1]+view[3]) {
+                const auto text=fit(o.name,S(160)); label(static_cast<int>(p[0])-ui_->text_width(text)/2,static_cast<int>(p[1])-lh()/2,text,objective_rgba);
+            }
+        }
+        for (const auto& n:map_.npcs()) {
+            if (!n.mark) continue;
+            auto p=screen(n.x,n.z);
+            if (const auto e=edge(p); e.clamped) {
+                const auto color=n.mark==ikv::ClientMap::mark_pending?mark_pending_rgba:mark_available_rgba;
+                p=pointer(e,color); quest_badge(p[0],p[1],badge*.8f,n.mark); continue;
+            }
+            quest_badge(p[0],p[1]-(world?badge*.9f:0),badge,n.mark);
+        }
+    }
+    std::string zone_label(int registry) const { return registry>=0 && registry<=70?ikv::source_scene_descriptor(static_cast<unsigned>(registry)).label:std::string("?"); }
+    void toggle_world_map() {
+        world_map_open_=!world_map_open_; map_panning_=false;
+        audio_->play_event(world_map_open_?"ui\\windowopen.raw":"ui\\windowclose.raw");
+        if (world_map_open_) map_.reset();
+    }
+    void world_map_centre() {
+        const auto* self=session_?pose(session_->self):nullptr;
+        if (!self) return;
+        map_.zoom=std::max(map_.zoom,3.f); const auto t=ikv::ClientMap::texel(self->x,self->z); map_.pan(t[0]-map_.centre_u,t[1]-map_.centre_v);
+    }
+    // Dünya Haritası: zone art with NPCs, doors (destination), party, own position and facing, quest marks and objective areas;
+    // wheel zooms at the pointer, a left drag pans; legend and active objectives on the right.
+    void paint_world_map() {
+        world_map_frame_={}; world_map_area_={};
+        const auto* self=session_?pose(session_->self):nullptr;
+        if (!world_map_open_ || !self || !scene_.source_registry_id) return;
+        ensure_zone_map(); ensure_map_art();
+        const int legend=S(230),pad=S(24);
+        const int side=std::max(S(200),std::min({height_-S(120),width_-legend-3*pad-S(20),S(900)}));
+        const int w=side+legend+3*pad,h=side+S(34)+pad,x=(width_-w)/2,y=std::max(S(8),(height_-S(80)-h)/2);
+        const auto zone=*scene_.source_registry_id;
+        const auto content=frame(0,x,y,w,h,"Dünya Haritası - "+ikv::source_scene_descriptor(zone).label);
+        ui_->rect(content[0]-S(10),content[1]-S(4),content[2]-content[0]+S(20),content[3]-content[1]+S(8),{14,16,18,235}); // world name labels stay behind
+        world_map_frame_={x,y,w,h};
+        hits_.push_back({x+w-S(30),y,S(30),S(28),nullptr,-1,"worldmap-toggle"}); // the frame's close x
+        const int ax=x+pad,ay=y+S(34);
+        world_map_area_={ax,ay,side,side};
+        hits_.push_back({ax,ay,side,side,nullptr,-1,"worldmap-area"});
+        const std::array<float,4> view{static_cast<float>(ax),static_cast<float>(ay),static_cast<float>(side),static_cast<float>(side)};
+        const float half=map_.half(),u0=map_.centre_u-half,v0=map_.centre_v-half,span=2*half,scale=static_cast<float>(side)/span;
+        ui_->rect(ax-1,ay-1,side+2,side+2,{0,0,0,255});
+        ui_->image(zone_map_,view,{{{u0/2048,v0/2048},{(u0+span)/2048,v0/2048},{u0/2048,(v0+span)/2048},{(u0+span)/2048,(v0+span)/2048}}});
+        const auto screen=[&](float px,float pz){ const auto t=ikv::ClientMap::texel(px,pz); return std::array<float,2>{view[0]+(t[0]-u0)*scale,view[1]+(t[1]-v0)*scale}; };
+        const auto shown=[&](const std::array<float,2>& p){ return p[0]>=view[0]+2 && p[1]>=view[1]+2 && p[0]<=view[0]+view[2]-2 && p[1]<=view[1]+view[3]-2; };
+        const float icon=12*s_;
+        const auto [mx,my]=cursor();
+        std::vector<std::pair<std::string,Rgba>> hover;
+        const auto hover_check=[&](const std::array<float,2>& p,float size,std::vector<std::pair<std::string,Rgba>> lines) {
+            if (hover.empty() && std::abs(static_cast<float>(mx)-p[0])<=size/2+2 && std::abs(static_cast<float>(my)-p[1])<=size/2+2) hover=std::move(lines);
+        };
+        // A label right of (or, near the view's right edge, left of) a point, kept inside the view horizontally.
+        const auto side_label=[&](const std::array<float,2>& p,const std::string& text,Rgba color) {
+            const int tw=ui_->text_width(text),right=static_cast<int>(view[0]+view[2]);
+            int lx=static_cast<int>(p[0]+icon*.7f);
+            if (lx+tw>right) lx=static_cast<int>(p[0]-icon*.7f)-tw;
+            label(std::max(static_cast<int>(view[0]),lx),static_cast<int>(p[1])-lh()/2,text,color);
+        };
+        for (const auto& n:map_.npcs()) {
+            const auto p=screen(n.x,n.z);
+            if (!shown(p)) continue;
+            if (n.kind=="door") {
+                ui_->image(map_ring_,{p[0]-icon/2,p[1]-icon/2,icon,icon},{{{0,0},{1,0},{0,1},{1,1}}},door_rgba);
+                const auto text=n.to>=0?"→ "+zone_label(n.to):std::string("Geçit");
+                side_label(p,text,door_rgba);
+                hover_check(p,icon,{{"Geçit",gold_rgba},{n.to>=0?"Gider: "+zone_label(n.to):"Hedef bilinmiyor",white_rgba}});
+                continue;
+            }
+            const Rgba color=npc_map_rgba(n);
+            ui_->image(map_disc_,{p[0]-icon/2,p[1]-icon/2,icon,icon},{{{0,0},{1,0},{0,1},{1,1}}},color);
+            // Names: shops/anvils/resets from zoom 2, quest givers from zoom 3 (zoom 1 shows the original map labels and doors).
+            if (map_.zoom>=(n.kind=="questgiver"?3.f:2.f)) {
+                const auto text=fit(n.name,S(150)); const int tw=ui_->text_width(text);
+                const int lx=std::clamp(static_cast<int>(p[0])-tw/2,static_cast<int>(view[0]),static_cast<int>(view[0]+view[2])-tw);
+                label(lx,static_cast<int>(p[1]+icon*.6f),text,color);
+            }
+            std::vector<std::pair<std::string,Rgba>> lines{{n.name,gold_rgba},{ikv::ClientMap::role(n),white_rgba}};
+            if (n.mark==ikv::ClientMap::mark_available) lines.push_back({"Alınabilir görev var",mark_available_rgba});
+            else if (n.mark==ikv::ClientMap::mark_ready) lines.push_back({"Görev teslim edilebilir",mark_ready_rgba});
+            else if (n.mark==ikv::ClientMap::mark_pending) lines.push_back({"Görev sürüyor",mark_pending_rgba});
+            hover_check(p,icon,std::move(lines));
+        }
+        for (const auto& m:map_.party()) {
+            const auto p=screen(m.x,m.z);
+            if (!shown(p)) continue;
+            ui_->image(map_disc_,{p[0]-icon*.4f,p[1]-icon*.4f,icon*.8f,icon*.8f},{{{0,0},{1,0},{0,1},{1,1}}},party_rgba);
+            side_label(p,m.name,party_rgba);
+            hover_check(p,icon,{{m.name,party_rgba},{"Grup üyesi",white_rgba}});
+        }
+        paint_quest_markers(view,u0,v0,span,true); // objective areas and quest badges over the NPC icons
+        { // own position and facing (actor heading; the eye.dds convention: texture-up along pi - yaw), red for contrast
+            const auto p=screen(self->x,self->z);
+            const auto* actor=actor_state(session_->self);
+            const float yaw=actor?actor->shown_yaw:renderer_->camera().yaw;
+            if (shown(p)) rotated_image(map_arrow_,p[0],p[1],icon*1.8f,3.14159265f-yaw,self_rgba);
+            else { const auto e=ikv::ClientMap::clamp_to_rect(p[0],p[1],view[0],view[1],view[0]+view[2],view[1]+view[3],icon); rotated_image(map_arrow_,e.x,e.y,icon*1.4f,e.angle+1.5707963f,self_rgba); }
+        }
+        if (!hover.empty()) tip_=std::move(hover);
+        if (inside(world_map_area_,static_cast<float>(mx),static_cast<float>(my))) { // pointer readout in the minimap's texel form
+            const float u=u0+(static_cast<float>(mx)-view[0])/scale,v=v0+(static_cast<float>(my)-view[1])/scale;
+            label(ax+S(6),ay+S(4),"("+std::to_string(static_cast<int>(u))+", "+std::to_string(static_cast<int>(v))+")");
+        }
+        paint_world_map_legend(ax+side+pad,ay,legend,side);
+        const auto own=ikv::ClientMap::texel(self->x,self->z);
+        map_center_={static_cast<int>(own[0]),static_cast<int>(own[1])}; map_painted_=Clock::now();
+    }
+    Rgba npc_map_rgba(const ikv::ClientMap::Npc& n) const {
+        if (n.banker) return {120,230,160,255};
+        if (n.kind=="merchant") return {90,170,255,255};
+        if (n.kind=="anvil") return {205,205,205,255};
+        if (n.kind=="reset") return {200,130,255,255};
+        return {255,240,150,255}; // questgiver
+    }
+    void paint_world_map_legend(int x,int y,int w,int h) {
+        const int row=std::max(lh(),S(18)),bottom=y+h;
+        const float icon=12*s_;
+        int ly=y;
+        const auto entry=[&](const std::function<void(float,float)>& draw,const std::string& text) {
+            if (ly+row>bottom) return;
+            draw(static_cast<float>(x)+icon/2+2*s_,static_cast<float>(ly)+static_cast<float>(row)/2);
+            label(x+S(22),ly+(row-lh())/2,fit(text,w-S(24))); ly+=row;
+        };
+        const auto disc=[&](Rgba color){ return [this,color,icon](float cx,float cy){ ui_->image(map_disc_,{cx-icon/2,cy-icon/2,icon,icon},{{{0,0},{1,0},{0,1},{1,1}}},color); }; };
+        label(x,ly,"Lejant",gold_rgba); ly+=row;
+        entry([&](float cx,float cy){ quest_badge(cx,cy,icon*1.3f,ikv::ClientMap::mark_available); },"Alınabilir görev");
+        entry([&](float cx,float cy){ quest_badge(cx,cy,icon*1.3f,ikv::ClientMap::mark_ready); },"Teslim edilecek görev");
+        entry([&](float cx,float cy){ quest_badge(cx,cy,icon*1.3f,ikv::ClientMap::mark_pending); },"Süren görev (teslim yeri)");
+        entry([&](float cx,float cy){ ui_->image(map_ring_,{cx-icon/2,cy-icon/2,icon,icon},{{{0,0},{1,0},{0,1},{1,1}}},objective_rgba); },"Görev bölgesi");
+        entry([&](float cx,float cy){ rotated_image(map_arrow_,cx,cy,icon*1.3f,0,self_rgba); },"Sen");
+        entry(disc(party_rgba),"Grup üyesi");
+        entry(disc({255,240,150,255}),"Görev veren");
+        entry(disc({90,170,255,255}),"Satıcı");
+        entry(disc({120,230,160,255}),"Bankacı");
+        entry(disc({205,205,205,255}),"Örs");
+        entry(disc({200,130,255,255}),"Sıfırlayıcı");
+        entry([&](float cx,float cy){ ui_->image(map_ring_,{cx-icon/2,cy-icon/2,icon,icon},{{{0,0},{1,0},{0,1},{1,1}}},door_rgba); },"Geçit (gideceği bölge)");
+        ly+=row/2;
+        std::vector<std::string> quests;
+        for (const auto& o:map_.objectives()) if (std::find(quests.begin(),quests.end(),o.name)==quests.end()) quests.push_back(o.name);
+        if (ly+row<=bottom) { label(x,ly,"Bu bölgedeki görevler",gold_rgba); ly+=row; }
+        if (quests.empty() && ly+row<=bottom) { label(x,ly,"Yok",dim_rgba); ly+=row; }
+        for (const auto& q:quests) if (ly+row<=bottom-3*row) { label(x+S(8),ly,fit(q,w-S(8)),objective_rgba); ly+=row; }
+        // zoom buttons and help at the bottom
+        const int by=bottom-row*2-S(6);
+        int bx=x; bx+=button(bx,by,"+",nullptr,-1,"worldmap-zoom-in")+S(4); bx+=button(bx,by,"-",nullptr,-1,"worldmap-zoom-out")+S(4);
+        button(bx,by,"Ortala",nullptr,-1,"worldmap-centre");
+        label(x,bottom-row,fit("Tekerlek: yakınlaştır, sürükle: kaydır",w),dim_rgba);
+        if (!map_.authoritative()) label(x,by-row,fit("Sunucu harita verisi yok: yalnız yakındakiler",w),dim_rgba);
     }
     // Per-frame HUD upkeep before paint_hud: text expiry, map repaint, F4 camera lock, cursor.
     void hud_frame() {
@@ -3090,7 +3308,7 @@ private:
         if (const auto* self=session_?pose(session_->self):nullptr) {
             // ponytail: CPU overlay repaints per moved map texel and 4x/s for dots; a GPU map quad if HUD cost shows up.
             const std::array<int,2> center{static_cast<int>(1024-self->x*map_scale),static_cast<int>(1024-self->z*map_scale)};
-            if (map_open_ && (center!=map_center_ || now-map_painted_>=std::chrono::milliseconds(250))) hud_dirty_=true;
+            if ((map_open_ || world_map_open_) && (center!=map_center_ || now-map_painted_>=std::chrono::milliseconds(250))) hud_dirty_=true;
             // F4 'Kamerayı kilitler': keep the camera behind the character's heading.
             if (const auto* actor=camera_locked_?actor_state(session_->self):nullptr) { auto camera=renderer_->camera(); camera.yaw=actor->shown_yaw; renderer_->set_camera(camera); }
         }
@@ -3256,6 +3474,7 @@ private:
         paint_bar();
         paint_minimap();
         paint_windows(st);
+        paint_world_map(); // NONCANONICAL wave 29 Dünya Haritası, above the stacked windows
         paint_dialogue(st);
         paint_loot();
         paint_center();
@@ -3730,7 +3949,7 @@ private:
         admin_.reset();
         session_.reset(); count_=0; entities_.clear(); tick_epoch_.reset(); epoch_tick_=0;
         pending_mutations_.clear(); pending_bytes_=0; accepted_actors_.clear(); accepted_source_.reset();
-        state_=Json::object(); state_pending_=false; players_.clear(); has_snapshot_=false;
+        state_=Json::object(); state_pending_=false; players_.clear(); has_snapshot_=false; map_.update(state_,0,Json::array());
         snapshot_source_.reset(); snapshot_revision_=painted_snapshot_revision_=0;
         try {
             session_=std::make_unique<ikv::ClientSession>(options_.host,options_.port,options_.ca,secret_.view(),options_.character);
@@ -4041,6 +4260,11 @@ private:
                 int top=static_cast<int>(hits_.size())-1;
                 while (top>=0 && !inside({hits_[static_cast<std::size_t>(top)].x,hits_[static_cast<std::size_t>(top)].y,hits_[static_cast<std::size_t>(top)].w,hits_[static_cast<std::size_t>(top)].h},mx,my)) --top;
                 if (top!=hover_hit_ || !tip_.empty()) { hover_hit_=top; hud_dirty_=true; }
+                if (world_map_open_ && inside(world_map_area_,mx,my)) hud_dirty_=true; // Dünya Haritası pointer readout and NPC tooltips
+                if (map_panning_ && (event.motion.state&SDL_BUTTON_LMASK) && world_map_area_[2]>0) { // NONCANONICAL wave 29 drag pan
+                    const float texels=2*map_.half()/static_cast<float>(world_map_area_[2]);
+                    map_.pan(-(mx-pan_x_)*texels,-(my-pan_y_)*texels); pan_x_=mx; pan_y_=my;
+                } else map_panning_=false;
             }
             // helps.xml 'Kamera Yönetimi': hold the right button and move the mouse to turn the view (W/A/S/D shortcut).
             if (event.type==SDL_EVENT_MOUSE_MOTION && (event.motion.state&SDL_BUTTON_RMASK) && renderer_) {
@@ -4055,6 +4279,7 @@ private:
                 if (!dragging_ && std::hypot(drag_x_-press_x_,drag_y_-press_y_)>static_cast<float>(S(4))) dragging_=true;
                 if (dragging_) hud_dirty_=true;
             }
+            if (event.type==SDL_EVENT_MOUSE_BUTTON_UP && event.button.button==SDL_BUTTON_LEFT) map_panning_=false;
             if (event.type==SDL_EVENT_MOUSE_BUTTON_UP && event.button.button==SDL_BUTTON_LEFT && !drag_.is_null()) {
                 const auto [x,y]=pixel(event.button.x,event.button.y);
                 if (dragging_) drop(x,y); else hud_click(press_x_,press_y_); // a press without movement is the element's click
@@ -4095,6 +4320,7 @@ private:
                     else if (!confirm_.is_null()) confirm_=nullptr;
                     else if (context_) context_=0;
                     else if (chat_menu_id_) chat_menu_id_=0; // chat-line name menu (0040aad0)
+                    else if (world_map_open_) toggle_world_map(); // NONCANONICAL wave 29 Dünya Haritası
                     else if (!windows_.empty()) windows_.pop_back();
                     else system_menu_=!system_menu_; // original Esc menu "Ana Menü": Oyuna Dön / Ayarlar / Çıkış
                 } else if (key==SDLK_RETURN || key==SDLK_KP_ENTER) {
@@ -4112,6 +4338,7 @@ private:
                 else if (key==SDLK_U) toggle_window(win_craft);
                 else if (key==SDLK_G) toggle_window(win_quests);
                 else if (key==SDLK_H) map_open_=!map_open_;
+                else if (key==SDLK_M) toggle_world_map(); // NONCANONICAL wave 29 (M)Dünya Haritası
                 else if (key==SDLK_P) toggle_window(win_group);
                 else if (key==SDLK_B) toggle_window(win_contacts); // (B)Bağlantılar Penceresi 0x58e28c
                 else if (key==SDLK_Z) { // 004b73ab: Z sits ("/otur", RP_Cok clip 82) or, already sitting, stands ('toah')
@@ -4132,7 +4359,12 @@ private:
                 const auto [x,y]=pixel(event.wheel.mouse_x,event.wheel.mouse_y);
                 const int steps=static_cast<int>(event.wheel.y);
                 const auto window=std::find_if(window_rects_.rbegin(),window_rects_.rend(),[&](const auto& w){return inside(w.second,x,y);});
-                if (inside(map_rect_,x,y)) map_zoom_=std::clamp(steps>0?map_zoom_/2:steps<0?map_zoom_*2:map_zoom_,1,4); // 512..2048 texels
+                if (world_map_open_ && inside(world_map_area_,x,y) && steps) { // NONCANONICAL wave 29: zoom at the pointer
+                    const float texels=2*map_.half()/static_cast<float>(world_map_area_[2]);
+                    map_.zoom_at(steps,map_.centre_u-map_.half()+(x-static_cast<float>(world_map_area_[0]))*texels,map_.centre_v-map_.half()+(y-static_cast<float>(world_map_area_[1]))*texels);
+                }
+                else if (world_map_open_ && inside(world_map_frame_,x,y)) {}
+                else if (inside(map_rect_,x,y)) map_zoom_=std::clamp(steps>0?map_zoom_/2:steps<0?map_zoom_*2:map_zoom_,1,4); // 512..2048 texels
                 else if (window!=window_rects_.rend()) { auto& scroll=scroll_[static_cast<std::size_t>(window->first)]; scroll=std::max(0,scroll-steps); }
                 else if (inside(chat_rect_,x,y)) chat_scroll_=std::max(0,chat_scroll_+steps);
                 else if (!editing_) options_.camera.distance=std::clamp(options_.camera.distance-event.wheel.y*2.f,6.f,60.f);
@@ -4184,6 +4416,10 @@ private:
         else if (value=="chat-filter") chat_filter_open_=!chat_filter_open_;
         else if (value.starts_with("filter:")) { const auto i=static_cast<std::size_t>(value[7]-'0'); if (i<chat_hidden_.size()) chat_hidden_[i]=!chat_hidden_[i]; }
         else if (value=="map") map_open_=false;
+        else if (value=="worldmap-toggle") toggle_world_map(); // NONCANONICAL wave 29 Dünya Haritası
+        else if (value=="worldmap-area") { map_panning_=true; const auto at=cursor(); pan_x_=static_cast<float>(at[0]); pan_y_=static_cast<float>(at[1]); }
+        else if (value=="worldmap-zoom-in" || value=="worldmap-zoom-out") map_.zoom_at(value=="worldmap-zoom-in"?2:-2,map_.centre_u,map_.centre_v);
+        else if (value=="worldmap-centre") world_map_centre();
         else if (value.starts_with("help-book:")) open_help(value.substr(10));
         else if (value=="input") editing_=true;
         else if (value=="guild-create") {
@@ -4417,7 +4653,8 @@ private:
     // A point over any painted window (Yönetici Paneli included) never reaches world picking or movement, even if no hit
     // element covers it.
     bool over_window(float x,float y) const {
-        return std::any_of(window_rects_.begin(),window_rects_.end(),[&](const auto& w){return inside(w.second,x,y);});
+        return std::any_of(window_rects_.begin(),window_rects_.end(),[&](const auto& w){return inside(w.second,x,y);}) ||
+               (world_map_open_ && inside(world_map_frame_,x,y)); // NONCANONICAL wave 29 Dünya Haritası
     }
     // Ganimet sacks (classes.dat object 90002, items\id_item_box.adf) render under the corpse's id shifted below the NPC range.
     static constexpr std::uint32_t sack_offset=0x40000000u;
