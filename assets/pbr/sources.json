@@ -8,13 +8,16 @@
    "ambientcg": "Bark001"
   },
   "brick": {
-   "ambientcg": "Bricks073A"
+   "ambientcg": "Bricks073A",
+   "contrast": 1.5
   },
   "cobble_fan": {
-   "ambientcg": "PavingStones049"
+   "ambientcg": "PavingStones049",
+   "contrast": 1.5
   },
   "cobble_round": {
-   "ambientcg": "PavingStones115B"
+   "ambientcg": "PavingStones115B",
+   "contrast": 1.5
   },
   "concrete": {
    "ambientcg": "Concrete036"
@@ -29,7 +32,8 @@
    "ambientcg": "Fabric013"
   },
   "flagstone": {
-   "ambientcg": "PavingStones055"
+   "ambientcg": "PavingStones055",
+   "contrast": 1.5
   },
   "grass": {
    "ambientcg": "Grass004"
@@ -78,17 +82,20 @@
    "ambientcg": "Ground037"
   },
   "paving_herringbone": {
-   "ambientcg": "PavingStones052"
+   "ambientcg": "PavingStones052",
+   "contrast": 1.5
   },
   "paving_hex": {
    "ambientcg": "PavingStones075",
-   "repeat": 2
+   "contrast": 1.5
   },
   "paving_mossy": {
-   "ambientcg": "PavingStones082"
+   "ambientcg": "PavingStones082",
+   "contrast": 1.5
   },
   "paving_slab": {
-   "ambientcg": "PavingStones112"
+   "ambientcg": "PavingStones112",
+   "contrast": 1.5
   },
   "plaster": {
    "ambientcg": "PaintedPlaster015"
@@ -97,23 +104,28 @@
    "ambientcg": "Rock030"
   },
   "roof_tiles": {
-   "ambientcg": "RoofingTiles006"
+   "ambientcg": "RoofingTiles006",
+   "contrast": 1.5
   },
   "sand": {
    "ambientcg": "Ground062S"
   },
   "sandstone_paving": {
-   "ambientcg": "PavingStones145"
+   "ambientcg": "PavingStones145",
+   "contrast": 1.5
   },
   "stone_block": {
-   "ambientcg": "Bricks064"
+   "ambientcg": "Bricks064",
+   "contrast": 1.5
   },
   "stone_rubble": {
-   "ambientcg": "Bricks076A"
+   "ambientcg": "Bricks076A",
+   "contrast": 1.5
   },
   "wood_planks": {
    "ambientcg": "Planks012",
-   "metal_scale": 0
+   "metal_scale": 0,
+   "contrast": 1.5
   }
  }
 }

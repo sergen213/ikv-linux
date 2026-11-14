@@ -2,112 +2,160 @@
  "version": 1,
  "materials": {
   "asphalt": {
-   "scale": null,
+   "scale": [
+    3.0,
+    3.0
+   ],
    "height_scale": 0.008,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "bark": {
-   "scale": null,
+   "scale": [
+    1.0,
+    1.0
+   ],
    "height_scale": 0.015,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.25
   },
   "brick": {
-   "scale": null,
+   "scale": [
+    1.2,
+    1.2
+   ],
    "height_scale": 0.02,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0
   },
   "cobble_fan": {
-   "scale": null,
-   "height_scale": 0.03,
+   "scale": [
+    3.0,
+    3.0
+   ],
+   "height_scale": 0.05,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "cobble_round": {
-   "scale": null,
-   "height_scale": 0.035,
+   "scale": [
+    2.0,
+    2.0
+   ],
+   "height_scale": 0.05,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "concrete": {
-   "scale": null,
+   "scale": [
+    2.5,
+    2.5
+   ],
    "height_scale": 0.008,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "dirt": {
-   "scale": null,
-   "height_scale": 0.02,
+   "scale": [
+    2.0,
+    2.0
+   ],
+   "height_scale": 0.025,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "dirt_cracked": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.015,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0.25
   },
   "fabric": {
-   "scale": null,
+   "scale": [
+    1.0,
+    1.0
+   ],
    "height_scale": 0,
    "tessellate": false,
    "parallax": false,
    "tint_keep_original": 0.25
   },
   "flagstone": {
-   "scale": null,
-   "height_scale": 0.02,
+   "scale": [
+    3.0,
+    3.0
+   ],
+   "height_scale": 0.03,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "grass": {
-   "scale": null,
+   "scale": [
+    1.4,
+    1.4
+   ],
    "height_scale": 0.01,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "gravel": {
-   "scale": null,
-   "height_scale": 0.02,
+   "scale": [
+    1.5,
+    1.5
+   ],
+   "height_scale": 0.03,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0.25
   },
   "marble": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.0,
    "tessellate": false,
    "parallax": false,
    "tint_keep_original": 0.35
   },
   "metal_painted": {
-   "scale": null,
+   "scale": [
+    1.5,
+    1.5
+   ],
    "height_scale": 0,
    "tessellate": false,
    "parallax": false,
    "tint_keep_original": 0.25
   },
   "metal_rust": {
-   "scale": null,
+   "scale": [
+    1.5,
+    1.5
+   ],
    "height_scale": 0,
    "tessellate": false,
    "parallax": false,
    "tint_keep_original": 0.25
   },
   "metal_tread": {
-   "scale": null,
+   "scale": [
+    1.0,
+    1.0
+   ],
    "height_scale": 0.004,
    "tessellate": false,
    "parallax": true,
@@ -164,91 +212,130 @@
    "tint_keep_original": 1.0
   },
   "moss": {
-   "scale": null,
+   "scale": [
+    2.1,
+    2.1
+   ],
    "height_scale": 0.012,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "paving_herringbone": {
-   "scale": null,
+   "scale": [
+    1.5,
+    1.5
+   ],
    "height_scale": 0.015,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "paving_hex": {
-   "scale": null,
+   "scale": [
+    1.6,
+    1.6
+   ],
    "height_scale": 0.015,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "paving_mossy": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.02,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "paving_slab": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.015,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "plaster": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.01,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "rock": {
-   "scale": null,
-   "height_scale": 0.05,
+   "scale": [
+    3.0,
+    3.0
+   ],
+   "height_scale": 0.1,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0.25
   },
   "roof_tiles": {
-   "scale": null,
-   "height_scale": 0.03,
+   "scale": [
+    3.2,
+    3.2
+   ],
+   "height_scale": 0.05,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "sand": {
-   "scale": null,
+   "scale": [
+    1.6,
+    1.6
+   ],
    "height_scale": 0.01,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0.35
   },
   "sandstone_paving": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.025,
    "tessellate": true,
    "parallax": true,
    "tint_keep_original": 0
   },
   "stone_block": {
-   "scale": null,
+   "scale": [
+    2.4,
+    2.4
+   ],
    "height_scale": 0.025,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0
   },
   "stone_rubble": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.04,
    "tessellate": false,
    "parallax": true,
    "tint_keep_original": 0
   },
   "wood_planks": {
-   "scale": null,
+   "scale": [
+    2.0,
+    2.0
+   ],
    "height_scale": 0.008,
    "tessellate": false,
    "parallax": true,

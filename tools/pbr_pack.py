@@ -173,13 +173,18 @@ def linear_to_srgb(c):
     return np.where(c <= 0.0031308, c * 12.92, 1.055 * c ** (1 / 2.4) - 0.055)
 
 
-def detail_albedo(image, size):
-    """Neutral mean, mean linear luminance MEAN_LUMINANCE, local hue/value variation kept."""
+def detail_albedo(image, size, ao=None, contrast=1.0):
+    """Neutral mean, mean linear luminance MEAN_LUMINANCE, local hue/value variation kept. The source AO is
+    multiplied in (the original textures carry baked joint/crevice darkening) and the luminance deviation from
+    the mean is raised to `contrast` so joints read through the renderer's blurred-original tint."""
     rgb = srgb_to_linear(np.asarray(square(image.convert('RGB'), size)).astype(np.float64) / 255)
-    rgb = rgb / rgb.reshape(-1, 3).mean(0) * MEAN_LUMINANCE
-    # Clip-aware: highlights above 1 are rare at 0.18 mean; renormalise once after clipping.
-    rgb = np.clip(rgb, 0, 1)
-    rgb = rgb / (rgb.reshape(-1, 3).mean(0) / MEAN_LUMINANCE)
+    if ao is not None:
+        rgb = rgb * np.asarray(Image.fromarray(np.round(ao * 255).astype(np.uint8)).resize((size, size), Image.BICUBIC))[..., None] / 255
+    if contrast != 1.0:
+        lum = np.maximum(rgb @ LUMA, 1e-5)
+        rgb = rgb * ((lum / lum.mean()) ** (contrast - 1))[..., None]
+    for _ in range(3):  # clip-aware renormalisation to the neutral 0.18 mean
+        rgb = np.clip(rgb / rgb.reshape(-1, 3).mean(0) * MEAN_LUMINANCE, 0, 1)
     return Image.fromarray(np.round(linear_to_srgb(rgb) * 255).astype(np.uint8))
 
 
@@ -215,10 +220,10 @@ def build_material(spec, params, zf, out):
         a = np.asarray(square(image, w).resize((w // repeat, w // repeat), Image.LANCZOS))
         return Image.fromarray(np.tile(a, (repeat, repeat) + (1,) * (a.ndim - 2)))
 
-    if not spec.get('micro'):
-        detail_albedo(load('Color'), size).save(out / 'albedo.png', optimize=True)
-    normal_map(load('NormalGL'), size, spec.get('normal_strength', 1.0)).save(out / 'normal.png', optimize=True)
     ao = gray(load('AmbientOcclusion'), aux, 1.0)
+    if not spec.get('micro'):
+        detail_albedo(load('Color'), size, ao, spec.get('contrast', 1.0)).save(out / 'albedo.png', optimize=True)
+    normal_map(load('NormalGL'), size, spec.get('normal_strength', 1.0)).save(out / 'normal.png', optimize=True)
     rough = np.clip(gray(load('Roughness'), aux, 0.65) + spec.get('roughness_bias', 0.0), 0.04, 1)
     metal = gray(load('Metalness'), aux, 0.0) * spec.get('metal_scale', 1.0)
     orm = np.stack([ao, rough, metal], -1)
