@@ -79,7 +79,7 @@
    "height_scale": 0.015,
    "tessellate": true,
    "parallax": true,
-   "tint_keep_original": 0.25
+   "tint_keep_original": 0.5
   },
   "fabric": {
    "scale": [
@@ -103,23 +103,23 @@
   },
   "grass": {
    "scale": [
-    1.4,
-    1.4
+    2.5,
+    2.5
    ],
    "height_scale": 0.01,
    "tessellate": false,
    "parallax": true,
-   "tint_keep_original": 0.35
+   "tint_keep_original": 0.5
   },
   "gravel": {
    "scale": [
-    3.0,
-    3.0
+    3.5,
+    3.5
    ],
    "height_scale": 0.05,
    "tessellate": true,
    "parallax": true,
-   "tint_keep_original": 0.25
+   "tint_keep_original": 0.4
   },
   "marble": {
    "scale": [
@@ -223,8 +223,8 @@
   },
   "paving_herringbone": {
    "scale": [
-    1.5,
-    1.5
+    3.0,
+    3.0
    ],
    "height_scale": 0.015,
    "tessellate": true,
@@ -233,8 +233,8 @@
   },
   "paving_hex": {
    "scale": [
-    1.6,
-    1.6
+    0.9,
+    0.9
    ],
    "height_scale": 0.015,
    "tessellate": true,
@@ -311,6 +311,26 @@
    "parallax": true,
    "tint_keep_original": 0
   },
+  "slab_cracked": {
+   "scale": [
+    5.0,
+    5.0
+   ],
+   "height_scale": 0.03,
+   "tessellate": true,
+   "parallax": true,
+   "tint_keep_original": 0.3
+  },
+  "slab_large": {
+   "scale": [
+    12.0,
+    12.0
+   ],
+   "height_scale": 0.01,
+   "tessellate": false,
+   "parallax": true,
+   "tint_keep_original": 0.4
+  },
   "stone_block": {
    "scale": [
     2.4,
@@ -364,7 +384,7 @@
   "textures/bina03.dds": "micro_plaster",
   "textures/bina04.dds": "micro_plaster",
   "textures/bina_02.dds": "micro_plaster",
-  "textures/cami_mermer_zemin.dds": "marble",
+  "textures/cami_mermer_zemin.dds": "slab_large",
   "textures/cami_texture.dds": "micro_stone",
   "textures/cami_texture_2.dds": "micro_stone",
   "textures/can_kay.dds": "rock",
@@ -695,7 +715,7 @@
   "textures/tap_zindan_ocak_kirli.dds": "brick",
   "textures/tap_zindan_tavan_kerpic.dds": "concrete",
   "textures/tap_zindan_torture_rack.dds": "micro_wood",
-  "textures/tap_zindan_zemin.dds": "cobble_round",
+  "textures/tap_zindan_zemin.dds": "slab_cracked",
   "textures/tapinak_zemin_texture.dds": "paving_mossy",
   "textures/tomb_mud.dds": "dirt_cracked",
   "textures/topkapi_agac_tile_texture.dds": "gravel",
@@ -706,7 +726,7 @@
   "textures/topkapi_arka_giris_textures.dds": "micro_plaster",
   "textures/topkapi_arka_giris_yanlar_diffuse.dds": "micro_plaster",
   "textures/topkapi_arka_giris_zemin.dds": "micro_stone",
-  "textures/topkapi_arka_interior_zemin.dds": "flagstone",
+  "textures/topkapi_arka_interior_zemin.dds": "slab_cracked",
   "textures/topkapi_arka_ust_isik_cati.dds": "micro_plaster",
   "textures/topkapi_arka_yukari_plaka_textures.dds": "micro_plaster",
   "textures/topkapi_baca_textures.dds": "micro_stone",
@@ -718,7 +738,7 @@
   "textures/topkapi_dukkanlar_plaka_raf.dds": "micro_plaster",
   "textures/topkapi_gecis_diffusemap.dds": "micro_plaster",
   "textures/topkapi_giris_metal_plakalar.dds": "micro_plaster",
-  "textures/topkapi_giris_zemin_tile.dds": "sandstone_paving",
+  "textures/topkapi_giris_zemin_tile.dds": "slab_cracked",
   "textures/topkapi_granit.dds": "concrete",
   "textures/topkapi_ic_bolum_catidiffusemap.dds": "micro_plaster",
   "textures/topkapi_isinlanma_kristal_kule.dds": "micro_plaster",
@@ -771,7 +791,7 @@
   "textures/ym_zemin_b.dds": "metal_rust",
   "textures/ym_zemin_c.dds": "metal_rust",
   "textures/can_kay_islak.dds": "rock",
-  "textures/can_top2.dds": "dirt",
+  "textures/can_top2.dds": "dirt_cracked",
   "textures/cem_cal_duvar_kirli.dds": "concrete",
   "textures/cem_cimen_a.dds": "grass",
   "textures/cem_tomb_mud.dds": "dirt_cracked",
@@ -796,15 +816,15 @@
   "textures/sig_bunkerwall_kirli.dds": "concrete",
   "textures/sig_floor_muddy.dds": "concrete",
   "textures/tap_zindan_duvar_kirli.dds": "stone_rubble",
-  "textures/tap_zindan_zemin_kirli.dds": "cobble_round",
+  "textures/tap_zindan_zemin_kirli.dds": "slab_cracked",
   "textures/tas_duvar_roman.dds": "stone_rubble",
   "textures/topkapi_arka_giris_zemin_blend.dds": "micro_stone",
   "textures/topkapi_cimen_blend.dds": "grass",
-  "textures/topkapi_giris_zemin_blend.dds": "sandstone_paving",
+  "textures/topkapi_giris_zemin_blend.dds": "dirt_cracked",
   "textures/topkapi_kayaliklar_toprak.dds": "dirt",
   "textures/topkapi_kolon_zemin_blend.dds": "flagstone",
-  "textures/topkapi_main_dirty_blend.dds": "flagstone",
-  "textures/toprak_b.dds": "gravel",
+  "textures/topkapi_main_dirty_blend.dds": "slab_cracked",
+  "textures/toprak_b.dds": "dirt_cracked",
   "textures/under_darkrock.dds": "rock",
   "textures/under_meran_yer_b_kirli.dds": "sandstone_paving",
   "textures/under_moss.dds": "moss",

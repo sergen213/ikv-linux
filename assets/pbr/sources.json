@@ -2,7 +2,7 @@
  "license": "CC0 1.0 (ambientCG)",
  "materials": {
   "asphalt": {
-   "ambientcg": "Asphalt026C"
+   "ambientcg": "Asphalt031"
   },
   "bark": {
    "ambientcg": "Bark001"
@@ -36,7 +36,8 @@
    "contrast": 1.5
   },
   "grass": {
-   "ambientcg": "Grass004"
+   "ambientcg": "Grass004",
+   "contrast": 1.5
   },
   "gravel": {
    "ambientcg": "Gravel022"
@@ -83,7 +84,7 @@
   },
   "paving_herringbone": {
    "ambientcg": "PavingStones052",
-   "contrast": 1.5
+   "contrast": 2.0
   },
   "paving_hex": {
    "ambientcg": "PavingStones075",
@@ -108,11 +109,19 @@
    "contrast": 1.5
   },
   "sand": {
-   "ambientcg": "Ground062S"
+   "ambientcg": "Ground096A",
+   "contrast": 2.0
   },
   "sandstone_paving": {
    "ambientcg": "PavingStones145",
    "contrast": 1.5
+  },
+  "slab_cracked": {
+   "ambientcg": "Tiles130",
+   "contrast": 1.5
+  },
+  "slab_large": {
+   "ambientcg": "PavingStones136"
   },
   "stone_block": {
    "ambientcg": "Bricks064",
