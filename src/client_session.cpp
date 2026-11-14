@@ -239,6 +239,28 @@ void validate_catalog(const Json& part) {
         if (item.contains("tab")) integer(item.at("tab"), 1, 1); // second Banka tab; absent = first
     }
 }
+// NONCANONICAL wave 29 catalogs.map (world_map.cpp map_view): the own zone's listed NPCs and the active quests' objective spots.
+void validate_map(const Json& map) {
+    if (!map.is_object()) invalid();
+    const auto& npcs = map.at("npcs");
+    array_limit(npcs, 256);
+    for (const auto& npc : npcs) {
+        if (!npc.is_object()) invalid();
+        integer(npc.at("id"), 1, UINT32_MAX); text(npc.at("kind"), 32);
+        integer(npc.at("x"), -coordinate_limit, coordinate_limit); integer(npc.at("y"), -coordinate_limit, coordinate_limit);
+        if (npc.contains("name")) text(npc.at("name"), 128);
+        if (npc.contains("mark")) integer(npc.at("mark"), 1, 3);
+        if (npc.contains("to")) integer(npc.at("to"), 0, 70);
+        if (npc.contains("banker") && !npc.at("banker").is_boolean()) invalid();
+    }
+    const auto& objectives = map.at("objectives");
+    array_limit(objectives, 32);
+    for (const auto& o : objectives) {
+        if (!o.is_object()) invalid();
+        text(o.at("quest"), 128);
+        integer(o.at("x"), -coordinate_limit, coordinate_limit); integer(o.at("y"), -coordinate_limit, coordinate_limit); integer(o.at("r"), 0, 500000);
+    }
+}
 Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) {
     if (!body.is_object() || integer(body.at("self"), 1, UINT32_MAX) != self ||
         integer(body.at("tick"), 0, UINT32_MAX) < tick) invalid();
@@ -404,6 +426,7 @@ Bounds validate_state(const Json& body, std::uint32_t self, std::uint32_t tick) 
             health(member); integer(member.at("mana"), 0, integer(member.at("max_mana"), 0, INT32_MAX)); text(member.at("zone"), 128);
             if (const auto& source = member.at("source_registry_id"); !source.is_null()) integer(source, 0, 70);
             if (!member.at("alive").is_boolean() || member.at("alive").get<bool>() != (member.at("hp").get<std::int64_t>() > 0)) invalid();
+            for (const char* key : {"x", "y"}) if (member.contains(key)) integer(member.at(key), -coordinate_limit, coordinate_limit); // wave 29 servers
         }
     }
     const auto& events = body.at("events");
@@ -679,6 +702,7 @@ void ClientSession::receive(Message message) {
             // The world sends catalogs on admission and whenever they change; other states keep the last accepted copy.
             if (const auto catalogs = body.find("catalogs"); catalogs != body.end()) {
                 if (!catalogs->is_object()) invalid();
+                if (const auto map = catalogs->find("map"); map != catalogs->end()) validate_map(*map);
                 impl_->fold(body);
             } else if (!impl_->state_seen || !state.contains("catalogs")) invalid();
             else {

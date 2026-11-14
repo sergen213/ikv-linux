@@ -246,6 +246,12 @@ private:
     void quest_use(uint32_t id, uint32_t target); // Kullan/Konuş on a use-objective prop/NPC; may commit state
     void quest_finish(Json& state, const Json& character, const std::string& quest, Json& events);
     void quest_tick(uint32_t id, Actor& a); // once a second: timed quest expiry and visit spots; may commit state
+    // NONCANONICAL wave 29 map catalog (src/world_map.cpp): per zone the static NPCs a map lists, per zone and enemy template
+    // the spawn clusters {x, y, radius} of kill/collect objective areas; map_view builds state() catalogs.map.
+    std::map<std::string, std::vector<uint32_t>> map_npcs_;
+    std::map<std::string, std::map<std::string, std::vector<std::array<int64_t,3>>>> map_spawns_;
+    void map_index();
+    Json map_view(uint32_t id) const;
     // Bots (src/world_bots.cpp). `errand` is an NPC to reach and `request` the action to send once in interaction range.
     struct Reaction { uint32_t due = 0; Json request; uint32_t leader = 0; }; // a delayed reply/accept; leader: set on success
     struct Bot {
