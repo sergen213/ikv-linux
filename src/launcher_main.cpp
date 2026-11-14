@@ -632,8 +632,11 @@ class Launcher final : public QWidget {
                 newest = release; newestVersion = QString::fromStdString(version);
             }
             if (newestVersion.isEmpty()) throw std::runtime_error("Seçili kanalda (" + updateChannel().toStdString() + ") sürüm bulunamadı");
-            if (ikv::updates::compare_versions(newestVersion.toStdString(), ikv::release::version) <= 0) {
-                status->setText(QString("Başlatıcı güncel (v%1)").arg(ikv::release::version)); log(status->text());
+            // --server updates the install root's services, which run its current release, not this launcher binary.
+            std::string baseline = ikv::release::version;
+            if (serverUpdate) if (const auto current = ikv::updates::current_release(fs(root->text())); !current.empty()) baseline = current;
+            if (ikv::updates::compare_versions(newestVersion.toStdString(), baseline) <= 0) {
+                status->setText(QString("Başlatıcı güncel (v%1)").arg(QString::fromStdString(baseline))); log(status->text());
                 if (automation) { std::printf("ikv-launcher %s: güncel (en yeni v%s)\n", ikv::release::version, qPrintable(newestVersion)); QCoreApplication::exit(0); }
                 return;
             }

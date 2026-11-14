@@ -355,6 +355,9 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
         add_test(NAME client-shard-transfer
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/client_transfer.py" --client "$<TARGET_FILE:ikv-client>")
         set_tests_properties(client-shard-transfer PROPERTIES TIMEOUT 120)
+        add_test(NAME client-outdated-refusal
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/client_outdated.py" --client "$<TARGET_FILE:ikv-client>")
+        set_tests_properties(client-outdated-refusal PROPERTIES TIMEOUT 60)
         add_test(NAME authenticated-multiplayer
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/local_multiplayer.py"
                 --auth "$<TARGET_FILE:ikv-auth>" --server "$<TARGET_FILE:ikv-server>"

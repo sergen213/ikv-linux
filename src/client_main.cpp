@@ -382,7 +382,13 @@ int headless(const Options& o,const Secret& secret) {
                     if (!std::cout) throw std::runtime_error("state output failed");
                 }
             });
-        } catch (const std::exception&) { if (!session->transfer || finishing) throw; } // a transferring shard may cut the line
+        } catch (const std::exception&) {
+            if (session->farewell_code==ikv::outdated_goodbye) { // NONCANONICAL: same "new release" exit as the graphical client
+                std::cerr << ikv::client_update::message(session->farewell_version) << '\n';
+                return ikv::client_update::exit_code;
+            }
+            if (!session->transfer || finishing) throw; // a transferring shard may cut the line
+        }
         if (session->eof && !finishing && !session->transfer) {
             if (!session->self || (o.ticks && count<o.ticks)) throw std::runtime_error("server closed before requested world state");
             finishing=true; session->stop();

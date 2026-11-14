@@ -465,6 +465,45 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases, smoke=
         assert stdout.strip() == "fixture-appimage 3.0.0 handoff=1 args=--update-interval-seconds 10", (stdout, stderr)
         assert os.readlink(auto_root / "current") == "releases/3.0.0"
         assert "skip_version" not in conf.read_text(encoding="utf-8"), "installing a newer release kept the rollback skip"
+
+        # ---- Dedicated servers: --update-once --server installs only (exit 10), ikv-auto-update.sh activates ----
+        server_root = workspace / "server-release"
+        shims = workspace / "shims"
+        shims.mkdir()
+        calls = workspace / "service-calls.log"
+        for name, body in (("systemctl", 'echo "systemctl $*" >> "$IKV_TEST_CALLS"\n'),
+                           ("psql", 'echo "psql $*" >> "$IKV_TEST_CALLS"; cat >> "$IKV_TEST_CALLS"; echo 1\n')):
+            (shims / name).write_text("#!/bin/sh\n" + body)
+            (shims / name).chmod(0o755)
+        dsn = workspace / "dsn"
+        dsn.write_text("host='/run/postgresql' port=5432 dbname=ikv user=ikv password=0123abcd connect_timeout=5\n")
+        script_env = dict(environment, IKV_RELEASE_ROOT=str(server_root), IKV_LAUNCHER=str(launcher), IKV_DSN_FILE=str(dsn),
+                          IKV_UPDATE_DELAY="7", IKV_TEST_CALLS=str(calls), PATH=str(shims) + os.pathsep + environment["PATH"],
+                          IKV_UPDATE_ARGS=f"--repo owned-fixture/releases --trust {public_key} --update-ca {ca_cert} "
+                                          f"--release-api {origin}/releases --channel stable --network-timeout-ms 2000")
+        script = Path(__file__).resolve().parents[1] / "deploy/ikv-auto-update.sh"
+        result = run(["sh", script], env=script_env, timeout=60)
+        assert "v3.0.0 kuruldu" in result.stdout and "fixture-appimage" not in result.stdout, result.stdout
+        assert os.readlink(server_root / "current") == "releases/3.0.0"
+        assert os.readlink(server_root / "active") == "extracted/3.0.0"
+        assert run([server_root / "active/AppRun", "ikv-server"]).stdout == "apprun 3.0.0 ikv-server\n"
+        log = calls.read_text()
+        assert "systemctl restart ikv-auth.service" in log and "password" not in log.split("psql", 1)[1].split("\n")[0], log
+        assert "'restart', jsonb_build_object('delay_seconds', 7" in log and "v3.0.0" in log, log
+        assert "systemctl restart ikv-server.service" not in log, "announced restart fell back to SIGTERM"
+        # Current: no install, no service restart.
+        calls.write_text("")
+        result = run(["sh", script], env=script_env, timeout=60)
+        assert "güncel" in result.stdout and "v3.0.0 active" in result.stdout, result.stdout
+        assert calls.read_text() == "", calls.read_text()
+        # A tampered manifest fails the check (exit 1): nothing is installed or activated and no service is touched.
+        responses["/manifest.json"] = responses["/manifest.json"] + b" "
+        tampered_root = workspace / "server-release-tampered"
+        result = run(["sh", script], env=dict(script_env, IKV_RELEASE_ROOT=str(tampered_root)), succeeds=False, timeout=60)
+        assert "the running release is kept" in result.stdout, result.stdout
+        assert not (tampered_root / "current").exists() and not (tampered_root / "active").exists()
+        assert calls.read_text() == "", calls.read_text()
+        publish(releases[2])
     finally:
         for fault in all_faults:
             fault["cancel"].set()
@@ -520,10 +559,14 @@ def main():
             (payload / "bin/ikv").write_bytes(b"#!/bin/sh\necho " + version.encode("ascii") + b"\n")
             (payload / "bin/ikv").chmod(0o755)
             if appimage:
-                # Stand-in for the release AppImage that the launcher execs on restart/handoff.
+                # Stand-in for the release AppImage that the launcher execs on restart/handoff; --appimage-extract
+                # (deploy/ikv-auto-update.sh) yields an AppRun that names the release.
+                v = version.encode("ascii")
                 (payload / "bin/ikv-linux.AppImage").write_bytes(
-                    b'#!/bin/sh\necho "fixture-appimage ' + version.encode("ascii")
-                    + b' handoff=${IKV_UPDATE_HANDOFF:-unset} args=$*"\n')
+                    b'#!/bin/sh\nif [ "${1:-}" = --appimage-extract ]; then mkdir -p squashfs-root && '
+                    b"printf '#!/bin/sh\\necho \"apprun " + v + b" $*\"\\n' > squashfs-root/AppRun && "
+                    b"chmod 755 squashfs-root/AppRun; exit 0; fi\n"
+                    b'echo "fixture-appimage ' + v + b' handoff=${IKV_UPDATE_HANDOFF:-unset} args=$*"\n')
                 (payload / "bin/ikv-linux.AppImage").chmod(0o755)
             (payload / "data.txt").write_bytes(b"release " + version.encode("ascii") + b"\n")
             (payload / "data.txt").chmod(0o644)
