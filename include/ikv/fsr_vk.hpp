@@ -3,6 +3,7 @@
 #include <vulkan/vulkan.h>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -47,6 +48,7 @@ public:
         float frame_ms, near_plane, far_plane, fov_y;
         bool reset;
         std::uint64_t frame; // +1 per call; a gap resets interpolation
+        std::function<void()> after_flow; // optional: recorded between optical flow and interpolation (GPU timing marks)
     };
     void interpolate(const Interpolation&);
     bool generates() const;

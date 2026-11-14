@@ -230,6 +230,28 @@ vec3 waterSurface(){
     if(weatherOn(frame.weatherMisc))c=mix(weatherFogLinear(),c,weatherFogTransmit(distance(frame.eye.xyz,p),frame.weather,frame.weatherMisc));
     return max(c,vec3(0));
 }
+#ifdef IKV_RT_GUIDED
+// Sparse indirect (wave 28 far, wave 29 foliage and glossy, main below): the previous frame's resolved indirect gain and
+// reflection at this point (reprojected; renderer_vk.cpp bindings 15/16), false when it has none there (seabed under the
+// water, which owns the guide; disocclusions) or when it belongs to the other kind of surface (NONCANONICAL wave 29:
+// temporal.frag stores a blended alpha-tested owner's history length negative; an opaque surface showing through a leaf
+// or grass blade's edge took the blade's estimate). Animated draws (wind-swayed foliage, actors) reproject with their own
+// motion: motionPrevious is their previous clip position without the previous jitter, which the history keeps.
+bool rtSparseHistory(out vec3 diffuse,out vec3 reflection,bool blended){
+    vec4 c=fract(draw.extra.w)>.25?vec4(motionPrevious.xy+frame.jitter.zw*motionPrevious.w,motionPrevious.zw):frame.previousVP*vec4(worldPosition,1);
+    vec2 uv=c.w>0?c.xy/c.w*.5+.5:vec2(-1);
+    diffuse=reflection=vec3(0);
+    if(!(all(greaterThanEqual(uv,vec2(0)))&&all(lessThan(uv,vec2(1)))))return false;
+    ivec2 t=ivec2(uv*vec2(textureSize(previousIndirect,0)));
+    vec4 d=texelFetch(previousIndirect,t,0);
+    // History carries the fog weights the stochastic terms were drawn with (faithful record fog, weather fog): undo them.
+    float weight=(frame.params.x>1.5&&frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.)*
+        (weatherOn(frame.weatherMisc)?weatherFogTransmit(distance(frame.eye.xyz,worldPosition),frame.weather,frame.weatherMisc):1.);
+    if(!((blended?-d.a:d.a)>=1&&weight>.01))return false;
+    diffuse=d.rgb/weight;reflection=texelFetch(previousReflection,t,0).rgb/weight;
+    return true;
+}
+#endif
 void main(){
 outputMotion=(motionPrevious.xy/motionPrevious.w-motionCurrent.xy/motionCurrent.w)*.5;
 parallax(); // derivatives: before any discard
@@ -247,31 +269,27 @@ vec3 rtFacet=cross(dFdx(worldPosition),dFdy(worldPosition));
 // their history. Far pixels were most of a horizon view's cost: incoherent rays from distant terrain, buildings and
 // canopies. The deterministic Sun ray is unchanged. Every pixel traces on a frame without history (params.z 0: the
 // first frame, lighting jumps), without the guided resolve and on untextured translucent draws (never resolved).
-bool indirect=true;
+// NONCANONICAL wave 29 (Topkapı Ruh Taşı ring, analysis/porting-wave29/TopkapiPerf3): nearer than that, blended
+// alpha-tested draws (foliage, grass: extra.w 1..2, cutoff) trace them on one 2x2 block of each 2x2 group of blocks
+// per frame (every pixel once in 4 frames; frame.shadowParams.z 1, renderer_vk.cpp IKV_RT_SPARSE_FOLIAGE). Every leaf
+// layer over a pixel paid for its own GI and reflection rays (a canopy's ~2.7 ms at 2743x1543); their denoised result
+// is low-frequency, so the resolve's neighbours and history carry it as they do far pixels.
+bool indirect=true,glossy=true; // glossy: reflection rays traced (sparse glossy below)
+bool foliage=draw.extra.w>.75&&draw.extra.w<2.&&draw.flags.w>0;
 vec3 sparseDiffuse=vec3(0),sparseReflection=vec3(0);bool sparseHistory=false;
 #ifdef IKV_RT_GUIDED
 if(frame.shadowParams.y>0&&frame.params.z>.5&&!(draw.extra.w>.75&&draw.flags.w<=0)&&
    dot(worldPosition-frame.eye.xyz,frame.cameraForward.xyz)>frame.shadowParams.y) {
     uvec2 q=(uvec2(gl_FragCoord.xy)>>1u)&3u;
     indirect=uint[16](0u,8u,2u,10u,12u,4u,14u,6u,3u,11u,1u,9u,15u,7u,13u,5u)[q.y*4u+q.x]==(uint(frame.viewport.z)&15u);
+} else if(frame.shadowParams.z>.5&&frame.params.z>.5&&foliage) {
+    uvec2 q=(uvec2(gl_FragCoord.xy)>>1u)&1u;
+    indirect=uint[4](0u,2u,3u,1u)[q.y*2u+q.x]==(uint(frame.viewport.z)&3u);
 }
-// Untraced pixels take the previous frame's resolved estimate (reprojected; renderer_vk.cpp bindings 15/16) into the raw
-// colour, so whatever reads the raw colour (layers under blended foliage) sees no dither. A pixel with no resolved
-// history there (seabed under the water, which owns the guide; disocclusions) traces after all, so the water's
+// Untraced pixels take the previous frame's resolved estimate (rtSparseHistory) into the raw colour, so whatever reads
+// the raw colour (layers under blended foliage) sees no dither. A pixel without one traces after all, so the water's
 // refraction copy keeps per-pixel samples.
-if(!indirect) {
-    vec4 c=frame.previousVP*vec4(worldPosition,1);
-    vec2 uv=c.w>0?c.xy/c.w*.5+.5:vec2(-1);
-    if(all(greaterThanEqual(uv,vec2(0)))&&all(lessThan(uv,vec2(1)))) {
-        ivec2 t=ivec2(uv*vec2(textureSize(previousIndirect,0)));
-        vec4 d=texelFetch(previousIndirect,t,0);
-        // History carries the fog weights the stochastic terms were drawn with (faithful record fog, weather fog): undo them.
-        float weight=(frame.params.x>1.5&&frame.fogColor.w>.5&&draw.extra.z>.5?clamp(sourceFog,0,1):1.)*
-            (weatherOn(frame.weatherMisc)?weatherFogTransmit(distance(frame.eye.xyz,worldPosition),frame.weather,frame.weatherMisc):1.);
-        if(d.a>=1&&weight>.01){sparseHistory=true;sparseDiffuse=d.rgb/weight;sparseReflection=texelFetch(previousReflection,t,0).rgb/weight;}
-    }
-    if(!sparseHistory)indirect=true;
-}
+if(!indirect)indirect=!(sparseHistory=rtSparseHistory(sparseDiffuse,sparseReflection,foliage));
 #endif
 #endif
 #ifdef IKV_RT_GUIDED
@@ -354,7 +372,22 @@ float ndl=max(dot(n,l),0),ndv=max(dot(n,v),.001),ndh=max(dot(n,h),0),vdh=max(dot
 if(frame.params.x<1.5){
 // Blended draws (extra.w 1, 1.5): foliage and grass trace their GI and reflection rays opaque (rt_lighting.glsl rtDiffuseLighting).
 uint secondaryFlags=draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u;
-RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags,indirect);
+// NONCANONICAL wave 29 sparse glossy reflection (analysis/porting-wave29/TopkapiPerf3; frame.shadowParams.w 1,
+// renderer_vk.cpp IKV_RT_SPARSE_REFLECTION): other rough surfaces (roughness >= .5: every dry surface, .65) trace their
+// glossy reflection rays on one 2x2 block of each 2x2 group per frame and take the resolved reflection elsewhere; GI and
+// the Sun ray stay per pixel. Reflection rays of ground and floors crossing alpha-tested canopies and grass were the
+// largest share of the Topkapı ring's opaque cost; a .65-rough reflection is as low-frequency as the GI. Wet surfaces
+// (roughness below .5: puddles) keep every ray. The resolve takes such pixels' reflection from traced
+// neighbours (outputReflection.a + 2: no reflection sample).
+vec3 glossyHistory=vec3(0);
+#ifdef IKV_RT_GUIDED
+if(indirect&&!foliage&&frame.shadowParams.w>.5&&frame.params.z>.5&&roughness>=.5&&!(draw.extra.w>.75&&draw.flags.w<=0)) {
+    uvec2 q=(uvec2(gl_FragCoord.xy)>>1u)&1u;
+    vec3 unused;
+    if(uint[4](0u,2u,3u,1u)[q.y*2u+q.x]!=(uint(frame.viewport.z)&3u))glossy=!rtSparseHistory(unused,glossyHistory,false);
+}
+#endif
+RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags,indirect,glossy);
 if(rtRoofed()) {
     // NONCANONICAL wave 29: roofed interior. The source's only interior light is its baked light (record per-vertex terms,
     // lightmaps, normal-map illumination: originalSurface), so physical RT takes the enhanced raster's roofed light
@@ -370,6 +403,7 @@ if(rtRoofed()) {
     light.sun=gain-ambientGain;
 }
 if(sparseHistory){light.diffuse=sparseDiffuse;light.reflection=sparseReflection;} // untraced far pixel: resolved estimate
+if(!glossy)light.reflection=glossyHistory; // sparse glossy: resolved reflection (already scaled in roofed zones)
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
 rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather||rtRoofed()?pow(albedo,vec3(1/2.2)):texel.rgb);
@@ -445,14 +479,18 @@ if(frame.params.x<.5&&frame.fogColor.w>.5&&draw.extra.z>.5)result=mix(frame.fogC
 outputColor=vec4(result,original.a);
 #ifdef IKV_RT_GUIDED
 // Alpha-tested blended draws (source cutoff: foliage, decals) own the guide: no depth writes and source back-to-front
-// order make the last fragment drawn the one the raw colour shows. Their stochastic terms are scaled by coverage, the
-// share of the raw colour they produce, so the resolve replaces exactly that share. Untextured translucent draws keep
+// order make the last fragment drawn the one the raw colour shows. Their coverage, the share of the raw colour they
+// produce, travels with the stochastic terms (outputDiffuse.a), so the resolve replaces exactly that share. NONCANONICAL
+// wave 29: the terms stay unscaled (they were multiplied by coverage, so the history of a leaf edge was the leaf's light x
+// its coverage, and layers under it that reuse the history, sparse indirect, went dark). Untextured translucent draws keep
 // their blended raw colour: no decomposition, never history.
 float guideDepth=max(dot(worldPosition-frame.eye.xyz,frame.cameraForward.xyz),.0001);
 bool translucent=draw.extra.w>.75&&draw.flags.w<=0;
 float coverage=draw.extra.w>.75?original.a:1.;
 outputGuide=vec4(rtGuideEncodeNormal(guideNormal),translucent?0:rtArtwork,translucent?-guideDepth:guideDepth);
-outputDiffuse=vec4(rtDiffuse*coverage,indirect?1:0); // a 0: no stochastic sample this frame (sparse far indirect)
-outputReflection=vec4(rtReflection*coverage,fract(draw.extra.w)>.25?1:0);
+// a: 1 + coverage when traced, -coverage without a stochastic sample this frame (sparse indirect).
+outputDiffuse=vec4(rtDiffuse,indirect?1+coverage:-coverage);
+// a: 1 animated, + 2 no reflection sample (sparse glossy), + 4 blended alpha-tested owner (temporal.frag history sign).
+outputReflection=vec4(rtReflection,(fract(draw.extra.w)>.25?1:0)+(glossy?0:2)+(foliage?4:0));
 #endif
 }

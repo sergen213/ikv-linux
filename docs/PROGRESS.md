@@ -272,6 +272,44 @@ User report: with ray tracing some interiors are not lit, e.g. Mısır Çarşıs
 - Results: interior physical luma within −4…+7 of raster in every zone (Migrat 30 vs 31, Sığınaklar 30 vs 34, Mısır 100 vs 97, Büyük Hol 83 vs 76); faithful keeps its level and gains actor shadows. GPU (1280×720, scene pass, mean of two alternated runs): Mısır faithful 0.13 → 0.21 ms, physical 2.37 → 2.15 ms; Eminönü faithful 2.28 → 2.36 ms, physical 4.03 → 4.33 ms. The exterior pipelines compile without the interior code; a same-binary base-vs-branch SPIR-V A/B on Eminönü physical gave 3.97 vs 4.07 ms (inside the ±0.15 ms run-to-run spread on this shared GPU), and exterior images match base at the noise floor.
 - Verification: `build-rel` (RelWithDebInfo) with no new warnings, `ctest` 14/14; all sheets inspected. Not verified: night hours, FSR/frame generation, in-game play.
 
+### Topkapı Ruh Taşı frame rate (RT physical): sparse foliage indirect and sparse glossy reflection
+
+User report: very slow near the Topkapı portal stones (Vulkan, RT physical, FSR3 balanced, frame generation, view 7, 2743×1543). This subsection replaces the notes of the two earlier investigation slices (TopkapiPerf, TopkapiPerf2). Evidence: `analysis/porting-wave29/TopkapiPerf3/` (`bench.sh`, `tm.py`, `metrics/metrics.json`, shader experiments in `var/`, parity captures in `parity/`).
+
+- **Cause:** only RT is slow there. At full GPU clock (no frame generation, `IKV_VSYNC=0`) the ring (`--at 0,285`, camera 0.6/0.35/46) cost 15.9 ms vs 5.9 ms at Drezin (`--at 0,-150`). The extra is ray work: GI and glossy-reflection rays of every layer of the blended tree canopy and grass, and reflection rays from ground and floors that cross alpha-tested leaves and blades.
+- **Sparse foliage indirect (NONCANONICAL):** blended alpha-tested draws trace their GI and reflection rays on one 2×2 block of four per frame at any depth (the wave-28 sparse far indirect still takes over beyond 100 units). The other pixels reuse the resolved history (`lighting.glsl` `rtSparseHistory`), and the guided resolve fills them from traced neighbours. Knob: `IKV_RT_SPARSE_FOLIAGE=0`.
+- **Sparse glossy reflection (NONCANONICAL, physical only):** other surfaces with roughness ≥ 0.5 (every dry surface) trace their reflection rays on one 2×2 block of four. GI and the Sun ray stay per pixel, and wet surfaces keep every ray. `outputReflection.a` +2 marks a pixel with no reflection sample, which `temporal.frag` fills from traced neighbours. Knob: `IKV_RT_SPARSE_REFLECTION=0`.
+- **History fixes, needed for parity (they also correct wave 28's far sparse):**
+  - Stochastic terms are no longer multiplied by coverage. Coverage travels in `outputDiffuse.a` (1+c traced, −c untraced) and the resolve scales its correction by it. Before, a leaf edge's history was its light × coverage, so layers reusing it went dark. Wave 28's far canopies were up to ~2.5 luma too dark: main 53.0/78.0 vs 55.4/79.2 when every ray is traced, and now 55.4/79.3.
+  - A blended owner's history length is stored negative, so an opaque surface showing through a blade edge no longer reuses the blade's estimate, and the other way round.
+  - Animated draws reproject the history with their own motion vectors.
+- **Measured:** same build, sparse on vs off, alternated, medians of steady 30-frame windows, full load, no frame generation:
+  - ring 15.9 → 13.3 ms GPU (scene 13.9 → 11.3; opaque 6.8 → 5.2, alpha 7.0 → 5.9);
+  - Drezin 5.9 → 5.4 ms.
+  
+  On the 60 Hz virtual output (FIFO), main vs this branch at the ring:
+  - frame generation on: 19.3 → 18.4 ms;
+  - frame generation off: 15.8 → 14.5 ms.
+  
+  FIFO lowers the GPU clock, so these numbers are clock-confounded.
+- **Rejected (measured, not shipped):**
+  - coarser alpha-test mip for secondary rays: −0.1 ms;
+  - stochastic alpha for secondary rays: +1.2 ms;
+  - coarser foliage Sun-ray mip: −0.25 ms;
+  - 8×8/16×16/32×32 tiles instead of 2×2 blocks: up to −0.55 ms more, but holes too big for the resolve;
+  - 1-of-16 foliage: −0.65 ms more;
+  - sparse GI on every near surface: −1.45 ms more, not parity-checked.
+  
+  Hidden-layer foliage prepasses save ≤ 1.1 ms (TopkapiPerf2).
+- **Frame generation:** its own work is optical flow + interpolation + 2 HUD composites + 1 copy, ~0.6–0.9 ms. New `flowMs`/`interpolateMs`/`hudMs` timing fields measure it. The ~3.3 ms reported earlier is the 60 Hz output capping the rendered rate at 30 fps, which lets the GPU clock drop. Async compute was not attempted. New benchmark knob: `IKV_VSYNC=0` (MAILBOX).
+- **Parity (2743×1543, RT physical):** ring and close stone/grass/tree stills, on vs off: unbiased differences (|bias| ≤ 0.15 luma per region, mean |Δ| ~1, p99 9–15), with no visible change in 1:1 crops; the tower view was captured. Off vs main differs only by the far-canopy fix above, plus grass 0.5–0.65 luma (0.9 %) darker, which also happens with every ray traced.
+
+Verification:
+- `build-rel` (RelWithDebInfo) warning-free apart from the existing `render_math_test` warnings;
+- ctest **15/15**.
+
+Not verified: RT faithful, Eminönü park and walk-sequence (motion) parity captures; a full FG-on main-vs-branch A/B at full load.
+
 ## 2026-11-13 wave 28 (0.14.0): wind-shaped sea, sparse puddles, footsteps in puddles and snow, dripping characters, horizon frame rate
 
 User requests: the sea must change shape in strong wind and calm down without wind; puddles were far too widespread and walking through them caused nothing; rain should drip off characters; characters should leave footprints only where there is snow. Three parallel slices (surfaces, character effects, sea) on a shared `renderer.hpp` contract (`GroundMark`, `kMaxGroundMarks`, `weather_puddle` CPU mirror), integrated on main with the client wiring `effects_->set_weather_props(...)` and `renderer_->set_ground_marks(effects_->ground_marks())`. Client-only: no server, database or wire change. All NONCANONICAL, enhanced appearance only; inactive weather, original appearance and roofed zones keep the exact pre-wave paths.

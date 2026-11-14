@@ -92,6 +92,10 @@ class VulkanRenderer final:public Renderer {
  // NONCANONICAL wave 28 (horizon frame rate): guided-RT pixels beyond this view depth (units) trace their stochastic GI and
  // reflection rays once in 16 frames, the resolve fills the rest (lighting.glsl `indirect`, temporal.frag).
  float sparse_indirect_depth_=100.f;
+ // NONCANONICAL wave 29 (Topkapı, analysis/porting-wave29/TopkapiPerf3): blended alpha-tested draws (foliage, grass) trace
+ // those rays on one pixel of four per frame at any depth (lighting.glsl `foliage`), other rough surfaces their glossy
+ // reflection rays (lighting.glsl `glossy`). A/B knobs: IKV_RT_SPARSE_FOLIAGE=0 / IKV_RT_SPARSE_REFLECTION=0 trace every pixel.
+ bool sparse_foliage_=true,sparse_reflection_=true;
  // shadow_ready_: the atlas was cleared once since create_targets (modes that never sample it skip the pass after that).
  bool shadow_ready_=false;
  VkSampler shadow_compare_=VK_NULL_HANDLE; // binding 5 sampler2DShadow: bilinear depth compare (hardware PCF) when supported
@@ -137,8 +141,12 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  // averages are logged as "Vulkan gpu timing frames=30 scenePassMs=X <pass>Ms=..." (scenePassMs first and unchanged:
  // scene pass begin TOP_OF_PIPE to end BOTTOM_OF_PIPE). The other passes are the gaps between consecutive BOTTOM_OF_PIPE
  // marks. timed_[slot]: that slot's last frame wrote them.
+ // NONCANONICAL wave 29: mark_opaque/mark_alpha/mark_particles split the scene pass (opaqueMs, alphaMs incl. the water copy,
+ // particleMs) after the existing names, so older parsers keep their fields.
  enum TimingMark:unsigned {mark_begin,mark_upload,mark_rt_update,mark_shadow,mark_scene_begin,mark_prepass,mark_scene_end,
-     mark_denoise,mark_glow,mark_fsr,mark_post,mark_end,timing_marks};
+     mark_denoise,mark_glow,mark_fsr,mark_post,mark_end,mark_opaque,mark_alpha,mark_particles,mark_flow,mark_interpolate,mark_hud,timing_marks};
+ // NONCANONICAL wave 29: mark_flow/mark_interpolate/mark_hud split presentCopyMs under frame generation (flowMs optical flow,
+ // interpolateMs frame interpolation, hudMs HUD composites; the real-frame copy is the rest); zero without frame generation.
  VkQueryPool timing_pool_=VK_NULL_HANDLE;float timestamp_period_=0;bool timed_[2]{};std::array<double,timing_marks> timing_sum_{};unsigned timing_count_=0;
  unsigned timing_slot_=0;
  void mark(TimingMark m,VkPipelineStageFlagBits stage=VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT){if(timing_pool_)vkCmdWriteTimestamp(command_,stage,timing_pool_,timing_slot_*timing_marks+m);}
@@ -429,7 +437,8 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      constexpr VkImageUsageFlags output_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
      fsr_->interpolate({c,{output_.handle,output_.format,extent_,output_usage},
          {g.handle,g.format,extent_,output_usage|VK_IMAGE_USAGE_STORAGE_BIT},frame_ms,options_.camera.near_plane,
-         options_.camera.far_plane,options_.camera.fov*.017453292519943295f,reset,++generation_frame_});
+         options_.camera.far_plane,options_.camera.fov*.017453292519943295f,reset,++generation_frame_,[&]{mark(mark_flow);}});
+     mark(mark_interpolate);
      constexpr VkAccessFlags hud_access=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_TRANSFER_READ_BIT;
      constexpr VkPipelineStageFlags hud_stages=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT;
      barrier(c,g.handle,VK_IMAGE_LAYOUT_GENERAL,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,VK_ACCESS_SHADER_WRITE_BIT,hud_access,
@@ -442,6 +451,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
          vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,hud_pipeline_);vkCmdDraw(c,3,1,0,0);
          vkCmdEndRenderPass(c);
      }
+     mark(mark_hud);
      barrier(c,r.handle,VK_IMAGE_LAYOUT_UNDEFINED,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,0,VK_ACCESS_TRANSFER_WRITE_BIT,
          VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT);
      VkImageCopy copy{};copy.srcSubresource=copy.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
@@ -986,7 +996,12 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      const char* denoise=SDL_getenv("IKV_RT_DENOISE");
      denoise_enabled_=rt_enabled_&&!original_lighting_&&(!denoise||std::strcmp(denoise,"0"));
      // A/B knob: IKV_RT_SPARSE_GI=0 traces every pixel's indirect rays; a positive value moves the start depth.
-     if(const char* sparse=SDL_getenv("IKV_RT_SPARSE_GI"))sparse_indirect_depth_=std::max(0.f,std::strtof(sparse,nullptr));
+     // Benchmark knob (NONCANONICAL wave 29): IKV_VSYNC=0 presents MAILBOX when offered, so a 60 Hz virtual output does not
+    // cap the rendered rate (frame generation halves it) and let the GPU clock down; IKV_VSYNC=1 forces FIFO.
+    if(const char* v=SDL_getenv("IKV_VSYNC"))options_.vsync=std::strcmp(v,"0")!=0;
+    if(const char* sparse=SDL_getenv("IKV_RT_SPARSE_GI"))sparse_indirect_depth_=std::max(0.f,std::strtof(sparse,nullptr));
+    if(const char* sparse=SDL_getenv("IKV_RT_SPARSE_FOLIAGE"))sparse_foliage_=std::strcmp(sparse,"0")!=0;
+    if(const char* sparse=SDL_getenv("IKV_RT_SPARSE_REFLECTION"))sparse_reflection_=std::strcmp(sparse,"0")!=0;
      VkPhysicalDeviceFeatures available{};vkGetPhysicalDeviceFeatures(physical_,&available);
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
@@ -2201,13 +2216,16 @@ void set_particles(const ParticleFrame& frame)override {
              const auto gap=[&](unsigned a,unsigned b){return t[b]>=t[a]?double(t[b]-t[a])*timestamp_period_*1e-6:0.;};
              const double ms[timing_marks]{gap(mark_scene_begin,mark_scene_end),gap(mark_begin,mark_upload),gap(mark_upload,mark_rt_update),
                  gap(mark_rt_update,mark_shadow),gap(mark_scene_begin,mark_prepass),gap(mark_shadow,mark_scene_end),gap(mark_scene_end,mark_denoise),
-                 gap(mark_denoise,mark_glow),gap(mark_glow,mark_fsr),gap(mark_fsr,mark_post),gap(mark_post,mark_end),gap(mark_begin,mark_end)};
+                 gap(mark_denoise,mark_glow),gap(mark_glow,mark_fsr),gap(mark_fsr,mark_post),gap(mark_post,mark_end),gap(mark_begin,mark_end),
+                 gap(mark_prepass,mark_opaque),gap(mark_opaque,mark_alpha),gap(mark_alpha,mark_particles),
+                gap(mark_post,mark_flow),gap(mark_flow,mark_interpolate),gap(mark_interpolate,mark_hud)};
              for(unsigned i=0;i<timing_marks;++i)timing_sum_[i]+=ms[i];
              if(++timing_count_==30) {
                  // scenePassMs first (older parsers match only it); sceneMs: shadow end to scene end (incl. water copy);
                  // prepassMs: scene begin to after the sky and depth prepass.
                  static constexpr const char* names[timing_marks]{"scenePassMs","uploadMs","rtUpdateMs","shadowMs","prepassMs","sceneMs",
-                     "denoiseMs","glowMs","fsrMs","postMs","presentCopyMs","totalMs"};
+                     "denoiseMs","glowMs","fsrMs","postMs","presentCopyMs","totalMs","opaqueMs","alphaMs","particleMs",
+                     "flowMs","interpolateMs","hudMs"};
                  std::cerr<<"Vulkan gpu timing frames=30";
                  for(unsigned i=0;i<timing_marks;++i)std::cerr<<' '<<names[i]<<'='<<timing_sum_[i]/30;
                  std::cerr<<'\n';
@@ -2273,7 +2291,9 @@ void set_particles(const ParticleFrame& frame)override {
      const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
      // shadow_params.y: NONCANONICAL wave 28 sparse far indirect start depth (lighting.glsl `indirect`; guided RT only).
      f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];
-     f.shadow_params={shadow_cascades.split,denoise_enabled_?sparse_indirect_depth_:0.f,0,0};
+     // shadow_params.z/w: NONCANONICAL wave 29 sparse foliage indirect / sparse glossy reflection (1: on).
+     f.shadow_params={shadow_cascades.split,denoise_enabled_?sparse_indirect_depth_:0.f,denoise_enabled_&&sparse_foliage_?1.f:0.f,
+         denoise_enabled_&&sparse_reflection_?1.f:0.f};
      f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
      f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
@@ -2339,18 +2359,21 @@ void set_particles(const ParticleFrame& frame)override {
     draw_scene(command_,false,scene_set,source.first(sky_end));
     const auto rest=source.subspan(sky_end);
     if(prepass_)draw_scene(command_,false,scene_set,rest,nullptr,nullptr,true);
-    mark(mark_prepass);
     const auto is_water=[](const DrawItem& d){return d.ocean;};
+    const std::size_t alpha_begin=std::size_t(std::find_if(rest.begin(),rest.end(),[&](const DrawItem& d){return d.alpha||is_water(d);})-rest.begin());
     std::size_t water_begin=rest.size();
     if(!options_.original_appearance&&std::any_of(rest.begin(),rest.end(),[&](const DrawItem& d){return d.visible&&is_water(d);}))
-        water_begin=std::size_t(std::find_if(rest.begin(),rest.end(),[&](const DrawItem& d){return d.alpha||is_water(d);})-rest.begin());
-    draw_scene(command_,false,scene_set,rest.first(water_begin));
+        water_begin=alpha_begin;
+    mark(mark_prepass);
+    draw_scene(command_,false,scene_set,rest.first(alpha_begin));
+    mark(mark_opaque);
     if(water_begin<rest.size()) {
         vkCmdEndRenderPass(command_);
         copy_water(command_,denoise_enabled_?raw_hdr_:hdr_[current]);
         begin_pass(command_,water_pass_,scene_fb_[current],render_extent_,false);
-        draw_scene(command_,false,scene_set,rest.subspan(water_begin));
     }
+    draw_scene(command_,false,scene_set,rest.subspan(alpha_begin));
+    mark(mark_alpha);
     // 0046ccf0 draws non-AfterHDR particles with the transparent list (glow input), then the hilite; 0046cbe0 draws
     // AfterHDR particles after the glow composite (0046fdb0 @470aed/@47183f).
     const auto draw_particles=[&](bool after_hdr) {
@@ -2367,6 +2390,7 @@ void set_particles(const ParticleFrame& frame)override {
         }
     };
     draw_particles(false);
+    mark(mark_particles);
     if(!contours_.empty()) {
         // Contour draw 0047e1xx: shells i=3,2,1 with c8 = (colour, sin(tick*.004)*.015 + i*.02).
         vkCmdBindPipeline(command_,VK_PIPELINE_BIND_POINT_GRAPHICS,contour_pipeline_);
@@ -2461,6 +2485,7 @@ void set_particles(const ParticleFrame& frame)override {
      }
      vkCmdEndRenderPass(command_);
      mark(mark_post);
+     if(!generating_){mark(mark_flow);mark(mark_interpolate);mark(mark_hud);} // no frame generation: zero-length splits
      auto& frame=slots_[slot];
      VkPipelineStageFlags wait=VK_PIPELINE_STAGE_TRANSFER_BIT;
      VkSubmitInfo submit{};submit.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO;

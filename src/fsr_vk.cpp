@@ -225,6 +225,7 @@ void Fsr3Upscaler::interpolate(const Interpolation& in) {
     flow.commandList=ffxGetCommandListVK(in.command);flow.color=source;flow.opticalFlowVector=vector;flow.opticalFlowSCD=scene_change;
     flow.reset=in.reset;flow.backbufferTransferFunction=FFX_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
     check(ffxOpticalflowContextDispatch(&c.flow,&flow),"optical flow dispatch");
+    if(in.after_flow)in.after_flow();
     // Same parameters the SDK's FSR3 component passes when its upscaler produced the dilated inputs (ffx_fsr3.cpp).
     FfxFrameInterpolationDispatchDescription fi{};
     fi.commandList=flow.commandList;fi.displaySize={display_.width,display_.height};fi.renderSize={render_.width,render_.height};

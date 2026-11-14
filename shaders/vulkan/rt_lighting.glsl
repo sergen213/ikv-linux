@@ -206,8 +206,9 @@ vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal
 }
 // facet: physical triangle normal facing the eye; smoothNormal: interpolated vertex normal; normal: authored
 // (normal-mapped) shading normal. indirect false: no GI or reflection rays (rtDiffuseLighting; reflection 0).
+// glossy false (NONCANONICAL wave 29 sparse glossy, lighting.glsl): no reflection rays (reflection 0).
 RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, vec3 viewDir, float roughness,
-                   vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags, bool indirect) {
+                   vec3 sunDir, uvec2 pixel, uint frame, float quality, uint secondaryFlags, bool indirect, bool glossy) {
     facet = rtUnit(facet);
     smoothNormal = rtUnit(dot(smoothNormal, facet) < 0.0 ? -smoothNormal : smoothNormal);
     normal = rtUnit(normal);
@@ -237,7 +238,7 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     float nDotV = max(dot(normal, viewDir), 0.0001);
     vec3 tangent = rtUnit(cross(abs(normal.y) < 0.99 ? vec3(0,1,0) : vec3(1,0,0), normal));
     vec3 bitangent = cross(normal, tangent);
-    for (int sampleIndex = 0; indirect && sampleIndex < samples; ++sampleIndex) {
+    for (int sampleIndex = 0; indirect && glossy && sampleIndex < samples; ++sampleIndex) {
         vec2 u = rtSequence(pixel, 2u, frame * uint(samples) + uint(sampleIndex));
         float phi = 6.28318530718 * u.x;
         float cosTheta = sqrt((1.0 - u.y) / (1.0 + (alphaSquared - 1.0) * u.y));

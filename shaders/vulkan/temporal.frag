@@ -10,7 +10,9 @@
 // accumulation, every frame, so disoccluded/fresh pixels (no history) take their converged same-surface neighbours.
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 color;             // display HDR
-layout(location=1) out vec4 diffuseHistory;    // rgb indirect gain estimate, a history length (0: none)
+// a < 0 (NONCANONICAL wave 29): the history's surface is a blended alpha-tested draw (foliage, grass); lighting.glsl's sparse
+// indirect reuses it only for the same kind of surface (an opaque surface hidden under a leaf must not take the leaf's).
+layout(location=1) out vec4 diffuseHistory;    // rgb indirect gain estimate, a history length (0: none; negative: blended)
 layout(location=2) out vec4 reflectionHistory; // rgb reflection estimate
 layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; } draw;
 layout(set=0,binding=1) uniform sampler2D rawHDR;
@@ -46,9 +48,11 @@ void main() {
     float depth=guide.w;
     vec4 diffuseSample=texelFetch(currentDiffuse,p,0);
     vec3 diffuse0=diffuseSample.rgb;
-    // NONCANONICAL wave 28 sparse far indirect (lighting.glsl `indirect`): a 0 = no stochastic sample this frame, only
+    // NONCANONICAL wave 28 sparse far indirect (lighting.glsl `indirect`): a <= 0 = no stochastic sample this frame, only
     // the analytic estimate the raw colour was lit with; it is replaced but never averaged.
     float traced=diffuseSample.a>.5?1.:0.;
+    // The raw colour's share of this surface (blended alpha-tested draws: their coverage; lighting.glsl outputDiffuse.a).
+    float coverage=traced>0?diffuseSample.a-1:-diffuseSample.a;
     vec4 reflection0=texelFetch(currentReflection,p,0);
     vec2 currentUV=(vec2(p)+.5)/vec2(size);
     vec3 ray=viewRay(currentUV);
@@ -65,7 +69,7 @@ void main() {
         // A-trous iteration: B3 taps at this stride, plane-distance and vertex-normal edge stopping (never across
         // silhouettes/creases). Short history leans on the (converged) neighbours; long history keeps its own value.
         vec4 center=texelFetch(previousDiffuse,p,0);
-        float own=max(center.a,1);
+        float own=max(abs(center.a),1);
         const float taps[3]=float[3](.375,.25,.0625);
         vec3 sumDiffuse=vec3(0),sumReflection=vec3(0);
         float weight=0;
@@ -80,7 +84,7 @@ void main() {
                 vec2 o=vec2(q-p);
                 float plane=abs(neighbor.w*(rayN+o.x*stepN+o.y*stepM)-depth*rayN)*planeScale/stride;
                 w*=exp(-plane)*pow16(clamp(dot(normal,rtGuideDecodeNormal(neighbor.xy)),0,1))*
-                    clamp(max(d.a,1)/own,.25,4.)*clamp(8./own,.125,1.);
+                    clamp(max(abs(d.a),1)/own,.25,4.)*clamp(8./own,.125,1.);
             }
             sumDiffuse+=d.rgb*w;
             if(reflections)sumReflection+=texelFetch(previousReflection,q,0).rgb*w;
@@ -89,10 +93,15 @@ void main() {
         diffuse=sumDiffuse/weight;reflection=sumReflection/weight;
         diffuseHistory=vec4(diffuse,center.a);
         reflectionHistory=vec4(reflection,1);
-        color=vec4(max(raw+rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb),vec3(0)),1);
+        color=vec4(max(raw+coverage*(rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb)),vec3(0)),1);
         return;
     }
-    bool animated=reflection0.a>.5;
+    // reflection a: 1 animated draw (history needs its motion vectors), + 2 no reflection sample this frame (NONCANONICAL
+    // wave 29 sparse glossy, lighting.glsl `glossy`: replaced from traced neighbours, never averaged).
+    // + 4: the guide owner is a blended alpha-tested draw (its history length is stored negative, see diffuseHistory).
+    bool animated=mod(reflection0.a,2.)>.5;
+    float glossyTraced=mod(reflection0.a,4.)>1.5?0.:traced;
+    float ownerSign=reflection0.a>3.5?-1.:1.;
 
     // Temporal: bilinear footprint of the reprojected previous estimate. Every tap must be the same physical surface
     // (previous-camera depth of this point, normal): disocclusions/foreign surfaces drop. This pixel shows the point at
@@ -124,6 +133,7 @@ void main() {
             vec4 old=texelFetch(previousGuide,q,0);
             if(!(old.w>0) || !(old.z>0) || !(abs(old.w-expected)<=tolerance) || !(dot(normal,rtGuideDecodeNormal(old.xy))>=.8))continue;
             vec4 sampleDiffuse=texelFetch(previousDiffuse,q,0);
+            sampleDiffuse.a=abs(sampleDiffuse.a);
             if(!(sampleDiffuse.a>=1))continue;
             float w=(o.x==1?f.x:1-f.x)*(o.y==1?f.y:1-f.y);
             history+=sampleDiffuse*w;
@@ -136,8 +146,8 @@ void main() {
 
     // Spatial prefilter: 5x5 geometry-weighted kernel over the stochastic terms only. Same-surface statistics over the
     // whole 5x5 bound how far history may differ from the current signal (a moving caster's indirect shadow).
-    vec3 sumDiffuse=diffuse0*traced,sumReflection=reflection0.rgb*traced;
-    float weight=traced;
+    vec3 sumDiffuse=diffuse0*traced,sumReflection=reflection0.rgb*glossyTraced;
+    float weight=traced,weightReflection=glossyTraced;
     vec3 mean=diffuse0*traced,square=diffuse0*diffuse0*traced;
     float count=traced;
     for(int y=-2;y<=2;++y)for(int x=-2;x<=2;++x) {
@@ -152,10 +162,13 @@ void main() {
         vec4 d4=texelFetch(currentDiffuse,q,0);
         if(!(d4.a>.5))continue;
         float w=g*exp(-.5*float(x*x+y*y)/1.5);
-        vec3 d=d4.rgb,r=reflections?texelFetch(currentReflection,q,0).rgb:vec3(0);
+        vec3 d=d4.rgb;
         sumDiffuse+=d*w;
-        sumReflection+=r*w;
         weight+=w;
+        if(reflections) {
+            vec4 r=texelFetch(currentReflection,q,0);
+            if(mod(r.a,4.)<1.5){sumReflection+=r.rgb*w;weightReflection+=w;}
+        }
         mean+=d*g; square+=d*d*g; count+=g;
     }
     if(!(weight>0)) {
@@ -164,12 +177,15 @@ void main() {
         // passes take the converged neighbours.
         bool kept=history.a>=1;
         diffuse=kept?history.rgb:diffuse0;reflection=kept?historyReflection.rgb:reflection0.rgb;
-        diffuseHistory=vec4(diffuse,kept?history.a:0.);
+        diffuseHistory=vec4(diffuse,kept?history.a*ownerSign:0.);
         reflectionHistory=vec4(reflection,kept?historyReflection.a:dot(diffuse,vec3(.299,.587,.114)));
-        color=vec4(max(raw+rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb),vec3(0)),1);
+        color=vec4(max(raw+coverage*(rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb)),vec3(0)),1);
         return;
     }
-    diffuse=sumDiffuse/weight;reflection=sumReflection/weight;
+    diffuse=sumDiffuse/weight;
+    // Sparse glossy without a traced same-surface reflection within reach: the reprojected history, else this pixel's own
+    // estimate (the resolved history lighting.glsl lit it with).
+    reflection=weightReflection>0?sumReflection/weightReflection:history.a>=1?historyReflection.rgb:reflection0.rgb;
 
     // Variance clip, then a history-length blend: alpha = 1/n until the cap (static 32, moving surfaces 16), independent
     // of screen speed; the clip and the anti-lag below, not a short cap, remove stale diffuse history. Reflections are
@@ -189,7 +205,7 @@ void main() {
     if(lag>noise)samples=max(1.,samples*noise*noise/(lag*lag));
     diffuse=mix(previous,diffuse,1./samples);
     reflection=mix(historyReflection.rgb,reflection,1./min(samples,8.));
-    diffuseHistory=vec4(diffuse,samples);
+    diffuseHistory=vec4(diffuse,samples*ownerSign);
     reflectionHistory=vec4(reflection,fast);
-    color=vec4(max(raw+rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb),vec3(0)),1);
+    color=vec4(max(raw+coverage*(rtGuideAlbedo(guide.z)*(diffuse-diffuse0)+(reflection-reflection0.rgb)),vec3(0)),1);
 }
