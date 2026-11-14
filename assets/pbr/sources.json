@@ -1,0 +1,131 @@
+{
+ "license": "CC0 1.0 (ambientCG)",
+ "materials": {
+  "asphalt": {
+   "ambientcg": "Asphalt026C"
+  },
+  "bark": {
+   "ambientcg": "Bark001"
+  },
+  "brick": {
+   "ambientcg": "Bricks073A",
+   "contrast": 1.5
+  },
+  "cobble_fan": {
+   "ambientcg": "PavingStones049",
+   "contrast": 1.5
+  },
+  "cobble_round": {
+   "ambientcg": "PavingStones115B",
+   "contrast": 1.5
+  },
+  "concrete": {
+   "ambientcg": "Concrete036"
+  },
+  "dirt": {
+   "ambientcg": "Ground067"
+  },
+  "dirt_cracked": {
+   "ambientcg": "Ground031"
+  },
+  "fabric": {
+   "ambientcg": "Fabric013"
+  },
+  "flagstone": {
+   "ambientcg": "PavingStones055",
+   "contrast": 1.5
+  },
+  "grass": {
+   "ambientcg": "Grass004"
+  },
+  "gravel": {
+   "ambientcg": "Gravel022"
+  },
+  "marble": {
+   "ambientcg": "Marble012"
+  },
+  "metal_painted": {
+   "ambientcg": "Metal021"
+  },
+  "metal_rust": {
+   "ambientcg": "Metal022"
+  },
+  "metal_tread": {
+   "ambientcg": "DiamondPlate008B"
+  },
+  "micro_metal": {
+   "ambientcg": "Metal013",
+   "micro": true,
+   "normal_strength": 0.5
+  },
+  "micro_plaster": {
+   "ambientcg": "PaintedPlaster015",
+   "micro": true,
+   "normal_strength": 0.6
+  },
+  "micro_rock": {
+   "ambientcg": "Rock030",
+   "micro": true,
+   "normal_strength": 0.7
+  },
+  "micro_stone": {
+   "ambientcg": "Rock023",
+   "micro": true,
+   "normal_strength": 0.5
+  },
+  "micro_wood": {
+   "ambientcg": "Wood049",
+   "micro": true,
+   "normal_strength": 0.5
+  },
+  "moss": {
+   "ambientcg": "Ground037"
+  },
+  "paving_herringbone": {
+   "ambientcg": "PavingStones052",
+   "contrast": 1.5
+  },
+  "paving_hex": {
+   "ambientcg": "PavingStones075",
+   "contrast": 1.5
+  },
+  "paving_mossy": {
+   "ambientcg": "PavingStones082",
+   "contrast": 1.5
+  },
+  "paving_slab": {
+   "ambientcg": "PavingStones112",
+   "contrast": 1.5
+  },
+  "plaster": {
+   "ambientcg": "PaintedPlaster015"
+  },
+  "rock": {
+   "ambientcg": "Rock030"
+  },
+  "roof_tiles": {
+   "ambientcg": "RoofingTiles006",
+   "contrast": 1.5
+  },
+  "sand": {
+   "ambientcg": "Ground062S"
+  },
+  "sandstone_paving": {
+   "ambientcg": "PavingStones145",
+   "contrast": 1.5
+  },
+  "stone_block": {
+   "ambientcg": "Bricks064",
+   "contrast": 1.5
+  },
+  "stone_rubble": {
+   "ambientcg": "Bricks076A",
+   "contrast": 1.5
+  },
+  "wood_planks": {
+   "ambientcg": "Planks012",
+   "metal_scale": 0,
+   "contrast": 1.5
+  }
+ }
+}
