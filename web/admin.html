@@ -85,7 +85,12 @@
     .ok { color: var(--good); }
     .bad { color: var(--bad); }
     .shard-list { margin: 0; padding-left: 1rem; }
-    #realm-results td:not(:nth-child(7)) { white-space: nowrap; }
+    .shard-list li button { margin: 0 0 0 .4rem; }
+    #realm-results td:not(:nth-child(8)) { white-space: nowrap; }
+    #realm-results td input, #realm-results td select { padding: .3rem .4rem; min-width: 4.5rem; }
+    #realm-results td input.realm-edit-name { min-width: 10rem; }
+    #realm-results tr.editing { background: var(--raised); }
+    .realm-hint { white-space: normal; font-size: .8rem; margin: .3rem 0 0; max-width: 26rem; }
     .operational { border-left: 3px solid var(--copper); padding-left: 1rem; margin-top: 1.2rem; }
     code { font-family: var(--mono); color: var(--copper); overflow-wrap: anywhere; }
     .footer { font: .75rem/1.7 var(--mono); color: var(--muted); border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1rem; }
@@ -163,9 +168,9 @@
           <div class="grid even">
             <section class="panel wide" aria-labelledby="realms-heading">
               <div class="panel-head"><span class="section-number">18</span><h2 id="realms-heading" title="Realms with their live shards">Sunucular (diyarlar)</h2></div>
-              <p class="muted">NONCANONICAL topluluk özelliği: özgün başlatıcının sunucu listesi gibi her diyar ayrı bir karakter dünyasıdır; bir diyara bir veya daha fazla <code>ikv-server</code> süreci (parça, en çok 32 oyuncu) <code>--realm ID</code> ile bağlanır. Son bildirimi 15 saniyeden eski parça seçilmez.</p>
+              <p class="muted">NONCANONICAL topluluk özelliği: özgün başlatıcının sunucu listesi gibi her diyar ayrı bir karakter dünyasıdır; bir diyara bir veya daha fazla <code>ikv-server</code> süreci (parça, en çok 32 oyuncu) <code>--realm ID</code> ile bağlanır. Diyar düzeni (parça sayısı, kapasite, açık/kapalı) veritabanında tutulur; başlatıcıyla barındırılan sunucu onu birkaç saniye içinde uygular. Son bildirimi 15 saniyeden eski parça seçilmez.</p>
               <p id="realm-state" class="hint" role="status"></p>
-              <div class="table-scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">Ad</th><th scope="col" title="Realm kind">Tür</th><th scope="col" title="online: a live shard">Durum</th><th scope="col" title="Population label shown in the launcher">Nüfus</th><th scope="col" title="Characters of every account">Karakter</th><th scope="col" title="Shards seen within the last hour: instance, address, players/capacity, heartbeat age">Parçalar</th><th scope="col"></th></tr></thead><tbody id="realm-results"></tbody></table></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">Ad</th><th scope="col" title="Realm kind">Tür</th><th scope="col" title="Çalışıyor, Başlatılıyor, Durduruldu">Durum</th><th scope="col" title="Desired shards / running shards and players per shard">Parça (istenen / çalışan)</th><th scope="col" title="Population label shown in the launcher">Nüfus</th><th scope="col" title="Characters of every account">Karakter</th><th scope="col" title="Shards seen within the last hour: instance, address, players/capacity, heartbeat age">Parçalar</th><th scope="col">İşlem</th></tr></thead><tbody id="realm-results"></tbody></table></div>
             </section>
             <section class="panel" aria-labelledby="realm-create-heading">
               <div class="panel-head"><span class="section-number">19</span><h2 id="realm-create-heading" title="Create a realm">Yeni diyar</h2></div>
@@ -175,19 +180,25 @@
                   <div class="field"><label for="realm-kind" title="Realm kind">Tür</label><select id="realm-kind"><option value="normal">normal</option><option value="pvp">pvp</option><option value="rp">rp</option></select></div>
                   <div class="field"><label for="realm-sort" title="List order in the launcher (-32768..32767)">Sıra</label><input id="realm-sort" type="number" min="-32768" max="32767" step="1" value="0" required></div>
                 </div>
+                <div class="row spaced">
+                  <div class="field"><label for="realm-shards" title="World processes the host runs for this realm (0-16)">Parça sayısı</label><input id="realm-shards" type="number" min="0" max="16" step="1" value="1" required></div>
+                  <div class="field"><label for="realm-capacity" title="Players per shard (1-32)">Kapasite</label><input id="realm-capacity" type="number" min="1" max="32" step="1" value="32" required></div>
+                  <div class="field"><label class="inline" title="Enabled: the host starts the shards now"><input id="realm-start" type="checkbox" checked> Hemen başlat</label></div>
+                </div>
                 <div class="actions"><button type="submit" data-operation title="Create the realm">Diyar oluştur</button></div>
               </form>
             </section>
-            <section class="panel" aria-labelledby="realm-rename-heading">
-              <div class="panel-head"><span class="section-number">20</span><h2 id="realm-rename-heading" title="Rename a realm">Diyarı yeniden adlandır</h2></div>
-              <form id="realm-rename">
+            <section class="panel" aria-labelledby="realm-restart-heading">
+              <div class="panel-head"><span class="section-number">20</span><h2 id="realm-restart-heading" title="Restart a realm or one shard with an announcement; players are saved">Yeniden başlat</h2></div>
+              <form id="realm-restart">
                 <div class="row">
-                  <div class="field"><label for="realm-rename-id" title="Realm to rename">Diyar</label><select id="realm-rename-id" required></select></div>
-                  <div class="field"><label for="realm-rename-name" title="2-32 bytes, unique">Yeni ad</label><input id="realm-rename-name" maxlength="32" autocomplete="off" required></div>
+                  <div class="field"><label for="realm-restart-id" title="Realm to restart">Diyar</label><select id="realm-restart-id" required></select></div>
+                  <div class="field"><label for="realm-restart-instance" title="Every live shard or a single shard">Parça</label><select id="realm-restart-instance"></select></div>
+                  <div class="field"><label for="realm-restart-delay" title="Announcement countdown before saving and restarting (0-3600 s)">Gecikme (sn)</label><input id="realm-restart-delay" type="number" min="0" max="3600" step="1" value="60" required></div>
                 </div>
-                <div class="actions"><button type="submit" data-operation title="Rename the realm">Yeniden adlandır</button></div>
+                <div class="actions"><button type="submit" data-operation class="danger" title="Announce, save every player and restart">Yeniden başlat</button></div>
               </form>
-              <p class="hint">Yeni bir parça başlatmak için sunucu makinesinde: <code>ikv-server … --realm ID --public-host ADRES --port PORT --capacity 32</code> (docs/SELF_HOSTING.md).</p>
+              <p class="hint">Çevrimiçi oyunculara geri sayım duyurulur, karakterler kaydedilir ve parça kapanır; diyar düzeni onu hâlâ istediği için barındırıcı yeniden başlatır (elle kurulumda systemd <code>Restart=on-failure</code>). Satırdaki düğmeler bu formu doldurur.</p>
             </section>
           </div>
         </section>
