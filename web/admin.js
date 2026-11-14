@@ -594,7 +594,7 @@
     const cell = node('td');
     const live = realmLive(realm).length;
     const desired = realmDesired(realm);
-    if (!realmEnabled(realm)) cell.append(node('span', 'Durduruldu', 'bad'));
+    if (!realmEnabled(realm)) cell.append(node('span', live ? `Durduruluyor (${live} canlı parça)` : 'Durduruldu', 'bad'));
     else if (desired === 0) cell.append(node('span', live ? 'Kapatılıyor' : 'Parça istenmiyor', 'bad'));
     else if (live >= desired) cell.append(node('span', 'Çalışıyor', 'ok'));
     else {
@@ -805,6 +805,7 @@
     const version = sessionVersion;
     try {
       await refreshAll();
+      scheduleRefresh(); // a realm change may leave shards settling; poll faster (wave 31)
       if (session && version === sessionVersion) { notice(message, 'success'); resetVisible = sensitive; }
     } catch (error) {
       if (session && version === sessionVersion) { notice(`${message}\nYenileme tamamlanamadı: ${error.message}`, 'error'); resetVisible = sensitive; }
@@ -818,6 +819,7 @@
       tab.tabIndex = selected ? 0 : -1;
       element(tab.getAttribute('aria-controls')).hidden = !selected;
     });
+    if (session && name === 'realms') scheduleRefresh(); // faster polling while shards settle (wave 31)
   }
   const tabs = [...document.querySelectorAll('[role="tab"]')];
   tabs.forEach((tab, index) => {
