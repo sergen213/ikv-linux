@@ -128,15 +128,26 @@ vec4 originalSurface(vec4 diffuse,float sunVisibility) {
 }
 // Enhanced raster and faithful RT albedo keep the original subtractive lightmap darkening (originalSurface; not on the
 // normal-mapped path): without it the sun lit lightmap-darkened art 3x brighter than original (NONCANONICAL wave 19).
-// Physical RT traces its own occlusion and has no lightmap term.
+// Physical RT traces its own occlusion and has no lightmap term outdoors; in roofed interiors (NONCANONICAL wave 29) it
+// keeps it: the lightmaps hold the shadows of the interior light the source has no other data for (rt_lighting.glsl).
 vec3 enhancedLightmapShadow(float alpha){
 #ifdef IKV_RT
-    if(frame.params.x<1.5)return vec3(0);
+    if(frame.params.x<1.5&&!rtRoofed())return vec3(0);
 #endif
     if(draw.extra.x<.5||draw.flags.x>.5)return vec3(0);
     vec3 shadow=texture(originalLightmap,lightmapUV).rgb*frame.fog.z;
     return draw.flags.y>.5?shadow*(1-clamp(alpha,0,1)):shadow;
 }
+#ifdef IKV_RT
+// NONCANONICAL wave 29 (RT in roofed interiors): the record's directional term (sourceSunTerm) lights an interior from
+// SunDir through the roof; only actors (TLAS mask 2) cast it, on static surfaces, as faithful RT's original appearance does
+// (the lightmaps hold the scenery's shadows). facet: unnormalised physical facet normal (rtFacet).
+float rtInteriorActorVisibility(vec3 facet){
+    if(frame.sun.w<.5||fract(draw.extra.w)>=.25||dot(worldNormal,frame.sun.xyz)<=0)return 1.;
+    facet=rtUnit(facet);if(dot(facet,frame.eye.xyz-worldPosition)<0)facet=-facet;
+    return rtSunVisibilityMasked(worldPosition,facet,rtUnit(frame.sun.xyz),2u,0u);
+}
+#endif
 vec4 sourceOceanSurface() {
     vec3 normal0=texture(normalMap,sourceOceanUV*.80000001).rgb*2-1;
     vec3 normal1=texture(normalMap,texcoord*.23999999).rgb*2-1;
@@ -344,10 +355,24 @@ if(frame.params.x<1.5){
 // Blended draws (extra.w 1, 1.5): foliage and grass trace their GI and reflection rays opaque (rt_lighting.glsl rtDiffuseLighting).
 uint secondaryFlags=draw.extra.w>.75&&draw.extra.w<2.?gl_RayFlagsOpaqueEXT:0u;
 RtLight light=rtLighting(worldPosition,dot(rtFacet,v)<0?-rtFacet:rtFacet,worldNormal,n,v,roughness,l,uvec2(gl_FragCoord.xy),uint(frame.viewport.z),1.,secondaryFlags,indirect);
+if(rtRoofed()) {
+    // NONCANONICAL wave 29: roofed interior. The source's only interior light is its baked light (record per-vertex terms,
+    // lightmaps, normal-map illumination: originalSurface), so physical RT takes the enhanced raster's roofed light
+    // (1.5 x baked, with actors shadowing the record's directional term) as a per-pixel gain, and the traced GI
+    // (rt_lighting.glsl rtInteriorAmbient: 1 unoccluded) occludes and colours its smooth ambient share: the record ambient
+    // x vertex colours, capped at the gain (dark normal-mapped texels). The rest of the gain stays deterministic.
+    vec3 baked=pow(max(originalSurface(texel,rtInteriorActorVisibility(rtFacet)).rgb,vec3(0)),vec3(2.2));
+    vec3 gain=1.5*baked/max(albedo,vec3(.02));
+    vec3 ambientGain=frame.sun.w>.5?min(1.5*pow(clamp(sourceAmbientTerm,0,1),vec3(2.2)),gain):gain;
+    // Reflections see the same record-ambient environment: scaled to this pixel's ambient like the GI.
+    vec3 local=ambientGain/max(rtInteriorAmbient()*.96,vec3(1e-4));
+    light.diffuse*=local;light.reflection*=local;
+    light.sun=gain-ambientGain;
+}
 if(sparseHistory){light.diffuse=sparseDiffuse;light.reflection=sparseReflection;} // untraced far pixel: resolved estimate
 result=albedo*(light.sun+light.diffuse)+light.reflection;
 #ifdef IKV_RT_GUIDED
-rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather?pow(albedo,vec3(1/2.2)):texel.rgb);
+rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwork(weather||rtRoofed()?pow(albedo,vec3(1/2.2)):texel.rgb);
 #endif
 }else
 #endif
@@ -356,8 +381,18 @@ rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwo
 // clock record. Faithful RT replaces outdoor baked ambient with traced diffuse GI; roofed interiors retain their
 // original baked light because the source's artificial lights have no RT emission data. Raster uses original baked
 // ambient everywhere. The record fog is applied in linear like the original's (sky included).
+#ifdef IKV_RT
+bool roofed=rtRoofed(); // NONCANONICAL wave 29: the roofed pipeline specialisation (rt_lighting.glsl kRoofedPipeline)
+#else
 bool roofed=sceneRoofed();
-vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
+#endif
+// NONCANONICAL wave 29: faithful RT interiors take actor shadows from the record's directional term (lighting.glsl
+// rtInteriorActorVisibility); raster keeps the unshadowed baked light.
+float interiorSun=1.;
+#ifdef IKV_RT
+if(roofed)interiorSun=rtInteriorActorVisibility(rtFacet);
+#endif
+vec3 baked=pow(max(originalSurface(texel,roofed?interiorSun:0.).rgb,vec3(0)),vec3(2.2));
 // Weather on the baked light: the same tint and wetness; snow takes the baked light level.
 if(weather)baked=weatherBaked(baked,sourceAlbedo,weathered,frame.weatherMisc)*weatherAmbientTint(frame.weather,frame.weatherMisc,frame.sourceTime.y);
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):

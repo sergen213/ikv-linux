@@ -26,6 +26,11 @@ layout(std430, set = 1, binding = 1) readonly buffer RtTriangles {
 };
 // Diffuse textures of alpha-tested materials (count: vulkan_rt.hpp rt_alpha_texture_slots).
 layout(set = 1, binding = 2) uniform sampler2D rtAlphaTextures[64];
+// NONCANONICAL wave 29: true only in the RT scene pipelines specialised for roofed zones (renderer_vk.cpp roofed_, bound
+// while SceneLighting::roofed). As a uniform branch the interior code cost exterior RT ~15 % scene-pass time (register
+// pressure, analysis/porting-wave29/RtIndoor/report.md); specialised false, the driver drops it.
+layout(constant_id = 1) const bool kRoofedPipeline = false;
+bool rtRoofed() { return kRoofedPipeline; }
 
 // Approximation, not original-game appearance: one-bounce stochastic diffuse
 // probes and glossy reflections, analytic sky/sun, geometric hit normals and
@@ -72,6 +77,22 @@ vec3 rtSkyIrradiance(vec3 normal) {
                clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
 }
 vec3 rtSunRadiance() { return vec3(2.8, 2.55, 2.2) * enhancedSunScale(); }
+// NONCANONICAL wave 29 (RT in roofed interiors, rtRoofed(): SceneLighting::roofed). The source lights an interior only
+// with its record (per-vertex ambient and directional terms, vs_1_1 oD0) and baked lightmaps: it has no point/spot light or
+// emissive data (analysis/porting-wave29/RtIndoor/report.md). Physical RT traced only the Sun and sky, which the roof
+// blocks, so interiors went near-black. In a roofed zone the traced environment is the record's ambient light instead: a
+// ray that escapes (or travels kInteriorReach units) sees it, a nearer hit returns its wall's half-albedo share of it, so GI
+// becomes the record ambient's occlusion and colour bleeding. x1.5/.96: an unoccluded surface gets exactly the enhanced
+// raster's roofed ambient (lighting.glsl: 1.5 x baked). No Sun or sky ray is traced there (lighting.glsl adds the
+// record's directional term, shadowed by actors only, like faithful RT's original appearance).
+const float kInteriorReach = 12.0; // world units (~3 m); occlusion starts fading in beyond 1.5
+// Without a record (frame.sun.w 0, before the server's first clock) the raster takes the vertex light as authored: unit.
+vec3 rtInteriorAmbient() {
+    return (1.5 / 0.96) * (frame.sun.w > 0.5 ? pow(clamp(frame.ambient.rgb, 0.0, 1.0), vec3(2.2)) : vec3(1.0));
+}
+vec3 rtInteriorHit(vec3 color, float distance) {
+    return rtInteriorAmbient() * mix(0.5 * max(color, vec3(0.0)), vec3(1.0), smoothstep(1.5, kInteriorReach, distance));
+}
 vec3 rtHemisphere(vec3 normal, vec2 u) {
     float phi = 6.28318530718 * u.x;
     float radius = sqrt(u.y);
@@ -129,12 +150,14 @@ float rtSunVisibility(vec3 position, vec3 facet, vec3 sunDir, uint flags) {
 // flags: extra ray flags of this ray (rtLighting/rtDiffuseLighting secondaryFlags).
 vec3 rtIncoming(vec3 position, vec3 facet, vec3 direction, vec3 sunDir, uint flags) {
     rayQueryEXT query;
+    bool roofed = rtRoofed();
     rtTrace(query, position, facet, direction, flags, 0xffu);
     if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionNoneEXT)
-        return rtSky(direction);
+        return roofed ? rtInteriorAmbient() : rtSky(direction);
     uint index = rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)
                + rayQueryGetIntersectionPrimitiveIndexEXT(query, true);
     RtTriangle triangle = rtTriangles[index];
+    if (roofed) return rtInteriorHit(triangle.color.rgb, rayQueryGetIntersectionTEXT(query, true));
     mat4x3 objectToWorld = rayQueryGetIntersectionObjectToWorldEXT(query, true);
     vec3 a = objectToWorld * vec4(triangle.a.xyz, 1.0);
     vec3 b = objectToWorld * vec4(triangle.b.xyz, 1.0);
@@ -169,7 +192,7 @@ vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal
     int samples = int(clamp(ceil(quality), 1.0, 4.0));
     vec3 diffuse = vec3(0.0);
 #if IKV_RT_GI
-    if (!indirect) return rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
+    if (!indirect) return rtRoofed() ? rtInteriorAmbient() * 0.96 : rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
     for (int sampleIndex = 0; sampleIndex < samples; ++sampleIndex) {
         vec3 direction = rtAboveSurface(rtHemisphere(normal, rtSequence(pixel, 1u, frame * uint(samples) + uint(sampleIndex))), smoothNormal);
         diffuse += rtIncoming(position, facet, direction, sunDir, secondaryFlags);
@@ -177,7 +200,7 @@ vec3 rtDiffuseLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal
     // Cosine-weighted estimator: cosine / PDF cancels pi for Lambertian BRDF.
     diffuse *= 0.96 / float(samples);
 #else
-    diffuse = rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
+    diffuse = rtRoofed() ? rtInteriorAmbient() * 0.96 : rtSkyIrradiance(normal) * (0.96 / 3.14159265359);
 #endif
     return diffuse;
 }
@@ -196,6 +219,8 @@ RtLight rtLighting(vec3 position, vec3 facet, vec3 smoothNormal, vec3 normal, ve
     // Behind the physical facet AND the smooth vertex normal (flat or back-lit surface): self-shadowed whatever the
     // mapped normal says. Behind the facet only: low-poly terminator, traced by rtSunVisibility.
     float visibility = dot(facet, sunDir) > 0.0 || dot(smoothNormal, sunDir) > 0.0 ? 1.0 : 0.0;
+    // Roofed (NONCANONICAL wave 29): no Sun ray through the roof; the caller adds the record's directional term.
+    if (rtRoofed()) cosine = 0.0;
 #if IKV_RT_SHADOWS
     if (cosine > 0.0 && visibility > 0.0)
         visibility = rtSunVisibility(position, facet, sunDir, 0u);
