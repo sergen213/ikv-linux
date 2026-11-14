@@ -24,6 +24,23 @@ find_package(Threads REQUIRED)
 find_package(OpenSSL 3.2 REQUIRED)
 find_package(Boost 1.74 CONFIG REQUIRED)
 find_package(nlohmann_json 3.9 REQUIRED)
+# Release identity (docs/LAUNCHER_UPDATES.md): the launcher's self-update defaults, and the version the server names
+# when it refuses an outdated client and the client reports. Settings may override repo/channel/trust.
+set(IKV_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version compiled into the launcher, client and server")
+set(IKV_UPDATE_REPOSITORY "sergen213/ikv-linux" CACHE STRING "Default GitHub OWNER/REPOSITORY for launcher updates")
+set(IKV_UPDATE_CHANNEL "experimental" CACHE STRING "Default launcher update channel (stable|experimental)")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem" IKV_RELEASE_TRUST_PEM)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv/release_defaults.hpp" @ONLY CONTENT [=[#pragma once
+namespace ikv::release {
+inline constexpr char version[] = "@IKV_VERSION@";
+inline constexpr char repository[] = "@IKV_UPDATE_REPOSITORY@";
+inline constexpr char channel[] = "@IKV_UPDATE_CHANNEL@";
+inline constexpr char trust_pem[] = R"PEM(@IKV_RELEASE_TRUST_PEM@)PEM";
+}
+]=])
+add_library(ikv-release-defaults INTERFACE)
+target_include_directories(ikv-release-defaults INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 add_library(ikv-protocol STATIC src/protocol.cpp)
 target_include_directories(ikv-protocol PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -50,7 +67,7 @@ if(IKV_BUILD_SERVER)
     add_library(ikv-world STATIC src/world.cpp src/world_bots.cpp src/world_weather.cpp src/world_map.cpp)
     target_link_libraries(ikv-world PUBLIC ikv-protocol ikv-store ikv-scene)
     add_executable(ikv-server src/server_main.cpp src/bots.cpp)
-    target_link_libraries(ikv-server PRIVATE ikv-world ikv-scene OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+    target_link_libraries(ikv-server PRIVATE ikv-world ikv-scene ikv-release-defaults OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
     add_executable(ikv-auth src/auth_main.cpp src/https_service.cpp)
     target_link_libraries(ikv-auth PRIVATE ikv-store Boost::headers OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
     if(WIN32)
@@ -177,9 +194,9 @@ if(IKV_BUILD_CLIENT)
     endif()
     # Original Ogg decoding: vendored stb_vorbis (third_party/stb_vorbis), compiled as C++ like upstream sources (-w).
     set_source_files_properties(third_party/stb_vorbis/stb_vorbis.c PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-w")
-    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_charsel.cpp src/audio.cpp
+    add_executable(ikv-client src/client_main.cpp src/client_update.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_charsel.cpp src/audio.cpp
         third_party/stb_vorbis/stb_vorbis.c)
-    target_link_libraries(ikv-client PRIVATE ikv-renderers Freetype::Freetype ${ikv_client_platform_libs} PkgConfig::TurboJPEG OpenSSL::SSL OpenSSL::Crypto Threads::Threads Boost::headers)
+    target_link_libraries(ikv-client PRIVATE ikv-renderers ikv-release-defaults Freetype::Freetype ${ikv_client_platform_libs} PkgConfig::TurboJPEG OpenSSL::SSL OpenSSL::Crypto Threads::Threads Boost::headers)
     if(WIN32)
         target_sources(ikv-client PRIVATE packaging/windows/ikv.rc)
     endif()
@@ -202,41 +219,27 @@ if(IKV_BUILD_ASSET_TOOLS)
 endif()
 if(IKV_BUILD_LAUNCHER)
     find_package(Qt6 6.2 REQUIRED COMPONENTS Core Widgets Network)
+    # Signed self-update (docs/LAUNCHER_UPDATES.md) on Linux (AppImage package) and Windows (portable-tree package).
+    add_library(ikv-updates STATIC src/launcher_updates.cpp)
+    target_include_directories(ikv-updates PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_features(ikv-updates PUBLIC cxx_std_20)
+    target_link_libraries(ikv-updates PUBLIC OpenSSL::Crypto ZLIB::ZLIB nlohmann_json::nlohmann_json)
+    add_executable(ikv-updater src/update_helper_main.cpp)
+    target_link_libraries(ikv-updater PRIVATE ikv-updates)
+    list(APPEND ikv_targets ikv-updates ikv-updater)
+    list(APPEND ikv_install_targets ikv-updater)
     if(WIN32)
-        # NONCANONICAL wave 17: no self-update (ikv-updates/ikv-updater) on Windows. Hosting since wave 19.
-        add_executable(ikv-launcher WIN32 src/launcher_main.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp
-            src/launcher_server.cpp packaging/windows/ikv.rc)
-        target_include_directories(ikv-launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-        target_link_libraries(ikv-launcher PRIVATE ikv-assets-lib Qt6::Widgets Qt6::Network OpenSSL::Crypto)
+        add_executable(ikv-launcher WIN32 src/launcher_main.cpp src/launcher_release.cpp src/launcher_assets.cpp src/launcher_extraction.cpp
+            src/launcher_skin.cpp src/launcher_server.cpp packaging/windows/ikv.rc)
+        target_link_libraries(ikv-launcher PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets Qt6::Network OpenSSL::Crypto shell32)
     else()
-        find_package(LibArchive REQUIRED)
-        add_library(ikv-updates STATIC src/launcher_updates.cpp)
-        target_include_directories(ikv-updates PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-        target_compile_features(ikv-updates PUBLIC cxx_std_20)
-        target_link_libraries(ikv-updates PUBLIC Qt6::Core Qt6::Network OpenSSL::Crypto LibArchive::LibArchive nlohmann_json::nlohmann_json)
-        add_executable(ikv-launcher src/launcher_main.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
-        target_link_libraries(ikv-launcher PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets nlohmann_json::nlohmann_json)
-        add_executable(ikv-updater src/update_helper_main.cpp)
-        target_link_libraries(ikv-updater PRIVATE ikv-updates)
-        list(APPEND ikv_targets ikv-updates ikv-updater)
-        list(APPEND ikv_install_targets ikv-updater)
+        add_executable(ikv-launcher src/launcher_main.cpp src/launcher_release.cpp src/launcher_assets.cpp src/launcher_extraction.cpp
+            src/launcher_skin.cpp src/launcher_server.cpp)
+        target_link_libraries(ikv-launcher PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets Qt6::Network nlohmann_json::nlohmann_json)
     endif()
+    target_include_directories(ikv-launcher PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_definitions(ikv-launcher PRIVATE IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
-    # Self-update defaults compiled into the launcher (docs/LAUNCHER_UPDATES.md); settings may override repo/channel/trust.
-    set(IKV_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version compiled into the launcher")
-    set(IKV_UPDATE_REPOSITORY "sergen213/ikv-linux" CACHE STRING "Default GitHub OWNER/REPOSITORY for launcher updates")
-    set(IKV_UPDATE_CHANNEL "experimental" CACHE STRING "Default launcher update channel (stable|experimental)")
-    file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem" IKV_RELEASE_TRUST_PEM)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem")
-    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv/release_defaults.hpp" @ONLY CONTENT [=[#pragma once
-namespace ikv::release {
-inline constexpr char version[] = "@IKV_VERSION@";
-inline constexpr char repository[] = "@IKV_UPDATE_REPOSITORY@";
-inline constexpr char channel[] = "@IKV_UPDATE_CHANNEL@";
-inline constexpr char trust_pem[] = R"PEM(@IKV_RELEASE_TRUST_PEM@)PEM";
-}
-]=])
-    target_include_directories(ikv-launcher PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_link_libraries(ikv-launcher PRIVATE ikv-release-defaults)
     list(APPEND ikv_targets ikv-launcher)
     list(APPEND ikv_install_targets ikv-launcher)
 endif()
@@ -259,8 +262,8 @@ if(WIN32 AND BUILD_TESTING AND IKV_BUILD_SERVER)
     target_link_libraries(world-test PRIVATE ikv-world)
     list(APPEND ikv_targets protocol-test world-test)
     if(IKV_BUILD_LAUNCHER)
-        add_executable(launcher-gui-smoke tests/launcher_gui_smoke.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
-        target_link_libraries(launcher-gui-smoke PRIVATE ikv-assets-lib Qt6::Widgets Qt6::Network OpenSSL::Crypto)
+        add_executable(launcher-gui-smoke tests/launcher_gui_smoke.cpp src/launcher_release.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
+        target_link_libraries(launcher-gui-smoke PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets Qt6::Network OpenSSL::Crypto shell32)
         target_compile_definitions(launcher-gui-smoke PRIVATE IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
         target_include_directories(launcher-gui-smoke PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated")
         list(APPEND ikv_targets launcher-gui-smoke)
@@ -356,8 +359,8 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
     if(IKV_BUILD_LAUNCHER)
         add_executable(launcher-assets-test tests/launcher_assets_test.cpp src/launcher_assets.cpp)
         target_link_libraries(launcher-assets-test PRIVATE ikv-assets-lib Qt6::Core)
-        add_executable(launcher-gui-smoke tests/launcher_gui_smoke.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
-        target_link_libraries(launcher-gui-smoke PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets nlohmann_json::nlohmann_json)
+        add_executable(launcher-gui-smoke tests/launcher_gui_smoke.cpp src/launcher_release.cpp src/launcher_assets.cpp src/launcher_extraction.cpp src/launcher_skin.cpp src/launcher_server.cpp)
+        target_link_libraries(launcher-gui-smoke PRIVATE ikv-updates ikv-assets-lib Qt6::Widgets Qt6::Network nlohmann_json::nlohmann_json)
         target_compile_definitions(launcher-gui-smoke PRIVATE IKV_HAS_VULKAN=${IKV_HAS_VULKAN})
         target_include_directories(launcher-gui-smoke PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
         list(APPEND ikv_targets launcher-gui-smoke)
@@ -377,8 +380,9 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
         set_tests_properties(launcher-extraction-boundaries PROPERTIES TIMEOUT 60)
         add_test(NAME signed-update
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/update_integration.py"
-                --helper "$<TARGET_FILE:ikv-updater>" --launcher "$<TARGET_FILE:ikv-launcher>")
-        set_tests_properties(signed-update PROPERTIES TIMEOUT 120)
+                --helper "$<TARGET_FILE:ikv-updater>" --launcher "$<TARGET_FILE:ikv-launcher>"
+                --smoke "$<TARGET_FILE:launcher-gui-smoke>")
+        set_tests_properties(signed-update PROPERTIES TIMEOUT 240 ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
         add_executable(update-version-test tests/update_version_test.cpp)
         target_link_libraries(update-version-test PRIVATE ikv-updates)
         list(APPEND ikv_targets update-version-test)

@@ -7,6 +7,7 @@
 #include "ikv/client_mutation.hpp"
 #include "ikv/client_trade.hpp"
 #include "ikv/client_ui.hpp"
+#include "ikv/client_update.hpp"
 #include "ikv/renderer.hpp"
 #include "ikv/scene.hpp"
 #include <SDL3/SDL.h>
@@ -114,7 +115,7 @@ Json read_json(const std::filesystem::path& path, std::uintmax_t cap) {
 constexpr std::array<float,11> view_distances{200,300,400,500,650,800,1000,1300,1700,2200,0};
 struct Options {
     std::string host,renderer="opengl",appearance="original",rt="off",rt_style="faithful",auth;
-    std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map;
+    std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map,update_signal;
     std::uint16_t port=7000;
     std::uint64_t character=0;
     int width=1280,height=800,dx=0,dy=0,ticks=0;
@@ -186,6 +187,7 @@ Options parse_options(int argc,char** argv) {
                 "[--parallax on|off]  enhanced parallax occlusion relief on static zone surfaces (NONCANONICAL; default on)\n"
                 "[--tessellation on|off]  enhanced tessellated PBR-pack relief where supported (NONCANONICAL; default on)\n"
                 "[--texture-detail 0|1|2 --lightmap-detail 0|1|2]  original texture/lightmap packs _4/_2/_1 (default 2 and 1)\n"
+                "[--update-signal FILE]  launcher's 'new release installed' file: show the notice and exit 75 (NONCANONICAL)\n"
                 "Ground click moves; WASD/arrows control camera; F1 displays recovered Turkish help.\n"
                 "Graphical scene, grid and character appearance follow the admitted authoritative source registry.\n";
             std::exit(0);
@@ -199,7 +201,7 @@ Options parse_options(int argc,char** argv) {
             flag!="--texture-detail" && flag!="--lightmap-detail" &&
             flag!="--settings" && flag!="--width" && flag!="--height" && flag!="--ticks" &&
             flag!="--commands" && flag!="--screenshot" && flag!="--audio" && flag!="--dx" && flag!="--dy" &&
-            flag!="--model-map" && flag!="--sound-map")
+            flag!="--model-map" && flag!="--sound-map" && flag!="--update-signal")
             throw std::invalid_argument("unknown option");
         if (++i==argc) throw std::invalid_argument("missing option value");
         const std::string_view value=argv[i];
@@ -237,6 +239,7 @@ Options parse_options(int argc,char** argv) {
         else if (flag=="--audio") o.audio=value;
         else if (flag=="--model-map") o.model_map=value;
         else if (flag=="--sound-map") o.sound_map=value;
+        else if (flag=="--update-signal") o.update_signal=value;
         else if (flag=="--width") o.width=number(value,640,3840);
         else if (flag=="--height") o.height=number(value,480,2160);
         else if (flag=="--ticks") o.ticks=number(value,1,INT32_MAX);
@@ -525,6 +528,7 @@ float unoccluded_distance(const ikv::Scene& scene,const ikv::Camera& camera) {
 
 class Application {
     Options options_;
+    ikv::client_update::Watch update_{options_.update_signal}; // NONCANONICAL: return to the launcher for a new release
     CpuTiming cpu_timing_;
     const Secret& secret_;
     ikv::Scene scene_;
@@ -750,6 +754,8 @@ public:
             input(dt);
             cpu_timing_.begin();
             if (interrupted && !quit_) leave();
+            if (const auto text=update_.poll(); text && !quit_) disconnect(*text); // the launcher installed a newer release
+            if (update_.due() && !quit_) leave();
             if (reconnect_ && !quit_) { reconnect_=false; connect(); }
             if (session_ && !disconnected_) {
                 try {
@@ -781,7 +787,7 @@ public:
                 SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(4)-spent).count()));
         }
         if (!options_.screenshot.empty() && !captured_) throw std::runtime_error("no authoritative native frame available for capture");
-        save_settings(); return 0;
+        save_settings(); return update_.triggered() ? ikv::client_update::exit_code : 0;
     }
 private:
     void queue_state() {
@@ -988,7 +994,7 @@ private:
         loading_=false;
         const ikv::CharacterScreenArt art{original_ui1_,loading_art_.logo,asset_base()/"fonts/verdana.ttf"};
         const auto chosen=ikv::run_character_screen(window_,*renderer_,*audio_,effects_.get(),scene,options_.assets,art,api,
-                                                    []{return interrupted!=0;});
+                                                    [this]{return interrupted!=0 || update_.poll().has_value() || update_.triggered();});
         // Providers borrow the charsel Scene: restore the world camera and rebuild before it is destroyed.
         renderer_->set_camera(options_.camera); reset_renderer();
         if (!chosen) { quit_=true; return false; }

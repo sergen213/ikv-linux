@@ -74,7 +74,7 @@ def tree_snapshot(root):
     return snapshot
 
 
-def launcher_tls_check(launcher, helper, workspace, public_key, releases):
+def launcher_tls_check(launcher, helper, workspace, public_key, releases, smoke=None):
     """Exercise signed updates and bounded HTTP bodies against an owned TLS repository."""
     import time
 
@@ -372,6 +372,99 @@ def launcher_tls_check(launcher, helper, workspace, public_key, releases):
         assert "Kurulu güncelleme kullanılamadı" in result.stderr, result.stderr
         altered.write_bytes(original)
         assert handoff().stdout.startswith("fixture-appimage 2.0.0 ")
+
+        # ---- Automatic updates: the normal (GUI) launcher installs without any button press ----
+        auto_root = workspace / "auto-installation"
+        auto_config = tls / "auto-config"
+        (auto_config / "IKVCommunity").mkdir(parents=True, mode=0o700)
+        auto_env = dict(unguarded, XDG_CONFIG_HOME=str(auto_config))
+        conf = auto_config / "IKVCommunity/IKVLauncher.conf"
+
+        def configure(skip=None):
+            lines = ["[installation]", "root=" + str(auto_root), "", "[updates]", "api=" + origin + "/releases",
+                     "trust=" + str(public_key), "ca=" + str(ca_cert), "release_channel=stable"]
+            if skip:
+                lines.append("skip_version=" + skip)
+            conf.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        def gui(extra=(), guarded=True, timeout=30):
+            env = dict(auto_env, IKV_UPDATE_HANDOFF="1") if guarded else auto_env
+            return subprocess.Popen([str(launcher), *extra], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, env=env)
+
+        def finished(process, timeout=30):
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout, stderr = process.communicate()
+                raise AssertionError(("launcher did not restart", stdout, stderr))
+            return stdout, stderr
+
+        def still_running(process, path, seconds=4):
+            # The refused/skipped update must leave this launcher running, with the active release unchanged.
+            deadline = time.monotonic() + 15
+            while path is not None and path not in requests[start:] and time.monotonic() < deadline:
+                time.sleep(0.1)
+            time.sleep(seconds)
+            alive = process.poll() is None
+            process.terminate()
+            stdout, stderr = process.communicate(timeout=10)
+            assert alive, ("launcher exited", stdout, stderr)
+            return stdout
+
+        configure()
+        publish(releases[0])
+        start = len(requests)
+        stdout, stderr = finished(gui(guarded=False))
+        assert stdout.strip() == "fixture-appimage 1.0.0 handoff=1 args=", (stdout, stderr)
+        assert os.readlink(auto_root / "current") == "releases/1.0.0"
+        assert "/" + releases[0][1].name in requests[start:]
+        # A tampered manifest is refused: no package download, the launcher stays usable on the old release.
+        publish(releases[1])
+        responses["/manifest.json"] = responses["/manifest.json"] + b" "
+        start = len(requests)
+        still_running(gui(), "/manifest.sig")
+        assert "/" + releases[1][1].name not in requests[start:], requests[start:]
+        assert os.readlink(auto_root / "current") == "releases/1.0.0", "tampered manifest changed the release"
+        assert not (auto_root / "releases/2.0.0").exists()
+        publish(releases[1])
+        if smoke is not None:
+            # The game runs: install now, restart only after it closes. The fake client ends at the update signal.
+            exited = workspace / "fake-client-exited"
+            fake = workspace / "fake-client.py"
+            fake.write_text("import os, sys, time\nsignal = sys.argv[1]\nwhile not os.path.exists(signal):\n"
+                            "    time.sleep(0.1)\ntime.sleep(1)\nopen(sys.argv[2], 'w').write(open(signal).read())\n"
+                            "sys.exit(75)\n", encoding="ascii")
+            fixture = {"mode": "auto-update", "timeout_seconds": 60,
+                       "client": [sys.executable, str(fake), str(auto_root / ".client-update"), str(exited)]}
+            result = subprocess.run([str(smoke)], input=json.dumps(fixture), stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, env=dict(auto_env, IKV_UPDATE_HANDOFF="1"), timeout=90)
+            lines = result.stdout.splitlines()
+            assert result.returncode == 0 and len(lines) == 2, (result.returncode, result.stdout, result.stderr)
+            assert lines[0].startswith("DEFERRED client_running=1 label=Güncelleme indirildi; oyun kapanınca yeniden başlatılacak"), lines
+            assert lines[1] == "fixture-appimage 2.0.0 handoff=1 args=", lines
+            assert exited.read_text() == "2.0.0\n", "client did not receive the update signal before the restart"
+            assert os.readlink(auto_root / "current") == "releases/2.0.0"
+        else:
+            finished(gui())
+        # An explicit rollback is not undone: 2.0.0 (rolled back from) is skipped until a strictly newer release appears,
+        # which the periodic re-check then installs automatically.
+        run([helper, "rollback", "--trust", public_key, "--root", auto_root])
+        configure(skip="2.0.0")
+        start = len(requests)
+        process = gui(["--update-interval-seconds", "10"])
+        deadline = time.monotonic() + 15
+        while "/releases" not in requests[start:] and time.monotonic() < deadline:
+            time.sleep(0.1)
+        time.sleep(2)
+        assert process.poll() is None and "/" + releases[1][1].name not in requests[start:], "rolled-back release reinstalled"
+        assert os.readlink(auto_root / "current") == "releases/1.0.0"
+        publish(releases[2])
+        stdout, stderr = finished(process, timeout=30)
+        assert stdout.strip() == "fixture-appimage 3.0.0 handoff=1 args=--update-interval-seconds 10", (stdout, stderr)
+        assert os.readlink(auto_root / "current") == "releases/3.0.0"
+        assert "skip_version" not in conf.read_text(encoding="utf-8"), "installing a newer release kept the rollback skip"
     finally:
         for fault in all_faults:
             fault["cancel"].set()
@@ -386,6 +479,7 @@ def main():
     parser.add_argument("--helper", required=True)
     parser.add_argument("--signer", default=str(Path(__file__).resolve().parents[1] / "tools/sign_manifest.py"))
     parser.add_argument("--launcher", help="Also exercise the launcher's real QtNetwork HTTPS update path")
+    parser.add_argument("--smoke", help="launcher-gui-smoke: also prove the update restart waits for a running game")
     args = parser.parse_args()
     helper = Path(args.helper).resolve()
     signer = Path(args.signer).resolve()
@@ -789,9 +883,11 @@ def main():
         retained_signature.write_bytes(saved_signature)
         check_preserved()
         if args.launcher:
-            # The launcher offers vX.Y.Z tags only and restarts into the installed AppImage.
+            # The launcher offers vX.Y.Z tags only, installs automatically and restarts into the installed AppImage.
             launcher_tls_check(Path(args.launcher).resolve(), helper, workspace, public_key,
-                               (make_release("1.0.0", 1, appimage=True), make_release("2.0.0", 2, appimage=True)))
+                               (make_release("1.0.0", 1, appimage=True), make_release("2.0.0", 2, appimage=True),
+                                make_release("3.0.0", 3, appimage=True)),
+                               Path(args.smoke).resolve() if args.smoke else None)
     print("signed updater integration checks passed")
 
 

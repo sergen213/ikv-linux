@@ -8,6 +8,16 @@
 
 namespace ikv::updates {
 
+// The signed package platform this build installs: Linux packages carry bin/ikv-linux.AppImage and no "platform"
+// manifest field; Windows packages carry the whole portable tree (bin/ikv-launcher.exe ...) and "platform":"windows".
+#ifdef _WIN32
+inline constexpr char platform[] = "windows";
+inline constexpr char launcher_payload[] = "bin/ikv-launcher.exe";
+#else
+inline constexpr char platform[] = "linux";
+inline constexpr char launcher_payload[] = "bin/ikv-linux.AppImage";
+#endif
+
 struct File {
     std::string path;
     std::string sha256;
@@ -23,6 +33,7 @@ struct Manifest {
     std::string package_sha256;
     std::uint64_t package_size{};
     std::vector<File> files;
+    std::string platform = "linux";
 };
 
 // All failures throw std::exception; a missing/untrusted key never succeeds.
@@ -43,6 +54,9 @@ Manifest verify_release(const std::filesystem::path& install_root,
 // Verify previous signed release, then atomically switch current; repeated rollback toggles.
 Manifest rollback(const std::filesystem::path& install_root,
                   const std::filesystem::path& trusted_pem);
+// Version named by the install root's current pointer (Linux: current symlink, Windows: current.json); empty when
+// nothing is installed. Recovers an interrupted cutover first, under the installation lock.
+std::string current_release(const std::filesystem::path& install_root);
 // Strict SemVer 2.0 precedence of MAJOR.MINOR.PATCH[-PRERELEASE] (a prerelease sorts before its
 // release; no "v" prefix, build metadata, leading zeroes or empty identifiers). Returns <0, 0 or >0;
 // malformed input throws.

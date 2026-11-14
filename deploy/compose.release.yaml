@@ -1,0 +1,14 @@
+# Automatic updates for Docker Compose (docs/SELF_HOSTING.md "Automatic updates"): auth and world run the active
+# extracted signed release that deploy/ikv-auto-update.sh (IKV_UPDATE_MODE=compose) installs into /var/lib/ikv-release.
+#   docker compose -f compose.yaml -f deploy/compose.release.yaml up -d
+services:
+  auth:
+    environment:
+      IKV_RELEASE: /opt/ikv-release/active
+    volumes:
+      - /var/lib/ikv-release:/opt/ikv-release:ro
+  world:
+    environment:
+      IKV_RELEASE: /opt/ikv-release/active
+    volumes:
+      - /var/lib/ikv-release:/opt/ikv-release:ro

@@ -1,5 +1,7 @@
 #include "ikv/launcher_server.hpp"
 #include "ikv/release_defaults.hpp"
+#include "ikv/launcher_release.hpp"
+#include "ikv/updates.hpp"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -422,6 +424,7 @@ QString countText(const QJsonValue& value) { return value.isDouble() ? QString::
 
 // ---- Supervisor: one detached process owns PostgreSQL, ikv-auth and ikv-server ----
 volatile std::sig_atomic_t stopRequested = 0;
+int supervisorLock = -1; // supervisor.lock, released before handing over to a newer release's supervisor
 #ifndef _WIN32
 void requestStop(int) { stopRequested = 1; } // Windows: DIR/stop.request (askSupervisorStop)
 #endif
@@ -440,7 +443,11 @@ public:
             if (!readJson(dir_ + "/host.json").value("keep_alive").toBool() && !anyHolder(dir_ + "/launcher.lock")) {
                 say("başlatıcı kapandı ve 'Başlatıcı kapanınca da çalışsın' kapalı");
                 shutdown({});
+                return;
             }
+            // Automatic updates (docs/LAUNCHER_UPDATES.md): a newer verified release in the install root, or one a newer
+            // launcher asks for (upgrade.request), is announced, the world saves, and the supervisor hands over to it.
+            if (QFileInfo::exists(dir_ + "/upgrade.request") || ticks_ % 120 == 0) checkUpgrade();
         });
     }
     ~Supervisor() override { password_.fill('\0'); }
@@ -487,6 +494,7 @@ private:
     QList<qint64> crashes_;
     QNetworkAccessManager network_;
     QTimer watch_;
+    QString upgradeLauncher_, upgradeVersion_; // set once the announced world restart for an upgrade is queued
 
     static void say(const QString& line) {
         std::fprintf(stdout, "%s supervisor: %s\n", QDateTime::currentDateTimeUtc().toString(Qt::ISODate).toUtf8().constData(), line.toUtf8().constData());
@@ -507,7 +515,7 @@ private:
         try {
             saveJson(dir_ + "/state.json", {{"pid", static_cast<qint64>(::getpid())}, {"phase", name}, {"message", message},
                 {"host", config_.value("host")}, {"bind", config_.value("bind")}, {"auth_port", authPort_}, {"admin_port", adminPort_},
-                {"world_port", worldPort_}, {"started_at", started_}, {"version", ikv::release::version}});
+                {"world_port", worldPort_}, {"started_at", started_}, {"version", ikv::release::version}, {"upgrades", true}});
         } catch (const std::exception& e) { say(failure(e)); }
     }
     QProcess* spawn(const QString& name, const QStringList& args, const QString& pattern, int seconds,
@@ -621,6 +629,7 @@ private:
         const bool world = process == world_;
         if (process == auth_) auth_ = nullptr; else if (world) world_ = nullptr; else return; // planned restarts
         if (stopping_) return;
+        if (world && status == QProcess::NormalExit && code == 75 && !upgradeLauncher_.isEmpty()) { upgrade(); return; }
         if (world && status == QProcess::NormalExit && code == 75) { say("yönetici yeniden başlatması"); startWorld(); return; }
         if (world && status == QProcess::NormalExit && code == 0) { say("yönetici kapatması"); shutdown({}); return; }
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
@@ -633,18 +642,86 @@ private:
         say(name + " yeniden başlatılıyor");
         if (world) startWorld(); else startAuth(Auth::Plain);
     }
-    void shutdown(const QString& problem) {
-        if (stopping_) return;
-        stopping_ = true; watch_.stop();
-        phase("stopping", problem);
+    void stopServices() {
         for (QProcess** slot : {&world_, &auth_}) // world first: it persists characters through auth's database
             if (auto* process = std::exchange(*slot, nullptr)) stopChild(process, 20000);
         if (!bin_.isEmpty()) {
             try { stopPostgres(dir_, bin_); say("PostgreSQL durduruldu"); } catch (const std::exception& e) { say(failure(e)); }
         }
         authPort_ = adminPort_ = worldPort_ = 0;
+    }
+    void shutdown(const QString& problem) {
+        if (stopping_) return;
+        stopping_ = true; watch_.stop();
+        phase("stopping", problem);
+        stopServices();
         phase(problem.isEmpty() ? "stopped" : "failed", problem);
         QCoreApplication::exit(problem.isEmpty() ? 0 : 1);
+    }
+    // The newer release's launcher binary/AppImage, or empty: a verified installed release of the install root
+    // (<asset-root>/..), else a newer launcher's upgrade.request {"launcher","version"} (its own supervisor program).
+    std::pair<QString, QString> upgradeTarget() {
+        if (QFileInfo::exists(dir_ + "/upgrade.request")) {
+            const auto request = readJson(dir_ + "/upgrade.request");
+            QFile::remove(dir_ + "/upgrade.request");
+            const auto launcher = request.value("launcher").toString(), version = request.value("version").toString();
+            try {
+                if (!launcher.isEmpty() && QFileInfo(launcher).isExecutable() && ikv::updates::compare_versions(version.toStdString(), ikv::release::version) > 0)
+                    return {launcher, version};
+            } catch (const std::exception&) {}
+            say("geçersiz güncelleme isteği yok sayıldı");
+        }
+        const auto installRoot = QFileInfo(assets_).absolutePath();
+        const auto installed = ikv::launcher_release::installed(installRoot, ikv::launcher_release::trustSetting(), true);
+        return {installed.launcher, installed.version};
+    }
+    // Queue the world's own announced restart (the management "restart" command: countdown announcements to every online
+    // player, then the world saves every character and exits 75) on behalf of the server's administrator.
+    void checkUpgrade() {
+        if (stopping_ || !upgradeLauncher_.isEmpty() || !world_ || !worldPort_) return;
+        QString launcher, version;
+        try { std::tie(launcher, version) = upgradeTarget(); }
+        catch (const std::exception& e) { say("kurulu güncelleme kullanılamadı: " + failure(e)); return; }
+        if (launcher.isEmpty()) return;
+        const auto host = readJson(dir_ + "/host.json");
+        const int delay = std::clamp(host.value("update_delay_seconds").toInt(60), 0, 3600);
+        const QString message = "Sunucu v" + version + " sürümüne güncelleniyor; karakterleriniz kaydedilir.";
+        QFile dsnFile(dir_ + "/secrets/dsn");
+        if (!dsnFile.open(QIODevice::ReadOnly)) { say("güncelleme: secrets/dsn okunamadı"); return; }
+        auto dsn = QString::fromUtf8(dsnFile.read(4096)).trimmed();
+        dsnFile.close();
+        QString password;
+        static const QRegularExpression secret(" password=(\\S+)");
+        if (const auto match = secret.match(dsn); match.hasMatch()) { password = match.captured(1); dsn.remove(match.capturedStart(), match.capturedLength()); }
+        auto environment = QProcessEnvironment::systemEnvironment();
+        if (!password.isEmpty()) environment.insert("PGPASSWORD", password); // child environment only, never argv
+        const QByteArray sql = "WITH queued AS (INSERT INTO world_commands(command, arguments, actor_id) "
+            "SELECT 'restart', jsonb_build_object('delay_seconds', " + QByteArray::number(delay) + ", 'message', :'message'), id "
+            "FROM accounts WHERE username = :'admin' RETURNING id) SELECT count(*) FROM queued;\n";
+        QByteArray output;
+        try {
+            const int code = runCode(bin_ + "/psql", {"--no-psqlrc", "--quiet", "--tuples-only", "--no-align", "--set", "ON_ERROR_STOP=1",
+                                                       "--set", "message=" + message, "--set", "admin=" + host.value("admin").toString(),
+                                                       "--file", "-", "--dbname", dsn}, &output, sql, environment);
+            if (code != 0 || output.trimmed() != "1") throw hostIssue("psql: " + QString::fromUtf8(output.right(500)).trimmed());
+        } catch (const std::exception& e) { say("güncelleme duyurusu kuyruğa alınamadı (yeniden denenecek): " + failure(e)); return; }
+        upgradeLauncher_ = launcher; upgradeVersion_ = version;
+        say(QString("v%1 hazır: dünya %2 sn sonra yeniden başlatılacak (oyunculara duyuruldu), sonra yeni sürüme geçilecek").arg(version).arg(delay));
+        phase("running", "güncelleme v" + version + " (" + QString::number(delay) + " sn)");
+    }
+    // The world announced, saved and exited 75: stop auth and PostgreSQL, release supervisor.lock and run the new
+    // release's supervisor with the same server directory and assets (it restarts PostgreSQL, ikv-auth, ikv-server).
+    void upgrade() {
+        stopping_ = true; watch_.stop();
+        phase("upgrading", "v" + upgradeVersion_);
+        stopServices();
+        phase("upgrading", "v" + upgradeVersion_);
+        say("yeni sürüm gözetmeni başlatılıyor: " + upgradeLauncher_);
+        if (supervisorLock >= 0) ::close(std::exchange(supervisorLock, -1));
+        try { ikv::launcher_release::execInto(upgradeLauncher_, {"--host-supervisor", dir_, "--asset-root", assets_}); }
+        catch (const std::exception& e) { say(failure(e)); }
+        phase("failed", "Yeni sürüm başlatılamadı: " + upgradeLauncher_);
+        QCoreApplication::exit(1);
     }
 };
 
@@ -719,7 +796,8 @@ private:
     QJsonArray bots_now_;
     std::function<void()> afterStop_;
     Mode mode_ = Mode::Idle;
-    bool polling_ = false, wasRunning_ = false, ours_ = false, settingsDirty_ = false, creating_ = false, upgradeTried_ = false;
+    bool polling_ = false, wasRunning_ = false, ours_ = false, settingsDirty_ = false, creating_ = false;
+    QString upgradeAsked_; // launcher version the running (older) server was last asked to upgrade to
     int lockFd_ = -1, ticks_ = 0, currentStep_ = -1, players_now_ = -1;
     qint64 logOffset_ = -1;
     QDeadlineTimer startDeadline_;
@@ -1635,17 +1713,24 @@ private:
         pages_->setCurrentWidget(admin && !creating_ ? managePage_ : createPage_);
         title_->setText("<h2>" + (admin && !creating_ ? "Sunucu Yönetimi — " + config.value("name").toString("Yerel Sunucu").toHtmlEscaped() : QString("Sunucu Kur")) + "</h2>");
         setWindowTitle(admin && !creating_ ? "Sunucu Yönetimi" : "Sunucu Kur");
-        const QString phaseText = phase == "database" ? "veritabanı" : phase == "auth" || phase == "bootstrap" ? "hesap servisi" : phase == "register" ? "yönetici kaydı" : phase == "world" ? "dünya yükleniyor" : phase;
-        // A supervisor started by an older launcher (state.json without or with another version, e.g. autostart just
-        // before a self-update, or keep-alive across an update) keeps that release's ikv-auth/ikv-server and web panel until a
-        // full stop and start, so the launcher restarts it once onto its own release (the world saves on stop).
+        const QString phaseText = phase == "database" ? "veritabanı" : phase == "auth" || phase == "bootstrap" ? "hesap servisi" : phase == "register" ? "yönetici kaydı" : phase == "world" ? "dünya yükleniyor" : phase == "upgrading" ? "yeni sürüme geçiliyor" : phase;
+        // A supervisor of an older release keeps that release's ikv-auth/ikv-server and web panel. Supervisors that
+        // upgrade themselves (state.json "upgrades") are asked to: they announce to online players, the world saves and they
+        // hand over to this launcher's release, once per new launcher version. Older ones get one full stop and start.
         const auto serverVersion = state.value("version").toString();
+        bool olderServer = serverVersion.isEmpty();
+        try { olderServer = olderServer || ikv::updates::compare_versions(serverVersion.toStdString(), ikv::release::version) < 0; } catch (const std::exception&) { olderServer = true; }
         const bool staleServer = running && serverVersion != QLatin1String(ikv::release::version);
-        if (staleServer && mode_ == Mode::Idle && !upgradeTried_) {
-            upgradeTried_ = true;
+        if (running && olderServer && mode_ == Mode::Idle && upgradeAsked_ != QLatin1String(ikv::release::version)) {
+            upgradeAsked_ = QString::fromLatin1(ikv::release::version);
             guarded([&] {
-                info(QString("Sunucu %1 ile çalışıyor; v%2 ile yeniden başlatılıyor…")
-                         .arg(serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion, QString::fromLatin1(ikv::release::version)));
+                const QString from = serverVersion.isEmpty() ? QString("eski bir sürüm") : "v" + serverVersion;
+                if (state.value("upgrades").toBool()) {
+                    saveJson(dir() + "/upgrade.request", {{"launcher", supervisorProgram()}, {"version", ikv::release::version}});
+                    info(QString("Sunucu %1 ile çalışıyor; oyunculara duyurulup v%2 ile yeniden başlatılacak (dünya kaydedilir)").arg(from, QString::fromLatin1(ikv::release::version)));
+                    return;
+                }
+                info(QString("Sunucu %1 ile çalışıyor; v%2 ile yeniden başlatılıyor…").arg(from, QString::fromLatin1(ikv::release::version)));
                 afterStop_ = [this] { startServer(); };
                 stopServer();
             });
@@ -1757,6 +1842,8 @@ bool isSupervisorInvocation(int argc, char** argv) {
 }
 
 int supervisorMain(int argc, char** argv) {
+    // The launcher's settings (updates/trust for verifying installed releases) live under the same identity.
+    QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
     if (std::strcmp(argv[1], "--host-lan") == 0) { // the host page's LAN toggle for scripts/headless hosts
         if (argc != 4 || (std::strcmp(argv[2], "on") != 0 && std::strcmp(argv[2], "off") != 0)) {
             std::fprintf(stderr, "kullanım: ikv-launcher --host-lan on|off DIR\n"); return 2;
@@ -1822,6 +1909,7 @@ int supervisorMain(int argc, char** argv) {
     bool locked = false;
     for (int attempt = 0; attempt < 40 && !(locked = ::flock(lock, LOCK_EX | LOCK_NB) == 0); ++attempt) ::usleep(50000); // a launcher's probe holds LOCK_SH briefly
     if (!locked) { std::fprintf(stderr, "Sunucu zaten çalışıyor\n"); return 3; }
+    supervisorLock = lock;
     const QString log = dir + "/server.log";
     if (QFileInfo(log).size() > (4 << 20)) { QFile::remove(log + ".1"); QFile::rename(log, log + ".1"); }
 #ifdef _WIN32

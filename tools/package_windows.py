@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Cross-build the IKV Windows (x64) client, launcher and server (hosting) and package them.
 
-Host:  python3 tools/package_windows.py [X.Y.Z] [--build-only] [--work DIR] [--dist DIR]   (docker or podman)
+Host:  python3 tools/package_windows.py [X.Y.Z] [--build-only] [--work DIR] [--dist DIR] [--signing-key PEM | --no-sign]
        Builds tools/windows/Dockerfile (pinned Debian 13 snapshot, MinGW-w64 GCC 14 posix/SEH, Qt 6.11.3 win64_mingw,
        OpenSSL 3.5.9, SDL 3.4.18, ...), then configures/compiles inside it with the source tree mounted read-only.
        --build-only stops after compiling (build log: <work>/build.log).
 Output: dist/IKV-Windows-<version>-x64-Setup.exe (NSIS, per-user) and dist/IKV-Windows-<version>-x64.zip (portable),
         each with .sha256, plus a .json inventory/licence report. Version defaults to CMake project().
+        Self-update trio (docs/LAUNCHER_UPDATES.md): dist/ikv-windows-x86_64-<version>.tar.gz (the staged portable tree,
+        deterministic USTAR) signed on the host with the release key into dist/manifest-windows.json + manifest-windows.sig
+        ("platform":"windows", channel experimental, next "experimental-windows" sequence of the local ledger).
 Work:  build-windows/ (build tree, staged install). Original game assets are never read.
 """
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -20,11 +24,20 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.search(r"^project\(\w+ VERSION ([0-9.]+)", (ROOT / "CMakeLists.txt").read_text(), re.MULTILINE).group(1)
 IMAGE = "ikv-windows-toolchain:trixie"
+# Signing (host only; the key never enters the container), shared with tools/release.py.
+SECRETS = Path.home() / ".local/share/ikv-dev/secrets"
+KEY = SECRETS / "release-signing.pem"
+LEDGER = SECRETS / "release-sequence.json"
+INITIAL_SEQUENCE = 2026101100
+CHANNEL = "experimental"
+SEQUENCE_KEY = CHANNEL + "-windows"  # Windows manifests have their own sequence (and highwater file on each install)
+PUBLIC = ROOT / "packaging/ikv-release-public.pem"
 QT = Path("/opt/w64/qt")
 # DLL search order for the closure: Qt, our dependency prefix, the GCC 14 posix runtime, the MinGW-w64 CRT side libs,
 # then EDB PostgreSQL (libpq and its OpenSSL/gettext DLLs) and the app-local Visual C++ runtime they import.
@@ -148,6 +161,10 @@ def inside(args) -> None:
     for package in ("gcc-mingw-w64-x86-64-posix-runtime", "mingw-w64-common"):  # libstdc++/libgcc (GCC RLE), winpthreads
         shutil.copyfile(Path(f"/usr/share/doc/{package}/copyright").resolve(), licenses / f"{package}.copyright")
     shutil.copyfile(src / "packaging/windows/README.txt", stage / "README.txt")
+    # The signed update payload must not contain empty directories (no signed file represents them).
+    for directory in sorted((p for p in stage.rglob("*") if p.is_dir()), key=lambda p: -len(p.parts)):
+        if not any(directory.iterdir()):
+            directory.rmdir()
 
     report = {"version": args.version, "asset_free": True,
               "compiler_warnings": (out / "warnings.txt").read_text().splitlines(),
@@ -185,7 +202,59 @@ def inside(args) -> None:
         (dist / (artifact.name + ".sha256")).write_text(f"{digest}  {artifact.name}\n")
         report[artifact.suffix[1:]] = {"file": artifact.name, "size": artifact.stat().st_size, "sha256": digest}
         print(f"{artifact}: {artifact.stat().st_size} bytes sha256 {digest}")
+    update = dist / f"ikv-windows-x86_64-{args.version}.tar.gz"
+    update_package(stage, update)
+    report["update_package"] = {"file": update.name, "size": update.stat().st_size, "sha256": sha256(update)}
+    print(f"{update}: {update.stat().st_size} bytes sha256 {report['update_package']['sha256']}")
     (dist / f"{base}.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+
+
+def update_package(stage: Path, package: Path) -> None:
+    """Deterministic USTAR tar.gz of the staged portable tree (what releases/<version> holds after installation)."""
+    package.unlink(missing_ok=True)
+    with package.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed, \
+            tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+        for path in sorted(stage.rglob("*")):
+            info = archive.gettarinfo(str(path), arcname=path.relative_to(stage).as_posix())
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = 0
+            if info.isfile():
+                with path.open("rb") as source:
+                    archive.addfile(info, source)
+            elif info.isdir():
+                archive.addfile(info)
+            else:
+                raise SystemExit(f"update payload contains a link or special file: {path}")
+
+
+def sign_update(version: str, stage: Path, dist: Path, key: Path) -> None:
+    """Sign the Windows update package with the release key (host only) and verify it against the trust root."""
+    if not key.is_file():
+        raise SystemExit(f"signing key missing: {key} (use --no-sign for an unsigned development build)")
+    derived = subprocess.run(["openssl", "pkey", "-in", key, "-pubout"], check=True, text=True, stdout=subprocess.PIPE).stdout
+    if derived.strip() != PUBLIC.read_text().strip():
+        raise SystemExit(f"{PUBLIC} is not the public half of {key}")
+    package = dist / f"ikv-windows-x86_64-{version}.tar.gz"
+    manifest, signature = dist / "manifest-windows.json", dist / "manifest-windows.sig"
+    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
+    sequence = int(ledger.get(SEQUENCE_KEY, INITIAL_SEQUENCE)) + 1
+    subprocess.run([sys.executable, ROOT / "tools/sign_manifest.py", "--root", stage, "--package", package, "--version", version,
+                    "--sequence", str(sequence), "--channel", CHANNEL, "--platform", "windows", "--output", manifest,
+                    "--signature", signature, "--key-file", key], check=True)
+    subprocess.run(["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", PUBLIC, "-rawin", "-in", manifest, "-sigfile", signature],
+                   check=True, stdout=subprocess.DEVNULL)
+    document = json.loads(manifest.read_bytes())
+    if document.get("platform") != "windows" or document["version"] != version or document["package"] != package.name:
+        raise SystemExit("signed Windows manifest does not describe this package")
+    ledger[SEQUENCE_KEY] = sequence
+    written = LEDGER.with_suffix(".tmp")
+    written.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n")
+    written.chmod(0o600)
+    written.replace(LEDGER)
+    for path in (package, manifest, signature):
+        print(f"{path}: {path.stat().st_size} bytes sha256 {sha256(path)}")
+    print(f"signed Windows update {CHANNEL} sequence {sequence}; ledger updated")
 
 
 def host(args) -> None:
@@ -200,6 +269,8 @@ def host(args) -> None:
                     "-v", f"{ROOT}:/src:ro", "-v", f"{work}:/out", "-v", f"{dist}:/dist", IMAGE,
                     "python3", "/src/tools/package_windows.py", "--inside", args.version]
                    + (["--build-only"] if args.build_only else []), check=True)
+    if not args.build_only and not args.no_sign:
+        sign_update(args.version, work / "stage", dist, args.signing_key)
 
 
 def self_check() -> None:
@@ -217,6 +288,8 @@ if __name__ == "__main__":
     parser.add_argument("--build-only", action="store_true")
     parser.add_argument("--work", type=Path, default=ROOT / "build-windows")
     parser.add_argument("--dist", type=Path, default=ROOT / "dist")
+    parser.add_argument("--signing-key", type=Path, default=KEY)
+    parser.add_argument("--no-sign", action="store_true", help="skip signing the Windows update trio (development builds)")
     parser.add_argument("--inside", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--self-check", action="store_true")
     args = parser.parse_args()

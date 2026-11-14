@@ -572,6 +572,44 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
     std::fprintf(stderr, "%s launcher-gui stage=%s: %s\n", result ? "FAIL" : "PASS", stage.toUtf8().constData(), reason.toUtf8().constData());
     return result;
 }
+// "mode":"auto-update" (tests/update_integration.py): the real Launcher with the IKVCommunity/IKVLauncher settings of
+// the caller's XDG_CONFIG_HOME (release API, trust, CA, install root). Starts the fixture's "client" command as the game
+// (private launch step), then the normal startup: the automatic check installs the newer release without any button.
+// Prints "DEFERRED client_running=1 label=…" once the restart waits for the game; when the fake client exits, the
+// launcher restarts into the installed release, which replaces this process (no return on success).
+struct LauncherTestAccess {
+    static void launch(Launcher& launcher, const QString& executable, const QStringList& args) { launcher.launch(executable, args); }
+    static bool clientRunning(const Launcher& launcher) { return launcher.clientRunning(); }
+    static void startup(Launcher& launcher) { launcher.startup({}, 3600); }
+    static QString label(const Launcher& launcher) { return launcher.updateLabel->text(); }
+};
+int autoUpdateSmoke(int& argc, char** argv, const QJsonObject& fixture) {
+    QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
+    ikv::launcher_release::rememberArguments(argc, argv);
+    QApplication app(argc, argv);
+    const auto command = fixture.value("client").toVariant().toStringList();
+    if (command.isEmpty()) throw std::runtime_error("auto-update fixture needs a client command");
+    const int seconds = fixture.value("timeout_seconds").toInt(60);
+    Launcher launcher;
+    LauncherTestAccess::launch(launcher, command.front(), command.mid(1));
+    QElapsedTimer clock; clock.start();
+    while (!LauncherTestAccess::clientRunning(launcher)) {
+        if (clock.elapsed() > 10000) throw std::runtime_error("fake client did not start");
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    LauncherTestAccess::startup(launcher);
+    bool deferred = false;
+    while (clock.elapsed() < seconds * 1000LL) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        if (!deferred && LauncherTestAccess::label(launcher).contains("oyun kapanınca yeniden başlatılacak")) {
+            deferred = true;
+            std::printf("DEFERRED client_running=%d label=%s\n", LauncherTestAccess::clientRunning(launcher) ? 1 : 0,
+                        LauncherTestAccess::label(launcher).toUtf8().constData());
+            std::fflush(stdout);
+        }
+    }
+    throw std::runtime_error(deferred ? "launcher did not restart after the game closed" : "automatic update did not defer for the running game");
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -596,6 +634,7 @@ int main(int argc, char** argv) {
         if (parse.error != QJsonParseError::NoError || !document.isObject())
             throw std::runtime_error("Stdin must contain one fixture JSON object");
         const auto fixture = document.object();
+        if (fixture.value("mode").toString() == "auto-update") return autoUpdateSmoke(argc, argv, fixture);
         if (fixture.value("mode").toString() == "host-server") {
             secretPassword = requiredString(fixture, "admin_password");
             ownedUsername = requiredString(fixture, "admin_username");
