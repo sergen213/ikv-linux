@@ -294,6 +294,16 @@ elseif(BUILD_TESTING AND IKV_BUILD_SERVER)
     list(APPEND ikv_targets quest-reachability-test)
     add_test(NAME world-quest-reachability COMMAND quest-reachability-test "${CMAKE_CURRENT_SOURCE_DIR}/config/gameplay.json")
     set_tests_properties(world-quest-reachability PROPERTIES TIMEOUT 120)
+    # NONCANONICAL wave 30: realm/shard Store boundaries (migration 009 over a populated 008 database, tickets, lease
+    # handoff, bus, lockouts, realm HTTPS routes) against a disposable PostgreSQL cluster.
+    add_executable(realm-store-test tests/realm_store_test.cpp)
+    target_link_libraries(realm-store-test PRIVATE ikv-store)
+    target_compile_options(realm-store-test PRIVATE -UNDEBUG)
+    list(APPEND ikv_targets realm-store-test)
+    add_test(NAME realm-store
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/realm_store_test.py"
+            --auth "$<TARGET_FILE:ikv-auth>" --store-test "$<TARGET_FILE:realm-store-test>" --source "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_tests_properties(realm-store PROPERTIES TIMEOUT 240)
     if(IKV_BUILD_ASSET_TOOLS)
         add_test(NAME asset-boundaries COMMAND ikv-assets --self-test)
         set_tests_properties(asset-boundaries PROPERTIES TIMEOUT 15)
