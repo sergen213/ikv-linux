@@ -84,6 +84,8 @@
     .empty { color: var(--muted); padding: .8rem 0; }
     .ok { color: var(--good); }
     .bad { color: var(--bad); }
+    .shard-list { margin: 0; padding-left: 1rem; }
+    #realm-results td:not(:nth-child(7)) { white-space: nowrap; }
     .operational { border-left: 3px solid var(--copper); padding-left: 1rem; margin-top: 1.2rem; }
     code { font-family: var(--mono); color: var(--copper); overflow-wrap: anywhere; }
     .footer { font: .75rem/1.7 var(--mono); color: var(--muted); border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1rem; }
@@ -122,6 +124,7 @@
         <p id="countdown-banner" class="banner" role="alert" hidden></p>
         <div class="tabs" role="tablist" aria-label="Yönetim bölümleri">
           <button type="button" role="tab" id="tab-overview" aria-controls="page-overview" title="Overview">Genel bakış</button>
+          <button type="button" role="tab" id="tab-realms" aria-controls="page-realms" title="Realms and their live shards (NONCANONICAL wave 30)">Sunucular</button>
           <button type="button" role="tab" id="tab-players" aria-controls="page-players" title="Players: search, kick, ban, mute, teleport">Oyuncular</button>
           <button type="button" role="tab" id="tab-bots" aria-controls="page-bots" title="Server-side bots">Botlar</button>
           <button type="button" role="tab" id="tab-world" aria-controls="page-world" title="World: announce, restart/shutdown, clock, config check">Dünya</button>
@@ -156,11 +159,44 @@
           </div>
         </section>
 
+        <section id="page-realms" role="tabpanel" aria-labelledby="tab-realms" hidden>
+          <div class="grid even">
+            <section class="panel wide" aria-labelledby="realms-heading">
+              <div class="panel-head"><span class="section-number">18</span><h2 id="realms-heading" title="Realms with their live shards">Sunucular (diyarlar)</h2></div>
+              <p class="muted">NONCANONICAL topluluk özelliği: özgün başlatıcının sunucu listesi gibi her diyar ayrı bir karakter dünyasıdır; bir diyara bir veya daha fazla <code>ikv-server</code> süreci (parça, en çok 32 oyuncu) <code>--realm ID</code> ile bağlanır. Son bildirimi 15 saniyeden eski parça seçilmez.</p>
+              <p id="realm-state" class="hint" role="status"></p>
+              <div class="table-scroll"><table><thead><tr><th scope="col">ID</th><th scope="col">Ad</th><th scope="col" title="Realm kind">Tür</th><th scope="col" title="online: a live shard">Durum</th><th scope="col" title="Population label shown in the launcher">Nüfus</th><th scope="col" title="Characters of every account">Karakter</th><th scope="col" title="Shards seen within the last hour: instance, address, players/capacity, heartbeat age">Parçalar</th><th scope="col"></th></tr></thead><tbody id="realm-results"></tbody></table></div>
+            </section>
+            <section class="panel" aria-labelledby="realm-create-heading">
+              <div class="panel-head"><span class="section-number">19</span><h2 id="realm-create-heading" title="Create a realm">Yeni diyar</h2></div>
+              <form id="realm-create">
+                <div class="row">
+                  <div class="field"><label for="realm-name" title="2-32 bytes, unique">Ad</label><input id="realm-name" maxlength="32" autocomplete="off" required></div>
+                  <div class="field"><label for="realm-kind" title="Realm kind">Tür</label><select id="realm-kind"><option value="normal">normal</option><option value="pvp">pvp</option><option value="rp">rp</option></select></div>
+                  <div class="field"><label for="realm-sort" title="List order in the launcher (-32768..32767)">Sıra</label><input id="realm-sort" type="number" min="-32768" max="32767" step="1" value="0" required></div>
+                </div>
+                <div class="actions"><button type="submit" data-operation title="Create the realm">Diyar oluştur</button></div>
+              </form>
+            </section>
+            <section class="panel" aria-labelledby="realm-rename-heading">
+              <div class="panel-head"><span class="section-number">20</span><h2 id="realm-rename-heading" title="Rename a realm">Diyarı yeniden adlandır</h2></div>
+              <form id="realm-rename">
+                <div class="row">
+                  <div class="field"><label for="realm-rename-id" title="Realm to rename">Diyar</label><select id="realm-rename-id" required></select></div>
+                  <div class="field"><label for="realm-rename-name" title="2-32 bytes, unique">Yeni ad</label><input id="realm-rename-name" maxlength="32" autocomplete="off" required></div>
+                </div>
+                <div class="actions"><button type="submit" data-operation title="Rename the realm">Yeniden adlandır</button></div>
+              </form>
+              <p class="hint">Yeni bir parça başlatmak için sunucu makinesinde: <code>ikv-server … --realm ID --public-host ADRES --port PORT --capacity 32</code> (docs/SELF_HOSTING.md).</p>
+            </section>
+          </div>
+        </section>
+
         <section id="page-players" role="tabpanel" aria-labelledby="tab-players" hidden>
           <div class="grid even">
             <section class="panel wide" aria-labelledby="online-heading">
               <div class="panel-head"><span class="section-number">03</span><h2 id="online-heading" title="Players currently online">Çevrimiçi oyuncular</h2></div>
-              <div class="table-scroll"><table><thead><tr><th scope="col" title="World entity id">ID</th><th scope="col">Karakter</th><th scope="col" title="Level">Sv.</th><th scope="col" title="Health">Can</th><th scope="col" title="Zone and position">Konum</th><th scope="col" title="Actions">İşlem</th></tr></thead><tbody id="online-players"></tbody></table></div>
+              <div class="table-scroll"><table><thead><tr><th scope="col" title="World entity id">ID</th><th scope="col">Karakter</th><th scope="col" title="Home realm and the shard (world process) the character is on">Diyar / parça</th><th scope="col" title="Level">Sv.</th><th scope="col" title="Health">Can</th><th scope="col" title="Zone and position">Konum</th><th scope="col" title="Actions">İşlem</th></tr></thead><tbody id="online-players"></tbody></table></div>
               <form id="move-form" class="selection">
                 <h3 title="Teleport a character or summon it to another">Işınla / yanına çağır</h3>
                 <div class="row">

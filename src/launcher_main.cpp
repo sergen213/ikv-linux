@@ -203,6 +203,14 @@ class Launcher final : public QWidget {
     QLabel *account{};
     QDialog *settingsDialog{}, *serverDialog{}, *hostDialog{}; // hostDialog: ikv::launcher_server panel
     QByteArray session;
+    // NONCANONICAL wave 30 realm list: the original launcher.exe listed servers (0x0048dbe0 URL, parser 0x0040a6a0,
+    // name-only ListBox 0x3fa in the left frame); here a logged-in profile lists its account service's /v1/realms.
+    enum class Realms { None, Waiting, Ready, Unsupported } realmState = Realms::None;
+    QWidget* realmPanel{};    // plain layout: "Sunucu" heading + list on the play page
+    QListWidget* realmList{}; // rows carry the realm id (Qt::UserRole); in the skin it moves into the left frame
+    QJsonArray realmRows;
+    QTimer* realmRetry{};
+    quint64 realmGeneration = 0; // bumped by logout/profile change so late responses are discarded
     QProcess *client{};
     bool busy = false;
     bool automation = false;
@@ -210,6 +218,7 @@ class Launcher final : public QWidget {
     struct TransferBudget {
         QDeadlineTimer deadline;
         qint64 bytes = 0, limit = 0;
+        int status = 0; // last final HTTP status, for fail handlers that distinguish e.g. 404
         QUrl origin;
         bool github = false;
         std::function<void(const QString&)> fail; // set: report failures here instead of error()
@@ -357,7 +366,7 @@ class Launcher final : public QWidget {
         installNote->setText("Kurulum klasörü: " + root->text());
         pages->setCurrentWidget(!hasAssets() ? installPage : session.isEmpty() ? loginPage : playPage);
     }
-    void clearSession() { session.fill('\0'); session.clear(); password->clear(); authSessionOrigin.clear(); showPage(); }
+    void clearSession() { session.fill('\0'); session.clear(); password->clear(); authSessionOrigin.clear(); resetRealms(); showPage(); }
     void paintEvent(QPaintEvent* event) override {
         if (skinFrame.isNull()) QWidget::paintEvent(event); else QPainter(this).drawImage(0, 0, skinFrame);
     }
@@ -365,12 +374,16 @@ class Launcher final : public QWidget {
         if (!skinFrame.isNull() && event->button() == Qt::LeftButton && windowHandle()) windowHandle()->startSystemMove();
         else QWidget::mousePressEvent(event);
     }
-    // OYNA is the current page's primary action; the server box only applies before login.
+    // OYNA is the current page's primary action; before login the server box chooses the profile, after login it
+    // lists the profile's realms (when the account service has /v1/realms).
+    bool realmsListed() const { return !session.isEmpty() && (realmState == Realms::Waiting || realmState == Realms::Ready); }
     void syncSkin() {
-        if (skinFrame.isNull()) return;
+        const bool listed = realmsListed() && pages->currentWidget() == playPage;
+        if (skinFrame.isNull()) { realmPanel->setVisible(listed); return; }
         const auto* page = pages->currentWidget();
         skinLogin->setVisible(page == loginPage); skinPlay->setVisible(page == playPage);
-        skinActions->setEnabled(!busy); skinLeft->setEnabled(!busy && page == loginPage);
+        realmList->setVisible(listed); profiles->setVisible(!listed); findChild<QPushButton*>("addServer")->setVisible(!listed);
+        skinActions->setEnabled(!busy); skinLeft->setEnabled(!busy && (page == loginPage || listed));
     }
     // Once original files are imported, re-present the existing widgets inside the original
     // launcher artwork (launcher.exe RT_BITMAP 139 frame + buttons). Any problem keeps the plain UI.
@@ -421,7 +434,10 @@ class Launcher final : public QWidget {
             "QProgressBar { background: white; border: none; } QProgressBar::chunk { background: #b0306f; }"
             "QPlainTextEdit { font-size: 7pt; }"
             "QScrollBar:vertical { width: 8px; background: #0d050f; } QScrollBar::handle:vertical { background: #6b3a7a; min-height: 16px; }"
-            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }");
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"
+            // Original server ListBox 0x3fa colours (OnCtlColor 0x00485a20): white text on #505050.
+            "QListWidget#realmList { background: #505050; color: #ffffff; border: 1px solid #6b3a7a; outline: none; }"
+            "QListWidget#realmList::item:selected { background: #8a2f8f; color: #ffffff; }");
         const auto place = [skin](QWidget* widget, const QRect& where) { widget->setParent(skin); widget->setGeometry(where); widget->show(); };
         const auto box = [&](const QRect& where, const QString& title) {
             auto* w = new QWidget; place(w, where);
@@ -443,7 +459,9 @@ class Launcher final : public QWidget {
         skinLeft = left->parentWidget();
         auto* form = loginPage->findChild<QFormLayout*>();
         auto* addServer = findChild<QPushButton*>("addServer");
-        left->addWidget(profiles); left->addWidget(addServer); left->addStretch();
+        // After login the same frame holds the realm list (the original's server ListBox at ≈(40,349) 134×128).
+        left->addWidget(profiles); left->addWidget(addServer); left->addWidget(realmList, 1); left->addStretch();
+        realmPanel->hide();
         form->removeRow(0); // the emptied "Sunucu" row of the login form
 
         auto* activity = box({64, 558, 229, 112}, "Etkinlik");
@@ -474,9 +492,9 @@ class Launcher final : public QWidget {
         const bool shown = isVisible();
         setAttribute(Qt::WA_TranslucentBackground); setWindowFlag(Qt::FramelessWindowHint);
         setFixedSize(frame.size()); setMask(QBitmap::fromImage(frame.createAlphaMask()));
-        connect(pages, &QStackedWidget::currentChanged, this, [this] { syncSkin(); });
         if (shown) show();
         syncSkin();
+        if (!realmRows.isEmpty()) fillRealms(); // skin-only population colours
         log("Özgün başlatıcı görünümü: " + app + "/launcher.exe");
     }
     QUrl validatedUrl(const QString& input) {
@@ -572,6 +590,7 @@ class Launcher final : public QWidget {
             else if (state->issue.isEmpty() && state->deadline.hasExpired()) state->issue = "HTTPS request wall deadline exceeded";
             drain(); replies.removeOne(reply);
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            budget->status = code;
             if (!state->redirect.isEmpty() && state->issue.isEmpty()) {
                 reply->deleteLater(); state->file.reset();
                 try { fetch(state->redirect, certificate, method, body, false, maximum, destination, done, redirects + 1, budget); }
@@ -598,6 +617,82 @@ class Launcher final : public QWidget {
             if (authUrl() != origin || serverCertificate() != certificate) throw std::runtime_error("Server profile changed; stale response discarded");
             done(bytes);
         });
+    }
+    // ---- NONCANONICAL wave 30 realm list (docs/LAUNCHER_UPDATES.md "Using the launcher") ----
+    // Rows are name-only like the original ListBox (launcher.exe 0x00485db0 LB_ADDSTRING of field 1); the population
+    // suffix is NONCANONICAL (the original showed none), worded from the guide's "yoğun" and the client's "dolu"/"kapalı".
+    static QString realmLabel(const QJsonObject& realm) {
+        static const QMap<QString, QString> words{{"low", "Sakin"}, {"medium", "Normal"}, {"high", "Yoğun"}, {"full", "Dolu"}};
+        const QString word = realm.value("status").toString() != "online" ? QString("Kapalı") : words.value(realm.value("population").toString());
+        return word.isEmpty() ? realm.value("name").toString() : realm.value("name").toString() + " (" + word + ")";
+    }
+    QString realmKey() const { return "lastRealm/" + profiles->currentText(); }
+    void resetRealms() {
+        ++realmGeneration;
+        if (realmRetry) realmRetry->stop();
+        realmState = Realms::None; realmRows = {};
+        if (realmList) realmList->clear();
+    }
+    // Keeps the current selection across refreshes; otherwise only the profile's last used realm is preselected
+    // (NONCANONICAL convenience: the original never sent LB_SETCURSEL).
+    void fillRealms() {
+        const auto selected = realmList->selectedItems();
+        const QVariant keep = selected.isEmpty() ? settings.value(realmKey()) : selected.first()->data(Qt::UserRole);
+        realmList->clear();
+        for (const auto& value : realmRows) {
+            const auto realm = value.toObject();
+            const int id = realm.value("id").toInt();
+            auto* item = new QListWidgetItem(realmLabel(realm), realmList);
+            item->setData(Qt::UserRole, id);
+            if (!skinFrame.isNull()) { // NONCANONICAL colours from the client palette; the row background never changes
+                const QString population = realm.value("population").toString();
+                if (realm.value("status").toString() != "online") item->setForeground(QColor(0x9a, 0x9a, 0x9a));
+                else if (population == "full") item->setForeground(QColor(0xff, 0x6b, 0x5b));
+                else if (population == "high") item->setForeground(QColor(0xf4, 0xc5, 0x42));
+            }
+            if (keep.isValid() && keep.toInt() == id) realmList->setCurrentItem(item);
+        }
+    }
+    // After login: GET /v1/realms. "Sunucu listesi bekleniyor..." (0x0049d858) until it arrives, then
+    // "Oyun başlamaya hazır." (0x0049d588). Transient failures retry every second (the original retried every
+    // ~50 ms, NONCANONICAL slower); an account service without the route (404) keeps the pre-realm OYNA.
+    void loadRealms() {
+        const auto generation = ++realmGeneration;
+        realmRetry->stop();
+        if (session.isEmpty()) return;
+        const bool first = realmState != Realms::Ready;
+        if (first) { realmState = Realms::Waiting; status->setText("Sunucu listesi bekleniyor..."); }
+        syncSkin();
+        const QUrl base = validatedUrl(authUrl());
+        auto budget = std::make_shared<TransferBudget>();
+        budget->deadline = QDeadlineTimer(networkTimeoutMs); budget->limit = 256 * 1024 + 6 * 65536; budget->origin = base;
+        budget->fail = [this, generation, budget](const QString& issue) {
+            if (generation != realmGeneration || session.isEmpty()) return;
+            if (budget->status == 404) {
+                realmState = Realms::Unsupported; realmRows = {}; realmList->clear();
+                status->setText("Giriş yapıldı"); syncSkin(); return;
+            }
+            log("Sunucu listesi alınamadı: " + issue);
+            if (budget->status == 0 || budget->status == 429 || budget->status >= 500) realmRetry->start(1000);
+            else status->setText("Sunucu listesi alınamadı: " + issue);
+        };
+        fetch(base.resolved(QUrl("/v1/realms")), serverCertificate(), "GET", {}, true, 256 * 1024, {}, [this, generation, first](const QByteArray& bytes) {
+            if (generation != realmGeneration || session.isEmpty()) return;
+            QJsonParseError parse; const auto document = QJsonDocument::fromJson(bytes, &parse);
+            if (parse.error != QJsonParseError::NoError || !document.isArray() || document.array().size() > 256)
+                throw std::runtime_error("Sunucu listesi geçersiz");
+            for (const auto& value : document.array()) {
+                const auto realm = value.toObject();
+                const double id = realm.value("id").toDouble(-1);
+                const QString name = realm.value("name").toString();
+                if (!value.isObject() || id < 1 || id > 32767 || id != std::floor(id) || name.trimmed().isEmpty() || name.size() > 200 ||
+                    !realm.value("status").isString() || !realm.value("population").isString())
+                    throw std::runtime_error("Sunucu listesi geçersiz");
+            }
+            realmRows = document.array(); realmState = Realms::Ready;
+            fillRealms(); syncSkin();
+            if (first) { status->setText("Oyun başlamaya hazır."); log(QString("Sunucu listesi: %1 sunucu").arg(realmRows.size())); }
+        }, 0, budget);
     }
 #ifndef _WIN32
     void runHelper(const QStringList& arguments, std::function<void()> done) {
@@ -731,6 +826,17 @@ class Launcher final : public QWidget {
         persist();
         if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Client is already running");
         if (session.isEmpty() || authSessionOrigin != authUrl()) throw std::runtime_error("Önce seçili sunucuya giriş yapın");
+        // A listed realm must be chosen first: the original's OYNA without a selection (launcher.exe 0x00486dd8).
+        QString realm;
+        if (realmsListed()) {
+            const auto chosen = realmList->selectedItems();
+            if (chosen.isEmpty()) {
+                if (automation) throw std::runtime_error("Lütfen bir sunucu seçiniz.");
+                QMessageBox::warning(this, "Uyarı", "Lütfen bir sunucu seçiniz.");
+                return;
+            }
+            realm = QString::number(chosen.first()->data(Qt::UserRole).toInt());
+        }
         const QUrl origin = validatedUrl(authUrl());
         const QString host = origin.host();
         const QString assets = root->text() + "/assets";
@@ -771,7 +877,8 @@ class Launcher final : public QWidget {
             args << "--audio" << QString::fromStdU16String((fs(assets) / relative).u16string());
         }
         status->setText("Sunucu denetleniyor…");
-        api("/v1/status", "GET", {}, false, [this, executable, host, args](const QByteArray& bytes) {
+        if (!realm.isEmpty()) args << "--realm" << realm; // NONCANONICAL wave 30: the client lists/creates this realm's characters
+        api("/v1/status", "GET", {}, false, [this, executable, host, args, realm](const QByteArray& bytes) {
             const auto state = QJsonDocument::fromJson(bytes).object();
             if (!state.value("online").toBool()) throw std::runtime_error("Dünya sunucusu çevrimdışı");
             const int port = state.value("world").toObject().value("world_port").toInt(7000);
@@ -779,6 +886,7 @@ class Launcher final : public QWidget {
             if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Client is already running");
             if (session.isEmpty()) throw std::runtime_error("Önce seçili sunucuya giriş yapın");
             launch(executable, QStringList{"--host", host, "--port", QString::number(port)} + args);
+            if (!realm.isEmpty()) settings.setValue(realmKey(), realm.toInt()); // per profile; preselected next time
         });
     }
     void launch(const QString& executable, const QStringList& args) {
@@ -790,6 +898,7 @@ class Launcher final : public QWidget {
         connect(process, &QProcess::errorOccurred, this, [this, process, output](QProcess::ProcessError) { if (!output->failed) error(process->errorString()); });
         connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, output](int code, QProcess::ExitStatus) {
             log(QString("Client exit %1").arg(code)); if (!output->failed) status->setText("İstemci kapandı");
+            if (realmState == Realms::Ready) { try { loadRealms(); } catch (const std::exception& e) { log(failure(e)); } } // fresh populations
         });
         client->start();
     }
@@ -1071,7 +1180,7 @@ public:
         username = text(lf, "Kullanıcı adı", "username", settings.value("account/username").toString());
         password = text(lf, "Parola", "password"); password->setEchoMode(QLineEdit::Password);
         auto* ar = new QHBoxLayout; lv->addLayout(ar);
-        auto* login = button(ar, "Giriş Yap", "loginButton", [this] { api("/v1/login", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray& bytes) { session.fill('\0'); session = QJsonDocument::fromJson(bytes).object().value("session").toString().toUtf8(); password->clear(); if (session.size() != 64 || std::any_of(session.begin(), session.end(), [](char c) { return !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); })) { clearSession(); throw std::runtime_error("Sunucudan geçersiz oturum yanıtı geldi"); } authSessionOrigin = authUrl(); settings.setValue("account/username", username->text()); account->setText("<h3>" + username->text().toHtmlEscaped() + "</h3>Karakter seçimi ve yaratma oyunun içinde yapılır."); status->setText("Giriş yapıldı"); showPage(); }); });
+        auto* login = button(ar, "Giriş Yap", "loginButton", [this] { api("/v1/login", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray& bytes) { session.fill('\0'); session = QJsonDocument::fromJson(bytes).object().value("session").toString().toUtf8(); password->clear(); if (session.size() != 64 || std::any_of(session.begin(), session.end(), [](char c) { return !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); })) { clearSession(); throw std::runtime_error("Sunucudan geçersiz oturum yanıtı geldi"); } authSessionOrigin = authUrl(); settings.setValue("account/username", username->text()); account->setText("<h3>" + username->text().toHtmlEscaped() + "</h3>Karakter seçimi ve yaratma oyunun içinde yapılır."); status->setText("Giriş yapıldı"); resetRealms(); showPage(); loadRealms(); }); });
         login->setMinimumHeight(40);
         button(ar, "Kayıt Ol", "registerButton", [this] { api("/v1/register", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray&) { password->clear(); status->setText("Hesap oluşturuldu; giriş yapın"); }); })->setMinimumHeight(40);
         connect(password, &QLineEdit::returnPressed, login, &QPushButton::click);
@@ -1083,6 +1192,16 @@ public:
         playPage = new QWidget; playPage->setObjectName("playPage"); auto* cv = new QVBoxLayout(playPage);
         cv->addStretch();
         account = new QLabel; account->setObjectName("account"); account->setWordWrap(true); cv->addWidget(account);
+        // NONCANONICAL wave 30: the logged-in profile's realms (the skin moves the list into the original left frame).
+        realmPanel = new QWidget; realmPanel->setObjectName("realmPanel"); realmPanel->hide();
+        auto* rv = new QVBoxLayout(realmPanel); rv->setContentsMargins(0, 0, 0, 0);
+        rv->addWidget(new QLabel("<b>Sunucu</b>"));
+        realmList = new QListWidget; realmList->setObjectName("realmList"); realmList->setSelectionMode(QAbstractItemView::SingleSelection);
+        realmList->setMaximumHeight(160); rv->addWidget(realmList); cv->addWidget(realmPanel);
+        // Double-click/Enter plays (NONCANONICAL: the original had no list double-click handler).
+        connect(realmList, &QListWidget::itemActivated, this, [this] { findChild<QPushButton*>("playButton")->click(); });
+        realmRetry = new QTimer(this); realmRetry->setSingleShot(true);
+        connect(realmRetry, &QTimer::timeout, this, [this] { try { loadRealms(); } catch (const std::exception& e) { status->setText(failure(e)); } });
         auto* play = button(cv, "OYNA", "playButton", [this] { this->play(); });
         play->setMinimumHeight(56); play->setStyleSheet("font-size:18pt;font-weight:bold");
         auto* cr = new QHBoxLayout; cv->addLayout(cr); cr->addStretch();
@@ -1106,6 +1225,7 @@ public:
         if (!names.contains("Localhost")) { names.prepend("Localhost"); settings.setValue("profileNames", names); }
         profiles->addItems(names); profiles->setCurrentText(settings.value("lastProfile").toString());
         connect(profiles, &QComboBox::currentIndexChanged, this, [this] { settings.setValue("lastProfile", profiles->currentText()); clearSession(); });
+        connect(pages, &QStackedWidget::currentChanged, this, [this] { syncSkin(); });
         showPage();
         log("Native Qt " QT_VERSION_STR " platform=" + QApplication::platformName());
     }
