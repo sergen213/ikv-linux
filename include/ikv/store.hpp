@@ -58,6 +58,7 @@ public:
     // ---- Realms, shards and phasing (wave 30, NONCANONICAL; migration 009) ----
     Json realms(std::int64_t account_id);                       // [{id,name,kind,status,population,characters}]
     void register_shard(const ShardInfo&);                     // also the heartbeat (players); throws ApiError
+    void retire_shard(std::string_view instance);              // clean stop: the row stops being live at once (not after 15 s)
     std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room
     std::optional<ShardInfo> shard(std::string_view instance); // live shard (heartbeat within 15 s)
     std::optional<ShardInfo> locate(int realm_id, std::string_view name); // online character's live shard

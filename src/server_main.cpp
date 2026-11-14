@@ -878,6 +878,7 @@ int run(const Options& opts) {
         }
     }
     if (saved) try { bots.stop(); } catch (const std::exception&) { std::cerr << "shutdown_release_failed\n"; exit_code = 1; }
+    try { store.retire_shard(instance); } catch (const std::exception&) { std::cerr << "shard_retire_failed\n"; } // wave 30: no longer chosen or targeted
     std::cout << "STOP tick=" << world.tick() << std::endl;
     return exit_code;
 }

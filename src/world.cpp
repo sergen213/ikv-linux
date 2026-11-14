@@ -662,7 +662,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         Json player_bound={{"id",INT32_MAX},{"kind","player"},{"name",std::string(32,'"')},{"appearance",appearance_bound},
                            {"class_id",3},{"x",-coordinate_limit},{"y",-coordinate_limit},{"hp",config_.at("resource_cap")},
                            {"max_hp",config_.at("resource_cap")},{"level",100},{"alive",false},{"equipment",Json::array()},
-                           {"clan",15},{"kabadayi",false},{"guild",std::string(32,'"')},{"posture",255},{"realm",std::string(32,'"')}, // realm: wave 30
+                           {"clan",15},{"kabadayi",false},{"guild",std::string(32,'"')},{"posture",255},
                            {"debuffs",Json(std::vector<Json>(8,{{"id",std::string(32,'x')},{"expires",UINT32_MAX},{"skill_source",Json::array({2,15})}}))}};
         std::map<std::string,Json> visual_slots;
         std::map<int,std::string> source_slots;
@@ -709,7 +709,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         Json full_offer={{"items",Json::array()},{"currency",1000000000},{"accepted",false}};
         for(int item=0;item<32;++item)full_offer["items"].push_back({{"uid",std::string(32,'f')},
             {"item",std::string(32,'x')},{"name",std::string(31,'"')},{"quantity",1000}}); // prefixed names fall back to the base name beyond 64 dumped bytes
-        Json trade_bound={{"type","trade"},{"peer",INT32_MAX},{"peer_name",std::string(32,'"')},{"peer_realm",std::string(32,'"')},{"initiator",INT32_MAX},
+        Json trade_bound={{"type","trade"},{"peer",INT32_MAX},{"peer_name",std::string(32,'"')},{"initiator",INT32_MAX},
                           {"revision",UINT64_MAX},{"phase","invited"},{"own",full_offer},{"other",std::move(full_offer)}};
         Json event_bounds=Json::array({trade_bound});
         for(int notice=0;notice<31;++notice)event_bounds.push_back({{"type","error"},{"code","trade_persistence"},
@@ -730,7 +730,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
         // A group member travels as a player entity when in view, else as a "party" row (state()), never both: five
         // player_bound entities above bound either form.
         const Json party_row={{"id",UINT32_MAX},{"name",std::string(32,'"')},{"level",INT32_MAX},{"class_id",3},{"hp",INT32_MAX},{"max_hp",INT32_MAX},{"mana",INT32_MAX},{"max_mana",INT32_MAX},
-                              {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true},{"x",-coordinate_limit},{"y",-coordinate_limit},{"realm",std::string(32,'"')}}; // x,y: NONCANONICAL wave 29 map; realm: wave 30
+                              {"zone",std::string(32,'"')},{"source_registry_id",70},{"alive",true},{"x",-coordinate_limit},{"y",-coordinate_limit}}; // x,y: NONCANONICAL wave 29 map
         require(party_row.dump().size()<=player_bound.dump().size(),"config","Party row exceeds the player entity bound");
         { // Type::catalog parts (recipe_book(), bank_view()), each its own frame: recipe_limit largest recipes with every item
           // a recipe names, and a full Banka tab of the largest stacks with the largest item definitions.
@@ -1463,8 +1463,9 @@ std::pair<Json,Json> World::trade_events(const Trade& t) const {
            {"phase",t.open?"open":"invited"},{"revision",t.revision},{"own",first},{"other",second}};
     Json b{{"type","trade"},{"peer",t.a},{"peer_name",actors_.at(t.a).character.at("name")},{"initiator",t.a},
            {"phase",t.open?"open":"invited"},{"revision",t.revision},{"own",std::move(second)},{"other",std::move(first)}};
-    if (auto r=realm_label(t.a,t.b)) a["peer_realm"]=*r; // wave 30: a peer from another realm
-    if (auto r=realm_label(t.b,t.a)) b["peer_realm"]=*r;
+    // Wave 30: a peer from another realm, when the event still fits the trade schema envelope (realm names are not in its bound).
+    if (auto r=realm_label(t.a,t.b); r && a.dump().size()+Json(*r).dump().size()+14<=32768) a["peer_realm"]=*r;
+    if (auto r=realm_label(t.b,t.a); r && b.dump().size()+Json(*r).dump().size()+14<=32768) b["peer_realm"]=*r;
     require(a.dump().size()<=32768 && b.dump().size()<=32768,"config","Alışveriş şartları çok büyük.");
     return {std::move(a),std::move(b)};
 }
@@ -2928,7 +2929,6 @@ Json World::state(uint32_t id) {
             party.push_back({{"id",member},{"name",m.character.at("name")},{"level",s.at("level")},{"class_id",m.character.at("class_id")},{"hp",s.at("hp")},{"max_hp",s.at("max_hp")},{"mana",s.at("mana")},{"max_mana",s.at("max_mana")},
                              {"zone",s.at("zone")},{"source_registry_id",config_.at("zones").at(s.at("zone").get<std::string>()).value("source_registry_id",Json(nullptr))},{"alive",s.at("hp").get<int>()>0},
                              {"x",s.at("x")},{"y",s.at("y")}}); // x,y: NONCANONICAL wave 29 Dünya Haritası party dots
-            if (auto r=realm_label(id,member)) party.back()["realm"]=*r; // wave 30
         }
         result["party"]=std::move(party);
     }
@@ -2938,6 +2938,15 @@ Json World::state(uint32_t id) {
     // constructor bounds five), then nearest-first while they fit. At extreme crowding the farthest players drop out of a
     // frame; NPCs then fill what remains.
     used+=a.event_bytes+a.events.size();
+    // Wave 30 realm names ("Ad (Realm)") are budgeted, not part of the static bound (no room left in it): a frame too full for a
+    // label carries the row without it.
+    const auto labelled=[&](Json& row,uint32_t subject){
+        const auto r=realm_label(id,subject); if(!r)return;
+        const size_t bytes=Json(*r).dump().size()+9; // ,"realm":
+        if(used+bytes>65533)return;
+        row["realm"]=*r; used+=bytes;
+    };
+    for(auto& row:result["party"])labelled(row,row.at("id").get<uint32_t>());
     // NONCANONICAL wave 30 raid (world_instance.cpp raid_view): leader and parties, then a compact row per other-party member, budgeted
     // right after the own group's entities (which the static bound covers) and before strangers and NPCs: the static bound has no
     // room left for a full raid (65482 of 65533 bytes on config/gameplay.json), so a frame too full for a row omits it and the
@@ -2961,10 +2970,9 @@ Json World::state(uint32_t id) {
         e["clan"]=s.value("clan",0);e["kabadayi"]=s.value("kabadayi",false);
         if(!s.at("buffs").empty())e["debuffs"]=shown_effects(s.at("buffs")); // the bearer's effect icons on its target/party frame
         if(s.contains("guild") && !s.at("guild").is_null())e["guild"]=s.at("guild").at("name");
-        if(auto r=realm_label(id,other))e["realm"]=*r; // wave 30: "Ad (Realm)" for a player from another realm
         const size_t bytes=e.dump().size()+1;
         if(stranger && used+bytes>65533)continue;
-        used+=bytes;result["entities"].push_back(std::move(e));
+        used+=bytes;labelled(e,other);result["entities"].push_back(std::move(e));
     }
     if(!raid_added)add_raid();
     // NONCANONICAL wave 29 catalogs.map (world_map.cpp) is budgeted like the NPCs it precedes: the static bound above leaves
