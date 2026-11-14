@@ -77,7 +77,7 @@ uint32_t World::find_character(int64_t character_id) const {
 // a character on this shard is handled exactly like the {target}/{to} form; one on another shard gets a bus message.
 // Also the acceptance of an invite that arrived over the bus. Returns false for every other request.
 bool World::shard_action(uint32_t id, const std::string& action, const Json& request) {
-    const bool inviting = action == "group_invite" || action == "guild_invite";
+    const bool inviting = action == "group_invite" || action == "guild_invite" || action == "raid_invite";
     const bool whisper = action == "chat" && request.value("channel", std::string()) == "private" && !request.contains("to");
     if ((inviting && !request.contains("target") && request.contains("name")) || (whisper && request.contains("name"))) {
         auto& a = actors_.at(id);
@@ -103,8 +103,13 @@ bool World::shard_action(uint32_t id, const std::string& action, const Json& req
         const auto from_name = a.character.at("name").get<std::string>();
         if (action == "group_invite") {
             const auto leader = group(id);
+            if (raid_of(id)) { reject(id, "raid", "Baskındayken baskın davetini kullanın."); return true; }
             if (leader && leader != id) { reject(id, "group", "Yalnızca grup lideri davet edebilir."); return true; }
             if (leader && groups_.at(leader).size() >= 6) { reject(id, "group", "Grup dolu."); return true; }
+        } else if (action == "raid_invite") { // a solo player of another shard joins the raid after the phase
+            const auto raid = raid_of(id);
+            if (!raid || raids_.at(raid).leader != id) { reject(id, "raid", "Bunu yalnızca baskın lideri yapabilir."); return true; }
+            if (raid_members(raid).size() >= config_.at("activities").at("raid").at("groups").get<size_t>() * 6) { reject(id, "raid", "Baskın dolu."); return true; }
         } else if (action == "guild_invite") {
             const bool member = current.contains("guild") && !current.at("guild").is_null();
             if (!member || current.at("guild").at("leader_character_id") != a.character_id) { reject(id, "guild", "Bunu yalnızca Lonca Reisi yapabilir."); return true; }
@@ -125,7 +130,7 @@ bool World::shard_action(uint32_t id, const std::string& action, const Json& req
         if (link_ && link_->locate) where = link_->locate(realm, name);
         if (!where || *where == link_->instance) { reject(id, "target", "Oyuncu oyunda değil."); return true; }
         Json body{{"to_name", name}, {"to_realm", realm}, {"from_char", a.character_id}, {"from_name", from_name}, {"from_realm", a.realm}};
-        if (action == "group_invite") { body["kind"] = "invite"; body["leader_instance"] = link_->instance; }
+        if (action == "group_invite" || action == "raid_invite") { body["kind"] = action == "group_invite" ? "invite" : "raid_invite"; body["leader_instance"] = link_->instance; }
         else if (action == "guild_invite") { body["kind"] = "guild_invite"; body["guild"] = current.at("guild"); body["instance"] = link_->instance; }
         else { body["kind"] = "whisper"; body["text"] = text; }
         link_->send(*where, body);
@@ -135,19 +140,26 @@ bool World::shard_action(uint32_t id, const std::string& action, const Json& req
         } else emit(id, {{"type", "ack"}, {"action", action}});
         return true;
     }
-    if (action == "group_accept" && !invites_.contains(id) && remote_invites_.contains(id)) {
+    // A remote raid invite is declined like a local one (raid_action then finds no local invite and returns).
+    if (action == "raid_decline" && remote_invites_.contains(id) && remote_invites_.at(id).value("kind", std::string()) == "raid_invite") remote_invites_.erase(id);
+    const bool raid_accept = action == "raid_accept" && !raid_invites_.contains(id);
+    if ((raid_accept || (action == "group_accept" && !invites_.contains(id))) && remote_invites_.contains(id) &&
+        (remote_invites_.at(id).value("kind", std::string()) == "raid_invite") == raid_accept) {
         const auto invite = remote_invites_.at(id);
-        if (tick_ > invite.at("expires").get<uint32_t>()) { remote_invites_.erase(id); reject(id, "group", "Grup davetinin süresi doldu."); return true; }
-        if (group(id)) { reject(id, "group", "Zaten bir gruptasınız."); return true; }
+        const char* code = raid_accept ? "raid" : "group";
+        if (tick_ > invite.at("expires").get<uint32_t>()) { remote_invites_.erase(id); reject(id, code, raid_accept ? "Baskın davetinin süresi doldu." : "Grup davetinin süresi doldu."); return true; }
+        if (group(id) || raid_of(id)) { reject(id, code, raid_accept ? "Başka sunucudaki bir baskına yalnızca grupsuz oyuncular katılabilir." : "Zaten bir gruptasınız."); return true; }
         const auto instance = invite.at("leader_instance").get<std::string>();
         std::optional<ShardInfo> destination;
         if (link_ && link_->shard) destination = link_->shard(instance);
-        if (!destination) { remote_invites_.erase(id); reject(id, "group", "Davet eden oyuncunun sunucusu şu anda kapalı."); return true; }
-        if (destination->players >= destination->capacity) { reject(id, "group", "Hedef sunucu dolu; gruba katılamazsınız."); return true; }
+        if (!destination) { remote_invites_.erase(id); reject(id, code, "Davet eden oyuncunun sunucusu şu anda kapalı."); return true; }
+        if (destination->players >= destination->capacity) { reject(id, code, raid_accept ? "Hedef sunucu dolu; baskına katılamazsınız." : "Hedef sunucu dolu; gruba katılamazsınız."); return true; }
         auto& a = actors_.at(id);
         remote_invites_.erase(id);
         if (trade(id)) cancel_trade(id);
-        transfers_.push_back({id, instance, "party", {{"leader_char", invite.at("from_char")}, {"guest", true}}});
+        Json payload{{"leader_char", invite.at("from_char")}, {"guest", true}};
+        if (raid_accept) payload["raid"] = true;
+        transfers_.push_back({id, instance, "party", std::move(payload)});
         link_->send(instance, {{"kind", "invite_answer"}, {"to_char", invite.at("from_char")}, {"from_char", a.character_id},
                                {"from_name", a.character.at("name")}, {"from_realm", a.realm}, {"accepted", true}});
         emit(id, {{"type", "ack"}, {"action", action}});
@@ -174,14 +186,16 @@ void World::shard_message(const Json& body) {
         if (link_ && body.contains("leader_instance"))
             link_->send(body.at("leader_instance").get<std::string>(), {{"kind", "invite_answer"}, {"to_char", body.at("from_char")}, {"accepted", false}, {"reason", reason}});
     };
-    if (kind == "invite") {
+    if (kind == "invite" || kind == "raid_invite") {
+        const bool raid = kind == "raid_invite";
         const auto t = addressed();
         if (!t) { answer("Oyuncu oyunda değil."); return; }
+        if (raid && (group(t) || raid_of(t))) { answer("Başka sunucudaki bir baskına yalnızca grupsuz oyuncular katılabilir."); return; }
         if (group(t)) { answer("Bu kişi zaten bir grupta."); return; }
         Json invite = body; invite["expires"] = tick_ + invite_ticks;
         remote_invites_[t] = std::move(invite);
-        invites_.erase(t); // the newest invitation wins
-        emit(t, tag(t, {{"type", "group_invite"}, {"from", 0}, {"name", from_name}}));
+        if (raid) { raid_invites_.erase(t); emit(t, tag(t, {{"type", "raid_invite"}, {"from", 0}, {"name", from_name}, {"size", 1}})); }
+        else { invites_.erase(t); emit(t, tag(t, {{"type", "group_invite"}, {"from", 0}, {"name", from_name}})); } // the newest invitation wins
     } else if (kind == "invite_answer") {
         const auto t = addressed();
         if (t && !body.value("accepted", false)) reject(t, "group", field(body, "reason").empty() ? "Davet reddedildi." : field(body, "reason"));
@@ -276,7 +290,19 @@ void World::shard_arrived(uint32_t id, const Json& payload) {
     a.guest = payload.value("guest", false);
     if (!payload.contains("leader_char")) return;
     const auto leader = find_character(payload.at("leader_char").get<int64_t>());
-    const bool open = leader && leader != id && !group(id) && (!group(leader) || group(leader) == leader) &&
+    if (payload.value("raid", false)) { // joined a raid of another shard: the first party with room, like raid_accept
+        const auto raid = leader ? raid_of(leader) : 0;
+        const size_t groups = raid ? config_.at("activities").at("raid").at("groups").get<size_t>() : 0;
+        if (raid && raids_.at(raid).leader == leader && !group(id) && !raid_of(id))
+            for (size_t p = 0; p < groups; ++p) if (raids_.at(raid).parties[p].size() < 6) {
+                raids_.at(raid).parties[p].push_back(id); invites_.erase(id);
+                raid_sync(raid);
+                return;
+            }
+        reject(id, "raid", "Baskın dolu ya da dağıldı; yine de bu sunucudasınız.");
+        return;
+    }
+    const bool open = leader && leader != id && !group(id) && !raid_of(leader) && (!group(leader) || group(leader) == leader) &&
                       (!groups_.contains(leader) || groups_.at(leader).size() < 6);
     if (!open) { reject(id, "group", "Grup dolu ya da dağıldı; yine de bu sunucudasınız."); return; }
     if (!groups_.contains(leader)) groups_[leader] = {leader};

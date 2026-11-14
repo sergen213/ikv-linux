@@ -1163,6 +1163,145 @@ void activity_rules(const ikv::Json& mechanics) {
     int blades=0;const auto bag=own(6);for(const auto& e:bag.at("inventory"))blades+=e.at("item")=="training_blade";
     check(blades==2,"the winning clan's lot draws an item prize");
 }
+// NONCANONICAL wave 30 fixture shared by the lockout and raid tests: eminonu with doors into a group zone (migrat, one copy) and a
+// raid zone (buyukhol, two copies, raid.min 3), a Şef in each, Er Meydanı config as activity_rules (the arena block is required).
+struct InstanceFixture { ikv::Json config; std::shared_ptr<ikv::Zone> grid; uint32_t to_group, to_raid, group_chief, raid_chief; };
+InstanceFixture instance_fixture(const ikv::Json& mechanics) {
+    auto grid=std::make_shared<ikv::Zone>();grid->width=grid->height=2048;grid->source="SYNTHETIC NOT ORIGINAL";grid->cell_size=1.5f;
+    grid->cells.assign(2048u*2048u,0);grid->heights.assign(grid->cells.size(),0.0f);
+    for(int y=-2;y<=2;++y)for(int x=-12;x<=12;++x)grid->cells[size_t(y+1024)*2048+size_t(x+1024)]=255;
+    auto config=mechanics;const ikv::Json bounds={-1536000,-1536000,1534500,1534500};
+    const auto zone=[&](int registry,const ikv::Json& instances){ikv::Json z={{"source_registry_id",registry},{"bounds",bounds},{"spawn",{0,0}},{"collision",ikv::Json::array()}};if(!instances.is_null())z["instances"]=instances;return z;};
+    auto raid_zone=zone(68,{68,68});raid_zone["raid"]={{"min",3},{"lockout",7200}};
+    config["zones"]={{"eminonu",zone(0,nullptr)},{"migrat",zone(36,{27})},{"savas",zone(6,{7})},{"buyukhol",raid_zone}};
+    config["quests"]=ikv::Json::object();
+    config["activities"]={{"lockout",1800},{"raid",{{"groups",4},{"boss_hp",4},{"boss_damage",2},{"boss_xp",4}}},
+                          {"arena",{{"zone","savas"},{"duration",400},{"kill_points",1},{"banner_points",5},{"guardian_points",3},{"stake",100},{"homes",{{"1","eminonu"},{"2","eminonu"}}},
+                                    {"capture_ticks",40},{"areas",{{{"name","Meydan"},{"x",0},{"y",0},{"radius",500},{"power",50}}}}}}};
+    const auto rat=mechanics.at("npcs")[2];
+    const uint32_t group_chief=2147493700u,raid_chief=2147493705u,to_group=2147493701u,to_raid=2147493706u;
+    const auto chief=[&](uint32_t id,const char* where){auto b=rat;b.update({{"id",id},{"name","Şef"},{"zone",where},{"x",7500},{"y",0},{"hp",40},{"damage",1},{"aggro",1000},{"respawn",72000},{"xp",2400},
+                                                                            {"patrol",ikv::Json::array()},{"drops",{"training_blade"}},{"loot",ikv::Json::array()},{"boss",true}});return b;};
+    const auto door=[](uint32_t id,const char* where,int x,const char* to,int ax){return ikv::Json{{"id",id},{"kind","door"},{"name","Kapı"},{"zone",where},{"x",x},{"y",0},{"hp",100},{"dialogue","Kapı"},
+                                                                                                 {"quests",ikv::Json::array()},{"shop",ikv::Json::array()},{"door",{{"to",to},{"arrive",{ax,0}}}}};};
+    config["npcs"]={door(to_group,"eminonu",15000,"migrat",6000),door(to_raid,"eminonu",14850,"buyukhol",6000),chief(group_chief,"migrat"),chief(raid_chief,"buyukhol")};
+    return {config,grid,to_group,to_raid,group_chief,raid_chief};
+}
+// NONCANONICAL wave 30 persistent lockouts: a Şef kill hands the lockout to the sink (Store::set_lockout on a server), and a
+// character re-admitted with the stored lockout (record "lockouts", Store::lockouts) stays shut out even when its saved state
+// lost the stamp (another shard, a save that never landed); without it the same character walks in.
+void lockout_persistence(const ikv::Json& mechanics) {
+    const auto f=instance_fixture(mechanics);
+    std::vector<std::tuple<int64_t,std::string,int64_t>> stored;
+    ikv::World world(f.config,[](std::span<const ikv::CharacterSave>){});
+    world.set_lockout_sink([&](int64_t character,const std::string& zone,int64_t until){stored.emplace_back(character,zone,until);});
+    world.set_source_zones({{"eminonu",f.grid},{"migrat",f.grid},{"savas",f.grid},{"buyukhol",f.grid}});
+    const auto own=[&](uint32_t p){return world.state(p).at("character").at("state");};
+    for(uint32_t p:{1u,2u})world.add(p,p,p,record(int(p),14900));
+    world.action(1,{{"action","group_invite"},{"target",2}});world.action(2,{{"action","group_accept"}});
+    for(uint32_t p:{1u,2u})world.action(p,{{"action","interact"},{"target",f.to_group}});
+    check(own(1).at("zone")=="migrat1" && own(2).at("zone")=="migrat1","group enters its copy");
+    world.action(1,{{"action","attack"},{"target",f.group_chief+65536u}});
+    for(int t=0;t<800 && stored.size()<2;++t)world.advance();
+    check(stored.size()==2 && std::get<1>(stored[0])=="migrat" && std::get<2>(stored[0])>std::time(nullptr)+1700 && std::get<2>(stored[0])<=std::time(nullptr)+1800,"Şef kill credit reaches the lockout sink with the group-zone duration");
+    const auto until=std::get<2>(stored[0]);
+    check(own(1).at("lockouts").at("migrat")==until,"the character state still carries the stamp");
+    world.remove(1);world.remove(2);
+    auto stale=record(1,14900);stale["lockouts"]={{"migrat",until}}; // state without the stamp, lockout from the database
+    world.add(1,1,1,stale);
+    check(own(1).at("lockouts").at("migrat")==until,"admission merges the persisted lockout into the state");
+    world.action(1,{{"action","interact"},{"target",f.to_group}});
+    check(event(world.state(1),"error","lockout") && own(1).at("zone")=="eminonu","a persisted lockout survives remove + re-add");
+    auto expired=record(2,14900);expired["lockouts"]={{"migrat",int64_t(std::time(nullptr))-5}};
+    world.add(2,2,2,expired);
+    check(!own(2).contains("lockouts"),"expired persisted lockouts are dropped at admission");
+    world.action(2,{{"action","interact"},{"target",f.to_group}});
+    check(own(2).at("zone")=="migrat","without a lockout the same character enters");
+}
+// NONCANONICAL wave 30 raids: formation caps (4 parties, 24), leader-only management, party moves, one copy for the whole raid,
+// the raid-zone minimum, scaled raid Şef, raid XP sharing and lockouts, raid chat, succession and disband, worst-case frame.
+void raid_rules(const ikv::Json& mechanics) {
+    const auto f=instance_fixture(mechanics);
+    std::vector<std::tuple<int64_t,std::string,int64_t>> stored;
+    ikv::World world(f.config,[](std::span<const ikv::CharacterSave>){});
+    world.set_lockout_sink([&](int64_t character,const std::string& zone,int64_t until){stored.emplace_back(character,zone,until);});
+    world.set_source_zones({{"eminonu",f.grid},{"migrat",f.grid},{"savas",f.grid},{"buyukhol",f.grid}});
+    const auto own=[&](uint32_t p){return world.state(p).at("character").at("state");};
+    const auto raid=[&](uint32_t p){return world.state(p).value("raid",ikv::Json());};
+    const auto refused=[&](uint32_t p,const ikv::Json& request){world.action(p,request);return event(world.state(p),"error","raid");};
+    // Worst-case names: 32 quote characters (66 bytes once escaped), the longest a record may carry.
+    for(uint32_t p=1;p<=26;++p){auto r=record(int(p),14900);r["name"]=std::string(32,'"');world.add(p,p,p,r);}
+    for(uint32_t leader:{1u,7u,13u,19u})for(uint32_t m=leader+1;m<leader+6;++m){world.action(leader,{{"action","group_invite"},{"target",m}});world.action(m,{{"action","group_accept"}});}
+    check(refused(2,{{"action","raid_convert"}}),"only a group leader converts a group into a raid");
+    world.action(1,{{"action","raid_convert"}});
+    check(raid(1).at("leader")==1 && raid(1).at("parties")[0].size()==6 && raid(1).at("rows").empty(),"the leader's group becomes the raid's first party");
+    check(refused(2,{{"action","raid_invite"},{"target",7}}),"only the raid leader invites");
+    check(refused(1,{{"action","raid_invite"},{"target",8}}),"a group member cannot be invited away from its group");
+    check(refused(2,{{"action","group_invite"},{"target",25}}),"group invitations are closed inside a raid");
+    world.action(1,{{"action","raid_invite"},{"target",7}});
+    check(event(world.state(7),"raid_invite"),"the invited group leader is asked");
+    world.action(7,{{"action","raid_accept"}});
+    check(raid(1).at("parties")[1].size()==6 && raid(8).at("leader")==1 && raid(1).at("rows").size()==6,"a group joins as a party; other parties travel as compact rows");
+    check(refused(7,{{"action","raid_move"},{"target",2},{"party",2}}),"only the raid leader moves members");
+    world.action(1,{{"action","raid_move"},{"target",2},{"party",2}});
+    check(raid(1).at("parties")[2]==ikv::Json::array({2}) && world.state(2).at("party").empty() && raid(1).at("parties")[0].size()==5,"raid_move moves a member to another party");
+    check(refused(1,{{"action","raid_move"},{"target",3},{"party",1}}),"a full party refuses a move");
+    world.action(1,{{"action","raid_move"},{"target",2},{"party",0}});
+    world.action(1,{{"action","raid_invite"},{"target",13}});world.action(13,{{"action","raid_accept"}});
+    world.action(1,{{"action","raid_invite"},{"target",25}});world.action(25,{{"action","raid_accept"}});
+    check(raid(1).at("parties")[3]==ikv::Json::array({25}),"a solo player joins the first party with room");
+    check(refused(1,{{"action","raid_invite"},{"target",19}}),"a fifth party does not fit: four parties at most");
+    check(refused(3,{{"action","raid_kick"},{"target",25}}),"only the raid leader removes members");
+    world.action(1,{{"action","raid_kick"},{"target",25}});
+    check(raid(25).is_null() && raid(1).at("parties")[3].empty(),"the leader removes a member");
+    world.action(1,{{"action","raid_invite"},{"target",19}});world.action(19,{{"action","raid_accept"}});
+    const auto full=raid(1);size_t members=0;for(const auto& p:full.at("parties"))members+=p.size();
+    check(members==24 && raid(24).at("leader")==1,"four parties of six: a full raid of 24");
+    check(refused(1,{{"action","raid_invite"},{"target",25}}),"a full raid refuses a 25th member");
+    // Worst-case frame: 24 raid members plus 2 others, every one in view, 32-quote names, and a full queue of notices: the 18
+    // other-party rows are budgeted right after the own party (state()), so the frame always fits; here every row still fits.
+    for(int n=0;n<31;++n)world.action(1,{{"action","raid_move"},{"target",2},{"party",9}});
+    {const auto frame=world.state(1);check(frame.dump().size()<=65533 && frame.at("raid").at("rows").size()==18 && frame.at("events").size()>=31,"a full raid's frame stays inside the protocol envelope");
+     size_t players=0;for(const auto& e:frame.at("entities"))players+=e.at("kind")=="player";check(players==25,"every raid member and stranger in view still travels as an entity");}
+    // Raid chat reaches every party.
+    ticks(world,11);world.action(7,{{"action","chat"},{"channel","raid"},{"text","toplanın"}});
+    bool heard=false;const auto listener=world.state(20);for(const auto& e:listener.at("events"))heard|=e.at("type")=="chat" && e.at("channel")=="raid";
+    check(heard,"raid chat reaches another party");
+    world.action(25,{{"action","chat"},{"channel","raid"},{"text","x"}});check(event(world.state(25),"error","raid"),"raid chat needs a raid");
+    // A raid below the zone minimum is refused; a group outside a raid uses the shared zone.
+    world.action(25,{{"action","group_invite"},{"target",26}});world.action(26,{{"action","group_accept"}});
+    world.action(25,{{"action","interact"},{"target",f.to_raid}});
+    check(own(25).at("zone")=="buyukhol","a group outside a raid enters the shared raid zone");
+    world.remove(25);world.add(25,25,25,record(25,14900)); // back in eminonu (26 was left alone: the group dissolved)
+    world.action(25,{{"action","group_invite"},{"target",26}});world.action(26,{{"action","group_accept"}});
+    world.action(25,{{"action","raid_convert"}});
+    check(refused(25,{{"action","interact"},{"target",f.to_raid}}) && own(25).at("zone")=="eminonu","a raid below the zone minimum is refused");
+    // The whole raid enters one copy; the copy's Şef is scaled.
+    for(uint32_t p=1;p<=24;++p)world.action(p,{{"action","interact"},{"target",f.to_raid}});
+    bool together=true;for(uint32_t p=1;p<=24;++p)together=together && own(p).at("zone")=="buyukhol1";
+    check(together,"every raid member enters the same raid copy");
+    const uint32_t boss=f.raid_chief+65536u;
+    const auto max_hp=[&](uint32_t viewer,uint32_t id)->int{const auto frame=world.state(viewer);for(const auto& e:frame.at("entities"))if(e.at("id")==id)return e.at("max_hp");return -1;};
+    check(max_hp(1,boss)==160,"the raid copy's Şef has boss_hp times its hit points");
+    std::map<uint32_t,int64_t> before;for(uint32_t p=1;p<=24;++p){const auto s=world.state(p);before[p]=s.at("xp_total").get<int64_t>()+s.at("character").at("state").at("xp").get<int64_t>();}
+    world.action(1,{{"action","attack"},{"target",boss}});
+    for(int t=0;t<2000 && stored.size()<24;++t)world.advance();
+    check(stored.size()==24 && std::get<1>(stored[0])=="buyukhol" && std::get<2>(stored[0])>std::time(nullptr)+7100,"the raid Şef kill locks every raid member in range for the raid lockout");
+    bool shared=true;for(uint32_t p=1;p<=24;++p){const auto s=world.state(p);shared=shared && s.at("xp_total").get<int64_t>()+s.at("character").at("state").at("xp").get<int64_t>()-before[p]==2400*4/24;}
+    check(shared,"kill XP is shared by every raid member in range, across parties");
+    // Succession, then disband.
+    world.action(1,{{"action","raid_leave"}});
+    check(raid(1).is_null() && world.state(1).at("party").empty() && raid(2).at("leader")==3 && raid(20).at("leader")==3,"the raid leader leaving hands the raid to the next member (first of the first party)");
+    world.remove(3);
+    check(raid(2).at("parties")[0].size()==4 && raid(2).at("leader")==4,"a disconnecting leader leaves the raid to the next member");
+    world.action(26,{{"action","raid_leave"}});
+    check(raid(25).is_null() && raid(26).is_null() && world.state(25).at("party").empty(),"a raid left with one member disbands");
+    world.action(4,{{"action","raid_disband"}});
+    const auto after=world.state(20);
+    check(!after.contains("raid"),"the leader disbands the raid");
+    bool groups_kept=false;for(const auto& e:after.at("events"))if(e.at("type")=="group")groups_kept=e.at("leader")==19 && e.at("members").size()==6;
+    check(groups_kept,"a disbanded raid's parties stay plain groups");
+}
 // Şef skills and auto_retaliate (both NONCANONICAL): a Şef's cast lays its skill's effect with the NPC as caster, a bite rider
 // rides a bite that drew blood, the damage over time it laid ticks from the living Şef, and an idle victim answers a blow only
 // when auto_retaliate is on.
@@ -1629,6 +1768,8 @@ int main(int argc, char** argv) {
         clan_rules(config);
         door_rules(config);
         activity_rules(config);
+        lockout_persistence(config);
+        raid_rules(config);
         boss_rules(config,false);boss_rules(config,true);
         idle_walk_rules(config);
         regeneration_rules(config);

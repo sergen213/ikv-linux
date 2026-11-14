@@ -379,9 +379,11 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                     const auto identity = store.authenticate(message.session);
                     const auto character_id = static_cast<std::int64_t>(message.character_id);
                     // NONCANONICAL wave 30 phase: redeem the single-use ticket first, then take over the lease the issuing
-                    // shard still holds (Store::enter_character handoff).
+                    // shard still holds (Store::enter_character handoff). Lockouts load for every admission, ticket or not.
+                    auto lockouts = store.lockouts(character_id); // before the lease, so a failure holds nothing
                     ikv::Json arrival = message.ticket.empty() ? ikv::Json(nullptr) : store.redeem_ticket(message.ticket, character_id, instance);
                     auto record = store.enter_character(identity, character_id, instance);
+                    record["lockouts"] = std::move(lockouts);
                     const auto id = next_id++;
                     peer.identity = identity; peer.character_id = character_id; peer.held_lease = true;
                     peer.session = message.session;
@@ -579,6 +581,8 @@ int run(const Options& opts) {
         }
     }
     ikv::World world(std::move(config), [&store](std::span<const ikv::CharacterSave> states) { store.save_characters(states); });
+    // NONCANONICAL wave 30: Şef-kill lockouts persist in instance_lockouts, so a reconnect or a phase to another shard keeps them.
+    world.set_lockout_sink([&store](std::int64_t character, const std::string& zone, std::int64_t until) { store.set_lockout(character, zone, until); });
     world.set_source_zones(std::move(source_zones));
     if (auto settings = store.world_settings(); !settings.empty()) {
         try { world.admin("settings", settings); } catch (const std::exception&) { std::cerr << "stored_world_settings_ignored\n"; }
