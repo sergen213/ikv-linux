@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -300,16 +301,18 @@ vec2 pbr_fade_uv=vec2(0.0),pbr_fade_du1=vec2(0.0),pbr_fade_du2=vec2(0.0);
 vec3 pbr_fade_pu=vec3(0.0),pbr_fade_pv=vec3(0.0);
 float pbr_main_weight(){return pbr_fade_layer?clamp(fade_blend,0.0,1.0):1.0;}
 vec3 parallax_gradient=vec3(0.0);
+bool pbr_derived_relief=false; // Vulkan pbrDerivedRelief: whole-original-albedo pack material keeps the derived relief
 void parallax() {
     surface_uv=texcoord;pbr_uv=texcoord;
     if(original_appearance||sky||source_ocean)return;
     pbr_on=pbrActive(pbr);
+    pbr_derived_relief=pbr_on&&!pbrParallax(pbr)&&pbrTintKeep(pbr)>=1.0;
     if(pbr_on&&pbr.x>0.0)pbr_uv=pbrWorldUV(fragment_position,world_normal,pbr.xy);
     vec2 base=pbr_on?pbr_uv:texcoord;
     vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),nf=cross(dp1,dp2),v=camera_position-fragment_position;
-    vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    vec2 du1=dFdx(base),du2=dFdy(base),tu1=dFdx(texcoord),tu2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbr_du1=du1;pbr_du2=du2;
-    pbr_uv_per_unit=max(length(dFdx(texcoord))/max(length(dp1),1e-6),length(dFdy(texcoord))/max(length(dp2),1e-6));
+    pbr_uv_per_unit=max(length(tu1)/max(length(dp1),1e-6),length(tu2)/max(length(dp2),1e-6));
     if(pbr_on){ // draw-uniform: derivatives in uniform control flow
         pbr_fade_layer=has_fade_map&&!has_normal_map&&!has_environment_map;
         pbr_fade_on=pbr_fade_layer&&pbrActive(pbr_fade);
@@ -322,18 +325,24 @@ void parallax() {
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0.0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
     pbr_pu=pu;pbr_pv=pv;
-    if(!has_height_map||(pbr_on&&!pbrParallax(pbr)))return;
+    if(!has_height_map||(pbr_on&&!pbrParallax(pbr)&&!pbr_derived_relief))return;
+    bool pack=pbr_on&&!pbr_derived_relief;
+    if(!pack&&pbr_on) {
+        base=texcoord;du1=tu1;du2=tu2;det=du1.x*du2.y-du2.x*du1.y;
+        if(abs(det)<1e-12)return;
+        pu=(dp1*du2.y-dp2*du1.y)/det;pv=(dp2*du1.x-dp1*du2.x)/det;
+    }
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
     float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
-        (pbr_on?min(pbr.z,1.0)*pbr_main_weight():min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
+        (pack?min(pbr.z,1.0)*pbr_main_weight():min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
     int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,base,du1,du2).r,last_t=0.0,last_f=h-1.0;
     for(int i=0;i<steps&&t<1.0-h;++i){last_t=t;last_f=t-(1.0-h);t+=1.0/float(steps);h=textureGrad(height_map,base+shift*t,du1,du2).r;}
     float f=t-(1.0-h);if(f>0.0&&last_f<0.0)t=mix(last_t,t,last_f/(last_f-f));
     vec2 shifted=base+shift*t;
-    if(!pbr_on||pbr.x<=0.0)surface_uv=shifted;
-    if(pbr_on)pbr_uv=shifted;
+    if(!pack||pbr.x<=0.0)surface_uv=shifted;
+    if(pack)pbr_uv=shifted;
     vec2 slope=(textureGrad(height_map,shifted,du1,du2).gb-0.5)*0.5*vec2(textureSize(height_map,0));
     parallax_gradient=0.7*depth*(slope.x*gu+slope.y*gv);
 }
@@ -467,7 +476,7 @@ void main() {
         float nlength=length(world_normal);
         vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
         if(pbr_on&&(pbr_fade_layer||pbr_maps.y>0.5)){ // wave 29; fade layers never have a source normal map
-            vec3 m=pbr_maps.y>0.5?pbrNormal(n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
+            vec3 m=pbr_maps.y>0.5?pbrNormal(pbr_derived_relief?normalize(n-parallax_gradient):n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
             if(pbr_fade_layer){vec3 f=pbr_fade_on&&pbr_fade_maps.y>0.5?pbrNormal(n,pbr_fade_pu,pbr_fade_pv,textureGrad(pbr_fade_normal_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb):n;
                 m=normalize(mix(f,m,pbr_main_weight()));}
             n=m;
@@ -485,10 +494,9 @@ void main() {
             if(pbr_maps.x>0.5) {
                 ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
                 vec3 low=has_texture?textureLod(diffuse_map,texcoord,pbrLowLod(pbr,pbr_uv_per_unit,float(size.x),levels)).rgb:vec3(1.0);
-                low=low*material_color.rgb-lightmap_shadow;
-                albedo=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,albedo,pbrTintKeep(pbr));
+                albedo=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low*material_color.rgb,albedo,pbr,lightmap_shadow);
             }
-            if(pbr_maps.z>0.5){vec3 orm=textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb;pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;}
+            if(pbr_maps.z>0.5){vec3 orm=textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb;pbr_ao=pbrAmbientAo(orm.r,pbr);roughness=clamp(orm.g,0.04,1.0);metallic=pbrMetallic(orm.b,pbr);}
         } else if(pbr_on) {
             // Terrain (Vulkan lighting.glsl): each layer's pack material carries that layer's own low-frequency original
             // colour (unmapped fade layer: its original texel), blended by vertex alpha like the diffuse layers above.
@@ -496,19 +504,20 @@ void main() {
             vec3 fade_a=pow(max(texture(fade_map,surface_uv).rgb*material_color.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
             if(pbr_maps.x>0.5) {
                 ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
-                vec3 low=(has_texture?textureLod(diffuse_map,texcoord,pbrLowLod(pbr,pbr_uv_per_unit,float(size.x),levels)).rgb:vec3(1.0))*material_color.rgb-lightmap_shadow;
-                main_a=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,main_a,pbrTintKeep(pbr));
+                vec3 low=(has_texture?textureLod(diffuse_map,texcoord,pbrLowLod(pbr,pbr_uv_per_unit,float(size.x),levels)).rgb:vec3(1.0))*material_color.rgb;
+                main_a=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,main_a,pbr,lightmap_shadow);
             }
             if(pbr_fade_on&&pbr_fade_maps.x>0.5) {
                 ivec2 fs=textureSize(fade_map,0);float levels=floor(log2(float(max(max(fs.x,fs.y),1))))+1.0;
-                vec3 low=textureLod(fade_map,texcoord,pbrLowLod(pbr_fade,pbr_uv_per_unit,float(fs.x),levels)).rgb*material_color.rgb-lightmap_shadow;
-                fade_a=pbrAlbedo(textureGrad(pbr_fade_albedo_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb,low,fade_a,pbrTintKeep(pbr_fade));
+                vec3 low=textureLod(fade_map,texcoord,pbrLowLod(pbr_fade,pbr_uv_per_unit,float(fs.x),levels)).rgb*material_color.rgb;
+                fade_a=pbrAlbedo(textureGrad(pbr_fade_albedo_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb,low,fade_a,pbr_fade,lightmap_shadow);
             }
             vec3 main_orm=pbr_maps.z>0.5?textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb:vec3(1.0,0.65,0.0);
             vec3 fade_orm=pbr_fade_on&&pbr_fade_maps.z>0.5?textureGrad(pbr_fade_orm_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb:vec3(1.0,0.65,0.0);
             float w=pbr_main_weight();
             albedo=mix(fade_a,main_a,w);
-            vec3 orm=mix(fade_orm,main_orm,w);pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;
+            vec3 orm=mix(fade_orm,main_orm,w);pbr_ao=mix(pbrAmbientAo(fade_orm.r,pbr_fade),pbrAmbientAo(main_orm.r,pbr),w);roughness=clamp(orm.g,0.04,1.0);
+            metallic=mix(pbrMetallic(fade_orm.b,pbr_fade),pbrMetallic(main_orm.b,pbr),w);
         }
         // NONCANONICAL wave 29 (Vulkan lighting.glsl): with a pack material the baked light lights the pack albedo, not the
         // original texture (original_surface = (texel - lightmap) x vertex light on this path).
@@ -828,6 +837,7 @@ class GlRenderer final : public Renderer {
         // NONCANONICAL wave 29: each material's PBR pack material (plan()), the pack maps uploaded (albedo, normal, ORM,
         // height) and per mesh whether a tessellated pack material draws it (0 no, 1 original UVs, 2 world projection).
         std::vector<const PbrMaterial*> pbr,pbr_fade;std::map<const PbrMaterial*,std::array<GLuint,4>> pbr_textures;std::vector<std::uint8_t> tess_meshes;
+        std::vector<std::array<float,2>> pbr_gains; // pbr.hpp pbr_low_gains: {main, fade} per material
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -956,7 +966,8 @@ public:
             draw_uniforms_={{sky_location_},{ocean_location_},{fog_enabled_location_},{normal_location_},{environment_location_},{lightmap_location_},
                 {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_},
                 {uniform(program_,"pbr")},{uniform(program_,"pbr_maps")},{uniform(program_,"pbr_fade")},{uniform(program_,"pbr_fade_maps")}};
-            if(!options_.original_appearance&&options_.tessellation)link_tess();
+            const char* tess_knob=SDL_getenv("IKV_PBR_TESS"); // NONCANONICAL wave 29 A/B knob, as Vulkan
+            if(!options_.original_appearance&&options_.tessellation&&!(tess_knob&&!std::strcmp(tess_knob,"0")))link_tess();
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
             glGenTextures(1,&overlay_texture_);
@@ -1411,7 +1422,9 @@ private:
             const auto& found=upload(p);
             auto& gpu=set.materials[index];
             gpu.pbr=p;gpu.pbr_albedo=found[0];gpu.pbr_normal=found[1];gpu.pbr_orm=found[2];
-            gpu.height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_program_)?found[3]:0;
+            // Whole-original-albedo materials without relief of their own keep the derived one (pbr_derived_relief).
+            if(p->parallax||p->tessellate)gpu.height=options_.parallax||(p->tessellate&&tess_program_)?found[3]:0;
+            else if(p->tint_keep_original<1.f)gpu.height=0;
             if(const auto* f=index<set.pbr_fade.size()?set.pbr_fade[index]:nullptr){const auto& fade=upload(f);
                 gpu.pbr_fade=f;gpu.pbr_fade_albedo=fade[0];gpu.pbr_fade_normal=fade[1];gpu.pbr_fade_orm=fade[2];}
         }
@@ -1420,7 +1433,7 @@ private:
     // NONCANONICAL wave 29: scene materials -> PBR pack materials (pbr.hpp eligibility + manifest key), enhanced only, and
     // the meshes needing a tessellation copy.
     void plan_pbr(GlSet& set,const Scene& scene) {
-        set.pbr.assign(scene.materials.size(),nullptr);set.tess_meshes.assign(scene.meshes.size(),0);
+        set.pbr.assign(scene.materials.size(),nullptr);set.tess_meshes.assign(scene.meshes.size(),0);set.pbr_gains.clear();
         if(options_.original_appearance)return;
         if(!pbr_loaded_) {
             pbr_loaded_=true;
@@ -1439,6 +1452,7 @@ private:
             ++mapped;
             if(pbr_fade_layer(scene.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(scene.materials[i].luminance)))++fades;
         }
+        set.pbr_gains=pbr_low_gains(scene,set.pbr,set.pbr_fade);
         std::size_t tessellated=0;
         if(tess_program_)for(const auto& in:scene.instances) {
             if(in.mesh>=scene.meshes.size())continue;
@@ -1945,10 +1959,11 @@ private:
         set1i(u.environment,environment?1:0);set1i(u.lightmap,maps.lightmap?1:0);
         set1i(u.fade,maps.fade?1:0);set1i(u.height,maps.height?1:0);
         bind_texture(1,maps.normal);bind_texture(2,environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);bind_texture(8,maps.height);
-        set4f(u.pbr,options_.original_appearance?std::array<float,4>{0,0,0,-1}:pbr_draw_params(maps.pbr,options_.parallax,false)); // wave 29
+        const auto gains=draw.material<set.pbr_gains.size()?set.pbr_gains[draw.material]:std::array<float,2>{1.f,1.f};
+        set4f(u.pbr,options_.original_appearance?std::array<float,4>{0,0,0,-1}:pbr_draw_params(maps.pbr,options_.parallax,false,gains[0])); // wave 29
         if(maps.pbr){set4f(u.pbr_maps,{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f});
             bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);
-            set4f(u.pbr_fade,pbr_draw_params(maps.pbr_fade,false,false));
+            set4f(u.pbr_fade,pbr_draw_params(maps.pbr_fade,false,false,gains[1]));
             if(maps.pbr_fade){set4f(u.pbr_fade_maps,{maps.pbr_fade_albedo?1.f:0.f,maps.pbr_fade_normal?1.f:0.f,maps.pbr_fade_orm?1.f:0.f,0.f});
                 bind_texture(14,maps.pbr_fade_albedo);bind_texture(15,maps.pbr_fade_normal);bind_texture(16,maps.pbr_fade_orm);}}
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
@@ -2044,9 +2059,10 @@ private:
             glUniform1i_(tess_u_.fog,draw->fog?1:0);
             static constexpr std::array<float,4> zero{};
             glUniform4fv_(tess_u_.sway,1,zero.data());glUniform4fv_(tess_u_.scroll,1,zero.data());
-            const auto params=pbr_draw_params(maps.pbr,options_.parallax,true);glUniform4fv_(tess_u_.pbr,1,params.data());
+            const auto gains=draw->material<set.pbr_gains.size()?set.pbr_gains[draw->material]:std::array<float,2>{1.f,1.f};
+            const auto params=pbr_draw_params(maps.pbr,options_.parallax,true,gains[0]);glUniform4fv_(tess_u_.pbr,1,params.data());
             const std::array<float,4> present{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f};glUniform4fv_(tess_u_.pbr_maps,1,present.data());
-            const auto fade=pbr_draw_params(maps.pbr_fade,false,false);glUniform4fv_(tess_u_.pbr_fade,1,fade.data());
+            const auto fade=pbr_draw_params(maps.pbr_fade,false,false,gains[1]);glUniform4fv_(tess_u_.pbr_fade,1,fade.data());
             const std::array<float,4> fade_present{maps.pbr_fade_albedo?1.f:0.f,maps.pbr_fade_normal?1.f:0.f,maps.pbr_fade_orm?1.f:0.f,0.f};glUniform4fv_(tess_u_.pbr_fade_maps,1,fade_present.data());
             bind_texture(0,diffuse);bind_texture(1,maps.normal);bind_texture(2,maps.environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);
             bind_texture(8,maps.height);bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);

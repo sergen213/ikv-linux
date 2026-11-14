@@ -181,6 +181,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      // NONCANONICAL wave 29: each scene material's PBR pack material and that of its MAT+14 secondary fade layer (null:
      // none; pbr.hpp pbr_fade_layer), and the pack maps this scene uploaded (albedo, normal, orm, height; null = absent).
      std::vector<const PbrMaterial*> pbr,pbr_fade;std::map<const PbrMaterial*,std::array<Image,4>> pbr_images;
+     std::vector<std::array<float,2>> pbr_gains; // pbr.hpp pbr_low_gains: {main, fade} per material
  };
  std::unique_ptr<SceneSet> set_;
  const Image* shore_map_=nullptr; // set_'s ocean_shore for material sets written by descriptors(); null: white
@@ -1505,7 +1506,10 @@ std::array<const Image*,material_images> material_maps(const SceneSet& set,const
      if(p&&!options_.original_appearance) {
          const auto found=set.pbr_images.find(p);
          if(found!=set.pbr_images.end())for(unsigned i=0;i<4;++i)if(found->second[i].view)pack[i]=&found->second[i];
-         height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_enabled_)?pack[3]:&white_;
+         // A material keeping the whole original albedo without relief of its own keeps the derived one (lighting.glsl
+         // pbrDerivedRelief); other pack materials replace it with theirs or none (it belongs to the original art).
+         if(p->parallax||p->tessellate)height=options_.parallax||(p->tessellate&&tess_enabled_)?pack[3]:&white_;
+         else if(p->tint_keep_original<1.f)height=&white_;
          const auto fading=fade?set.pbr_images.find(fade):set.pbr_images.end();
          if(fading!=set.pbr_images.end())for(unsigned i=0;i<3;++i)if(fading->second[i].view)fade_pack[i]=&fading->second[i];
      }
@@ -1792,8 +1796,8 @@ std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& bat
             std::cerr<<"PBR pack root="<<root.string()<<" materials="<<pbr_pack_->materials.size()<<" keys="<<pbr_pack_->textures.size()<<'\n';
         } catch(const std::exception& e){std::cerr<<"PBR pack disabled: "<<e.what()<<'\n';pbr_pack_.reset();}
     }
-    if(retain){set.pbr.resize(s.materials.size(),nullptr);set.pbr_fade.resize(s.materials.size(),nullptr);return {};}
-    set.pbr.assign(s.materials.size(),nullptr);set.pbr_fade.assign(s.materials.size(),nullptr);
+    if(retain){set.pbr.resize(s.materials.size(),nullptr);set.pbr_fade.resize(s.materials.size(),nullptr);set.pbr_gains.resize(s.materials.size(),{1.f,1.f});return {};}
+    set.pbr.assign(s.materials.size(),nullptr);set.pbr_fade.assign(s.materials.size(),nullptr);set.pbr_gains.assign(s.materials.size(),{1.f,1.f});
     if(!pbr_pack_)return {};
     const auto eligible=pbr_eligible_materials(s);
     std::size_t mapped=0,fades=0;
@@ -1808,6 +1812,7 @@ std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& bat
         ++mapped;upload(set.pbr[i]);
         if(pbr_fade_layer(s.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(s.materials[i].luminance))){++fades;upload(set.pbr_fade[i]);}
     }
+    set.pbr_gains=pbr_low_gains(s,set.pbr,set.pbr_fade);
     std::vector<std::uint8_t> tess(s.meshes.size(),0);
     std::size_t tessellated=0;
     if(tess_enabled_)for(const auto& in:s.instances) {
@@ -1873,7 +1878,8 @@ void record_geometry_uploads(SceneSet& set) {
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
  // Push constants of one scene draw (shadow: previous_model carries the cascade's light matrix).
- Draw scene_draw(const DrawItem& item,const Material* material,bool shadow,const Matrix4* light_vp,const PbrMaterial* p=nullptr,const PbrMaterial* fade=nullptr)const {
+ Draw scene_draw(const DrawItem& item,const Material* material,bool shadow,const Matrix4* light_vp,const PbrMaterial* p=nullptr,const PbrMaterial* fade=nullptr,
+     std::array<float,2> gains={1.f,1.f})const {
      Draw draw;draw.model=item.model;
      draw.color=material?material->color:std::array<float,4>{1,1,1,1};
      draw.flags={material&&!material->normal.empty()?1.f:0.f,material&&(!material->environment.empty()||(item.sky&&(!material->luminance.empty()||!material->lightmap.empty())))?1.f:0.f,
@@ -1884,7 +1890,7 @@ void record_geometry_uploads(SceneSet& set) {
      draw.scroll=item.scroll;draw.previous_model=shadow&&light_vp?*light_vp:item.previous;
      // NONCANONICAL wave 29 PBR pack (pbr.glsl draw.pbr). A tessellation material without tessellation falls back to
      // parallax occlusion when that is on. The secondary fade layer's material carries no relief.
-     if(!options_.original_appearance){draw.pbr=pbr_draw_params(p,options_.parallax,item.tess);if(p)draw.pbr_fade=pbr_draw_params(fade,false,false);}
+     if(!options_.original_appearance){draw.pbr=pbr_draw_params(p,options_.parallax,item.tess,gains[0]);if(p)draw.pbr_fade=pbr_draw_params(fade,false,false,gains[1]);}
      return draw;
  }
  // Opaque colour draws the depth prepass covers: visible, not sky/water/blended, no alpha cutoff (lighting.glsl may
@@ -1915,7 +1921,8 @@ void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<cons
          }
          const Material* material=item.material<scene.materials.size()?&scene.materials[item.material]:nullptr;
          const Draw draw=scene_draw(item,material,shadow,light_vp,item.material<set.pbr.size()?set.pbr[item.material]:nullptr,
-             item.material<set.pbr_fade.size()?set.pbr_fade[item.material]:nullptr);
+             item.material<set.pbr_fade.size()?set.pbr_fade[item.material]:nullptr,
+             item.material<set.pbr_gains.size()?set.pbr_gains[item.material]:std::array<float,2>{1.f,1.f});
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
          const bool tess=item.tess&&(!shadow||tess_casters);

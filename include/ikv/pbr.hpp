@@ -9,6 +9,8 @@
 // `ikv-assets pbr-keys <original/app/base>` lists every eligible key of every original zone.
 #include "ikv/scene.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <array>
 #include <filesystem>
 #include <memory>
@@ -45,13 +47,24 @@ struct PbrMaterial {
 };
 // Per-draw shader vector (pbr.glsl `pbr`: Vulkan push constant, GL uniform) of a draw with pack material p; {0,0,0,-1}
 // without one. tessellated: the draw displaces its geometry (no parallax then); a tessellation material drawn without
-// tessellation falls back to parallax occlusion when RendererOptions::parallax allows.
-inline std::array<float, 4> pbr_draw_params(const PbrMaterial* p, bool parallax_option, bool tessellated) {
+// tessellation falls back to parallax occlusion when RendererOptions::parallax allows. w = tint_keep_original + 2 x relief
+// + 4 x round(low_gain x 256) (pbr.glsl pbrTintKeep, pbrParallax, pbrLowGain).
+inline std::array<float, 4> pbr_draw_params(const PbrMaterial* p, bool parallax_option, bool tessellated, float low_gain = 1.f) {
     if (!p) return {0, 0, 0, -1};
     const bool relief = !tessellated && parallax_option && (p->parallax || p->tessellate) && !p->height.data.empty();
+    const float gain = std::round(std::clamp(low_gain, 1.f / 256.f, 16.f) * 256.f);
     return {p->world_uv ? .25f / p->scale[0] : 0.f, p->world_uv ? .25f / p->scale[1] : 0.f, p->height_scale * 4.f,
-            p->tint_keep_original + (relief ? 2.f : 0.f)};
+            p->tint_keep_original + (relief ? 2.f : 0.f) + 4.f * gain};
 }
+// NONCANONICAL wave 29: linear brightness gain of the blurred-original tint (pbr.glsl pbrAlbedo). The shader samples a
+// coarse authored mip of the original diffuse and linearises it, but the authored mips average sRGB values: for high-
+// contrast textures (cobbles: bright stones, dark joints) that is ~20% darker than the mean linear colour the original
+// shading shows, so every pack surface came out darker. Gain = mean linear luminance of the top mip / mean linearised
+// luminance of the mip pbrLowLod mostly picks (the coarsest for world-projected materials, levels-4 otherwise).
+float pbr_low_gain(const Texture& diffuse, bool world_uv);
+// Per scene material {main gain (Material::diffuse), fade layer gain (Material::luminance)}; 1 where unmapped.
+std::vector<std::array<float, 2>> pbr_low_gains(const Scene& scene, std::span<const PbrMaterial* const> pbr,
+                                                std::span<const PbrMaterial* const> fade);
 struct PbrPack {
     std::filesystem::path root;
     std::vector<PbrMaterial> materials;

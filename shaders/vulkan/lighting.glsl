@@ -74,16 +74,21 @@ vec2 pbrFadeUV=vec2(0),pbrFadeDu1=vec2(0),pbrFadeDu2=vec2(0);
 vec3 pbrFadePu=vec3(0),pbrFadePv=vec3(0);
 float pbrMainWeight(){return pbrFadeLayer?clamp(fadeWeight,0.,1.):1.;}
 vec3 parallaxGradient=vec3(0);
+// NONCANONICAL wave 29: a pack material that keeps the whole original albedo (micro-detail atlases, tint_keep_original 1)
+// and has no relief of its own keeps the original art's derived relief on the original UVs (renderer: material.height
+// stays bound), with the pack's micro normal on top (mappedNormal); else facades lost their parallax relief to the pack.
+bool pbrDerivedRelief=false;
 void parallax(){
     surfaceUV=texcoord;pbrUV=texcoord;
     if(frame.params.x<.5)return;
     pbrOn=pbrActive(draw.pbr);
+    pbrDerivedRelief=pbrOn&&!pbrParallax(draw.pbr)&&pbrTintKeep(draw.pbr)>=1.;
     if(pbrOn&&draw.pbr.x>0.)pbrUV=pbrWorldUV(worldPosition,worldNormal,draw.pbr.xy);
     vec2 base=pbrOn?pbrUV:texcoord;
     vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),nf=cross(dp1,dp2),v=frame.eye.xyz-worldPosition;
-    vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
+    vec2 du1=dFdx(base),du2=dFdy(base),tu1=dFdx(texcoord),tu2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbrDu1=du1;pbrDu2=du2;
-    pbrUvPerUnit=max(length(dFdx(texcoord))/max(length(dp1),1e-6),length(dFdy(texcoord))/max(length(dp2),1e-6));
+    pbrUvPerUnit=max(length(tu1)/max(length(dp1),1e-6),length(tu2)/max(length(dp2),1e-6));
     if(pbrOn){ // draw-uniform: the fade layer's derivatives stay in uniform control flow
         pbrFadeLayer=draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5;
         pbrFadeOn=pbrFadeLayer&&pbrActive(draw.pbrFade);
@@ -96,25 +101,31 @@ void parallax(){
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det; // dP/du, dP/dv
     pbrPu=pu;pbrPv=pv;
-    if(textureSize(heightMap,0).x<2||(pbrOn&&!pbrParallax(draw.pbr)))return;
+    if(textureSize(heightMap,0).x<2||(pbrOn&&!pbrParallax(draw.pbr)&&!pbrDerivedRelief))return;
+    bool pack=pbrOn&&!pbrDerivedRelief; // pack relief on pbrUV; else the derived relief on the original UVs
+    if(!pack&&pbrOn) {
+        base=texcoord;du1=tu1;du2=tu2;det=du1.x*du2.y-du2.x*du1.y;
+        if(abs(det)<1e-12)return;
+        pu=(dp1*du2.y-dp2*du1.y)/det;pv=(dp2*du1.x-dp1*du2.x)/det;
+    }
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
     float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
-        (pbrOn?min(draw.pbr.z,1.)*pbrMainWeight():min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
+        (pack?min(draw.pbr.z,1.)*pbrMainWeight():min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
     int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,base,du1,du2).r,lastT=0,lastF=h-1;
     for(int i=0;i<steps&&t<1-h;++i){lastT=t;lastF=t-(1-h);t+=1./steps;h=textureGrad(heightMap,base+shift*t,du1,du2).r;}
     float f=t-(1-h);if(f>0&&lastF<0)t=mix(lastT,t,lastF/(lastF-f)); // secant refinement
     vec2 shifted=base+shift*t;
-    if(!pbrOn||draw.pbr.x<=0.)surfaceUV=shifted; // the original maps follow only when they share the pack's UVs
-    if(pbrOn)pbrUV=shifted;
+    if(!pack||draw.pbr.x<=0.)surfaceUV=shifted; // the original maps follow only when they share the pack's UVs
+    if(pack)pbrUV=shifted;
     vec2 slope=(textureGrad(heightMap,shifted,du1,du2).gb-.5)*.5*vec2(textureSize(heightMap,0)); // dh/du, dh/dv
     parallaxGradient=.7*depth*(slope.x*gu+slope.y*gv);
 }
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
     if(pbrOn&&(pbrFadeLayer||textureSize(pbrNormalMap,0).x>1)) { // fade layers never have a source normal map
-        vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
+        vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(pbrDerivedRelief?normalize(n-parallaxGradient):n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
         if(!pbrFadeLayer)return m;
         vec3 f=pbrFadeOn&&textureSize(pbrFadeNormalMap,0).x>1?pbrNormal(n,pbrFadePu,pbrFadePv,textureGrad(pbrFadeNormalMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb):n;
         return normalize(mix(f,m,pbrMainWeight()));
@@ -377,10 +388,9 @@ float pbrAo=1.;
 if(pbrOn&&!pbrFadeLayer){
     if(textureSize(pbrAlbedoMap,0).x>1) {
         vec3 low=textureLod(diffuseMap,texcoord,pbrLowLod(draw.pbr,pbrUvPerUnit,float(textureSize(diffuseMap,0).x),float(textureQueryLevels(diffuseMap)))).rgb;
-        low=low*draw.color.rgb-enhancedLightmapShadow(texel.a);
-        albedo=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,albedo,pbrTintKeep(draw.pbr));
+        albedo=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low*draw.color.rgb,albedo,draw.pbr,enhancedLightmapShadow(texel.a));
     }
-    if(textureSize(pbrOrmMap,0).x>1){vec3 orm=textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb;pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;}
+    if(textureSize(pbrOrmMap,0).x>1){vec3 orm=textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb;pbrAo=pbrAmbientAo(orm.r,draw.pbr);roughness=clamp(orm.g,.04,1.);metallic=pbrMetallic(orm.b,draw.pbr);}
 } else if(pbrOn) {
     // Terrain: each layer's pack material carries that layer's own low-frequency original colour (unmapped fade layer:
     // its original texel), blended by vertex alpha like the original diffuse layers (texel above).
@@ -388,18 +398,19 @@ if(pbrOn&&!pbrFadeLayer){
     vec3 mainA=pow(max(texture(diffuseMap,surfaceUV).rgb*draw.color.rgb-shade,vec3(0)),vec3(2.2));
     vec3 fadeA=pow(max(texture(fadeMap,surfaceUV).rgb*draw.color.rgb-shade,vec3(0)),vec3(2.2));
     if(textureSize(pbrAlbedoMap,0).x>1){
-        vec3 low=textureLod(diffuseMap,texcoord,pbrLowLod(draw.pbr,pbrUvPerUnit,float(textureSize(diffuseMap,0).x),float(textureQueryLevels(diffuseMap)))).rgb*draw.color.rgb-shade;
-        mainA=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,mainA,pbrTintKeep(draw.pbr));
+        vec3 low=textureLod(diffuseMap,texcoord,pbrLowLod(draw.pbr,pbrUvPerUnit,float(textureSize(diffuseMap,0).x),float(textureQueryLevels(diffuseMap)))).rgb*draw.color.rgb;
+        mainA=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,mainA,draw.pbr,shade);
     }
     if(pbrFadeOn&&textureSize(pbrFadeAlbedoMap,0).x>1){
-        vec3 low=textureLod(fadeMap,texcoord,pbrLowLod(draw.pbrFade,pbrUvPerUnit,float(textureSize(fadeMap,0).x),float(textureQueryLevels(fadeMap)))).rgb*draw.color.rgb-shade;
-        fadeA=pbrAlbedo(textureGrad(pbrFadeAlbedoMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb,low,fadeA,pbrTintKeep(draw.pbrFade));
+        vec3 low=textureLod(fadeMap,texcoord,pbrLowLod(draw.pbrFade,pbrUvPerUnit,float(textureSize(fadeMap,0).x),float(textureQueryLevels(fadeMap)))).rgb*draw.color.rgb;
+        fadeA=pbrAlbedo(textureGrad(pbrFadeAlbedoMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb,low,fadeA,draw.pbrFade,shade);
     }
     vec3 mainOrm=textureSize(pbrOrmMap,0).x>1?textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb:vec3(1,.65,0);
     vec3 fadeOrm=pbrFadeOn&&textureSize(pbrFadeOrmMap,0).x>1?textureGrad(pbrFadeOrmMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb:vec3(1,.65,0);
     float w=pbrMainWeight();
     albedo=mix(fadeA,mainA,w);
-    vec3 orm=mix(fadeOrm,mainOrm,w);pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;
+    vec3 orm=mix(fadeOrm,mainOrm,w);pbrAo=mix(pbrAmbientAo(fadeOrm.r,draw.pbrFade),pbrAmbientAo(mainOrm.r,draw.pbr),w);roughness=clamp(orm.g,.04,1.);
+    metallic=mix(pbrMetallic(fadeOrm.b,draw.pbrFade),pbrMetallic(mainOrm.b,draw.pbr),w);
 }
 // NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl);
 // NONCANONICAL wave 28: footstep rings in puddles and prints in snow (frame.groundMarks).

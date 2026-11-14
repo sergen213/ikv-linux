@@ -28,8 +28,12 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path, std::uint
 }
 std::uint32_t be32(const std::uint8_t* p) { return std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]; }
 constexpr std::uint32_t kMaxSide = 1024;
-// Float RGBA level 0 -> RGBA8 texture with a full box-filtered mip chain (normal maps renormalised per level).
-Texture rgba_texture(std::string name, std::string source, std::uint32_t w, std::uint32_t h, std::vector<float> level, bool normal_map) {
+// Float RGBA level 0 -> RGBA8 texture with a full box-filtered mip chain (normal maps renormalised per level). srgb: the
+// colour is averaged in linear (pbr.glsl's pow 2.2) and stored as sRGB, so coarse mips keep the mean linear colour the
+// shader reads at level 0 (averaging the high-contrast sRGB albedo darkened distant pack surfaces by up to ~15%).
+Texture rgba_texture(std::string name, std::string source, std::uint32_t w, std::uint32_t h, std::vector<float> level, bool normal_map,
+                     bool srgb = false) {
+    if (srgb) for (std::size_t i = 0; i < level.size(); ++i) if (i % 4 != 3) level[i] = std::pow(std::clamp(level[i], 0.f, 1.f), 2.2f);
     // Oversized maps (contract: <= 1024) are box-reduced first.
     auto halve = [&](std::uint32_t& mw, std::uint32_t& mh, std::vector<float>& rgba) {
         const std::uint32_t nw = std::max(1u, mw / 2), nh = std::max(1u, mh / 2);
@@ -51,7 +55,10 @@ Texture rgba_texture(std::string name, std::string source, std::uint32_t w, std:
     out.data.reserve(std::size_t(w) * h * 4 * 4 / 3 + 64);
     for (std::uint32_t mw = w, mh = h;;) {
         const std::size_t offset = out.data.size();
-        for (const float v : level) out.data.push_back(std::uint8_t(std::lround(std::clamp(v, 0.f, 1.f) * 255.f)));
+        for (std::size_t i = 0; i < level.size(); ++i) {
+            const float v = srgb && i % 4 != 3 ? std::pow(std::clamp(level[i], 0.f, 1.f), 1.f / 2.2f) : level[i];
+            out.data.push_back(std::uint8_t(std::lround(std::clamp(v, 0.f, 1.f) * 255.f)));
+        }
         out.mips.push_back({mw, mh, offset, out.data.size() - offset});
         if (mw == 1 && mh == 1) break;
         halve(mw, mh, level);
@@ -125,6 +132,48 @@ std::vector<bool> pbr_eligible_materials(const Scene& scene) {
 const PbrMaterial* PbrPack::find(std::string_view diffuse) const {
     const auto it = textures.find(pbr_texture_key(diffuse));
     return it == textures.end() ? nullptr : &materials[it->second];
+}
+
+float pbr_low_gain(const Texture& diffuse, bool world_uv) {
+    if (diffuse.mips.size() < 2 || diffuse.data.empty()) return 1.f; // no coarser mip: pbrLowLod samples the texels
+    assets::DdsImage image{diffuse.width, diffuse.height, {}, diffuse.mips, diffuse.format};
+    assets::DdsImage decoded;
+    try {
+        image.rgba = diffuse.data;
+        decoded = diffuse.format == assets::DdsFormat::rgba8 ? std::move(image) : assets::decompress_dds(image);
+    } catch (const std::exception&) { return 1.f; }
+    const auto mean_linear = [&](std::size_t level) {
+        const auto& mip = decoded.mips[level];
+        const std::size_t texels = std::size_t(mip.width) * mip.height;
+        if (!texels || mip.offset + texels * 4 > decoded.rgba.size()) return 0.;
+        double sum = 0;
+        const auto* p = decoded.rgba.data() + mip.offset;
+        for (std::size_t i = 0; i < texels; ++i, p += 4) // pbr.glsl linearisation: pow(srgb, 2.2), Rec.709 luminance
+            sum += .2126 * std::pow(p[0] / 255., 2.2) + .7152 * std::pow(p[1] / 255., 2.2) + .0722 * std::pow(p[2] / 255., 2.2);
+        return sum / double(texels);
+    };
+    const std::size_t levels = decoded.mips.size();
+    const std::size_t low = world_uv ? levels - 1 : levels > 4 ? levels - 4 : 0;
+    const double top = mean_linear(0), coarse = mean_linear(low);
+    return low && top > 0 && coarse > 1e-6 ? float(std::clamp(top / coarse, .5, 16.)) : 1.f;
+}
+
+std::vector<std::array<float, 2>> pbr_low_gains(const Scene& scene, std::span<const PbrMaterial* const> pbr,
+                                                std::span<const PbrMaterial* const> fade) {
+    std::vector<std::array<float, 2>> out(scene.materials.size(), {1.f, 1.f});
+    std::map<std::pair<std::string, bool>, float> cache;
+    const auto gain = [&](const std::string& name, bool world_uv) {
+        const auto [it, added] = cache.try_emplace({name, world_uv}, 1.f);
+        if (added)
+            for (const auto& t : scene.textures)
+                if (t.name == name) { it->second = pbr_low_gain(t, world_uv); break; }
+        return it->second;
+    };
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        if (i < pbr.size() && pbr[i]) out[i][0] = gain(scene.materials[i].diffuse, pbr[i]->world_uv);
+        if (i < fade.size() && fade[i]) out[i][1] = gain(scene.materials[i].luminance, fade[i]->world_uv);
+    }
+    return out;
 }
 
 std::filesystem::path pbr_pack_root(const char* executable_base) {
@@ -254,17 +303,17 @@ std::shared_ptr<const PbrPack> load_pbr_pack(const std::filesystem::path& root) 
     for (auto& m : pack->materials) jobs.push_back(std::async(std::launch::async, [&root, &m] {
         std::vector<std::string> notes;
         const auto dir = root / m.id;
-        const auto load = [&](const char* file, Texture& target, int kind) { // 0 colour, 1 normal, 2 height
+        const auto load = [&](const char* file, Texture& target, int kind) { // 0 data, 1 normal, 2 height, 3 sRGB colour
             const auto path = dir / file;
             std::error_code e;
             if (!std::filesystem::is_regular_file(path, e)) return;
             try {
                 const auto png = decode_png(read_file(path, 64u << 20));
                 target = rgba_texture("pbr:" + m.id + "/" + file, "pbr/" + m.id + "/" + file, png.width, png.height,
-                    kind == 2 ? height_layout(png) : png_rgba(png), kind == 1);
+                    kind == 2 ? height_layout(png) : png_rgba(png), kind == 1, kind == 3);
             } catch (const std::exception& error) { notes.push_back(path.string() + ": " + error.what()); }
         };
-        load("albedo.png", m.albedo, 0); load("normal.png", m.normal, 1); load("orm.png", m.orm, 0); load("height.png", m.height, 2);
+        load("albedo.png", m.albedo, 3); load("normal.png", m.normal, 1); load("orm.png", m.orm, 0); load("height.png", m.height, 2);
         if (m.height.data.empty() || m.height_scale <= 0) m.tessellate = m.parallax = false; // nothing to displace
         return notes;
     }));
@@ -342,6 +391,13 @@ void pbr_self_test() {
          "PNG unfilter");
     const auto tex = rgba_texture("t", "t", 4, 2, std::vector<float>(32, .5f), false);
     need(tex.mips.size() == 3 && tex.mips[2].width == 1 && tex.data.size() == 32 + 8 + 4, "mip chain");
+    // Low-frequency gain: black/white texels whose authored 1x1 mip averaged sRGB (128) read darker than their linear mean.
+    Texture checker{"c", 2, 1, {0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255}, {{2, 1, 0, 8}, {1, 1, 8, 4}}};
+    need(std::abs(pbr_low_gain(checker, true) - float(.5 / std::pow(128. / 255., 2.2))) < 1e-3f, "low gain");
+    PbrMaterial pm; pm.tint_keep_original = .35f; pm.parallax = true; pm.height = tex;
+    const auto w = pbr_draw_params(&pm, true, false, 1.21f)[3]; // pbr.glsl pbrFlags/pbrLowGain decoding
+    const float q = std::floor(w * .25f), flags = w - 4 * q;
+    need(std::abs(q / 256 - 1.21f) < 2e-3f && flags >= 2 && std::abs(flags - 2 - .35f) < 1e-3f, "draw params encoding");
     // Two quads sharing an edge, 16 units wide: after splitting to 8-unit edges, interior vertices displace, rim does not.
     Mesh m;
     for (int z2 = 0; z2 <= 1; ++z2) for (int x = 0; x <= 2; ++x) m.vertices.push_back(Vertex{float(x * 16), 0, float(z2 * 16), 0, 1, 0, float(x), float(z2)});
