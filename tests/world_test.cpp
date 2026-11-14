@@ -1448,6 +1448,66 @@ void crafter_frame(const ikv::Json& config, const std::filesystem::path& assets)
     check(size(frame)<=65533 && size(book)<=65533 && size(bank)<=65533,"state and each catalog part fit one frame");
     check(std::any_of(frame.at("entities").begin(),frame.at("entities").end(),[&](const ikv::Json& e){return e.at("id")==banker;}),"the banker stays in view beside a full recipe memory and bank");
 }
+// Wave 29: generated NPC spots read back as the original minimap readouts they came from (client 0x477775: texel =
+// 0x400 - int(position * 2/3)), and generated monsters stroll at their walk clip's planted-foot speed with pauses instead of
+// pacing a 6-unit line at the run speed (before: Fare 6 u/s, ~57 direction reversals a minute, moving 95 % of the time).
+void wave29_npcs(const ikv::Json& config, const std::filesystem::path& assets) {
+    const auto npc=[&](unsigned uid)->const ikv::Json& { for (const auto& n : config.at("npcs")) if (n.at("source_uid")==uid) return n; throw std::runtime_error("npc missing"); };
+    const auto texel=[](const ikv::Json& v){ return 1024-int(v.get<double>()/1000*0.6666667f); };
+    // VOD minimap readouts beside the NPC (analysis/porting-wave11/Gaps/vod_notes.md) and quest-text coordinates.
+    for (const auto& [uid,u,v] : std::vector<std::tuple<unsigned,int,int>>{{1001,771,518},{1039,640,465},{1010,987,210},{1042,1133,1221},{1043,1367,726}}) {
+        const auto& n=npc(uid);
+        check(n.at("zone")=="eminonu" && std::abs(texel(n.at("x"))-u)<=2 && std::abs(texel(n.at("y"))-v)<=2,("NPC "+std::to_string(uid)+" stands at its original minimap readout").c_str());
+    }
+    const auto& ali=npc(1039),& flag=npc(1037);
+    check(flag.at("zone")==ali.at("zone") && std::hypot(flag.at("x").get<double>()-ali.at("x").get<double>(),flag.at("y").get<double>()-ali.at("y").get<double>())<=6000,
+          "the Bayrak stands beside Jandarma Ali (W-AGL 'Türk Bayrağı'nın altında', VOD 08:55)");
+    // <loc> props without a usable gamezonename join the zone of a loc placed by its gamezonename within 10 units, not the
+    // alphabetically first grid with support (Sivri Ada).
+    for (const auto& [uid,zone] : std::vector<std::pair<unsigned,const char*>>{{131138,"siginak"},{30150,"cemberli"},{131355,"cemberli"},{131834,"migrat"}})
+        check(npc(uid).at("zone")==zone,("<loc> prop "+std::to_string(uid)+" stands in the zone of its co-located locs").c_str());
+    int strollers=0;
+    for (const auto& n : config.at("npcs")) {
+        if (n.at("kind")!="enemy") continue;
+        check(n.at("patrol").empty(),"generated monsters have no back-and-forth patrol line");
+        if (n.value("idlewalktend",0)==0) continue;
+        ++strollers; const int walk=n.at("walk_speed");
+        check(walk>=1 && walk<=375 && walk<=n.at("speed").get<int>(),"a monster strolls no faster than 7.5 u/s nor its chase speed");
+        if (n.at("source_uid")==16001) check(walk>=100 && walk<=125,"Fare strolls at its Fare_Walk planted-foot speed (2.0-2.5 u/s)");
+    }
+    check(strollers>=700,"spawn-group monsters stroll");
+    if (!std::filesystem::exists(assets / "zone00.bin")) { std::cout << "wave29 pacing skipped: no original walk grids in " << assets << '\n'; return; }
+    auto calm=config; for (auto& n : calm["npcs"]) if (n.contains("aggro")) n["aggro"]=1; // observe idle behaviour, not a chase
+    std::map<std::string,std::shared_ptr<const ikv::Zone>> grids;
+    const auto id=ikv::source_scene_descriptor(calm.at("zones").at("eminonu").at("source_registry_id").get<unsigned>()).support_id;
+    grids["eminonu"]=std::make_shared<const ikv::Zone>(ikv::load_zone(assets,id));
+    for (const auto& [name,zone] : calm.at("zones").items()) if (zone.contains("source_registry_id") && !grids.contains(name))
+        grids[name]=std::make_shared<const ikv::Zone>(ikv::load_zone(assets,ikv::source_scene_descriptor(zone.at("source_registry_id").get<unsigned>()).support_id));
+    ikv::World world(calm,[](std::span<const ikv::CharacterSave>){}); world.set_source_zones(grids);
+    auto r=record(1); r["state"]={{"zone","eminonu"},{"x",388500},{"y",1048500}}; world.add(1,1,1,r); // the park N of Mısır Çarşısı (VOD 32:15)
+    struct Track { int x=INT32_MIN,y=0,moving=0,ticks=0,reversals=0; double lx=0,ly=0; bool was=false; int64_t step=0; };
+    std::map<uint32_t,Track> rats;
+    for (int t=0;t<1200;++t) {
+        world.advance(); const auto f=world.state(1);
+        for (const auto& e : f.at("entities")) {
+            if (e.at("kind")!="enemy" || e.at("source_uid")!=16001) continue;
+            auto& k=rats[e.at("id")]; const int x=e.at("x"),y=e.at("y");
+            if (k.x!=INT32_MIN) {
+                const double dx=x-k.x,dy=y-k.y; ++k.ticks; k.step=std::max<int64_t>(k.step,std::lround(std::hypot(dx,dy)));
+                if (dx || dy) { ++k.moving; if (!k.was && k.lx*dx+k.ly*dy<-.866*std::hypot(k.lx,k.ly)*std::hypot(dx,dy)) ++k.reversals; k.lx=dx; k.ly=dy; }
+                k.was=dx || dy;
+            }
+            k.x=x; k.y=y;
+        }
+    }
+    int seen=0,moving=0,ticks=0,reversals=0; int64_t step=0;
+    for (const auto& [rat,k] : rats) if (k.ticks>=600) { ++seen; moving+=k.moving; ticks+=k.ticks; reversals+=k.reversals; step=std::max(step,k.step); }
+    check(seen>=5,"park rats in view");
+    check(step<=125,"a strolling rat moves at most its walk speed per tick");
+    check(moving*2<ticks,"rats rest more than they walk");
+    check(reversals<=seen*6,"rats do not pace back and forth");
+    std::cout << "wave29 NPCs: " << seen << " park rats, moving " << 100*moving/std::max(1,ticks) << " %, " << reversals << " reversals in 60 s, max step " << step << '\n';
+}
 // NONCANONICAL wave 27 seasons/weather/wind (src/world_weather.cpp): deterministic from (seed, in-game minute), seasons in
 // order, bounded ramps, snow only when cold, clock.weather on the wire, the admin "weather" command and config validation.
 void weather_rules(ikv::Json config) {
@@ -1533,6 +1593,7 @@ int main(int argc, char** argv) {
         std::ifstream input(argv[1]); ikv::Json config; input >> config;
         real_content(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
         crafter_frame(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
+        wave29_npcs(config,std::filesystem::path(argv[1]).parent_path().parent_path()/"original"/"app"/"base");
         std::ifstream fixture_input(argv[2]); ikv::Json fixture; fixture_input >> fixture;
         config=independent_mechanics(std::move(config),fixture);
         // Arbitrary synthetic visual item metadata, not a canonical weapon-slot mapping.

@@ -488,7 +488,8 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 for(const auto& v:e){integer(v.at("slot"),11,12);integer(v.at("source_uid"),1,INT32_MAX);}
                 require(e.size()<2 || e[0].at("slot")!=e[1].at("slot"),"config","NPC equipment slot repeated");
             }
-            if(definition.contains("idlewalktend") && integer(definition.at("idlewalktend"),0,100)) integer(definition.at("walk_speed"),1,100000); // classes.dat idle walk percent, animation.dat walk speed
+            if(definition.contains("idlewalktend") && integer(definition.at("idlewalktend"),0,100)) integer(definition.at("walk_speed"),1,100000); // classes.dat idle walk percent, walk-clip speed
+            if(definition.contains("walk_speed")) integer(definition.at("walk_speed"),1,100000);
             for (const auto& item : definition.at("shop")) require(config_.at("items").contains(text(item)), "config", "Shop item missing");
             for (const auto& quest : definition.at("quests")) require(config_.at("quests").contains(text(quest)), "config", "Quest missing");
             // Klan OOK guards (recruiter/merchant/arena guardian with "aggro") carry the same classes.dat combat stats as enemies.
@@ -1687,7 +1688,8 @@ void World::walk(uint32_t id, Npc& n, int32_t gx, int32_t gy, int pace, int spee
 }
 // classes.dat idlewalktend (0-99; 0 on most records, 50 on townsfolk, 99 on roaming bosses) is a server field: the client loader
 // 00439bd0 never reads it. NONCANONICAL reading: every 5 s a resting NPC takes a walk with that percent chance, at its
-// animation.dat walk speed (state 2 forwardspeed, `walk_speed`), to a reachable point within 12 units of its spawn (VOD 04:45:
+// walk-clip speed (`walk_speed`: since wave 29 the generator's planted-foot speed of the state-2 clip, capped at 7.5 u/s;
+// monster spawn-group members without the field stroll at idlewalktend 50), to a reachable point within 12 units of its spawn (VOD 04:45:
 // a Yeni Cami Dayı stands a few seconds, then walks off past the players beside him). It stands for a minute after serving a
 // player (npc()) and while it is someone's open bank, so shops, banks and quest dialogs stay in reach.
 void World::idle_walk(uint32_t id, Npc& n, int pace) {
@@ -2786,6 +2788,7 @@ void World::advance() {
             if(n.definition.contains("idlewalktend")) { idle_walk(id,n,pace); continue; } // classes.dat defines its idle behaviour
             if(!n.definition.at("patrol").empty()) {
                 const auto& point=n.definition.at("patrol")[n.waypoint];gx=point[0];gy=point[1];if(n.x==gx && n.y==gy) { n.waypoint=(n.waypoint+1)%n.definition.at("patrol").size();continue; }
+                walk(id,n,gx,gy,pace,n.definition.value("walk_speed",0)); continue; // NONCANONICAL wave 29: an idle patrol walks (walk_speed when set)
             }
         }
         walk(id,n,gx,gy,pace);
