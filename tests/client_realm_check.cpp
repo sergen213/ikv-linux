@@ -98,8 +98,8 @@ void world_endpoints() {
     rejects([] { ikv::parse_world_endpoint(Json::array()); }, "non-object world endpoint accepted");
 
     require(ikv::parse_realm_id("1") == 1 && ikv::parse_realm_id("32767") == 32767, "valid --realm rejected");
-    for (const auto* bad : {"", "0", "01", "-1", "+1", "32768", "99999", "1a", "123456", " 1"})
-        rejects([&] { ikv::parse_realm_id(bad); }, "malformed --realm accepted");
+    for (const auto* realm : {"", "0", "01", "-1", "+1", "32768", "99999", "1a", "123456", " 1"})
+        rejects([&] { ikv::parse_realm_id(realm); }, "malformed --realm accepted");
 }
 } // namespace
 

@@ -39,7 +39,7 @@ int main(int argc, char** argv) {
     auto dsn = buffer.str(); while (!dsn.empty() && (dsn.back() == '\n' || dsn.back() == ' ')) dsn.pop_back();
     PGconn* raw = PQconnectdb(dsn.c_str());
     if (PQstatus(raw) != CONNECTION_OK) { std::cerr << "cannot connect\n"; return 2; }
-    PQexec(raw, "SET client_encoding='UTF8'");
+    query(raw, "SET client_encoding='UTF8'");
 
     ikv::Store a(dsn), b(dsn), c(dsn); // three shard processes
     const std::string A1 = "test-a1", A2 = "test-a2", A3 = "test-a3-full", B1 = "test-b1", C1 = "test-c1";
