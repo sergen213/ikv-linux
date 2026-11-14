@@ -411,6 +411,10 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
 struct Options {
     std::string bind = "127.0.0.1", cert, key, dsn_file, gameplay = "config/gameplay.json";
     std::string asset_root;
+    // NONCANONICAL wave 30 realms: this shard's realm, the address clients reach it at (empty: the HTTPS host) and its
+    // advertised player capacity (at most max_players).
+    int realm = 1, capacity = static_cast<int>(max_players);
+    std::string public_host;
     std::uint16_t port = 7000;
     std::optional<std::uint32_t> ticks, bots;
     bool stop_on_stdin_eof = false;
@@ -431,6 +435,8 @@ Options options(int argc, char** argv) {
                          "Usage: ikv-server --cert FILE --key FILE --dsn-file FILE [--bind IPv4] [--port 7000]\n"
                          "                  [--gameplay config/gameplay.json] [--ticks N] [--bots N (0..256; default gameplay.json bots.spawn)]\n"
                          "                  [--asset-root ROOT (required by source-associated gameplay zones)]\n"
+                         "                  [--realm ID (default 1)] [--public-host NAME (address clients connect to; default: the HTTPS host)]\n"
+                         "                  [--capacity N (1..32 players, default 32)]\n"
                          "                  [--stop-on-stdin-eof (graceful stop when stdin closes; the Windows launcher supervisor)]\n";
             std::exit(0);
         }
@@ -443,6 +449,20 @@ Options options(int argc, char** argv) {
         else if (option == "--dsn-file") result.dsn_file = value;
         else if (option == "--gameplay") result.gameplay = value;
         else if (option == "--asset-root") result.asset_root = value;
+        else if (option == "--public-host") {
+            if (value.size() > 253 || value.find_first_of(" \t\r\n") != std::string::npos ||
+                std::any_of(value.begin(), value.end(), [](unsigned char c) { return c < 32 || c == 127; }))
+                throw std::invalid_argument("invalid public host");
+            result.public_host = value;
+        } else if (option == "--realm") {
+            const auto realm = number(value);
+            if (!realm || realm > 32767) throw std::invalid_argument("realm must be 1..32767");
+            result.realm = static_cast<int>(realm);
+        } else if (option == "--capacity") {
+            const auto capacity = number(value);
+            if (!capacity || capacity > max_players) throw std::invalid_argument("capacity must be 1..32");
+            result.capacity = static_cast<int>(capacity);
+        }
         else if (option == "--port") {
             const auto port = number(value);
             if (port > 65535) throw std::invalid_argument("invalid port");
@@ -554,7 +574,11 @@ int run(const Options& opts) {
     auto initial_status = world.status();
     initial_status["instance"] = instance; initial_status["players"] = 0; initial_status["connections"] = 0;
     initial_status["tick"] = 0; initial_status["world_port"] = ntohs(address.sin_port);
+    initial_status["realm_id"] = opts.realm;
     store.world_status(initial_status);
+    // NONCANONICAL wave 30: the shard registry row (realm, public address, capacity) shares the 1 s heartbeat.
+    ikv::ShardInfo shard{instance, opts.realm, opts.public_host, ntohs(address.sin_port), 0, opts.capacity};
+    store.register_shard(shard);
     std::cout << "READY world_port=" << ntohs(address.sin_port) << " bind=" << opts.bind << std::endl;
     while (!stopping) {
         const auto now = Clock::now();
@@ -699,7 +723,10 @@ int run(const Options& opts) {
                 status["memory_kib"] = resident_kib();
                 const auto exit_left = exit_at ? std::max<std::int64_t>(0, std::chrono::ceil<std::chrono::seconds>(*exit_at - Clock::now()).count()) : -1;
                 status["countdown"] = exit_at ? ikv::Json{{"command", exit_command}, {"seconds", exit_left}} : ikv::Json(nullptr);
+                status["realm_id"] = opts.realm;
                 store.world_status(status);
+                shard.players = static_cast<int>(std::min<std::size_t>(joined(peers), max_players));
+                store.register_shard(shard);
             } catch (const std::exception&) {
                 // Do not keep serving authority when session/lease refresh cannot be enforced.
                 std::cerr << "heartbeat_failed\n"; exit_code = 1; break;
