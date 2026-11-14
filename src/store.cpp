@@ -512,9 +512,13 @@ void Store::world_status(const Json& status) {
     if(!missing.empty()){std::lock_guard guard(impl_->mutex);for(auto id:missing){auto it=impl_->leases.find(id);if(it!=impl_->leases.end()){impl_->departed[id]=it->second.first;impl_->leases.erase(it);}}}
     transaction.commit();
 }
-Json Store::take_world_commands(){
+Json Store::take_world_commands(std::string_view instance,int realm){
     Impl::Connection connection(*impl_);Transaction transaction(connection);
-    auto result=sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text");
+    // NONCANONICAL wave 30: a command targets one shard (target_instance), the shards of a realm (target_realm) or any shard.
+    auto result=instance.empty()
+        ?sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text")
+        :sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL AND (target_instance IS NULL OR target_instance=$1) AND (target_realm IS NULL OR target_realm=$2::integer) ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text",
+             {std::string(instance),std::to_string(realm)});
     transaction.commit();Json rows=Json::array();
     for(int i=0;i<PQntuples(result.get());++i)rows.push_back({{"id",integer(result,i,0)},{"command",cell(result,i,1)},{"arguments",Json::parse(cell(result,i,2))}});
     std::sort(rows.begin(),rows.end(),[](const Json& a,const Json& b){return a.at("id").get<std::int64_t>()<b.at("id").get<std::int64_t>();});
@@ -700,13 +704,32 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         audit(connection,"character."+action,who.account_id,id);transaction.commit();return {{"ok",true}};
     }
     // World commands travel through world_commands; the world consumes them at its 1 s heartbeat and records a result.
+    // NONCANONICAL wave 30 targeting: an optional body "instance" names one shard and "realm_id" limits a command to a realm.
+    // Otherwise a character command goes to the shard leasing that character, a world-wide command (announcements, weather,
+    // clock, settings, respawn, player list, restart/shutdown/cancel) gets one row per live shard, and anything else is taken
+    // by the first shard. command_id is the first row; command_ids lists every row.
     const auto enqueue=[&](const std::string& command,const Json& arguments)->Json{
         Impl::Connection connection(*impl_);Transaction transaction(connection);
         auto pending=sql(connection,"SELECT count(*),count(*) FILTER (WHERE command IN ('restart','shutdown')) FROM world_commands WHERE consumed_at IS NULL");
         if(integer(pending,0,0)>=64)throw ApiError(429,"command_queue_full","64 world commands are already pending; check that the world is running");
         if((command=="restart"||command=="shutdown")&&integer(pending,0,1))throw ApiError(409,"command_pending","A world control command is pending");
-        auto id=sql(connection,"INSERT INTO world_commands(command,arguments,actor_id) VALUES($1,$2::jsonb,$3::bigint) RETURNING id",{command,arguments.dump(),std::to_string(who.account_id)});
-        audit(connection,"world."+command,who.account_id,0,arguments);transaction.commit();return {{"ok",true},{"command_id",integer(id,0,0)}};
+        const std::string realm=body.contains("realm_id")?std::to_string(number(body,"realm_id",1,32767)):"";
+        static const std::set<std::string> broadcast{"announce","weather","clock","settings","respawn","players","restart","shutdown","cancel"};
+        std::vector<std::pair<std::string,std::string>> targets; // (target_instance, target_realm); "" = NULL
+        if(body.contains("instance"))targets.emplace_back(text(body,"instance",1,128),"");
+        else if(arguments.contains("character_id")){
+            auto lease=sql(connection,"SELECT lease_instance FROM characters WHERE id=$1::bigint AND lease_instance IS NOT NULL AND lease_expires_at>now()",{std::to_string(arguments.at("character_id").get<std::int64_t>())});
+            targets.emplace_back(PQntuples(lease.get())?cell(lease,0,0):"",realm);
+        }else if(broadcast.contains(command)){
+            auto live=sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE (NULLIF($1,'')::integer IS NULL OR s.realm_id=NULLIF($1,'')::integer) AND ")+shard_live+" ORDER BY s.instance",{realm});
+            for(int i=0;i<PQntuples(live.get());++i)targets.emplace_back(cell(live,i,0),"");
+            if(targets.empty())targets.emplace_back("",realm);
+        }else targets.emplace_back("",realm);
+        Json ids=Json::array();
+        for(const auto& [instance,target_realm]:targets)
+            ids.push_back(integer(sql(connection,"INSERT INTO world_commands(command,arguments,actor_id,target_instance,target_realm) VALUES($1,$2::jsonb,$3::bigint,NULLIF($4,''),NULLIF($5,'')::smallint) RETURNING id",
+                                      {command,arguments.dump(),std::to_string(who.account_id),instance,target_realm}),0,0));
+        audit(connection,"world."+command,who.account_id,0,arguments);transaction.commit();return {{"ok",true},{"command_id",ids.front()},{"command_ids",ids}};
     };
     const auto line=[&](const Json& source,const char* key,std::size_t min,std::size_t max){
         auto value=text(source,key,min,max);
@@ -890,6 +913,13 @@ std::optional<ShardInfo> Store::locate(int realm,std::string_view name) {
     if(name.size()<2||name.size()>32)return std::nullopt;
     Impl::Connection connection(*impl_);
     return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM characters c JOIN world_instances s ON s.instance=c.lease_instance WHERE c.realm_id=$1::integer AND lower(c.name)=lower($2) AND c.deleted_at IS NULL AND c.lease_expires_at>now() AND "+shard_live+" LIMIT 1",{std::to_string(realm),std::string(name)}));
+}
+std::vector<ShardInfo> Store::shards(int realm) {
+    Impl::Connection connection(*impl_);
+    auto result=sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE ($1::integer=0 OR s.realm_id=$1::integer) AND "+shard_live+" ORDER BY s.realm_id,s.instance",{std::to_string(realm)});
+    std::vector<ShardInfo> out;out.reserve(static_cast<std::size_t>(PQntuples(result.get())));
+    for(int i=0;i<PQntuples(result.get());++i)out.push_back(shard_row(result,i));
+    return out;
 }
 int Store::character_realm(std::int64_t id) {
     Impl::Connection connection(*impl_);

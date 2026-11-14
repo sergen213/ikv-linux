@@ -3,6 +3,7 @@
 #include "ikv/world.hpp"
 #include "ikv/bots.hpp"
 #include "ikv/scene.hpp"
+#include "ikv/release_defaults.hpp"
 
 #include <algorithm>
 #include <array>
@@ -345,7 +346,7 @@ void send_state(Peer& peer, ikv::World& world) {
     flush(peer);
 }
 void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& store,
-             const std::string& instance, std::uint32_t& next_id) {
+             const std::string& instance, std::uint32_t& next_id, std::size_t capacity) {
     if (peer.closing || (peer.operation != TlsOperation::idle && peer.operation != TlsOperation::read_want_write)) return;
     std::size_t read_bytes = 0;
     while (peer.socket.get() >= 0 && !peer.closing && read_bytes < 65536) {
@@ -368,17 +369,30 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                 if (peer.closing || peer.socket.get() < 0) return;
                 if (peer.id == 0) {
                     if (message.type != ikv::Type::hello) { disconnect(peer, "handshake_state"); return; }
-                    if (joined(peers) >= max_players || next_id == 0 || next_id >= 0x70000000U) { // 0x70000000+: bot actors
+                    if (message.version == ikv::legacy_protocol_version) { // NONCANONICAL wave 30: a 0.15 client reads this v2 goodbye
+                        if (queue(peer, ikv::outdated_goodbye_message(ikv::release::version))) { begin_close(peer, "outdated_client"); flush(peer); }
+                        return;
+                    }
+                    if (joined(peers) >= capacity || next_id == 0 || next_id >= 0x70000000U) { // 0x70000000+: bot actors
                         disconnect(peer, "player_limit"); return;
                     }
                     const auto identity = store.authenticate(message.session);
                     const auto character_id = static_cast<std::int64_t>(message.character_id);
+                    // NONCANONICAL wave 30 phase: redeem the single-use ticket first, then take over the lease the issuing
+                    // shard still holds (Store::enter_character handoff). Lockouts load for every admission, ticket or not.
+                    auto lockouts = store.lockouts(character_id); // before the lease, so a failure holds nothing
+                    ikv::Json arrival = message.ticket.empty() ? ikv::Json(nullptr) : store.redeem_ticket(message.ticket, character_id, instance);
                     auto record = store.enter_character(identity, character_id, instance);
+                    record["lockouts"] = std::move(lockouts);
                     const auto id = next_id++;
                     peer.identity = identity; peer.character_id = character_id; peer.held_lease = true;
                     peer.session = message.session;
                     world.add(id, identity.account_id, character_id, record, identity.admin); world.entitlement(id, identity.plus, identity.kasa);
                     peer.id = id;
+                    if (!arrival.is_null()) {
+                        world.shard_arrived(id, arrival);
+                        std::cerr << "actor=" << id << " arrived=ticket\n";
+                    }
                     ikv::Message welcome{ikv::Type::welcome}; welcome.id = id; welcome.tick = world.tick();
                     if (!queue(peer, welcome)) return;
                     send_state(peer, world);
@@ -399,13 +413,45 @@ void receive(Peer& peer, std::list<Peer>& peers, ikv::World& world, ikv::Store& 
                 } else { disconnect(peer, "joined_state"); return; }
             }
         } catch (const ikv::ApiError& e) {
-            refuse(peer, "authentication_or_store", e.code == "unauthorized" ? std::string(e.what()) :
+            refuse(peer, "authentication_or_store", e.code == "unauthorized" || e.code == "invalid_ticket" ? std::string(e.what()) :
                    e.code == "character_unavailable" ? "Bu karakter şu anda oyunda ya da kullanılamıyor." : "Sunucu girişinizi reddetti; yeniden giriş yapın.");
             return;
         }
         catch (const std::invalid_argument&) { disconnect(peer, "protocol"); return; }
         catch (const ikv::Json::exception&) { disconnect(peer, "json"); return; }
         catch (const std::exception&) { disconnect(peer, "world_operation"); return; }
+    }
+}
+// NONCANONICAL wave 30 phases (World::shard_transfers): save, issue the destination ticket, queue the critical transfer
+// event in a final state, then goodbye "transfer" and close. A refused phase leaves the player where it is.
+void carry_transfers(std::list<Peer>& peers, ikv::World& world, ikv::Store& store, const std::string& instance,
+                     const std::map<int, std::string>& realms) {
+    for (auto& transfer : world.shard_transfers()) {
+        const auto peer = std::find_if(peers.begin(), peers.end(), [&](const Peer& p) { return p.id == transfer.id; });
+        if (peer == peers.end() || peer->closing || peer->socket.get() < 0) continue;
+        const auto started = Clock::now();
+        try {
+            auto to = transfer.instance;
+            if (to.empty()) { // reason "home": the least loaded shard of the home realm, unless that is this one
+                const auto home = store.pick_shard(transfer.payload.value("realm", 1));
+                if (!home || home->instance == instance) { world.shard_failed(transfer.id, ""); continue; }
+                to = home->instance;
+            }
+            const auto destination = store.shard(to);
+            if (!destination) { world.shard_failed(transfer.id, "Hedef sunucu şu anda kapalı."); continue; }
+            world.save_all();
+            const auto ticket = store.issue_ticket(peer->character_id, instance, to, transfer.reason, transfer.payload);
+            ikv::Json event{{"type", "transfer"}, {"host", destination->host}, {"port", destination->port}, {"ticket", ticket}, {"reason", transfer.reason}};
+            if (const auto realm = realms.find(destination->realm_id); realm != realms.end() && !realm->second.empty() && realm->second.size() <= 64)
+                event["realm"] = realm->second;
+            world.shard_departing(transfer.id, std::move(event));
+            send_state(*peer, world);
+            refuse(*peer, "transfer", std::string(ikv::transfer_goodbye));
+            std::cerr << "actor=" << transfer.id << " transfer=" << transfer.reason << " ms="
+                      << std::chrono::duration<double, std::milli>(Clock::now() - started).count() << '\n';
+        } catch (const ikv::ApiError& e) {
+            world.shard_failed(transfer.id, e.code == "shard_full" || e.code == "shard_offline" ? std::string(e.what()) : "Sunucu değiştirilemedi.");
+        } catch (const std::exception&) { world.shard_failed(transfer.id, "Sunucu değiştirilemedi."); }
     }
 }
 struct Options {
@@ -431,7 +477,7 @@ Options options(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view option(argv[i]);
         if (option == "--help") {
-            std::cout << "Independent authenticated IKV community world (custom protocol v2)\n"
+            std::cout << "Independent authenticated IKV community world (custom protocol v3)\n"
                          "Usage: ikv-server --cert FILE --key FILE --dsn-file FILE [--bind IPv4] [--port 7000]\n"
                          "                  [--gameplay config/gameplay.json] [--ticks N] [--bots N (0..256; default gameplay.json bots.spawn)]\n"
                          "                  [--asset-root ROOT (required by source-associated gameplay zones)]\n"
@@ -535,6 +581,8 @@ int run(const Options& opts) {
         }
     }
     ikv::World world(std::move(config), [&store](std::span<const ikv::CharacterSave> states) { store.save_characters(states); });
+    // NONCANONICAL wave 30: Şef-kill lockouts persist in instance_lockouts, so a reconnect or a phase to another shard keeps them.
+    world.set_lockout_sink([&store](std::int64_t character, const std::string& zone, std::int64_t until) { store.set_lockout(character, zone, until); });
     world.set_source_zones(std::move(source_zones));
     if (auto settings = store.world_settings(); !settings.empty()) {
         try { world.admin("settings", settings); } catch (const std::exception&) { std::cerr << "stored_world_settings_ignored\n"; }
@@ -579,6 +627,46 @@ int run(const Options& opts) {
     // NONCANONICAL wave 30: the shard registry row (realm, public address, capacity) shares the 1 s heartbeat.
     ikv::ShardInfo shard{instance, opts.realm, opts.public_host, ntohs(address.sin_port), 0, opts.capacity};
     store.register_shard(shard);
+    // NONCANONICAL wave 30 shard link: by-name lookups, live shard rows and bus sends for World (src/world_shard.cpp). A failed
+    // lookup reads as "not online"; a failed send is logged and dropped (the bus is best effort, the tick never waits on it).
+    world.shard_link({instance, opts.realm,
+        [&store](int realm, const std::string& name) -> std::optional<std::string> {
+            try { if (auto found = store.locate(realm, name)) return found->instance; } catch (const std::exception&) { std::cerr << "shard_locate_failed\n"; }
+            return std::nullopt;
+        },
+        [&store](const std::string& target) -> std::optional<ikv::ShardInfo> {
+            try { return store.shard(target); } catch (const std::exception&) { std::cerr << "shard_lookup_failed\n"; return std::nullopt; }
+        },
+        [&store, &instance](const std::string& to, const ikv::Json& body) {
+            try {
+                if (to != "*") { store.bus_send(to, body); return; }
+                for (const auto& other : store.shards()) if (other.instance != instance) store.bus_send(other.instance, body);
+            } catch (const std::exception&) { std::cerr << "bus_send_failed\n"; }
+        }});
+    std::map<int, std::string> realm_names;
+    const auto refresh_realms = [&] {
+        std::map<int, std::string> names;
+        for (const auto& realm : store.realms(0)) names[realm.at("id").get<int>()] = realm.at("name").get<std::string>();
+        realm_names = names; world.shard_realms(std::move(names));
+    };
+    refresh_realms();
+    int bus_socket = -1, realm_refresh = 0;
+    try { bus_socket = store.bus_fd(); } catch (const std::exception&) { std::cerr << "bus_unavailable\n"; }
+    // Every pending bus body, 64 at a time; a lost LISTEN connection is reopened at the next heartbeat.
+    const auto drain_bus = [&] {
+        try {
+            for (;;) {
+                const auto bodies = store.bus_take(instance);
+                for (const auto& body : bodies) {
+                    try { world.shard_message(body); } catch (const std::exception&) { std::cerr << "bus_message_ignored\n"; }
+                }
+                if (bodies.size() < 64) break;
+            }
+        } catch (const ikv::ApiError& e) {
+            if (e.code == "bus_error") bus_socket = -1;
+            std::cerr << "bus_take_failed\n";
+        } catch (const std::exception&) { std::cerr << "bus_take_failed\n"; }
+    };
     std::cout << "READY world_port=" << ntohs(address.sin_port) << " bind=" << opts.bind << std::endl;
     while (!stopping) {
         const auto now = Clock::now();
@@ -600,12 +688,14 @@ int run(const Options& opts) {
             it = peers.erase(it);
         }
         if (exit_code != 0) break;
-        std::array<pollfd, max_connections + 1> pollfds {};
-        std::array<Peer*, max_connections + 1> polled {};
+        std::array<pollfd, max_connections + 2> pollfds {};
+        std::array<Peer*, max_connections + 2> polled {};
         std::size_t count = 1; pollfds[0] = poll_entry(listener.get(), POLLIN);
         for (auto& peer : peers) {
             pollfds[count] = poll_entry(peer.socket.get(), poll_interest(peer)); polled[count++] = &peer;
         }
+        const std::size_t bus_index = count;
+        if (bus_socket >= 0) pollfds[count++] = poll_entry(bus_socket, POLLIN);
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_tick - Clock::now()).count();
         const int ready = poll(pollfds.data(), static_cast<nfds_t>(count), static_cast<int>(std::clamp<std::int64_t>(remaining, 0, 50)));
         if (ready < 0) { if (socket_error() == EINTR) continue; throw std::runtime_error("poll failed"); }
@@ -624,7 +714,11 @@ int run(const Options& opts) {
                 peers.emplace_back(fd, next_connection++, context.get());
             }
         }
-        for (std::size_t i = 1; i < count; ++i) {
+        if (bus_index < count && pollfds[bus_index].revents) {
+            if (pollfds[bus_index].revents & (POLLERR | POLLHUP | POLLNVAL)) bus_socket = -1; // reopened at the heartbeat
+            drain_bus();
+        }
+        for (std::size_t i = 1; i < bus_index; ++i) {
             auto& peer = *polled[i]; const auto events = pollfds[i].revents;
             if (events & (POLLERR | POLLNVAL)) { disconnect(peer, "socket"); continue; }
             if (peer.closing) { advance_close(peer); continue; }
@@ -637,11 +731,12 @@ int run(const Options& opts) {
                     ((peer.operation == TlsOperation::read_want_write && (events & peer.want)) ||
                      (peer.operation == TlsOperation::idle &&
                       ((events & (POLLIN | POLLHUP)) || SSL_pending(peer.ssl.get()) > 0))))
-                    receive(peer, peers, world, store, instance, next_id);
+                    receive(peer, peers, world, store, instance, next_id, static_cast<std::size_t>(opts.capacity));
             }
             if (peer.closing) advance_close(peer);
             else if (peer.socket.get() >= 0 && (events & POLLHUP)) disconnect(peer, "socket_hangup");
         }
+        carry_transfers(peers, world, store, instance, realm_names);
         const auto after_io = Clock::now();
         if (after_io >= next_tick) {
             const auto begin = Clock::now();
@@ -673,6 +768,13 @@ int run(const Options& opts) {
             next_save = Clock::now() + std::chrono::seconds(5);
         }
         if (Clock::now() >= next_heartbeat) {
+            // NONCANONICAL wave 30: reopen a lost bus, take what NOTIFY may have missed, refresh realm names every 30 s and
+            // run the guest grace; none of it stops the world when PostgreSQL hiccups.
+            if (bus_socket < 0) try { bus_socket = store.bus_fd(); } catch (const std::exception&) { std::cerr << "bus_unavailable\n"; }
+            drain_bus();
+            if (++realm_refresh >= 30) { realm_refresh = 0; try { refresh_realms(); } catch (const std::exception&) { std::cerr << "realm_refresh_failed\n"; } }
+            world.shard_tick();
+            carry_transfers(peers, world, store, instance, realm_names);
             try {
                 for (auto& peer : peers) if (peer.id && !peer.closing && peer.socket.get() >= 0) {
                     try {
@@ -686,7 +788,7 @@ int run(const Options& opts) {
                         }
                     } catch (const std::exception&) { refuse(peer, "session_revoked", "Oturumunuz sonlandırıldı; başlatıcıdan yeniden giriş yapın."); }
                 }
-                for (const auto& command : store.take_world_commands()) {
+                for (const auto& command : store.take_world_commands(instance, opts.realm)) {
                     const auto name = command.at("command").get<std::string>();
                     const auto& arguments = command.at("arguments");
                     ikv::Json result{{"ok", true}};

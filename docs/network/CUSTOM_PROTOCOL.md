@@ -88,7 +88,7 @@ Client-side: 5 s read silence fails the session; outgoing queue ≤ 256 KiB and 
 | `guild` (optional/null) | `{id, name, leader_character_id, members[character_id], revision, level?, funds?}`: `level` 1..100 (absent = 1; "Lonca : <%s><%d>", gates `guild_level` goods), `funds` 0..999,000,000 Lonca Parası from `guild_donate` (NONCANONICAL progression). |
 | `clan`, `san`, `clan_currency` (optional) | Clan 1..15; Şan ≤ 1e9; Klan Parası ≤ 999,000,000. An enemy-clan kill pays the killer the guide Şan (1, 10 or 100 by the 3000-Şan thresholds of both players, × both Karizmas/10000, at least 1 unless a Karizma is 0) and the same Klan Parası. |
 | `karizma`, `karizma_reset` (optional) | Guide Karizma 0..100 (absent = `character_points.charisma`, 100); −20 per enemy-clan death; at 0, `karizma_reset` (Unix seconds) restores 100 two hours later. Shown as `stats.charisma`. |
-| `lockouts` (optional) | `{group_zone: unix_expiry}` ≤ 32: kill credit on a Şef (`boss` NPC) inside a group-zone copy bars that zone's doors until expiry (`activities.lockout` seconds, NONCANONICAL). |
+| `lockouts` (optional) | `{zone: unix_expiry}` ≤ 32: kill credit on a Şef (`boss` NPC) inside a group-zone or raid-zone copy bars that zone's doors until expiry (`activities.lockout` seconds for group zones, the zone's `raid.lockout` for raid zones; NONCANONICAL). Wave 30: also stored in `instance_lockouts` and merged back at admission, see [Raids](#raids-noncanonical-wave-30). |
 | `kabadayi` (optional) | `true` in Kabadayı mode; removed on death and on admission (`src/world.cpp:619,784`). |
 | `contacts` (optional) | `{friends: [[character_id, name]], ignored: [[character_id, name]]}`, each ≤ `social.contacts_max`. |
 | `quickbar` (optional) | Hızlı Erişim Çubuğu: exactly 10 slots, each `null`, `{skill}` or `{item: uid}` (original `tdbp` 0044b330 / hcpe 0044b400). Absent until the first drop; unknown skills load as `null`. |
@@ -121,7 +121,7 @@ Packing order: every queued event's bytes are reserved first (the queue is deliv
 
 ## Actions (`World::handle`, `src/world.cpp:1054-1428`; `World::social`, `:1006-1035`; `World::economy`, `:1675-1746`)
 
-Envelope: JSON object ≤ 8,192 dumped bytes; `action` string 1..32 bytes (`src/world.cpp:1055-1057`). While dead only `resurrect`, `chat`, `trade_cancel`, `group_leave`, `quickbar` are accepted (`dead`) (`:1058`). A kicked actor gets `permission`. Unknown name → `action`. Missing/mistyped field → `request` ("Malformed action fields", `:1050`). Integer out of range → `quantity`; entity id not in 1..UINT32_MAX → `target`. Text fields are 1..N bytes without NUL (`:34-39`). Persistence failure → `persistence`, state unchanged (`:563-575`).
+Envelope: JSON object ≤ 8,192 dumped bytes; `action` string 1..32 bytes (`src/world.cpp:1055-1057`). While dead only `resurrect`, `chat`, `trade_cancel`, `group_leave`, `raid_leave`, `quickbar` are accepted (`dead`) (`:1058`). A kicked actor gets `permission`. Unknown name → `action`. Missing/mistyped field → `request` ("Malformed action fields", `:1050`). Integer out of range → `quantity`; entity id not in 1..UINT32_MAX → `target`. Text fields are 1..N bytes without NUL (`:34-39`). Persistence failure → `persistence`, state unchanged (`:563-575`).
 
 Common NPC check `npc()`: exists (`target`), within `interaction_range` (`range`), alive (`dead`), right kind (`target`) (`src/world.cpp:557-562`).
 
@@ -237,6 +237,32 @@ Delivery: **self** = sender only; **AOI** = every player in the same zone within
 | `arena_stake` | `code`, `stake`, `text` (Dikkat confirmation wording, NONCANONICAL) | self | `World::arena` (`arena_stake` action) |
 
 Queue rules (`World::emit`, `src/world.cpp:354-377`): critical = `trade`, `trade_invite`, `trade_complete`, `trade_cancel`, `kick`, `error` with code `trade_persistence` (`:16-20`). A new `trade`/`trade_complete`/`trade_cancel` drops queued `trade`/`trade_invite`. Overflow drops the oldest noncritical event first. A kicked actor receives only `kick` events afterwards.
+
+## Raids (NONCANONICAL, wave 30)
+
+The original game had no raids (`src/world_instance.cpp`, [server architecture](../SERVER_ARCHITECTURE.md#instances-lockouts-and-raids-noncanonical-wave-30)). A raid is up to `activities.raid.groups` (4) parties of six. Every refusal below is an `error` event with code `raid` unless noted; every accepted action replies `ack`. Without an `activities.raid` block every `raid_*` action is refused ("Bu sunucuda baskınlar kapalı.").
+
+| Action | Fields | Effect / key rejections | Events |
+| --- | --- | --- | --- |
+| `raid_convert` | — | The sender must lead a group and not be in a raid; the group becomes party 1 and the sender the raid leader. | `raid` + `group` to members |
+| `raid_invite` | `target` | Raid leader only; target online (`target`), not in a raid, solo or a group leader; the raid must have room: a solo target needs a party with fewer than six, a group needs an empty party and the total stays ≤ 24 ("Baskın dolu."). | target gets `raid_invite` |
+| `raid_accept` | — | Pending invitation (the raid still exists); a group member cannot accept for its group; room is checked again. A solo player joins the first party with room; a group leader's whole group becomes the first empty party. | `raid` + `group` to members |
+| `raid_decline` | — | Drops a pending invitation. | — |
+| `raid_leave` | — | Leave the raid (also allowed while dead). `group_leave` in a raid does the same, and so does a disconnect. A leaving leader is succeeded by the first member of the first party; a raid left with one member disbands. | `raid {leader:0}` + `group {leader:0}` to the leaver; `raid` + `group` to the rest |
+| `raid_kick` | `target` | Raid leader only; the target must be another member. | as `raid_leave` |
+| `raid_move` | `target`, `party` 0..groups−1 | Raid leader only; target a member; the destination party has fewer than six and is not the member's own. | `raid` + `group` to members |
+| `raid_disband` | — | Raid leader only. Each party of two or more stays a plain group. | `raid {leader:0}` and `group` to every member |
+
+Inside a raid `group_invite` and `group_kick` are refused (`raid`), and `group_accept` refuses an invitation from a player who has since joined a raid. Doors into a raid zone (zone `raid: {min, lockout}`) take a raid member into the raid's copy: refused below `min` members, when every copy is busy, or while the member's lockout for that zone runs (`lockout`, hours left). Players outside a raid enter the shared zone.
+
+Chat channel `raid` reaches every raid member (refused outside a raid). The native client lists it as `Baskın:` (`/a`).
+
+| Event | Fields | Delivery |
+| --- | --- | --- |
+| `raid` | `leader` (0 = no raid), `parties` (`groups` arrays of member ids) | raid members on every change |
+| `raid_invite` | `from`, `name`, `size` (players joining with the target) | target |
+
+State member `raid` (optional, budgeted; present while in a raid): `{leader, parties: [[id]] × groups, rows: [[id, name, class_id, level, hp_percent, source_registry_id|null]]}`. `rows` cover the members of the other parties (the own party travels as `party` rows and player entities); `hp_percent` is 1..100 while alive and 0 when dead. The member is packed after the own party's entities and before strangers and NPCs; a frame too full omits trailing rows (or, at the extreme, the whole member), so the client keeps each member's last row and drops a raid only after it is absent from 100 consecutive frames or a `raid {leader:0}` event arrives.
 
 ## Validation limits
 

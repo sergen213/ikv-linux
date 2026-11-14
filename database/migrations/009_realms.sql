@@ -62,3 +62,13 @@ CREATE TABLE shard_messages (
  consumed_at timestamptz
 );
 CREATE INDEX shard_messages_pending ON shard_messages(to_instance, id) WHERE consumed_at IS NULL;
+
+-- Administrator world commands reach the right shard: target_instance names one shard (the one leasing a commanded
+-- character, or an explicit choice); target_realm limits a command to a realm's shards; both NULL means any shard.
+-- World-wide commands are written once per live shard, so the single pending restart/shutdown is per target shard.
+ALTER TABLE world_commands
+ ADD COLUMN target_instance text CHECK (target_instance IS NULL OR length(target_instance) BETWEEN 1 AND 128),
+ ADD COLUMN target_realm smallint REFERENCES realms(id);
+DROP INDEX world_commands_single_pending;
+CREATE UNIQUE INDEX world_commands_single_pending ON world_commands(COALESCE(target_instance, '')) WHERE consumed_at IS NULL AND command IN ('restart','shutdown');
+CREATE INDEX world_commands_pending ON world_commands(id) WHERE consumed_at IS NULL;
