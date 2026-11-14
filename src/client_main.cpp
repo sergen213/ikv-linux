@@ -2,6 +2,7 @@
 #include "ikv/effects.hpp"
 #include "ikv/client_admin.hpp"
 #include "ikv/client_map.hpp"
+#include "ikv/client_raid.hpp"
 #include "ikv/client_charsel.hpp"
 #include "ikv/client_session.hpp"
 #include "ikv/client_mutation.hpp"
@@ -677,6 +678,7 @@ class Application {
     std::array<int,4> map_rect_{};
     // NONCANONICAL wave 29 quest markers and Dünya Haritası (M): data (ikv::ClientMap), marker art, window/view rectangles.
     ikv::ClientMap map_;
+    ikv::ClientRaid raid_; // NONCANONICAL wave 30 raid roster (client_raid.cpp)
     ikv::assets::DdsImage map_arrow_{},map_disc_{},map_ring_{};
     bool world_map_open_=false,map_panning_=false;
     std::array<int,4> world_map_frame_{},world_map_area_{};
@@ -686,7 +688,7 @@ class Application {
     struct LoadingArt { ikv::assets::DdsImage art{},logo{}; std::vector<ikv::assets::DdsImage> frames; } loading_art_;
     ikv::Scene loading_scene_; // empty scene: the renderer presents only the loading overlay
     float loading_progress_=0;
-    std::array<bool,7> chat_hidden_{}; // 'F' filter; Sistem cannot be filtered
+    std::array<bool,8> chat_hidden_{}; // 'F' filter; Sistem cannot be filtered
     std::uint32_t whisper_to_=0,whisper_from_=0;
     std::string whisper_name_,whisper_from_name_;
     // Chat A/G toggles (0040d330/0040d220, flags 0x5e98a1/0x5e98a0, both allowed at start): blocked trade requests are
@@ -910,7 +912,7 @@ private:
         }
         poll_assembly();
         const bool changed_state=state_pending_;
-        if (changed_state) { state_=session_->state; state_pending_=false; map_.update(state_,session_->self,group_members_); }
+        if (changed_state) { state_=session_->state; state_pending_=false; map_.update(state_,session_->self,group_members_); raid_.update(state_,session_->self); }
         bool changed_snapshot=false;
         if (snapshot_source_!=scene_.source_registry_id ||
             (!state_.empty() && session_->tick<state_.at("tick").get<std::uint32_t>())) {
@@ -1275,6 +1277,7 @@ private:
             y+=74;
             if (y>330) break;
         }
+        if (session_) raid_.paint(*ui_,0,S(y+4),s_); // NONCANONICAL wave 30 raid roster under the party frames
         Json self_row;
         const Json* subject=entity(target_);
         if (!subject && session_ && target_==session_->self && target_) {
@@ -1319,6 +1322,9 @@ private:
             if (session_ && target_==session_->self) { // 0041a230 self: PRVL Gruptan Çık in a group, else MDBK Kabadayı Moduna Geç; BANK; privileged SNAY
                 if (!group_members_.empty()) items.emplace_back("Gruptan Çık",nullptr,"group-leave");
                 else if (!st.value("kabadayi",false)) items.emplace_back("Kabadayı Moduna Geç",nullptr,"kabadayi");
+                // NONCANONICAL wave 30 raids (no original menu items): a group leader converts the group, a member leaves the raid.
+                if (raid_.active()) items.emplace_back("Baskından Çık",Json{{"action","raid_leave"}},"");
+                else if (group_leader_==session_->self && !group_members_.empty()) items.emplace_back("Baskın Kur",Json{{"action","raid_convert"}},"");
                 items.emplace_back("Kasamı Göster",nullptr,"bank-open"); // 0x58ec64 'BANK', always listed; the server checks Kasa Erişimi (guide l.875-878)
                 if (state_.value("admin",false)) {
                     items.emplace_back("İsim Yansıt",nullptr,"reflect:"+std::to_string(target_));
@@ -1357,6 +1363,10 @@ private:
         items.emplace_back("Fısılda",nullptr,"whisper:"+sid);
         if (!chat && leading && std::find(group_members_.begin(),group_members_.end(),Json(id))!=group_members_.end()) items.emplace_back("Gruptan Çıkar",nullptr,"group-kick:"+sid);
         else if (chat || group_members_.empty() || leading) items.emplace_back("Gruba Davet Et",act("group_invite"),"");
+        if (raid_.active() && session_ && raid_.leader()==session_->self) { // NONCANONICAL wave 30 raid leader items
+            const bool member=std::any_of(raid_.parties().begin(),raid_.parties().end(),[&](const auto& p){return std::find(p.begin(),p.end(),id)!=p.end();});
+            items.emplace_back(member?"Baskından Çıkar":"Baskına Davet Et",act(member?"raid_kick":"raid_invite"),"");
+        }
         if (own.contains("guild") && own.at("guild").is_object()) {
             items.emplace_back("Loncaya Davet Et",act("guild_invite"),"");
             if (const Json* e=entity(id); !chat && e && e->value("guild",std::string{})==own.at("guild").value("name",std::string{}))
@@ -3467,11 +3477,11 @@ private:
     // ---- Chat: original channel table 0040c3a0 (+0xec, stride 0x24) and helps.xml 'Mesaj Kanalları'. Klan ('/k') is the
     // Arzın Çocukları/Lodos clan channel, Lonca (FF33FF33) the player guild; '/l' for Lonca is NONCANONICAL. ----
     struct ChatChannel { const char* prefix; std::uint32_t argb; const char* wire; char command; bool once; };
-    static constexpr std::array<ChatChannel,8> chat_channels{{
+    static constexpr std::array<ChatChannel,9> chat_channels{{
         {"Bölge: ",0xffff8033,"zone",'b',true},{"Klan: ",0xff33ffff,"clan",'k',false},{"Grup: ",0xffff3333,"group",'g',false},
         {"Söyle: ",0xffffffff,"local",'s',false},{"Rol yap: ",0xff60a0ff,"roleplay",'r',true},{"Fısılda: ",0xffff33ff,"private",'f',true},
-        {"Lonca: ",0xff33ff33,"guild",'l',false},{"",0xffffff00,"",0,false}}};
-    static constexpr int chat_say=3,chat_whisper=5,chat_system=7;
+        {"Lonca: ",0xff33ff33,"guild",'l',false},{"Baskın: ",0xffff9933,"raid",'a',false} /* NONCANONICAL wave 30 raid channel, '/a' */,{"",0xffffff00,"",0,false}}};
+    static constexpr int chat_say=3,chat_whisper=5,chat_system=8;
     static_assert(chat_system+1==static_cast<int>(chat_channels.size()) && chat_system==std::tuple_size_v<decltype(chat_hidden_)>);
     // Fısıldama, Rol yapma and Bölge stay active for one message, then the previous channel returns.
     void select_channel(int channel) { if (!chat_channels[static_cast<std::size_t>(channel_)].once) chat_previous_=channel_; channel_=channel; }
@@ -4260,6 +4270,9 @@ private:
                 group_members_=members.is_array()?members:Json::array(); group_leader_=event.value("leader",0u);
                 notice("Grup durumu güncellendi.");
             }
+            else if (type=="raid") { if (raid_.receive(event)) notice(raid_.active()?"Baskın durumu güncellendi.":"Baskın dağıldı."); } // NONCANONICAL wave 30
+            else if (type=="raid_invite" && invites_allowed_) // NONCANONICAL wave 30 wording
+                ask(Json{{"action","raid_accept"}},event.value("name",std::string{"?"})+" sizi baskınına davet ediyor. Kabul ediyor musunuz?");
             // 004a7f40 / 004a8010: "Dikkat" yes/no prompts (accept callbacks 004102b0/00410290) only while G allows invites.
             else if (type=="group_invite" && invites_allowed_) {
                 ask(Json{{"action","group_accept"}},event.value("name",std::string{"?"})+" sizi grubuna davet ediyor. Kabul ediyor musunuz?");

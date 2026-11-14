@@ -79,6 +79,8 @@ constexpr std::pair<unsigned, const char*> loc_zone_overrides[] = {{132058, "emi
 // (47-65) reuse the zone's scene; their support grids 8/9/10 are cell-for-cell identical to 14/15/16. Er Meydanı 2-20 are the
 // savas registry rows 7-25 (zone name table 0x58ffc4..: "savas2".."savas20" share support grid 6 with "savas", Er Meydanı 1).
 constexpr std::tuple<const char*, unsigned, unsigned> zone_instances[] = {{"migrat", 27, 9}, {"siginak", 37, 9}, {"cemberli", 47, 19}, {"savas", 7, 19}};
+// NONCANONICAL wave 30 raid zones (world_instance.cpp): copies reuse the zone's own registry row; {min members, lockout seconds}.
+constexpr std::tuple<const char*, unsigned, unsigned, unsigned, unsigned> raid_zones[] = {{"yeralti", 26, 2, 12, 604800}, {"buyukhol", 68, 2, 10, 604800}};
 // Enemy entity ids 2147493667-2147493774 stay enemies of these zones, 9 each in this order (the former NONCANONICAL 3x3 level
 // bands); they take the first 9 members of the zone's tools/data/placements.json spawn groups, every other member is appended.
 constexpr const char* legacy_enemy_zones[] = {"eminonu", "antrepo", "labirent", "meteor", "ada", "yeralti", "migrat", "siginak", "cemberli", "buyukhol", "karakoy", "karakoyic"};
@@ -266,6 +268,7 @@ int main(int argc, char** argv) try {
     Ordered zones = Ordered::object();
     for (const auto& [name, registry] : zone_registry) zones[name] = {{"source_registry_id", registry}, {"bounds", {-ikv::coordinate_limit, -ikv::coordinate_limit, ikv::coordinate_limit - 1500, ikv::coordinate_limit - 1500}}, {"spawn", nullptr}, {"collision", Ordered::array()}};
     for (const auto& [name, first, count] : zone_instances) { Ordered rows = Ordered::array(); for (unsigned n = 0; n < count; ++n) rows.push_back(first + n); zones[name]["instances"] = std::move(rows); }
+    for (const auto& [name, row, count, min, lockout] : raid_zones) { zones[name]["instances"] = Ordered(std::vector<unsigned>(count, row)); zones[name]["raid"] = {{"min", min}, {"lockout", lockout}}; }
     std::vector<std::pair<unsigned, Ordered>> doors, late_doors, final_doors, prop_doors; // source loc uid -> door definition (placed as NPCs
                                        // after the town; late: narrow-arrival doors after the traps; final: appended_pairs, last; prop: prop_pairs)
     for (const auto& [from, to] : edges) {

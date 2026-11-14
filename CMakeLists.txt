@@ -47,7 +47,7 @@ if(IKV_BUILD_SERVER)
     target_include_directories(ikv-store PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_features(ikv-store PUBLIC cxx_std_20)
     target_link_libraries(ikv-store PUBLIC ikv-protocol PostgreSQL::PostgreSQL OpenSSL::Crypto nlohmann_json::nlohmann_json Threads::Threads)
-    add_library(ikv-world STATIC src/world.cpp src/world_bots.cpp src/world_weather.cpp src/world_map.cpp)
+    add_library(ikv-world STATIC src/world.cpp src/world_bots.cpp src/world_weather.cpp src/world_map.cpp src/world_instance.cpp)
     target_link_libraries(ikv-world PUBLIC ikv-protocol ikv-store ikv-scene)
     add_executable(ikv-server src/server_main.cpp src/bots.cpp)
     target_link_libraries(ikv-server PRIVATE ikv-world ikv-scene OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
@@ -177,7 +177,7 @@ if(IKV_BUILD_CLIENT)
     endif()
     # Original Ogg decoding: vendored stb_vorbis (third_party/stb_vorbis), compiled as C++ like upstream sources (-w).
     set_source_files_properties(third_party/stb_vorbis/stb_vorbis.c PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-w")
-    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_charsel.cpp src/audio.cpp
+    add_executable(ikv-client src/client_main.cpp src/client_session.cpp src/client_ui.cpp src/client_trade.cpp src/client_admin.cpp src/client_map.cpp src/client_raid.cpp src/client_charsel.cpp src/audio.cpp
         third_party/stb_vorbis/stb_vorbis.c)
     target_link_libraries(ikv-client PRIVATE ikv-renderers Freetype::Freetype ${ikv_client_platform_libs} PkgConfig::TurboJPEG OpenSSL::SSL OpenSSL::Crypto Threads::Threads Boost::headers)
     if(WIN32)

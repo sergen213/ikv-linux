@@ -551,6 +551,7 @@ def source_requires_assets(services):
     assert source_ids and all(type(registry) is int and 0 <= registry <= 70 for registry in source_ids)
     for zone in config["zones"].values():
         zone.pop("instances", None)  # instance copies are original registry rows too
+        zone.pop("raid", None)  # wave 30 raid zones need their instance copies
     # Only remove the source associations: the real TLS, store and all other
     # production gameplay fields must successfully reach listening readiness.
     independent = services.root / "source-root-control.json"

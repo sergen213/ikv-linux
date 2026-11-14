@@ -46,6 +46,11 @@ public:
     Json bot_returns(); // spawn specs of churned-out bots whose offline time is over (bots.offline_minutes)
     Json bot_character(int level) const; // a fresh bot {name, class_id, appearance, state} with original class/sex/cosmetics
     Json bot_plan(int total) const; // spawn specs from gameplay.json bots.spawn; total < 0: the configured counts, else round-robin
+    // NONCANONICAL wave 30 persistent lockouts (src/world_instance.cpp): called with (character_id, base zone, expiry unix) when a
+    // Şef kill stamps a group-zone or raid lockout, so the server stores it (Store::set_lockout) and phasing to another shard or
+    // reconnecting cannot bypass it. Admission records may carry "lockouts" {zone: expires_unix} (Store::lockouts); they are
+    // merged into the character state. World stays database-free: without a sink the stamp lives only in the character state.
+    void set_lockout_sink(std::function<void(int64_t, const std::string&, int64_t)> sink);
 private:
     struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
     struct RouteSearch {
@@ -231,6 +236,31 @@ private:
     std::pair<Json,Json> trade_events(const Trade& value) const;
     void validate_offer(uint32_t id, const Json& offer);
     uint32_t group(uint32_t id) const;
+    // NONCANONICAL wave 30 raids (src/world_instance.cpp): up to activities.raid.groups parties of six under one raid leader. Each
+    // non-empty party is mirrored as a groups_ entry (party leader = its first member), so party frames, group chat and group-zone
+    // copies keep working per party; raid zones (zone "raid": {min, lockout}) send the whole raid into one copy, kill XP/loot is
+    // shared by raid members in range, and state() carries compact rows of the other parties' members.
+    struct Refusal { std::string code, message; }; // thrown by world_instance.cpp, rethrown as a rejection by handle()
+    struct Raid { uint32_t leader = 0; std::array<std::vector<uint32_t>,4> parties; };
+    std::map<uint32_t, Raid> raids_; // by raid id
+    std::map<uint32_t, uint32_t> raid_invites_; // invitee -> raid id
+    uint32_t next_raid_ = 1;
+    std::function<void(int64_t, const std::string&, int64_t)> lockout_sink_;
+    void raid_validate(); // constructor: activities.raid, zone raid blocks, scaled Şefs in raid copies
+    uint32_t raid_of(uint32_t id) const; // raid id, 0 when not in a raid
+    std::vector<uint32_t> raid_members(uint32_t raid) const;
+    void raid_action(uint32_t id, const std::string& action, const Json& request); // raid_* actions; throws Refusal
+    void raid_remove(uint32_t id); // leave (or kicked/disconnected): succession or disband
+    void raid_disband(uint32_t raid);
+    void raid_sync(uint32_t raid, const std::vector<uint32_t>& gone = {}); // mirror parties into groups_, emit raid/group events
+    Json raid_view(uint32_t id) const; // state() "raid" member, null when not in a raid
+    std::vector<uint32_t> sharers(uint32_t owner) const; // kill XP/loot recipients: raid or group members in range and alive
+    // Zone entry through a door (handle "interact"): raid-copy minimum size and lockouts, group-zone lockouts; throws Refusal.
+    std::string entry(uint32_t id, const std::string& to);
+    // A Şef kill credit in a group-zone or raid copy: stamps the lockout into `state`, returns (zone, expiry) or empty zone.
+    std::pair<std::string, int64_t> stamp_lockout(Json& state, const Json& definition) const;
+    void persist_lockouts(const std::vector<std::tuple<int64_t, std::string, int64_t>>& stamped);
+    void merge_lockouts(Json& state, const Json& record) const; // admission: Store lockouts into state, expired dropped
     void leave_group(uint32_t id);
     void handle(uint32_t id, const Json& request);
     // Quests (world.cpp quest block). Character state keeps active quests in "quests" {id:{progress[,deadline]}} and
