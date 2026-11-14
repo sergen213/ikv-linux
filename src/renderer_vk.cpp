@@ -84,6 +84,10 @@ class VulkanRenderer final:public Renderer {
  // NONCANONICAL wave 28: enhanced water draws (DrawItem::water) use these, the scene fragment shader specialised with
  // lighting.glsl kWaterPipeline, so every other draw's pipeline compiles without the water/wind-sea/foam code.
  VkPipeline water_pipeline_=VK_NULL_HANDLE,water_double_=VK_NULL_HANDLE;
+ // NONCANONICAL wave 29: with RT, twins of the scene pipelines specialised with rt_lighting.glsl kRoofedPipeline, bound in
+ // roofed zones (SceneLighting::roofed); same order as roofed_bases(). Null without RT (raster uses the runtime flag).
+ VkPipeline roofed_[8]{};
+ std::array<VkPipeline,8> roofed_bases()const{return {opaque_,alpha_,opaque_double_,alpha_double_,opaque_prepassed_,opaque_prepassed_double_,water_pipeline_,water_double_};}
  bool prepass_=false;
  // NONCANONICAL wave 28 (horizon frame rate): guided-RT pixels beyond this view depth (units) trace their stochastic GI and
  // reflection rays once in 16 frames, the resolve fills the rest (lighting.glsl `indirect`, temporal.frag).
@@ -769,7 +773,7 @@ Buffer upload_buffer(const void* data,VkDeviceSize bytes,VkBufferUsageFlags usag
  VkShaderModule shader(const char* name){auto words=shader_bytes(name);VkShaderModuleCreateInfo c{};c.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;c.codeSize=words.size()*4;c.pCode=words.data();VkShaderModule module;checked(vkCreateShaderModule(device_,&c,nullptr,&module),"create shader module");return module;}
 VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mesh,bool alpha,
                     bool depth,bool shadow,bool double_sided=false,bool depth_write=true,std::optional<ParticleBlend> particle={},
-                    bool contour=false,bool glow_composite=false,bool water=false) {
+                    bool contour=false,bool glow_composite=false,bool water=false,bool roofed=false) {
      progress();
      // frag null: depth only (no fragment stage, no colour writes): depth prepass and opaque shadow casters.
      VkShaderModule v=shader(vert),f=VK_NULL_HANDLE;VkPipeline result=VK_NULL_HANDLE;
@@ -780,10 +784,11 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          stages[0].stage=VK_SHADER_STAGE_VERTEX_BIT;stages[0].module=v;stages[0].pName="main";
          stages[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT;stages[1].module=f;stages[1].pName="main";
          // water: lighting.glsl constant_id 0 (kWaterPipeline). Scene shaders declare it; other shaders ignore the entry.
-         const VkBool32 water_value=water?VK_TRUE:VK_FALSE;
-         const VkSpecializationMapEntry water_entry{0,0,sizeof(VkBool32)};
-         const VkSpecializationInfo water_info{1,&water_entry,sizeof(VkBool32),&water_value};
-         if(frag&&std::strncmp(frag,"scene",5)==0)stages[1].pSpecializationInfo=&water_info;
+         // roofed: rt_lighting.glsl constant_id 1 (kRoofedPipeline, NONCANONICAL wave 29); only RT scene shaders declare it.
+         const std::array<VkBool32,2> spec_values{water?VK_TRUE:VK_FALSE,roofed?VK_TRUE:VK_FALSE};
+         const VkSpecializationMapEntry spec_entries[2]{{0,0,sizeof(VkBool32)},{1,sizeof(VkBool32),sizeof(VkBool32)}};
+         const VkSpecializationInfo spec_info{2,spec_entries,sizeof(spec_values),spec_values.data()};
+         if(frag&&std::strncmp(frag,"scene",5)==0)stages[1].pSpecializationInfo=&spec_info;
         // scene.vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
         const bool previous_pose=std::strncmp(vert,"scene",5)==0;
         const VkVertexInputBindingDescription bindings[2]{{0,static_cast<std::uint32_t>(particle?sizeof(ParticleVertex):sizeof(Vertex)),VK_VERTEX_INPUT_RATE_VERTEX},
@@ -1175,6 +1180,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          if(*p)vkDestroyPipeline(device_,*p,nullptr);
          *p=VK_NULL_HANDLE;
      }
+    for(auto& p:roofed_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:sky_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
     for(auto& p:after_particle_pipeline_){if(p)vkDestroyPipeline(device_,p,nullptr);p=VK_NULL_HANDLE;}
@@ -1375,6 +1381,14 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          opaque_prepassed_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,false,false);
          opaque_prepassed_double_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false,true,false);
      }
+    if(rt_enabled_) { // NONCANONICAL wave 29: roofed twins, roofed_bases() order
+        const auto twin=[&](bool alpha,bool double_sided,bool depth_write,bool water){
+            return pipeline("scene.vert",scene_shader,scene_pass_,true,alpha,true,false,double_sided,depth_write,{},false,false,water,true);};
+        roofed_[0]=twin(false,false,true,false);roofed_[1]=twin(true,false,true,false);
+        roofed_[2]=twin(false,true,true,false);roofed_[3]=twin(true,true,true,false);
+        if(prepass_){roofed_[4]=twin(false,false,false,false);roofed_[5]=twin(false,true,false,false);}
+        roofed_[6]=twin(false,false,true,true);roofed_[7]=twin(false,true,true,true);
+    }
     for(unsigned i=0;i<4;++i)sky_pipeline_[i]=pipeline("scene.vert",scene_shader,scene_pass_,true,(i&1)!=0,true,false,(i&2)!=0,false);
     for(unsigned i=0;i<5;++i)particle_pipeline_[i]=pipeline("particle.vert","particle.frag",scene_pass_,true,true,true,false,true,false,ParticleBlend(i));
     for(unsigned i=0;i<5;++i)after_particle_pipeline_[i]=pipeline("particle.vert","particle.frag",after_pass_,true,true,true,false,true,false,ParticleBlend(i));
@@ -1782,6 +1796,8 @@ void record_geometry_uploads(SceneSet& set) {
      if(rt_enabled_&&!shadow&&!prepass)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
      VkPipeline bound_pipeline=VK_NULL_HANDLE;VkDescriptorSet bound_set=VK_NULL_HANDLE;std::uint32_t bound_mesh=UINT32_MAX;
+     // NONCANONICAL wave 29: RT colour draws in a roofed zone take the kRoofedPipeline twins (roofed_).
+     const bool roofed=rt_enabled_&&!shadow&&!prepass&&scene.lighting.roofed;const auto roofed_base=roofed_bases();
      for(const auto& item:items) {
         // Shadow pass (enhanced raster only): source ocean casts none; off-camera casters still need light-volume culling.
         if(shadow) {
@@ -1803,6 +1819,7 @@ void record_geometry_uploads(SceneSet& set) {
              item.water?(double_sided?water_double_:water_pipeline_):
              item.alpha?(double_sided?alpha_double_:alpha_):
              prepassed(scene,item)?(double_sided?opaque_prepassed_double_:opaque_prepassed_):(double_sided?opaque_double_:opaque_);
+         if(roofed)for(std::size_t i=0;i<roofed_base.size();++i)if(selected==roofed_base[i]&&roofed_[i]){selected=roofed_[i];break;}
          if(selected!=bound_pipeline){vkCmdBindPipeline(c,VK_PIPELINE_BIND_POINT_GRAPHICS,selected);bound_pipeline=selected;}
          const auto descriptor=material_sets_[item.material<material_sets_.size()?item.material:0];
          if(descriptor!=bound_set){vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,0,1,&descriptor,1,&uniform_offset_);bound_set=descriptor;}
