@@ -40,7 +40,9 @@ public:
     void save_characters(std::span<const CharacterSave> states);
     Json api(std::string_view method, std::string_view path, std::string_view bearer, const Json& body, std::string_view peer_key);
     void world_status(const Json& status);
-    Json take_world_commands(); // [{id,command,arguments}], oldest first, at most 16 per call
+    // [{id,command,arguments}], oldest first, at most 16 per call. Wave 30: a shard passes its instance and realm and receives
+    // only commands targeted at it, at its realm or untargeted; an empty instance takes any command (pre-realm behaviour).
+    Json take_world_commands(std::string_view instance = {}, int realm_id = 0);
     void finish_world_command(std::int64_t id, const Json& result);
     Json world_settings(); // persisted administrator rates/zone switches, {} when never set
     // Administrator-only raw SQL dump bytes for GET /v1/admin/backups/{name}; throws ApiError like api().
@@ -59,6 +61,7 @@ public:
     std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room
     std::optional<ShardInfo> shard(std::string_view instance); // live shard (heartbeat within 15 s)
     std::optional<ShardInfo> locate(int realm_id, std::string_view name); // online character's live shard
+    std::vector<ShardInfo> shards(int realm_id = 0);           // live shards (0: every realm), by realm then instance
     int character_realm(std::int64_t character_id);            // home realm; throws ApiError 404
     // Raw 64-hex ticket, valid 60 s, single use, bound to character and destination. The caller must hold the character's
     // lease as `from` and should save the character first; the ticket releases nothing. A newer ticket voids older ones.

@@ -15,6 +15,19 @@
 
 namespace ikv {
 struct Zone;
+// NONCANONICAL wave 30 realms and shards (src/world_shard.cpp). The server process wires these to Store: locate finds the
+// live shard instance holding an online character of a realm, shard reads a live shard row, send posts a bus message to a
+// shard instance ("*": every other live shard). A World without a link (tests, tools) keeps every feature shard-local.
+struct ShardLink {
+    std::string instance;
+    int realm = 1;
+    std::function<std::optional<std::string>(int realm, const std::string& name)> locate;
+    std::function<std::optional<ShardInfo>(const std::string& instance)> shard;
+    std::function<void(const std::string& instance, const Json& body)> send;
+};
+// A phase the server must carry out: issue a ticket for actor `id` to `instance` (empty: a shard of the payload's "realm",
+// reason "home"), emit the transfer event (shard_departing) and close, or report the refusal (shard_failed).
+struct ShardTransfer { uint32_t id = 0; std::string instance, reason; Json payload; };
 class World {
 public:
     World(Json config, std::function<void(std::span<const CharacterSave>)> persist);
@@ -46,6 +59,16 @@ public:
     Json bot_returns(); // spawn specs of churned-out bots whose offline time is over (bots.offline_minutes)
     Json bot_character(int level) const; // a fresh bot {name, class_id, appearance, state} with original class/sex/cosmetics
     Json bot_plan(int total) const; // spawn specs from gameplay.json bots.spawn; total < 0: the configured counts, else round-robin
+    // ---- Realms and shards (wave 30, NONCANONICAL, src/world_shard.cpp) ----
+    void shard_link(ShardLink link);
+    void shard_realms(std::map<int, std::string> names); // realm id -> name, refreshed by the server
+    void shard_message(const Json& body); // one bus body (plan "Bus messages")
+    std::vector<ShardTransfer> shard_transfers(); // pending phases, taken once
+    void shard_departing(uint32_t id, Json transfer); // queue the critical transfer event; the actor accepts no more requests
+    void shard_failed(uint32_t id, const std::string& message); // a phase could not start (empty message: silent, retry later)
+    void shard_arrived(uint32_t id, const Json& payload); // admitted with a redeemed ticket: join the leader's group
+    void shard_tick(); // once a second: guests without a group go home after 60 s
+    int realm_of(uint32_t id) const; // actor's home realm (1 when unknown)
 private:
     struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
     struct RouteSearch {
@@ -73,6 +96,9 @@ private:
         uint32_t banker = 0, gathering = 0, gather_ready = 0; // open bank NPC (own id: Kasa Erişimi); Toplama node and completion tick
         int bank_tab = 0; // shown Banka tab (original page 0x611454)
         uint8_t posture = 0; // held RP clip (social.postures: sit/lay) shown to late joiners; cleared by moving, fighting, dying
+        int realm = 1; // home realm (characters.realm_id); wave 30
+        bool guest = false, departing = false; // guest: on a foreign realm/layer shard; departing: a phase ticket was issued
+        uint32_t alone_since = 0, home_retry = 0; // guest grace: tick the guest last had no group, next home attempt
     };
     struct Npc {
         Json definition;
@@ -119,6 +145,22 @@ private:
     std::map<uint32_t, std::vector<uint32_t>> groups_;
     std::map<uint32_t, uint32_t> invites_;
     std::map<uint32_t, Json> guild_invites_;
+    // Wave 30 shards: link, realm names, invites delivered over the bus (by invited actor), pending phases and the newest
+    // guild rosters heard from other shards (by guild id).
+    std::optional<ShardLink> link_;
+    std::map<int, std::string> realm_names_;
+    std::map<uint32_t, Json> remote_invites_;
+    std::vector<ShardTransfer> transfers_;
+    std::map<std::string, Json> guild_rosters_;
+    bool shard_action(uint32_t id, const std::string& action, const Json& request); // by-name invites/whispers, remote accept
+    std::optional<std::string> realm_label(uint32_t viewer, uint32_t subject) const; // subject's realm name if not the viewer's
+    std::string realm_name(int realm) const;
+    int realm_id(const std::string& name) const; // 0 when unknown
+    uint32_t find_player(int realm, const std::string& name) const; // online non-bot actor, 0 when none
+    uint32_t find_character(int64_t character_id) const;
+    void shard_guild(const Json& guild); // a roster change reaches the other shards
+    void shard_guild_chat(const Json& guild, const Json& line);
+    Json shard_guild_latest(const Json& guild) const; // the newest known roster of a guild
     uint32_t next_summon_ = 0xf0000000u; // summoned NPC ids, above the configured population
     // Er Meydanı match (guide rehberi "Er Meydanı"): per-clan score, end tick, Klan Parası stakes by actor (/kpsavas), and per
     // activities.arena.areas entry its holding clan plus the clan currently alone inside and for how many ticks.

@@ -24,6 +24,23 @@ find_package(Threads REQUIRED)
 find_package(OpenSSL 3.2 REQUIRED)
 find_package(Boost 1.74 CONFIG REQUIRED)
 find_package(nlohmann_json 3.9 REQUIRED)
+# Release identity (docs/LAUNCHER_UPDATES.md): the launcher's self-update defaults, and the version the server names
+# when it refuses an outdated client and the client reports. Settings may override repo/channel/trust.
+set(IKV_VERSION "${PROJECT_VERSION}" CACHE STRING "Release version compiled into the launcher, client and server")
+set(IKV_UPDATE_REPOSITORY "sergen213/ikv-linux" CACHE STRING "Default GitHub OWNER/REPOSITORY for launcher updates")
+set(IKV_UPDATE_CHANNEL "experimental" CACHE STRING "Default launcher update channel (stable|experimental)")
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem" IKV_RELEASE_TRUST_PEM)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/packaging/ikv-release-public.pem")
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/ikv/release_defaults.hpp" @ONLY CONTENT [=[#pragma once
+namespace ikv::release {
+inline constexpr char version[] = "@IKV_VERSION@";
+inline constexpr char repository[] = "@IKV_UPDATE_REPOSITORY@";
+inline constexpr char channel[] = "@IKV_UPDATE_CHANNEL@";
+inline constexpr char trust_pem[] = R"PEM(@IKV_RELEASE_TRUST_PEM@)PEM";
+}
+]=])
+add_library(ikv-release-defaults INTERFACE)
+target_include_directories(ikv-release-defaults INTERFACE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 add_library(ikv-protocol STATIC src/protocol.cpp)
 target_include_directories(ikv-protocol PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -47,10 +64,10 @@ if(IKV_BUILD_SERVER)
     target_include_directories(ikv-store PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_features(ikv-store PUBLIC cxx_std_20)
     target_link_libraries(ikv-store PUBLIC ikv-protocol PostgreSQL::PostgreSQL OpenSSL::Crypto nlohmann_json::nlohmann_json Threads::Threads)
-    add_library(ikv-world STATIC src/world.cpp src/world_bots.cpp src/world_weather.cpp src/world_map.cpp)
+    add_library(ikv-world STATIC src/world.cpp src/world_bots.cpp src/world_weather.cpp src/world_map.cpp src/world_shard.cpp)
     target_link_libraries(ikv-world PUBLIC ikv-protocol ikv-store ikv-scene)
     add_executable(ikv-server src/server_main.cpp src/bots.cpp)
-    target_link_libraries(ikv-server PRIVATE ikv-world ikv-scene OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+    target_link_libraries(ikv-server PRIVATE ikv-world ikv-scene ikv-release-defaults OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
     add_executable(ikv-auth src/auth_main.cpp src/https_service.cpp)
     target_link_libraries(ikv-auth PRIVATE ikv-store Boost::headers OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
     if(WIN32)
