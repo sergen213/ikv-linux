@@ -23,6 +23,10 @@ std::string pbr_texture_key(std::string_view diffuse);
 // Per scene material: true for opaque static zone materials (every placement an unanimated, unskinned, non-sky,
 // non-ocean zone instance; no blend, cut-out or environment map), the set derive_parallax_heights also uses.
 std::vector<bool> pbr_eligible_materials(const Scene& scene);
+// A material whose original shading blends the MAT+14 secondary fade layer (Material::luminance) under the diffuse by
+// vertex alpha (renderers: fade map present, no normal or environment map). Terrains: the visible ground is often that
+// layer (dirt, grass), so its own pack material (keyed by Material::luminance) is blended in the same way.
+inline bool pbr_fade_layer(const Material& m) { return !m.luminance.empty() && m.normal.empty() && m.environment.empty(); }
 // Tessellated draws only within this many scene units of the eye: pbr.glsl kPbrTessFadeEnd (displacement faded out).
 constexpr float kPbrTessRange = 80.f;
 struct PbrMaterial {

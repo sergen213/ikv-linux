@@ -31,11 +31,17 @@ void main(){
     if(weight>1e-4&&draw.pbr.z>0.){
         mat3 m=mat3(draw.model);
         vec3 n=normalize(mat3(cross(m[1],m[2]),cross(m[2],m[0]),cross(m[0],m[1]))*smoothNormal*sign(dot(m[0],cross(m[1],m[2]))));
+#ifdef IKV_SHADOW_TESS
+        float d=distance(world,frame.eye.xyz),fade=pbrShadowTessFade(d); // <= the receiver's pbrTessFade
+#else
         float d=distance(world,frame.eye.xyz),fade=pbrTessFade(d);
+#endif
         if(fade>0.){
             vec2 uv=draw.pbr.x>0.?pbrWorldUV(world,n,draw.pbr.xy):LERP(tUV);
             float lod=pbrHeightLod(draw.pbr,d,frame.cameraUp.w,frame.viewport.y,float(textureSize(heightMap,0).x));
-            offset=n*(textureLod(heightMap,uv,lod).r*draw.pbr.z*weight*fade);
+            // Terrain fade layers (lighting.glsl pbrMainWeight): the main pack's relief only where its layer shows.
+            float layer=draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5?clamp(LERP(tColor).a,0.,1.):1.;
+            offset=n*(textureLod(heightMap,uv,lod).r*draw.pbr.z*weight*fade*layer);
         }
     }
 #ifdef IKV_SHADOW_TESS

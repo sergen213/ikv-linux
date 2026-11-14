@@ -30,11 +30,23 @@ out vec3 t_position[];out vec3 t_normal[];out vec2 t_uv[];out vec4 t_ambient[];o
 uniform vec3 camera_position;
 uniform vec4 pbr;
 uniform vec2 tess_view;
+uniform mat4 view_projection;
+uniform mat4 object_matrix;
 )GLSL" IKV_GL_PBR R"GLSL(
 float edge_level(vec3 a,vec3 b){
     float d=max(distance((a+b)*0.5,camera_position),0.5);
     float pixels=distance(a,b)/d*tess_view.x*0.5/max(tess_view.y,1e-3);
     return clamp(pixels/kPbrTessPixels*pbrTessFade(d),1.0,64.0);
+}
+// Vulkan scene_tess.tesc patchOutside: the patch, displaced by up to pbr.z along its smoothed normals, outside one plane.
+bool patch_outside(){
+    mat3 m=mat3(object_matrix);vec4 out4=vec4(1.0);bool behind=true;
+    for(int i=0;i<6;++i){
+        vec3 n=m*v_smooth[i%3];float l=length(n);
+        vec4 p=view_projection*vec4(v_world[i%3]+(i<3||l<=1e-6?vec3(0.0):n/l*pbr.z),1.0);
+        out4*=vec4(bvec4(p.x<-p.w,p.x>p.w,p.y<-p.w,p.y>p.w));behind=behind&&p.z<-p.w;
+    }
+    return dot(out4,vec4(1.0))>0.0||behind;
 }
 void main(){
     t_position[gl_InvocationID]=v_position[gl_InvocationID];t_normal[gl_InvocationID]=v_normal[gl_InvocationID];
@@ -43,6 +55,7 @@ void main(){
     t_color[gl_InvocationID]=v_color[gl_InvocationID];
     if(gl_InvocationID==0){
         bool rigid=pbr.z<=0.0||(dot(v_smooth[0],v_smooth[0])+dot(v_smooth[1],v_smooth[1])+dot(v_smooth[2],v_smooth[2]))<1e-12;
+        if(!rigid&&patch_outside()){gl_TessLevelOuter[0]=gl_TessLevelOuter[1]=gl_TessLevelOuter[2]=gl_TessLevelInner[0]=0.0;return;}
         float e0=rigid?1.0:edge_level(v_world[1],v_world[2]),e1=rigid?1.0:edge_level(v_world[2],v_world[0]),e2=rigid?1.0:edge_level(v_world[0],v_world[1]);
         gl_TessLevelOuter[0]=e0;gl_TessLevelOuter[1]=e1;gl_TessLevelOuter[2]=e2;gl_TessLevelInner[0]=max(e0,max(e1,e2));
     }
@@ -66,6 +79,7 @@ uniform float fog_start;
 uniform float fog_end;
 uniform vec4 pbr;
 uniform vec2 tess_view;
+uniform bool has_fade_map;uniform bool has_normal_map;uniform bool has_environment_map;
 uniform sampler2D height_map;
 out vec3 fragment_position;
 out vec4 shadow_position;
@@ -95,7 +109,9 @@ void main(){
         if(fade>0.0){
             vec2 huv=pbr.x>0.0?pbrWorldUV(world_position.xyz,n,pbr.xy):uv;
             float lod=pbrHeightLod(pbr,d,tess_view.y,tess_view.x,float(textureSize(height_map,0).x));
-            world_position.xyz+=n*(textureLod(height_map,huv,lod).r*pbr.z*weight*fade);
+            // Terrain fade layers (scene_fragment pbr_main_weight): the main pack's relief only where its layer shows.
+            float layer=has_fade_map&&!has_normal_map&&!has_environment_map?clamp(LERP(t_color).a,0.0,1.0):1.0;
+            world_position.xyz+=n*(textureLod(height_map,huv,lod).r*pbr.z*weight*fade*layer);
         }
     }
     gl_Position=view_projection*world_position;

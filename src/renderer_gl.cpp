@@ -253,12 +253,18 @@ uniform vec4 weather_mark_bounds;
 uniform vec4 weather_marks[64];
 uniform vec4 source_time;
 // NONCANONICAL wave 29 PBR pack (Vulkan lighting.glsl; pbr.glsl): pbr as Vulkan draw.pbr, pbr_maps xyz = albedo/normal/ORM
-// bound (units 11..13).
+// bound (units 11..13); pbr_fade/pbr_fade_maps the terrain's secondary fade layer material (Vulkan draw.pbrFade, units
+// 14..16).
 uniform vec4 pbr;
 uniform vec4 pbr_maps;
 uniform sampler2D pbr_albedo_map;
 uniform sampler2D pbr_normal_map;
 uniform sampler2D pbr_orm_map;
+uniform vec4 pbr_fade;
+uniform vec4 pbr_fade_maps;
+uniform sampler2D pbr_fade_albedo_map;
+uniform sampler2D pbr_fade_normal_map;
+uniform sampler2D pbr_fade_orm_map;
 )GLSL" IKV_GL_WEATHER IKV_GL_PBR R"GLSL(
 // Enhanced raster lighting: Vulkan lighting.glsl (non-RT enhanced) plus its post.frag ACES tonemap.
 const float PI=3.14159265359;
@@ -286,8 +292,13 @@ out vec4 output_color;
 uniform sampler2D height_map;
 uniform bool has_height_map;
 vec2 surface_uv,pbr_uv,pbr_du1=vec2(0.0),pbr_du2=vec2(0.0);
+float pbr_uv_per_unit=0.0; // original UV change per scene unit (pbr.glsl pbrLowLod)
 vec3 pbr_pu=vec3(0.0),pbr_pv=vec3(0.0);
 bool pbr_on=false;
+bool pbr_fade_layer=false,pbr_fade_on=false; // Vulkan pbrFadeLayer/pbrFadeOn
+vec2 pbr_fade_uv=vec2(0.0),pbr_fade_du1=vec2(0.0),pbr_fade_du2=vec2(0.0);
+vec3 pbr_fade_pu=vec3(0.0),pbr_fade_pv=vec3(0.0);
+float pbr_main_weight(){return pbr_fade_layer?clamp(fade_blend,0.0,1.0):1.0;}
 vec3 parallax_gradient=vec3(0.0);
 void parallax() {
     surface_uv=texcoord;pbr_uv=texcoord;
@@ -298,6 +309,15 @@ void parallax() {
     vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),nf=cross(dp1,dp2),v=camera_position-fragment_position;
     vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbr_du1=du1;pbr_du2=du2;
+    pbr_uv_per_unit=max(length(dFdx(texcoord))/max(length(dp1),1e-6),length(dFdy(texcoord))/max(length(dp2),1e-6));
+    if(pbr_on){ // draw-uniform: derivatives in uniform control flow
+        pbr_fade_layer=has_fade_map&&!has_normal_map&&!has_environment_map;
+        pbr_fade_on=pbr_fade_layer&&pbrActive(pbr_fade);
+        pbr_fade_uv=pbr_fade.x>0.0?pbrWorldUV(fragment_position,world_normal,pbr_fade.xy):texcoord;
+        pbr_fade_du1=dFdx(pbr_fade_uv);pbr_fade_du2=dFdy(pbr_fade_uv);
+        float fdet=pbr_fade_du1.x*pbr_fade_du2.y-pbr_fade_du2.x*pbr_fade_du1.y;
+        if(abs(fdet)>1e-12){pbr_fade_pu=(dp1*pbr_fade_du2.y-dp2*pbr_fade_du1.y)/fdet;pbr_fade_pv=(dp2*pbr_fade_du1.x-dp1*pbr_fade_du2.x)/fdet;}
+    }
     if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0.0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det;
@@ -305,7 +325,7 @@ void parallax() {
     if(!has_height_map||(pbr_on&&!pbrParallax(pbr)))return;
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
     float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
-        (pbr_on?min(pbr.z,1.0):min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
+        (pbr_on?min(pbr.z,1.0)*pbr_main_weight():min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
     int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,base,du1,du2).r,last_t=0.0,last_f=h-1.0;
@@ -446,7 +466,12 @@ void main() {
         if(has_normal_map||has_environment_map)surface.a=1.0;
         float nlength=length(world_normal);
         vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
-        if(pbr_on&&pbr_maps.y>0.5)n=pbrNormal(n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb); // wave 29
+        if(pbr_on&&(pbr_fade_layer||pbr_maps.y>0.5)){ // wave 29; fade layers never have a source normal map
+            vec3 m=pbr_maps.y>0.5?pbrNormal(n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
+            if(pbr_fade_layer){vec3 f=pbr_fade_on&&pbr_fade_maps.y>0.5?pbrNormal(n,pbr_fade_pu,pbr_fade_pv,textureGrad(pbr_fade_normal_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb):n;
+                m=normalize(mix(f,m,pbr_main_weight()));}
+            n=m;
+        }
         else if(has_normal_map) {
             vec3 t=world_tangent-n*dot(n,world_tangent);
             // Source normal maps carry only xy (b specular, a illumination): z rebuilt as original_surface (Vulkan mappedNormal).
@@ -456,18 +481,38 @@ void main() {
         float roughness=0.65,metallic=0.0,pbr_ao=1.0;
         vec3 albedo=pow(max(surface.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
         // NONCANONICAL wave 29 PBR pack (Vulkan lighting.glsl): albedo, roughness, metallic, ambient occlusion.
-        if(pbr_on) {
+        if(pbr_on&&!pbr_fade_layer) {
             if(pbr_maps.x>0.5) {
                 ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
-                vec3 low=has_texture?textureLod(diffuse_map,texcoord,max(levels-4.0,0.0)).rgb:vec3(1.0);
-                // Terrain's MAT+14 secondary layer (vertex-alpha blend above): the low-frequency colour follows the blend.
-                if(has_fade_map&&!has_normal_map&&!has_environment_map){ivec2 fs=textureSize(fade_map,0);
-                    low=mix(textureLod(fade_map,texcoord,max(floor(log2(float(max(max(fs.x,fs.y),1))))-3.0,0.0)).rgb,low,fade_blend);}
+                vec3 low=has_texture?textureLod(diffuse_map,texcoord,pbrLowLod(pbr,pbr_uv_per_unit,float(size.x),levels)).rgb:vec3(1.0);
                 low=low*material_color.rgb-lightmap_shadow;
                 albedo=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,albedo,pbrTintKeep(pbr));
             }
             if(pbr_maps.z>0.5){vec3 orm=textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb;pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;}
+        } else if(pbr_on) {
+            // Terrain (Vulkan lighting.glsl): each layer's pack material carries that layer's own low-frequency original
+            // colour (unmapped fade layer: its original texel), blended by vertex alpha like the diffuse layers above.
+            vec3 main_a=pow(max((has_texture?texture(diffuse_map,surface_uv).rgb:vec3(1.0))*material_color.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
+            vec3 fade_a=pow(max(texture(fade_map,surface_uv).rgb*material_color.rgb-lightmap_shadow,vec3(0.0)),vec3(2.2));
+            if(pbr_maps.x>0.5) {
+                ivec2 size=textureSize(diffuse_map,0);float levels=floor(log2(float(max(max(size.x,size.y),1))))+1.0;
+                vec3 low=(has_texture?textureLod(diffuse_map,texcoord,pbrLowLod(pbr,pbr_uv_per_unit,float(size.x),levels)).rgb:vec3(1.0))*material_color.rgb-lightmap_shadow;
+                main_a=pbrAlbedo(textureGrad(pbr_albedo_map,pbr_uv,pbr_du1,pbr_du2).rgb,low,main_a,pbrTintKeep(pbr));
+            }
+            if(pbr_fade_on&&pbr_fade_maps.x>0.5) {
+                ivec2 fs=textureSize(fade_map,0);float levels=floor(log2(float(max(max(fs.x,fs.y),1))))+1.0;
+                vec3 low=textureLod(fade_map,texcoord,pbrLowLod(pbr_fade,pbr_uv_per_unit,float(fs.x),levels)).rgb*material_color.rgb-lightmap_shadow;
+                fade_a=pbrAlbedo(textureGrad(pbr_fade_albedo_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb,low,fade_a,pbrTintKeep(pbr_fade));
+            }
+            vec3 main_orm=pbr_maps.z>0.5?textureGrad(pbr_orm_map,pbr_uv,pbr_du1,pbr_du2).rgb:vec3(1.0,0.65,0.0);
+            vec3 fade_orm=pbr_fade_on&&pbr_fade_maps.z>0.5?textureGrad(pbr_fade_orm_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb:vec3(1.0,0.65,0.0);
+            float w=pbr_main_weight();
+            albedo=mix(fade_a,main_a,w);
+            vec3 orm=mix(fade_orm,main_orm,w);pbr_ao=orm.r;roughness=clamp(orm.g,0.04,1.0);metallic=orm.b;
         }
+        // NONCANONICAL wave 29 (Vulkan lighting.glsl): with a pack material the baked light lights the pack albedo, not the
+        // original texture (original_surface = (texel - lightmap) x vertex light on this path).
+        if(pbr_on&&!has_normal_map&&!has_environment_map)baked=albedo*pow(max(scene_roofed?source_vertex_light:source_ambient_light,vec3(0.0)),vec3(2.2));
         // NONCANONICAL wave 27 (Vulkan lighting.glsl): season tint, rain wetness and snow cover on albedo and baked light.
         bool weather=weatherOn(weather_misc);
         float direct_roughness=roughness,puddle=0.0;
@@ -715,7 +760,8 @@ class GlRenderer final : public Renderer {
     struct SkinStream { std::array<float,3> position,normal,tangent; }; // skinned attributes (upload_stream)
     std::vector<SkinStream> skin_stream_;
     // pbr*: NONCANONICAL wave 29 PBR pack material and maps (0 = absent).
-    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; const PbrMaterial* pbr=nullptr; GLuint pbr_albedo=0,pbr_normal=0,pbr_orm=0; };
+    struct GpuMaterial { GLuint diffuse=0,normal=0,environment=0,lightmap=0,fade=0,height=0; bool referenced=false; const PbrMaterial* pbr=nullptr; GLuint pbr_albedo=0,pbr_normal=0,pbr_orm=0;
+        const PbrMaterial* pbr_fade=nullptr; GLuint pbr_fade_albedo=0,pbr_fade_normal=0,pbr_fade_orm=0; }; // pbr_fade: the fade layer's (pbr.hpp pbr_fade_layer)
     struct Draw { const Instance* instance; Matrix4 matrix; float distance; std::uint32_t material; bool fog; std::array<float,4> scroll; bool visible=true; };
     struct ContourDraw { std::uint32_t mesh; Matrix4 matrix; std::array<float,3> color; };
     SDL_Window* window_;
@@ -781,7 +827,7 @@ class GlRenderer final : public Renderer {
         GLuint shore_texture=0;std::array<float,4> shore_grid{};float shore_level=0; // that grid's shore field (renderer.hpp ocean_shore_field)
         // NONCANONICAL wave 29: each material's PBR pack material (plan()), the pack maps uploaded (albedo, normal, ORM,
         // height) and per mesh whether a tessellated pack material draws it (0 no, 1 original UVs, 2 world projection).
-        std::vector<const PbrMaterial*> pbr;std::map<const PbrMaterial*,std::array<GLuint,4>> pbr_textures;std::vector<std::uint8_t> tess_meshes;
+        std::vector<const PbrMaterial*> pbr,pbr_fade;std::map<const PbrMaterial*,std::array<GLuint,4>> pbr_textures;std::vector<std::uint8_t> tess_meshes;
         std::size_t next_texture=0,next_material=0,next_mesh=0; // upload cursors
         SourceScrollState scroll;
     };
@@ -795,12 +841,12 @@ class GlRenderer final : public Renderer {
     struct UniformInt { GLint location=-1; int value=std::numeric_limits<int>::min(); };
     struct UniformFloat { GLint location=-1; float value=std::numeric_limits<float>::quiet_NaN(); };
     struct UniformVec4 { GLint location=-1; std::array<float,4> value{std::numeric_limits<float>::quiet_NaN()}; };
-    struct SceneUniforms { UniformInt sky,ocean,fog,normal,environment,lightmap,fade,height,texture; UniformFloat cutoff; UniformVec4 scroll,sway,color,pbr,pbr_maps; } draw_uniforms_;
+    struct SceneUniforms { UniformInt sky,ocean,fog,normal,environment,lightmap,fade,height,texture; UniformFloat cutoff; UniformVec4 scroll,sway,color,pbr,pbr_maps,pbr_fade,pbr_fade_maps; } draw_uniforms_;
     struct ShadowUniforms { UniformInt texture,fade,opaque; UniformFloat cutoff; UniformVec4 color,sway; } shadow_uniforms_;
     UniformVec4 depth_sway_;
     GLint normal_matrix_location_=-1,grayscale_location_=-1,contour_grayscale_location_=-1;
     GLint particle_grayscale_location_=-1,particle_fog_enabled_location_=-1,particle_fog_start_location_=-1,particle_fog_end_location_=-1;
-    std::array<GLuint,14> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
+    std::array<GLuint,17> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
     // Shadow casters without an alpha cutoff draw with a depth-only program. Static casters (no entity, skin or sway) of a
     // cascade are cached in shadow_static_*: while the light matrix and the static caster list are unchanged, the cached
     // depth is restored only where last frame's dynamic casters drew, then the dynamic casters are drawn again (the depth
@@ -822,7 +868,7 @@ class GlRenderer final : public Renderer {
     // are its per-draw locations. Shadow casters stay untessellated (the outward relief never sinks under its caster depth).
     std::shared_ptr<const PbrPack> pbr_pack_;bool pbr_loaded_=false;
     GLuint tess_program_=0;struct TessSync{GLint from,to;GLenum type;GLint count;};std::vector<TessSync> tess_sync_;
-    struct TessUniforms { GLint object,normal_matrix,color,texture,normal,environment,lightmap,fade,height,cutoff,ocean,sky,fog,sway,scroll,pbr,pbr_maps,view; } tess_u_{};
+    struct TessUniforms { GLint object,normal_matrix,color,texture,normal,environment,lightmap,fade,height,cutoff,ocean,sky,fog,sway,scroll,pbr,pbr_maps,view,pbr_fade,pbr_fade_maps; } tess_u_{};
     std::vector<const Draw*> tess_draws_;
     bool timing_=false;GLuint timing_queries_[timing_ring][timed_passes]{};unsigned timing_issued_[timing_ring]{};unsigned timing_frame_=0;
     double timing_sum_[timed_passes]{};unsigned timing_frames_=0;
@@ -902,13 +948,14 @@ public:
             glUniform1i_(uniform(program_,"water_color_map"),6);glUniform1i_(uniform(program_,"water_depth_map"),7);glUniform1i_(uniform(program_,"height_map"),8);
             glUniform1i_(uniform(program_,"shadow_far_map"),9);glUniform1i_(uniform(program_,"water_shore_map"),10);
             glUniform1i_(uniform(program_,"pbr_albedo_map"),11);glUniform1i_(uniform(program_,"pbr_normal_map"),12);glUniform1i_(uniform(program_,"pbr_orm_map"),13);
+            glUniform1i_(uniform(program_,"pbr_fade_albedo_map"),14);glUniform1i_(uniform(program_,"pbr_fade_normal_map"),15);glUniform1i_(uniform(program_,"pbr_fade_orm_map"),16);
             water_shore_grid_location_=uniform(program_,"water_shore_grid");water_shore_level_location_=uniform(program_,"water_shore_level");
             light_location_=uniform(program_,"light_view_projection");
             far_light_location_=uniform(program_,"far_light_view_projection");shadow_split_location_=uniform(program_,"shadow_split");
             normal_matrix_location_=uniform(program_,"normal_matrix");grayscale_location_=uniform(program_,"grayscale");
             draw_uniforms_={{sky_location_},{ocean_location_},{fog_enabled_location_},{normal_location_},{environment_location_},{lightmap_location_},
                 {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_},
-                {uniform(program_,"pbr")},{uniform(program_,"pbr_maps")}};
+                {uniform(program_,"pbr")},{uniform(program_,"pbr_maps")},{uniform(program_,"pbr_fade")},{uniform(program_,"pbr_fade_maps")}};
             if(!options_.original_appearance&&options_.tessellation)link_tess();
             glUseProgram_(overlay_program_); glUniform1i_(uniform(overlay_program_,"overlay_map"),0);
             glGenVertexArrays_(1,&overlay_vao_);
@@ -1356,11 +1403,17 @@ private:
             options_.parallax&&!options_.original_appearance?find_texture(set,material.height):0,true};
         // NONCANONICAL wave 29 PBR pack maps; the pack's own relief replaces the derived one (as Vulkan material_maps).
         if(const auto* p=index<set.pbr.size()?set.pbr[index]:nullptr) {
-            auto [found,added]=set.pbr_textures.try_emplace(p,std::array<GLuint,4>{});
-            if(added){const Texture* maps[4]{&p->albedo,&p->normal,&p->orm,&p->height};for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())upload_texture(*maps[k],found->second[k]);state_reset();}
+            const auto upload=[&](const PbrMaterial* m)->const std::array<GLuint,4>& {
+                auto [found,added]=set.pbr_textures.try_emplace(m,std::array<GLuint,4>{});
+                if(added){const Texture* maps[4]{&m->albedo,&m->normal,&m->orm,&m->height};for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())upload_texture(*maps[k],found->second[k]);state_reset();}
+                return found->second;
+            };
+            const auto& found=upload(p);
             auto& gpu=set.materials[index];
-            gpu.pbr=p;gpu.pbr_albedo=found->second[0];gpu.pbr_normal=found->second[1];gpu.pbr_orm=found->second[2];
-            gpu.height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_program_)?found->second[3]:0;
+            gpu.pbr=p;gpu.pbr_albedo=found[0];gpu.pbr_normal=found[1];gpu.pbr_orm=found[2];
+            gpu.height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_program_)?found[3]:0;
+            if(const auto* f=index<set.pbr_fade.size()?set.pbr_fade[index]:nullptr){const auto& fade=upload(f);
+                gpu.pbr_fade=f;gpu.pbr_fade_albedo=fade[0];gpu.pbr_fade_normal=fade[1];gpu.pbr_fade_orm=fade[2];}
         }
         progress();
     }
@@ -1380,15 +1433,19 @@ private:
         }
         if(!pbr_pack_)return;
         const auto eligible=pbr_eligible_materials(scene);
-        std::size_t mapped=0;
-        for(std::size_t i=0;i<scene.materials.size();++i)if(eligible[i]&&(set.pbr[i]=pbr_pack_->find(scene.materials[i].diffuse)))++mapped;
+        std::size_t mapped=0,fades=0;
+        set.pbr_fade.assign(scene.materials.size(),nullptr);
+        for(std::size_t i=0;i<scene.materials.size();++i)if(eligible[i]&&(set.pbr[i]=pbr_pack_->find(scene.materials[i].diffuse))) {
+            ++mapped;
+            if(pbr_fade_layer(scene.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(scene.materials[i].luminance)))++fades;
+        }
         std::size_t tessellated=0;
         if(tess_program_)for(const auto& in:scene.instances) {
             if(in.mesh>=scene.meshes.size())continue;
             const auto m=in.material==UINT32_MAX?scene.meshes[in.mesh].material:in.material;
             if(m<set.pbr.size()&&set.pbr[m]&&set.pbr[m]->tessellate&&!set.tess_meshes[in.mesh]){set.tess_meshes[in.mesh]=set.pbr[m]->world_uv?2:1;++tessellated;}
         }
-        std::fprintf(stderr,"PBR scene materialsMapped=%zu tessellatedMeshes=%zu tessellation=%d\n",mapped,tessellated,tess_program_?1:0);
+        std::fprintf(stderr,"PBR scene materialsMapped=%zu fadeLayersMapped=%zu tessellatedMeshes=%zu tessellation=%d\n",mapped,fades,tessellated,tess_program_?1:0);
     }
     void validate_mesh(const Scene& scene,std::size_t index) const {
         const auto& mesh=scene.meshes[index];
@@ -1890,7 +1947,10 @@ private:
         bind_texture(1,maps.normal);bind_texture(2,environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);bind_texture(8,maps.height);
         set4f(u.pbr,options_.original_appearance?std::array<float,4>{0,0,0,-1}:pbr_draw_params(maps.pbr,options_.parallax,false)); // wave 29
         if(maps.pbr){set4f(u.pbr_maps,{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f});
-            bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);}
+            bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);
+            set4f(u.pbr_fade,pbr_draw_params(maps.pbr_fade,false,false));
+            if(maps.pbr_fade){set4f(u.pbr_fade_maps,{maps.pbr_fade_albedo?1.f:0.f,maps.pbr_fade_normal?1.f:0.f,maps.pbr_fade_orm?1.f:0.f,0.f});
+                bind_texture(14,maps.pbr_fade_albedo);bind_texture(15,maps.pbr_fade_normal);bind_texture(16,maps.pbr_fade_orm);}}
         const auto diffuse=maps.diffuse?maps.diffuse:gpu.texture;
         glUniformMatrix4fv_(object_location_,1,GL_FALSE,draw.matrix.data());set4f(u.color,material.color);set1i(u.texture,diffuse?1:0);
         // scene_vertex reads normal_matrix only on its enhanced, non-sky, non-ocean path.
@@ -1943,7 +2003,7 @@ private:
         tess_u_={location("object_matrix"),location("normal_matrix"),location("material_color"),location("has_texture"),location("has_normal_map"),
             location("has_environment_map"),location("has_lightmap"),location("has_fade_map"),location("has_height_map"),location("alpha_cutoff"),
             location("source_ocean"),location("sky"),location("fog_enabled"),location("weather_sway"),location("source_scroll"),location("pbr"),
-            location("pbr_maps"),location("tess_view")};
+            location("pbr_maps"),location("tess_view"),location("pbr_fade"),location("pbr_fade_maps")};
         tess_program_=p;
         std::fprintf(stderr,"OpenGL tessellation enabled (GL %d, %zu mirrored uniforms)\n",major,tess_sync_.size());
         check("linking tessellation program");
@@ -1986,8 +2046,11 @@ private:
             glUniform4fv_(tess_u_.sway,1,zero.data());glUniform4fv_(tess_u_.scroll,1,zero.data());
             const auto params=pbr_draw_params(maps.pbr,options_.parallax,true);glUniform4fv_(tess_u_.pbr,1,params.data());
             const std::array<float,4> present{maps.pbr_albedo?1.f:0.f,maps.pbr_normal?1.f:0.f,maps.pbr_orm?1.f:0.f,0.f};glUniform4fv_(tess_u_.pbr_maps,1,present.data());
+            const auto fade=pbr_draw_params(maps.pbr_fade,false,false);glUniform4fv_(tess_u_.pbr_fade,1,fade.data());
+            const std::array<float,4> fade_present{maps.pbr_fade_albedo?1.f:0.f,maps.pbr_fade_normal?1.f:0.f,maps.pbr_fade_orm?1.f:0.f,0.f};glUniform4fv_(tess_u_.pbr_fade_maps,1,fade_present.data());
             bind_texture(0,diffuse);bind_texture(1,maps.normal);bind_texture(2,maps.environment);bind_texture(3,maps.lightmap);bind_texture(4,maps.fade);
             bind_texture(8,maps.height);bind_texture(11,maps.pbr_albedo);bind_texture(12,maps.pbr_normal);bind_texture(13,maps.pbr_orm);
+            bind_texture(14,maps.pbr_fade_albedo);bind_texture(15,maps.pbr_fade_normal);bind_texture(16,maps.pbr_fade_orm);
             bind_vao(gpu.tess_vao);glDrawElements(GL_PATCHES,gpu.tess_count,GL_UNSIGNED_INT,nullptr);
         }
         glUseProgram_(program_);

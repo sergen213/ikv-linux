@@ -56,8 +56,9 @@ static_assert(sizeof(Frame)==1680 && offsetof(Frame,ocean_shore)==1648 && offset
               offsetof(Frame,ground_mark_info)==592 && offsetof(Frame,ground_marks)==624 && kMaxGroundMarks==64);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 // pbr: NONCANONICAL wave 29 (pbr.glsl draw.pbr; w < 0 = no pack material). Every Draw{} defaults to no pack.
-struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;std::array<float,4> pbr{0,0,0,-1};};
-static_assert(sizeof(Draw)==208 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128 && offsetof(Draw,pbr)==192);
+// pbr_fade: NONCANONICAL wave 29 pack material of a terrain's MAT+14 secondary fade layer (lighting.glsl draw.pbrFade).
+struct Draw {Matrix4 model;std::array<float,4> color,flags,extra,scroll;Matrix4 previous_model;std::array<float,4> pbr{0,0,0,-1},pbr_fade{0,0,0,-1};};
+static_assert(sizeof(Draw)==224 && offsetof(Draw,scroll)==112 && offsetof(Draw,previous_model)==128 && offsetof(Draw,pbr)==192);
 // Skinned meshes write staging[frame slot] on the host; the copy into vertices is recorded into that frame (upload).
 // previous: the pose the last frame drew (motion vectors; swapped with vertices on upload); previous_stale: previous
 // still differs from vertices.
@@ -113,7 +114,8 @@ class VulkanRenderer final:public Renderer {
 // (copy_water, bindings 12/13), and water_pass_ continuing the scene pass with writable depth. water_ready_: in a sampled
 // layout (every scene draw binds them, also before the first copy).
 Image water_color_,water_depth_;VkRenderPass water_pass_=VK_NULL_HANDLE;bool water_ready_=false;
-static constexpr std::uint32_t scene_images=20; // combined image samplers per frame/material descriptor set
+static constexpr std::uint32_t scene_images=23; // combined image samplers per frame/material descriptor set
+static constexpr std::size_t material_images=12; // material_maps(): the per-material views of a material set
  // Colour locations per render pass (VK_FORMAT_UNDEFINED = VK_ATTACHMENT_UNUSED). Scene pass: 0 HDR colour, 1 RT guide,
  // 2 motion (RG16F previousUV-UV, FSR or RT denoise), 3/4 RT illumination/reflection history, 5 FSR reactive (R8).
  std::vector<VkFormat> scene_colors_,after_colors_,temporal_colors_{VK_FORMAT_R16G16B16A16_SFLOAT};
@@ -150,7 +152,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
  void mark(TimingMark m,VkPipelineStageFlagBits stage=VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT){if(timing_pool_)vkCmdWriteTimestamp(command_,stage,timing_pool_,timing_slot_*timing_marks+m);}
  // Frame uniforms: one aligned region per slot behind the dynamic binding 0 of every set (uniform_offset_ while recording).
  Buffer uniform_;std::uint32_t uniform_stride_=0,uniform_offset_=0;
- struct ViewsLess {bool operator()(const std::array<VkImageView,9>& a,const std::array<VkImageView,9>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
+ struct ViewsLess {bool operator()(const std::array<VkImageView,material_images>& a,const std::array<VkImageView,material_images>& b)const{return std::lexicographical_compare(a.begin(),a.end(),b.begin(),b.end(),std::less<VkImageView>{});}};
  struct ContourItem {std::uint32_t mesh,material;Matrix4 model;std::array<float,3> color;};
  std::vector<ContourItem> contours_;
  // Everything one Scene uploads: its GPU resources, its RT scene and its temporal history. render() frees it (after a
@@ -159,7 +161,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      const Scene* scene=nullptr;
      std::vector<Image> textures;std::unordered_map<std::string,std::size_t> texture_lookup;std::vector<Geometry> geometry;
      std::vector<VkDescriptorSet> material_sets;
-     std::map<std::array<VkImageView,9>,VkDescriptorSet,ViewsLess> material_cache;std::vector<VkDescriptorPool> material_pools; // see material_set()
+     std::map<std::array<VkImageView,material_images>,VkDescriptorSet,ViewsLess> material_cache;std::vector<VkDescriptorPool> material_pools; // see material_set()
      std::vector<std::uint8_t> material_usage;
      std::vector<Matrix4> history_instance_models;
      std::unique_ptr<VulkanRtScene> rt;VkDescriptorPool rt_pool=VK_NULL_HANDLE;VkDescriptorSet rt_set=VK_NULL_HANDLE;
@@ -176,9 +178,9 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      // NONCANONICAL wave 28: the ocean bed grid's shore field (renderer.hpp ocean_shore_field; binding 15, Frame ocean_shore
      // = its grid, ocean_bed.x = the water level), built with the first ocean wave copy.
      Image ocean_shore;std::array<float,4> ocean_shore_grid{};float ocean_shore_level=0;
-     // NONCANONICAL wave 29: each scene material's PBR pack material (null: none) and the pack maps this scene uploaded
-     // (albedo, normal, orm, height; null handle = absent).
-     std::vector<const PbrMaterial*> pbr;std::map<const PbrMaterial*,std::array<Image,4>> pbr_images;
+     // NONCANONICAL wave 29: each scene material's PBR pack material and that of its MAT+14 secondary fade layer (null:
+     // none; pbr.hpp pbr_fade_layer), and the pack maps this scene uploaded (albedo, normal, orm, height; null = absent).
+     std::vector<const PbrMaterial*> pbr,pbr_fade;std::map<const PbrMaterial*,std::array<Image,4>> pbr_images;
  };
  std::unique_ptr<SceneSet> set_;
  const Image* shore_map_=nullptr; // set_'s ocean_shore for material sets written by descriptors(); null: white
@@ -230,7 +232,7 @@ VkFramebuffer atrous_fb_[2][2]{};VkDescriptorSet atrous_sets_[2][3]{}; // [slot]
      for(auto& t:set.textures)destroy(t);
      destroy(set.ocean_shore);set.ocean_shore_grid={};set.ocean_shore_level=0;shore_map_=nullptr;
      for(auto& [material,images]:set.pbr_images)for(auto& i:images)destroy(i);
-     set.pbr_images.clear();set.pbr.clear();
+     set.pbr_images.clear();set.pbr.clear();set.pbr_fade.clear();
      set.geometry.clear();set.textures.clear();
  }
  void progress()const {if(options_.progress)options_.progress();}
@@ -808,6 +810,11 @@ VkPipeline pipeline(const char* vert,const char* frag,VkRenderPass pass,bool mes
          const VkSpecializationMapEntry water_entry{0,0,sizeof(VkBool32)};
          const VkSpecializationInfo water_info{1,&water_entry,sizeof(VkBool32),&water_value};
          if(frag&&std::strncmp(frag,"scene",5)==0)stages[fragment_stage].pSpecializationInfo=&water_info;
+         // NONCANONICAL wave 29: scene_tess.tesc constant_id 1 (kShadowTess): coarser, shorter-range shadow casters.
+         const VkSpecializationMapEntry shadow_tess_entry{1,0,sizeof(VkBool32)};
+         const VkBool32 shadow_tess_value=VK_TRUE;
+         const VkSpecializationInfo shadow_tess_on{1,&shadow_tess_entry,sizeof(VkBool32),&shadow_tess_value};
+         if(tess&&shadow)stages[1].pSpecializationInfo=&shadow_tess_on;
         // scene.vert binding 1 = the previous frame's skinned pose (static meshes bind binding 0's buffer again).
         const bool previous_pose=std::strncmp(vert,"scene",5)==0;
         const VkVertexInputBindingDescription bindings[2]{{0,static_cast<std::uint32_t>(particle?sizeof(ParticleVertex):sizeof(Vertex)),VK_VERTEX_INPUT_RATE_VERTEX},
@@ -1016,7 +1023,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      if(denoise_enabled_&&!available.independentBlend)
          throw std::runtime_error("Vulkan guided RT denoise requires independentBlend");
      VkPhysicalDeviceProperties props;vkGetPhysicalDeviceProperties(physical_,&props);
-     if(props.limits.maxPushConstantsSize<sizeof(Draw))throw std::runtime_error("Vulkan device push constants are smaller than 208 bytes");
+     if(props.limits.maxPushConstantsSize<sizeof(Draw))throw std::runtime_error("Vulkan device push constants are smaller than 224 bytes");
      // FSR's features are enabled whenever supported, so Ayarlar can switch the upscaler without a new device.
      const char* fsr_missing=available.independentBlend?nullptr:"independentBlend unavailable";
      fsr_supported_=!fsr_missing&&Fsr3Upscaler::supported(physical_,&fsr_missing);
@@ -1157,7 +1164,8 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      // 15/16 the previous frame's resolved RT indirect/reflection (sparse far indirect estimate; white without denoise),
      // 17 the ocean shore field (shore_map_).
      std::array<VkDescriptorSetLayoutBinding,scene_images+1> bindings{};
-     // 18..20 NONCANONICAL wave 29 PBR pack albedo/normal/ORM (white = absent). Tessellation reads 0 and the height (14).
+     // 18..20 NONCANONICAL wave 29 PBR pack albedo/normal/ORM (white = absent), 21..23 those of the terrain's secondary fade
+     // layer. Tessellation reads 0 and the height (14).
      bindings[0]={0,VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC,1,push_stages_,nullptr};
      const std::uint32_t binding_count=scene_images+1;
      for(std::uint32_t i=1;i<binding_count;++i)bindings[i]={i,VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,1,
@@ -1453,19 +1461,19 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
 VkDescriptorSet allocate_set(VkDescriptorSetLayout layout,VkDescriptorPool pool=VK_NULL_HANDLE){VkDescriptorSetAllocateInfo a{};a.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;a.descriptorPool=pool?pool:descriptor_pool_;a.descriptorSetCount=1;a.pSetLayouts=&layout;VkDescriptorSet result;checked(vkAllocateDescriptorSets(device_,&a,&result),"allocate descriptor set");return result;}
 // temporal: input_diffuse/input_reflection replace the previous history at 6/8 (a-trous iterations read the last pass).
 // bound: a material's six scene maps (material_maps); null for frame-target sets.
-void write_set(VkDescriptorSet set,const std::array<const Image*,9>* bound,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
+void write_set(VkDescriptorSet set,const std::array<const Image*,material_images>* bound,unsigned history,bool post,bool temporal=false,const Image* diffuse=nullptr,const Image* second=nullptr,
                const Image* input_diffuse=nullptr,const Image* input_reflection=nullptr) {
      VkDescriptorBufferInfo buffer_info{uniform_.handle,0,sizeof(Frame)};
      std::array<VkDescriptorImageInfo,scene_images> images{};
      const Image* maps[scene_images]{&white_,&flat_normal_,&white_,&white_,&shadow_,&white_,&depth_,&overlay_,&white_,&white_,&white_,&water_color_,&water_depth_,&white_,&white_,&white_,
-         bound&&shore_map_?shore_map_:&white_,&white_,&white_,&white_};
+         bound&&shore_map_?shore_map_:&white_,&white_,&white_,&white_,&white_,&white_,&white_};
      // NONCANONICAL wave 28 sparse far indirect (lighting.glsl sparseIndirect): the last a-trous iteration's output (atrous_
      // A pair) still holds the previous frame's resolved estimate when the scene pass samples it. Never for the passes that
      // write it (post/temporal sets).
      if(denoise_enabled_&&!post){maps[14]=&atrous_[0];maps[15]=&atrous_[1];}
      if(post)maps[0]=&hdr_[history];
      else if(bound){maps[0]=(*bound)[0];maps[1]=(*bound)[1];maps[2]=(*bound)[2];maps[3]=(*bound)[3];maps[8]=(*bound)[4];maps[13]=(*bound)[5];
-         maps[17]=(*bound)[6];maps[18]=(*bound)[7];maps[19]=(*bound)[8];}
+         maps[17]=(*bound)[6];maps[18]=(*bound)[7];maps[19]=(*bound)[8];maps[20]=(*bound)[9];maps[21]=(*bound)[10];maps[22]=(*bound)[11];}
     if(diffuse)maps[0]=diffuse;
     if(second)maps[1]=second;
     // temporal.frag bindings: 1 raw, 2/3 current diffuse/reflection, 4 motion, 6/8 previous diffuse/reflection history,
@@ -1489,24 +1497,27 @@ void write_set(VkDescriptorSet set,const std::array<const Image*,9>* bound,unsig
  }
 // [5]: NONCANONICAL parallax height (lighting.glsl parallax(); 1x1 white = none): enhanced with RendererOptions::parallax.
 // [6..8] NONCANONICAL wave 29 PBR pack albedo/normal/ORM; a pack material's own height replaces [5] (the derived relief
-// belongs to the original art): bound for tessellation, or for parallax with RendererOptions::parallax.
-std::array<const Image*,9> material_maps(const SceneSet& set,const Material& m,const PbrMaterial* p)const {
+// belongs to the original art): bound for tessellation, or for parallax with RendererOptions::parallax. [9..11] the
+// albedo/normal/ORM of the terrain's secondary fade layer pack material (fade; its relief is not used).
+std::array<const Image*,material_images> material_maps(const SceneSet& set,const Material& m,const PbrMaterial* p,const PbrMaterial* fade)const {
      const Image* height=options_.parallax&&!options_.original_appearance?&texture(set,m.height,white_):&white_;
-     std::array<const Image*,4> pack{&white_,&white_,&white_,&white_};
+     std::array<const Image*,4> pack{&white_,&white_,&white_,&white_},fade_pack{&white_,&white_,&white_,&white_};
      if(p&&!options_.original_appearance) {
          const auto found=set.pbr_images.find(p);
          if(found!=set.pbr_images.end())for(unsigned i=0;i<4;++i)if(found->second[i].view)pack[i]=&found->second[i];
          height=((p->parallax||p->tessellate)&&options_.parallax)||(p->tessellate&&tess_enabled_)?pack[3]:&white_;
+         const auto fading=fade?set.pbr_images.find(fade):set.pbr_images.end();
+         if(fading!=set.pbr_images.end())for(unsigned i=0;i<3;++i)if(fading->second[i].view)fade_pack[i]=&fading->second[i];
      }
      return {&texture(set,m.diffuse,white_),&texture(set,m.normal,flat_normal_),
          &texture(set,!m.environment.empty()?m.environment:!m.luminance.empty()?m.luminance:m.lightmap,white_),
-         &texture(set,m.luminance,white_),&texture(set,m.lightmap,white_),height,pack[0],pack[1],pack[2]};
+         &texture(set,m.luminance,white_),&texture(set,m.lightmap,white_),height,pack[0],pack[1],pack[2],fade_pack[0],fade_pack[1],fade_pack[2]};
 }
 // A material set depends only on its six bound views (the rest are frame targets), so retained-scene reloads (actor AOI
 // churn) reuse cached sets instead of rewriting thousands. Cleared whenever textures or render targets are destroyed.
-VkDescriptorSet material_set(SceneSet& set,const Material& m,const PbrMaterial* pack) {
-     const auto bound=material_maps(set,m,pack);
-     std::array<VkImageView,9> key;for(std::size_t i=0;i<key.size();++i)key[i]=bound[i]->view;
+VkDescriptorSet material_set(SceneSet& set,const Material& m,const PbrMaterial* pack,const PbrMaterial* fade) {
+     const auto bound=material_maps(set,m,pack,fade);
+     std::array<VkImageView,material_images> key;for(std::size_t i=0;i<key.size();++i)key[i]=bound[i]->view;
      const auto [found,inserted]=set.material_cache.try_emplace(key,VK_NULL_HANDLE);
      if(!inserted)return found->second;
      try {
@@ -1568,7 +1579,8 @@ void clear_material_sets(SceneSet& set) {
      for(std::uint32_t i=static_cast<std::uint32_t>(kept);i<materials;++i) {
          if(i%1024==0)progress();
          if(!scene.materials.empty()&&!set.material_usage[i])continue;
-         set.material_sets[i]=material_set(set,i<scene.materials.size()?scene.materials[i]:none,i<set.pbr.size()?set.pbr[i]:nullptr);
+         set.material_sets[i]=material_set(set,i<scene.materials.size()?scene.materials[i]:none,i<set.pbr.size()?set.pbr[i]:nullptr,
+             i<set.pbr_fade.size()?set.pbr_fade[i]:nullptr);
      }
      if(!retained)write_rt(set);
  }
@@ -1770,7 +1782,7 @@ void clear_material_sets(SceneSet& set) {
 // material draws it (0 no, 1 original UVs, 2 world projection) for the tessellation copies.
 std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& batch) {
     const Scene& s=*set.scene;
-    if(options_.original_appearance){set.pbr.assign(s.materials.size(),nullptr);return {};}
+    if(options_.original_appearance){set.pbr.assign(s.materials.size(),nullptr);set.pbr_fade.assign(s.materials.size(),nullptr);return {};}
     if(!pbr_loaded_) {
         pbr_loaded_=true;
         const auto root=pbr_pack_root(SDL_GetBasePath());
@@ -1780,18 +1792,21 @@ std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& bat
             std::cerr<<"PBR pack root="<<root.string()<<" materials="<<pbr_pack_->materials.size()<<" keys="<<pbr_pack_->textures.size()<<'\n';
         } catch(const std::exception& e){std::cerr<<"PBR pack disabled: "<<e.what()<<'\n';pbr_pack_.reset();}
     }
-    if(retain){set.pbr.resize(s.materials.size(),nullptr);return {};}
-    set.pbr.assign(s.materials.size(),nullptr);
+    if(retain){set.pbr.resize(s.materials.size(),nullptr);set.pbr_fade.resize(s.materials.size(),nullptr);return {};}
+    set.pbr.assign(s.materials.size(),nullptr);set.pbr_fade.assign(s.materials.size(),nullptr);
     if(!pbr_pack_)return {};
     const auto eligible=pbr_eligible_materials(s);
-    std::size_t mapped=0;
+    std::size_t mapped=0,fades=0;
+    const auto upload=[&](const PbrMaterial* p) {
+        auto [found,added]=set.pbr_images.try_emplace(p);
+        if(!added)return;
+        const Texture* maps[4]{&p->albedo,&p->normal,&p->orm,&p->height};
+        for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())found->second[k]=upload_texture(*maps[k],&batch);
+    };
     for(std::size_t i=0;i<s.materials.size();++i) {
         if(!eligible[i]||!(set.pbr[i]=pbr_pack_->find(s.materials[i].diffuse)))continue;
-        ++mapped;
-        auto [found,added]=set.pbr_images.try_emplace(set.pbr[i]);
-        if(!added)continue;
-        const Texture* maps[4]{&set.pbr[i]->albedo,&set.pbr[i]->normal,&set.pbr[i]->orm,&set.pbr[i]->height};
-        for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())found->second[k]=upload_texture(*maps[k],&batch);
+        ++mapped;upload(set.pbr[i]);
+        if(pbr_fade_layer(s.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(s.materials[i].luminance))){++fades;upload(set.pbr_fade[i]);}
     }
     std::vector<std::uint8_t> tess(s.meshes.size(),0);
     std::size_t tessellated=0;
@@ -1800,7 +1815,7 @@ std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& bat
         const auto m=in.material==UINT32_MAX?s.meshes[in.mesh].material:in.material;
         if(m<set.pbr.size()&&set.pbr[m]&&set.pbr[m]->tessellate&&!tess[in.mesh]){tess[in.mesh]=set.pbr[m]->world_uv?2:1;++tessellated;}
     }
-    std::cerr<<"PBR scene materialsMapped="<<mapped<<" packMaterials="<<set.pbr_images.size()<<" tessellatedMeshes="<<tessellated
+    std::cerr<<"PBR scene materialsMapped="<<mapped<<" fadeLayersMapped="<<fades<<" packMaterials="<<set.pbr_images.size()<<" tessellatedMeshes="<<tessellated
         <<" tessellation="<<(tess_enabled_?1:0)<<'\n';
     return tess;
 }
@@ -1858,7 +1873,7 @@ void record_geometry_uploads(SceneSet& set) {
     vkCmdPipelineBarrier(command_,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,0,1,&b,0,nullptr,0,nullptr);
 }
  // Push constants of one scene draw (shadow: previous_model carries the cascade's light matrix).
- Draw scene_draw(const DrawItem& item,const Material* material,bool shadow,const Matrix4* light_vp,const PbrMaterial* p=nullptr)const {
+ Draw scene_draw(const DrawItem& item,const Material* material,bool shadow,const Matrix4* light_vp,const PbrMaterial* p=nullptr,const PbrMaterial* fade=nullptr)const {
      Draw draw;draw.model=item.model;
      draw.color=material?material->color:std::array<float,4>{1,1,1,1};
      draw.flags={material&&!material->normal.empty()?1.f:0.f,material&&(!material->environment.empty()||(item.sky&&(!material->luminance.empty()||!material->lightmap.empty())))?1.f:0.f,
@@ -1868,8 +1883,8 @@ void record_geometry_uploads(SceneSet& set) {
         (item.alpha?1.f:0.f)+(item.dynamic?.5f:0.f)+(material&&material->source_ocean?2.f:0.f)};
      draw.scroll=item.scroll;draw.previous_model=shadow&&light_vp?*light_vp:item.previous;
      // NONCANONICAL wave 29 PBR pack (pbr.glsl draw.pbr). A tessellation material without tessellation falls back to
-     // parallax occlusion when that is on.
-     if(!options_.original_appearance)draw.pbr=pbr_draw_params(p,options_.parallax,item.tess);
+     // parallax occlusion when that is on. The secondary fade layer's material carries no relief.
+     if(!options_.original_appearance){draw.pbr=pbr_draw_params(p,options_.parallax,item.tess);if(p)draw.pbr_fade=pbr_draw_params(fade,false,false);}
      return draw;
  }
  // Opaque colour draws the depth prepass covers: visible, not sky/water/blended, no alpha cutoff (lighting.glsl may
@@ -1878,10 +1893,11 @@ void record_geometry_uploads(SceneSet& set) {
      if(!prepass_||!item.visible||item.sky||item.alpha||item.ocean||item.tess)return false;
      return item.material>=scene.materials.size()||!(scene.materials[item.material].alpha_cutoff>0);
  }
- // items: a slice of set.draws. casters: the shadow cascade's light volume, with near-clamped casters retained.
- // prepass: the depth-only pass over the prepassed() items.
- void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,
-                 const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr,bool prepass=false) {
+// items: a slice of set.draws. casters: the shadow cascade's light volume, with near-clamped casters retained.
+// prepass: the depth-only pass over the prepassed() items. tess_casters: tessellated items cast displaced shadows
+// (NONCANONICAL wave 29: near cascade only; the far cascade draws their source mesh).
+void draw_scene(VkCommandBuffer c,bool shadow,const SceneSet& set,std::span<const DrawItem> items,
+                const FrustumPlanes* casters=nullptr,const Matrix4* light_vp=nullptr,bool prepass=false,bool tess_casters=true) {
      const Scene& scene=*set.scene;const auto& material_usage_=set.material_usage;const auto& material_sets_=set.material_sets;
      if(rt_enabled_&&!shadow&&!prepass)vkCmdBindDescriptorSets(c,VK_PIPELINE_BIND_POINT_GRAPHICS,pipeline_layout_,1,1,&set.rt_set,0,nullptr);
      // draws are sorted by pass, then distance: skip rebinding an unchanged pipeline, material set and mesh buffers.
@@ -1898,10 +1914,12 @@ void record_geometry_uploads(SceneSet& set) {
                  throw std::runtime_error("scene draw references an unbound dormant material: "+std::to_string(item.material));
          }
          const Material* material=item.material<scene.materials.size()?&scene.materials[item.material]:nullptr;
-         const Draw draw=scene_draw(item,material,shadow,light_vp,item.material<set.pbr.size()?set.pbr[item.material]:nullptr);
+         const Draw draw=scene_draw(item,material,shadow,light_vp,item.material<set.pbr.size()?set.pbr[item.material]:nullptr,
+             item.material<set.pbr_fade.size()?set.pbr_fade[item.material]:nullptr);
          bool double_sided=material&&material->double_sided;
          const unsigned variant=(double_sided?2:0)+(item.alpha?1:0);
-         auto selected=item.tess?(shadow?(double_sided?shadow_tess_double_:shadow_tess_):(double_sided?opaque_tess_double_:opaque_tess_)):
+         const bool tess=item.tess&&(!shadow||tess_casters);
+         auto selected=tess?(shadow?(double_sided?shadow_tess_double_:shadow_tess_):(double_sided?opaque_tess_double_:opaque_tess_)):
              shadow?(draw.flags[3]>0?(double_sided?shadow_double_:shadow_pipeline_):(double_sided?shadow_depth_double_:shadow_depth_)):
              prepass?(double_sided?prepass_double_:prepass_pipeline_):
              item.sky?sky_pipeline_[variant]:
@@ -1914,17 +1932,17 @@ void record_geometry_uploads(SceneSet& set) {
          vkCmdPushConstants(c,pipeline_layout_,push_stages_,0,sizeof(draw),&draw);
          // NONCANONICAL wave 28: the subdivided ocean copy where the wind sea shows (build_draws); its own binding key.
          auto& g=set.geometry[item.mesh];
-         const std::uint32_t mesh_key=item.waves?item.mesh|0x80000000u:item.tess?item.mesh|0x40000000u:item.mesh;
+         const std::uint32_t mesh_key=item.waves?item.mesh|0x80000000u:tess?item.mesh|0x40000000u:item.mesh;
          if(mesh_key!=bound_mesh) {
              // Binding 1 = the previous pose motion vectors compare against (skins only, once motion is rendered).
-             const VkBuffer vertices=item.waves?g.wave_vertices.handle:item.tess?g.tess_vertices.handle:g.vertices.handle;
+             const VkBuffer vertices=item.waves?g.wave_vertices.handle:tess?g.tess_vertices.handle:g.vertices.handle;
              const VkBuffer buffers[2]{vertices,motion_vectors_&&g.previous.handle?g.previous.handle:vertices};
              const VkDeviceSize offsets[2]{};
              vkCmdBindVertexBuffers(c,0,2,buffers,offsets);
-             vkCmdBindIndexBuffer(c,item.waves?g.wave_indices.handle:item.tess?g.tess_indices.handle:g.indices.handle,0,VK_INDEX_TYPE_UINT32);
+             vkCmdBindIndexBuffer(c,item.waves?g.wave_indices.handle:tess?g.tess_indices.handle:g.indices.handle,0,VK_INDEX_TYPE_UINT32);
              bound_mesh=mesh_key;
          }
-         vkCmdDrawIndexed(c,item.waves?g.wave_count:item.tess?g.tess_count:g.count,1,0,0,0);
+         vkCmdDrawIndexed(c,item.waves?g.wave_count:tess?g.tess_count:g.count,1,0,0,0);
      }
  }
  // depth: clear the depth attachment that follows the pass's colour attachments (location 0 clears to the backdrop,
@@ -2412,7 +2430,7 @@ void set_particles(const ParticleFrame& frame)override {
          vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
          const Matrix4& light=index?f.far_light:f.light;
          const auto casters=shadow_caster_planes(light);
-         draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light);
+         draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light,false,index==0);
      }
      vkCmdEndRenderPass(command_);
      }

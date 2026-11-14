@@ -30,7 +30,7 @@ layout(location=1) out vec4 outputGuide;
 layout(location=3) out vec4 outputDiffuse;
 layout(location=4) out vec4 outputReflection;
 #endif
-layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; mat4 previousModel; vec4 pbr; } draw;
+layout(push_constant) uniform Draw { mat4 model; vec4 color; vec4 flags; vec4 extra; vec4 scroll; mat4 previousModel; vec4 pbr; vec4 pbrFade; } draw;
 #include "pbr.glsl"
 layout(set=0,binding=1) uniform sampler2D diffuseMap;
 layout(set=0,binding=2) uniform sampler2D normalMap;
@@ -59,9 +59,20 @@ layout(set=0,binding=14) uniform sampler2D heightMap;
 layout(set=0,binding=18) uniform sampler2D pbrAlbedoMap;
 layout(set=0,binding=19) uniform sampler2D pbrNormalMap;
 layout(set=0,binding=20) uniform sampler2D pbrOrmMap;
+// NONCANONICAL wave 29: the terrain's MAT+14 secondary fade layer has its own pack material (draw.pbrFade, pbr.hpp
+// pbr_fade_layer): albedo/normal/ORM blended with the main pack's by the same vertex alpha (fadeWeight) as the original
+// blends the two diffuse layers; the main pack's relief (parallax depth, tessellation) scales with that weight too.
+layout(set=0,binding=21) uniform sampler2D pbrFadeAlbedoMap;
+layout(set=0,binding=22) uniform sampler2D pbrFadeNormalMap;
+layout(set=0,binding=23) uniform sampler2D pbrFadeOrmMap;
 vec2 surfaceUV,pbrUV,pbrDu1=vec2(0),pbrDu2=vec2(0);
+float pbrUvPerUnit=0.; // original UV change per scene unit (pbr.glsl pbrLowLod)
 vec3 pbrPu=vec3(0),pbrPv=vec3(0);
 bool pbrOn=false;
+bool pbrFadeLayer=false,pbrFadeOn=false; // the draw blends a fade layer; that layer has a pack material
+vec2 pbrFadeUV=vec2(0),pbrFadeDu1=vec2(0),pbrFadeDu2=vec2(0);
+vec3 pbrFadePu=vec3(0),pbrFadePv=vec3(0);
+float pbrMainWeight(){return pbrFadeLayer?clamp(fadeWeight,0.,1.):1.;}
 vec3 parallaxGradient=vec3(0);
 void parallax(){
     surfaceUV=texcoord;pbrUV=texcoord;
@@ -72,6 +83,15 @@ void parallax(){
     vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),nf=cross(dp1,dp2),v=frame.eye.xyz-worldPosition;
     vec2 du1=dFdx(base),du2=dFdy(base);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbrDu1=du1;pbrDu2=du2;
+    pbrUvPerUnit=max(length(dFdx(texcoord))/max(length(dp1),1e-6),length(dFdy(texcoord))/max(length(dp2),1e-6));
+    if(pbrOn){ // draw-uniform: the fade layer's derivatives stay in uniform control flow
+        pbrFadeLayer=draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5;
+        pbrFadeOn=pbrFadeLayer&&pbrActive(draw.pbrFade);
+        pbrFadeUV=draw.pbrFade.x>0.?pbrWorldUV(worldPosition,worldNormal,draw.pbrFade.xy):texcoord;
+        pbrFadeDu1=dFdx(pbrFadeUV);pbrFadeDu2=dFdy(pbrFadeUV);
+        float fdet=pbrFadeDu1.x*pbrFadeDu2.y-pbrFadeDu2.x*pbrFadeDu1.y;
+        if(abs(fdet)>1e-12){pbrFadePu=(dp1*pbrFadeDu2.y-dp2*pbrFadeDu1.y)/fdet;pbrFadePv=(dp2*pbrFadeDu1.x-dp1*pbrFadeDu2.x)/fdet;}
+    }
     if(abs(det)<1e-12||dot(nf,nf)<1e-20||dist<1e-4)return;
     nf=normalize(nf);v/=dist;if(dot(nf,v)<0)nf=-nf;
     vec3 pu=(dp1*du2.y-dp2*du1.y)/det,pv=(dp2*du1.x-dp1*du2.x)/det; // dP/du, dP/dv
@@ -79,7 +99,7 @@ void parallax(){
     if(textureSize(heightMap,0).x<2||(pbrOn&&!pbrParallax(draw.pbr)))return;
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
     float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
-        (pbrOn?min(draw.pbr.z,1.):min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
+        (pbrOn?min(draw.pbr.z,1.)*pbrMainWeight():min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
     int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,base,du1,du2).r,lastT=0,lastF=h-1;
@@ -93,7 +113,12 @@ void parallax(){
 }
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
-    if(pbrOn&&textureSize(pbrNormalMap,0).x>1)return pbrNormal(n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb);
+    if(pbrOn&&(pbrFadeLayer||textureSize(pbrNormalMap,0).x>1)) { // fade layers never have a source normal map
+        vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
+        if(!pbrFadeLayer)return m;
+        vec3 f=pbrFadeOn&&textureSize(pbrFadeNormalMap,0).x>1?pbrNormal(n,pbrFadePu,pbrFadePv,textureGrad(pbrFadeNormalMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb):n;
+        return normalize(mix(f,m,pbrMainWeight()));
+    }
     if(draw.flags.x<.5)return normalize(n-parallaxGradient);
     // Zero/degenerate-tangent source meshes (e.g. NPC staff tips) skip normal mapping, as GL does: a screen-derivative
     // tangent is per-triangle, so it rotated the map differently on every facet.
@@ -104,6 +129,10 @@ vec3 mappedNormal(){
     // does. Decoding b as z bent specular-free texels (b~0) inward, so normal-mapped actors went near-black (wave 19).
     vec2 xy=texture(normalMap,surfaceUV).xy*2-1;
     return normalize(mat3(t,cross(n,t),n)*normalize(vec3(xy,1-dot(xy,xy))));
+}
+// The original per-vertex light on the unmapped path (originalSurface multiplies the texel by it).
+vec3 originalVertexLight(float sunVisibility){
+    return sunVisibility<1&&frame.sun.w>.5?clamp(sourceAmbientTerm+sourceSunTerm*sunVisibility,0,1):vertexAmbient.rgb;
 }
 // Independently expressed recovered original shader equations, not copied proprietary shader source.
 // sunVisibility: 1 in raster; RT sun-ray visibility. Occlusion removes only the source directional terms.
@@ -136,7 +165,7 @@ vec4 originalSurface(vec4 diffuse,float sunVisibility) {
         return vec4(result,1);
     }
     vec3 lightmap=hasLightmap?texture(originalLightmap,lightmapUV).rgb:vec3(0);
-    vec3 vertexLight=sunVisibility<1&&frame.sun.w>.5?clamp(sourceAmbientTerm+sourceSunTerm*sunVisibility,0,1):vertexAmbient.rgb;
+    vec3 vertexLight=originalVertexLight(sunVisibility);
     if(hasEnvironment) {
         vec3 result=hasLightmap?
             mix(diffuse.rgb,environmentColor,diffuse.a)-lightmap*(1-clamp(diffuse.a,0,1))*frame.fog.z:
@@ -345,16 +374,32 @@ vec3 result=frame.params.x<.5?original.rgb:texel.rgb;
 if(frame.params.x>.5){vec3 n=mappedNormal(),v=normalize(frame.eye.xyz-worldPosition),l=normalize(frame.sun.xyz),h=normalize(v+l);float roughness=.65,metallic=0.;vec3 albedo=pow(max(texel.rgb-enhancedLightmapShadow(texel.a),vec3(0)),vec3(2.2));
 // NONCANONICAL wave 29 PBR pack: albedo (pbr.glsl pbrAlbedo), roughness, metallic and ambient occlusion.
 float pbrAo=1.;
-if(pbrOn){
+if(pbrOn&&!pbrFadeLayer){
     if(textureSize(pbrAlbedoMap,0).x>1) {
-        vec3 low=textureLod(diffuseMap,texcoord,max(float(textureQueryLevels(diffuseMap))-4.,0.)).rgb;
-        // Terrain blends the MAT+14 secondary layer by vertex alpha (texel above): the low-frequency colour follows the blend.
-        if(draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5)
-            low=mix(textureLod(fadeMap,texcoord,max(float(textureQueryLevels(fadeMap))-4.,0.)).rgb,low,fadeWeight);
+        vec3 low=textureLod(diffuseMap,texcoord,pbrLowLod(draw.pbr,pbrUvPerUnit,float(textureSize(diffuseMap,0).x),float(textureQueryLevels(diffuseMap)))).rgb;
         low=low*draw.color.rgb-enhancedLightmapShadow(texel.a);
         albedo=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,albedo,pbrTintKeep(draw.pbr));
     }
     if(textureSize(pbrOrmMap,0).x>1){vec3 orm=textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb;pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;}
+} else if(pbrOn) {
+    // Terrain: each layer's pack material carries that layer's own low-frequency original colour (unmapped fade layer:
+    // its original texel), blended by vertex alpha like the original diffuse layers (texel above).
+    vec3 shade=enhancedLightmapShadow(texel.a);
+    vec3 mainA=pow(max(texture(diffuseMap,surfaceUV).rgb*draw.color.rgb-shade,vec3(0)),vec3(2.2));
+    vec3 fadeA=pow(max(texture(fadeMap,surfaceUV).rgb*draw.color.rgb-shade,vec3(0)),vec3(2.2));
+    if(textureSize(pbrAlbedoMap,0).x>1){
+        vec3 low=textureLod(diffuseMap,texcoord,pbrLowLod(draw.pbr,pbrUvPerUnit,float(textureSize(diffuseMap,0).x),float(textureQueryLevels(diffuseMap)))).rgb*draw.color.rgb-shade;
+        mainA=pbrAlbedo(textureGrad(pbrAlbedoMap,pbrUV,pbrDu1,pbrDu2).rgb,low,mainA,pbrTintKeep(draw.pbr));
+    }
+    if(pbrFadeOn&&textureSize(pbrFadeAlbedoMap,0).x>1){
+        vec3 low=textureLod(fadeMap,texcoord,pbrLowLod(draw.pbrFade,pbrUvPerUnit,float(textureSize(fadeMap,0).x),float(textureQueryLevels(fadeMap)))).rgb*draw.color.rgb-shade;
+        fadeA=pbrAlbedo(textureGrad(pbrFadeAlbedoMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb,low,fadeA,pbrTintKeep(draw.pbrFade));
+    }
+    vec3 mainOrm=textureSize(pbrOrmMap,0).x>1?textureGrad(pbrOrmMap,pbrUV,pbrDu1,pbrDu2).rgb:vec3(1,.65,0);
+    vec3 fadeOrm=pbrFadeOn&&textureSize(pbrFadeOrmMap,0).x>1?textureGrad(pbrFadeOrmMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb:vec3(1,.65,0);
+    float w=pbrMainWeight();
+    albedo=mix(fadeA,mainA,w);
+    vec3 orm=mix(fadeOrm,mainOrm,w);pbrAo=orm.r;roughness=clamp(orm.g,.04,1.);metallic=orm.b;
 }
 // NONCANONICAL wave 27: season tint, rain wetness, running streaks, rippled puddles and snow cover (weather.glsl);
 // NONCANONICAL wave 28: footstep rings in puddles and prints in snow (frame.groundMarks).
@@ -391,6 +436,10 @@ rtDiffuse=light.diffuse;rtReflection=light.reflection;rtArtwork=rtGuidePackArtwo
 // ambient everywhere. The record fog is applied in linear like the original's (sky included).
 bool roofed=sceneRoofed();
 vec3 baked=pow(max(originalSurface(texel,roofed?1.:0.).rgb,vec3(0)),vec3(2.2));
+// NONCANONICAL wave 29: with a pack material the baked light lights the pack albedo, not the original texture (on this
+// path originalSurface = (texel - lightmap shadow) x vertex light, so this equals the original baked light whenever
+// the albedo is the original's); else shadowed and lightmapped ground kept showing only the original art.
+if(pbrOn&&draw.flags.x<.5&&draw.flags.y<.5)baked=sourceAlbedo*pow(originalVertexLight(roofed?1.:0.),vec3(2.2));
 // Weather on the baked light: the same tint and wetness; snow takes the baked light level.
 if(weather)baked=weatherBaked(baked,sourceAlbedo,weathered,frame.weatherMisc)*weatherAmbientTint(frame.weather,frame.weatherMisc,frame.sourceTime.y);
 // x1.5: calibrated against the ACES toe so enhanced is about as bright as original (whose fake-HDR glow is original-only):

@@ -205,6 +205,12 @@ int main(int argc, char** argv) {
                         entry["largest"]={{"zone",d.key},{"center",{largest[m][0],largest[m][1],largest[m][2]}},{"extent",largest[m][3]}};
                     if(!scene.materials[m].name.empty()&&std::find(entry["materials"].begin(),entry["materials"].end(),scene.materials[m].name)==entry["materials"].end())
                         entry["materials"].push_back(scene.materials[m].name);
+                    // The MAT+14 secondary fade layer drawn under this key (renderers map its own pack material too).
+                    if(ikv::pbr_fade_layer(scene.materials[m])) {
+                        if(!entry.contains("fade_layers"))entry["fade_layers"]=nlohmann::json::array();
+                        const auto fade=ikv::pbr_texture_key(scene.materials[m].luminance);
+                        if(std::find(entry["fade_layers"].begin(),entry["fade_layers"].end(),fade)==entry["fade_layers"].end())entry["fade_layers"].push_back(fade);
+                    }
                 }
             }
             std::cout<<keys.dump(1)<<"\n";return 0;
