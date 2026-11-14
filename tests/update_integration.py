@@ -897,6 +897,12 @@ def main():
         recover_invoke("install", third)
         assert os.readlink(recovery_root / "current") == "releases/v3"
         assert recovery_highwater.read_bytes() == third_highwater
+        # A validly signed Windows package ("platform":"windows") is never installed by the Linux updater.
+        windows_document = dict(third[4], version="v4-windows", sequence=4, platform="windows")
+        sign_fixture(invalid_manifest, invalid_signature, private_key, windows_document)
+        recover_invoke("install", (third[0], third[1], invalid_manifest, invalid_signature, windows_document), succeeds=False)
+        assert os.readlink(recovery_root / "current") == "releases/v3"
+        assert not (recovery_root / "releases/v4-windows").exists()
         # Sequences are channel-local and never an ordering of arbitrary version strings.
         experimental_document = dict(first[4], version="z-experimental", channel="experimental")
         sign_fixture(invalid_manifest, invalid_signature, private_key, experimental_document)
