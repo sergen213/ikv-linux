@@ -106,6 +106,7 @@ std::string field(std::string_view key) {
     if(key=="token")return "Sıfırlama kodu";
     if(key=="name"||key=="confirm_name")return "Karakter ismi";
     if(key=="class_id")return "Sınıf";
+    if(key=="realm_id")return "Diyar";
     return std::string(key);
 }
 std::string text(const Json& body, const char* key, std::size_t min, std::size_t max) {
@@ -129,11 +130,11 @@ std::int64_t number(const Json& body,const char* key,std::int64_t min,std::int64
     auto value=body[key].get<std::int64_t>(); if(value<min||value>max)throw ApiError(400,"invalid_request",field(key)+" geçersiz."); return value;
 }
 void state_valid(const Json& state) { if(!state.is_object()||state.dump().size()>262144)throw ApiError(400,"invalid_state","Character state must be an object of at most 256 KiB"); }
-constexpr const char* character_columns="c.id,c.account_id,c.name,c.class_id,c.appearance::text,c.state::text,COALESCE(m.muted_until>now(),false),COALESCE(to_char(m.muted_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),''),(SELECT g.state::text FROM guild_registry g JOIN guild_members gm ON gm.guild_id=g.id WHERE gm.character_id=c.id),c.bank::text";
+constexpr const char* character_columns="c.id,c.account_id,c.name,c.class_id,c.appearance::text,c.state::text,COALESCE(m.muted_until>now(),false),COALESCE(to_char(m.muted_until AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'),''),(SELECT g.state::text FROM guild_registry g JOIN guild_members gm ON gm.guild_id=g.id WHERE gm.character_id=c.id),c.bank::text,c.realm_id";
 Json character_row(const Result& result,int row) {
     auto state=Json::parse(cell(result,row,5));
     if(PQgetisnull(result.get(),row,8))state.erase("guild");else state["guild"]=Json::parse(cell(result,row,8));
-    return {{"id",integer(result,row,0)},{"account_id",integer(result,row,1)},{"name",cell(result,row,2)},{"class_id",integer(result,row,3)},
+    return {{"id",integer(result,row,0)},{"account_id",integer(result,row,1)},{"name",cell(result,row,2)},{"class_id",integer(result,row,3)},{"realm_id",integer(result,row,10)},
         {"appearance",Json::parse(cell(result,row,4))},{"state",std::move(state)},{"bank",Json::parse(cell(result,row,9))},
         {"moderation",{{"muted",boolean(result,row,6)},{"muted_until",cell(result,row,7).empty()?Json(nullptr):Json(cell(result,row,7))}}}};
 }
@@ -230,6 +231,45 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
     if(!WIFEXITED(status)||WEXITSTATUS(status)!=0)throw ApiError(503,"backup_error","Database tool failed; check PostgreSQL tool versions and privileges");
 #endif
 }
+// ---- Realms and shards (wave 30, NONCANONICAL) ----
+// A shard row is selectable only with a real port and a heartbeat within 15 seconds.
+constexpr const char* shard_columns="s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity";
+constexpr const char* shard_live="s.kind='world' AND s.port>0 AND s.updated_at>now()-interval '15 seconds'";
+ShardInfo shard_row(const Result& result,int row) {
+    return {cell(result,row,0),static_cast<int>(integer(result,row,1)),cell(result,row,2),static_cast<std::uint16_t>(integer(result,row,3)),
+        static_cast<int>(integer(result,row,4)),static_cast<int>(integer(result,row,5))};
+}
+std::optional<ShardInfo> first_shard(const Result& result) { if(!PQntuples(result.get()))return std::nullopt; return shard_row(result,0); }
+Json shard_json(const ShardInfo& s) { return {{"instance",s.instance},{"realm_id",s.realm_id},{"host",s.host},{"port",s.port},{"players",s.players},{"capacity",s.capacity}}; }
+bool printable(std::string_view value) { return std::none_of(value.begin(),value.end(),[](unsigned char c){return c<32||c==127;}); }
+std::string instance_name(std::string_view value) {
+    if(value.empty()||value.size()>128||!printable(value))throw ApiError(400,"invalid_instance","Invalid world instance");
+    return std::string(value);
+}
+std::string realm_population(std::int64_t live,std::int64_t players,std::int64_t capacity,std::int64_t open) {
+    if(live==0)return "low";
+    if(open==0)return "full";
+    return players*3<capacity?"low":players*3<capacity*2?"medium":"high";
+}
+// The character's lease moved to the destination of a ticket this instance issued: a completed phase handoff, not a
+// lost lease. The source keeps no authority over the character (its late saves would overwrite newer state).
+bool handed_off(PGconn* connection,std::int64_t character,const std::string& instance) {
+    auto result=sql(connection,"SELECT 1 FROM transfer_tickets t JOIN characters c ON c.id=t.character_id WHERE t.character_id=$1::bigint AND t.from_instance=$2 AND c.lease_instance=t.to_instance AND c.lease_expires_at>now() AND t.created_at>now()-interval '10 minutes' LIMIT 1",{std::to_string(character),instance});
+    return PQntuples(result.get())>0;
+}
+// Realm rows with live-shard population; characters counts the given account's live characters (account 0: everyone's).
+Json realm_rows(PGconn* connection,std::int64_t account) {
+    auto result=sql(connection,std::string("SELECT r.id,r.name,r.kind,r.sort,count(s.instance),COALESCE(sum(s.players),0),COALESCE(sum(s.capacity),0),count(s.instance) FILTER (WHERE s.players<s.capacity),"
+        "(SELECT count(*) FROM characters c WHERE c.realm_id=r.id AND ($1::bigint=0 OR c.account_id=$1::bigint) AND c.deleted_at IS NULL) "
+        "FROM realms r LEFT JOIN world_instances s ON s.realm_id=r.id AND ")+shard_live+" GROUP BY r.id ORDER BY r.sort,r.id",{std::to_string(account)});
+    Json rows=Json::array();
+    for(int i=0;i<PQntuples(result.get());++i){
+        const auto live=integer(result,i,4);
+        rows.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"kind",cell(result,i,2)},{"sort",integer(result,i,3)},{"status",live?"online":"offline"},
+            {"population",realm_population(live,integer(result,i,5),integer(result,i,6),integer(result,i,7))},{"characters",integer(result,i,8)}});
+    }
+    return rows;
+}
 } // anonymous namespace
 // POST /v1/admin/world and the in-game Yönetici Paneli (World::handle "admin") share these bounds (NONCANONICAL web/in-game
 // administration). Only validated fields reach World::admin.
@@ -285,6 +325,11 @@ struct Store::Impl {
     struct Limit {std::chrono::steady_clock::time_point start;int count;};
     std::array<std::map<std::string,Limit>,2> limits;
     std::map<std::int64_t,std::pair<std::int64_t,std::string>> leases;
+    // NONCANONICAL wave 30 shard bus: a dedicated connection outside the pool that only LISTENs on ikv_bus.
+    std::mutex bus_mutex;
+    PGconn* listener=nullptr;
+    // Characters this process handed to another shard with a ticket (id -> account): later saves are dropped silently.
+    std::map<std::int64_t,std::int64_t> departed;
     explicit Impl(std::string value):dsn(std::move(value)) {
         const char* keywords[]={"dbname","connect_timeout","client_encoding",nullptr};
         const char* values[]={dsn.c_str(),"5","UTF8",nullptr};
@@ -315,7 +360,29 @@ struct Store::Impl {
         }
         catch(...){for(auto* c:connections)if(c)PQfinish(c);throw;}
     }
-    ~Impl(){for(auto* c:connections)PQfinish(c);OPENSSL_cleanse(dsn.data(),dsn.size());}
+    ~Impl(){for(auto* c:connections)PQfinish(c);if(listener)PQfinish(listener);OPENSSL_cleanse(dsn.data(),dsn.size());}
+    // Caller holds bus_mutex. Same single endpoint as the pool (checked against the first pooled connection).
+    PGconn* bus_listener() {
+        if(listener&&PQstatus(listener)==CONNECTION_OK)return listener;
+        if(listener){PQfinish(listener);listener=nullptr;}
+        const char* keywords[]={"dbname","connect_timeout","client_encoding",nullptr};
+        const char* values[]={dsn.c_str(),"5","UTF8",nullptr};
+        PGconn* c=PQconnectdbParams(keywords,values,1);
+        try {
+            if(!c||PQstatus(c)!=CONNECTION_OK)throw ApiError(503,"bus_error","Cannot connect the shard bus to PostgreSQL");
+            auto* first=connections.front();
+            if(std::string_view(PQhost(c))!=PQhost(first)||std::string_view(PQhostaddr(c))!=PQhostaddr(first)||std::string_view(PQport(c))!=PQport(first)||std::string_view(PQdb(c))!=PQdb(first))throw ApiError(503,"database_endpoint","Database bus endpoint differs from the pool");
+            const int socket=PQsocket(c);
+#ifdef _WIN32
+            if(socket<0||!SetHandleInformation(reinterpret_cast<HANDLE>(static_cast<std::uintptr_t>(socket)),HANDLE_FLAG_INHERIT,0))throw ApiError(503,"bus_error","Cannot secure database connection");
+#else
+            if(socket<0||fcntl(socket,F_SETFD,FD_CLOEXEC)<0)throw ApiError(503,"bus_error","Cannot secure database connection");
+#endif
+            sql(c,"SET statement_timeout='10s'");
+            sql(c,"LISTEN ikv_bus");
+        } catch(...) { if(c)PQfinish(c); throw; }
+        return listener=c;
+    }
     struct Connection {
         Impl& owner;std::size_t index;
         explicit Connection(Impl& impl):owner(impl),index(0){std::unique_lock lock(owner.mutex);if(!owner.available.wait_for(lock,std::chrono::seconds(5),[&]{return std::any_of(owner.used.begin(),owner.used.end(),[](bool v){return !v;});}))throw ApiError(503,"busy","Sunucu meşgul; daha sonra tekrar deneyin.");while(owner.used[index])++index;owner.used[index]=true;}
@@ -352,13 +419,15 @@ Json Store::enter_character(const Identity& who,std::int64_t id,std::string_view
     if(instance.empty()||instance.size()>128)throw ApiError(400,"invalid_instance","Invalid world instance");
     {std::lock_guard guard(impl_->mutex);if(impl_->leases.contains(id))throw ApiError(409,"character_unavailable","Character is already active in this world process");}
     Impl::Connection connection(*impl_);Transaction transaction(connection);
-    auto result=sql(connection,"UPDATE characters c SET lease_instance=$3,lease_expires_at=now()+interval '30 seconds' FROM accounts a WHERE c.id=$1::bigint AND c.account_id=$2::bigint AND a.id=c.account_id AND c.deleted_at IS NULL AND (a.banned_until IS NULL OR a.banned_until<=now()) AND (c.lease_expires_at IS NULL OR c.lease_expires_at<=now()) RETURNING c.id",{std::to_string(id),std::to_string(who.account_id),std::string(instance)});
+    // NONCANONICAL wave 30 phase handoff: a live lease is taken over when its holder issued this character an unexpired
+    // ticket to this instance (redeemed or not), so the joiner does not wait for the 30 s lease expiry.
+    auto result=sql(connection,"UPDATE characters c SET lease_instance=$3,lease_expires_at=now()+interval '30 seconds' FROM accounts a WHERE c.id=$1::bigint AND c.account_id=$2::bigint AND a.id=c.account_id AND c.deleted_at IS NULL AND (a.banned_until IS NULL OR a.banned_until<=now()) AND (c.lease_expires_at IS NULL OR c.lease_expires_at<=now() OR (c.lease_instance<>$3 AND EXISTS (SELECT 1 FROM transfer_tickets t WHERE t.character_id=c.id AND t.from_instance=c.lease_instance AND t.to_instance=$3 AND t.expires_at>now()))) RETURNING c.id",{std::to_string(id),std::to_string(who.account_id),std::string(instance)});
     if(!PQntuples(result.get()))throw ApiError(409,"character_unavailable","Character missing, banned or already active");
     auto state=sql(connection,std::string("SELECT ")+character_columns+" FROM characters c LEFT JOIN chat_moderation m ON m.character_id=c.id WHERE c.id=$1::bigint",{std::to_string(id)});auto out=character_row(state,0);transaction.commit();
-    {std::lock_guard lock(impl_->mutex);impl_->leases[id]={who.account_id,std::string(instance)};}return out;
+    {std::lock_guard lock(impl_->mutex);impl_->departed.erase(id);impl_->leases[id]={who.account_id,std::string(instance)};}return out;
 }
 void Store::leave_character(std::int64_t account,std::int64_t id) {
-    std::string instance;{std::lock_guard lock(impl_->mutex);auto it=impl_->leases.find(id);if(it==impl_->leases.end()||it->second.first!=account)return;instance=it->second.second;}
+    std::string instance;{std::lock_guard lock(impl_->mutex);impl_->departed.erase(id);auto it=impl_->leases.find(id);if(it==impl_->leases.end()||it->second.first!=account)return;instance=it->second.second;}
     Impl::Connection connection(*impl_);sql(connection,"UPDATE characters SET lease_instance=NULL,lease_expires_at=NULL WHERE id=$1::bigint AND account_id=$2::bigint AND lease_instance=$3",{std::to_string(id),std::to_string(account),instance});
     std::lock_guard lock(impl_->mutex);impl_->leases.erase(id);
 }
@@ -369,15 +438,25 @@ void Store::save_characters(std::span<const CharacterSave> saves) {
     Impl::Connection connection(*impl_);Transaction transaction(connection);std::int64_t previous=0;
     // ponytail: one transaction lock for guild roster writes; partition by guild if communities outgrow 32 live players.
     if(std::any_of(ordered.begin(),ordered.end(),[](const CharacterSave* save){return save->state.contains("guild")&&!save->state["guild"].is_null();}))sql(connection,"SELECT pg_advisory_xact_lock(4242427446)");
+    std::vector<const CharacterSave*> kept;kept.reserve(ordered.size());std::vector<std::int64_t> departed;
     for(const auto* save:ordered){if(save->character_id<=0||save->character_id==previous)throw ApiError(400,"invalid_save","Duplicate character in batch");previous=save->character_id;
-        std::string instance;{std::lock_guard lock(impl_->mutex);auto it=impl_->leases.find(save->character_id);if(it==impl_->leases.end()||it->second.first!=save->account_id)throw ApiError(409,"lease_lost","Character is not owned by this world process");instance=it->second.second;}
-        auto live=sql(connection,"SELECT c.id FROM characters c WHERE c.id=$1::bigint AND c.account_id=$2::bigint AND c.deleted_at IS NULL AND c.lease_instance=$3 AND c.lease_expires_at>now() FOR UPDATE OF c",{std::to_string(save->character_id),std::to_string(save->account_id),instance});if(!PQntuples(live.get()))throw ApiError(409,"lease_lost","Character lease expired or ownership changed");
+        std::string instance;{std::lock_guard lock(impl_->mutex);auto it=impl_->leases.find(save->character_id);
+            if(it==impl_->leases.end()||it->second.first!=save->account_id){auto gone=impl_->departed.find(save->character_id);if(gone!=impl_->departed.end()&&gone->second==save->account_id)continue;throw ApiError(409,"lease_lost","Character is not owned by this world process");}
+            instance=it->second.second;}
+        auto live=sql(connection,"SELECT c.id FROM characters c WHERE c.id=$1::bigint AND c.account_id=$2::bigint AND c.deleted_at IS NULL AND c.lease_instance=$3 AND c.lease_expires_at>now() FOR UPDATE OF c",{std::to_string(save->character_id),std::to_string(save->account_id),instance});
+        if(!PQntuples(live.get())){
+            // NONCANONICAL wave 30: the character phased to another shard with this instance's ticket; that shard loaded the
+            // newer state, so this late save is dropped (the rest of the batch still commits).
+            if(handed_off(connection,save->character_id,instance)){departed.push_back(save->character_id);continue;}
+            throw ApiError(409,"lease_lost","Character lease expired or ownership changed");
+        }
+        kept.push_back(save);
         // The bank shares the state row update, so an item/currency move between them commits atomically or not at all.
         if(!save->bank.is_null()){if(!save->bank.is_object()||save->bank.dump().size()>65536)throw ApiError(400,"invalid_bank","Bank must be an object of at most 64 KiB");
             sql(connection,"UPDATE characters SET state=$2::jsonb,bank=$3::jsonb,updated_at=now() WHERE id=$1::bigint",{std::to_string(save->character_id),save->state.dump(),save->bank.dump()});}
         else sql(connection,"UPDATE characters SET state=$2::jsonb,updated_at=now() WHERE id=$1::bigint",{std::to_string(save->character_id),save->state.dump()});}
     std::map<std::string,Json> guilds;
-    for(const auto* save:ordered)if(save->state.contains("guild")&&!save->state["guild"].is_null()){
+    for(const auto* save:kept)if(save->state.contains("guild")&&!save->state["guild"].is_null()){
         const auto& guild=save->state["guild"];auto id=text(guild,"id",1,128);text(guild,"name",2,32);
         number(guild,"revision",1,INT64_MAX);auto leader=number(guild,"leader_character_id",0,INT64_MAX);
         if(!guild.contains("members")||!guild["members"].is_array()||guild["members"].size()>256)throw ApiError(400,"invalid_guild","Guild roster must be an array of at most 256 characters");
@@ -392,6 +471,9 @@ void Store::save_characters(std::span<const CharacterSave> saves) {
             if(PQntuples(old.get())){
                 auto old_revision=integer(old,0,0);auto old_state=Json::parse(cell(old,0,1));
                 if(revision==old_revision&&old_state==guild)continue;
+                // NONCANONICAL wave 30: guilds are cross-realm, so another shard may already have advanced the roster; an older
+                // embedded copy is ignored (entry overlays the registry) instead of failing this shard's saves.
+                if(revision<old_revision)continue;
                 if(old_revision==INT64_MAX||revision!=old_revision+1)throw ApiError(409,"guild_revision","Guild roster revision is stale");
             }else if(revision!=1)throw ApiError(409,"guild_revision","New guild must start at revision one");
             auto valid=sql(connection,"SELECT count(*) FROM (SELECT id FROM characters WHERE deleted_at IS NULL AND id IN (SELECT value::bigint FROM jsonb_array_elements_text($1::jsonb)) ORDER BY id FOR KEY SHARE) valid",{guild["members"].dump()});
@@ -402,6 +484,7 @@ void Store::save_characters(std::span<const CharacterSave> saves) {
         }
     }
     transaction.commit();
+    if(!departed.empty()){std::lock_guard lock(impl_->mutex);for(auto id:departed){auto it=impl_->leases.find(id);if(it!=impl_->leases.end()){impl_->departed[id]=it->second.first;impl_->leases.erase(it);}}}
 }
 void Store::world_status(const Json& status) {
     auto instance=text(status,"instance",1,128);if(status.dump().size()>65536)throw ApiError(400,"invalid_status","World status too large");
@@ -409,24 +492,35 @@ void Store::world_status(const Json& status) {
     {
         std::lock_guard guard(impl_->mutex);
         if(impl_->world_instance.empty()){
-            auto claim=sql(connection,"SELECT pg_try_advisory_lock(4242427445)");
-            if(!boolean(claim,0,0))throw ApiError(409,"world_already_running","Only one authoritative world process is allowed per community");
+            // NONCANONICAL wave 30: several shards (one per instance) share a community database; each instance still has
+            // exactly one authoritative process.
+            auto claim=sql(connection,"SELECT pg_try_advisory_lock(424242745,hashtext($1))",{instance});
+            if(!boolean(claim,0,0))throw ApiError(409,"world_already_running","This world instance is already running");
             impl_->world_instance=instance;
         } else if(impl_->world_instance!=instance)throw ApiError(409,"world_instance_mismatch","A world Store cannot publish another instance");
     }
     sql(connection,"INSERT INTO world_instances(instance,status) VALUES($1,$2::jsonb) ON CONFLICT(instance) DO UPDATE SET status=EXCLUDED.status,updated_at=now()",{instance,status.dump()});
     auto renewed=sql(connection,"UPDATE characters SET lease_expires_at=now()+interval '30 seconds' WHERE lease_instance=$1 AND lease_expires_at>now() AND deleted_at IS NULL RETURNING id,account_id",{instance});
+    std::vector<std::int64_t> missing;
     {
         std::lock_guard guard(impl_->mutex);
         std::set<std::int64_t> live;
         for(int i=0;i<PQntuples(renewed.get());++i){auto id=integer(renewed,i,0);auto lease=impl_->leases.find(id);if(lease!=impl_->leases.end()&&lease->second.first==integer(renewed,i,1)&&lease->second.second==instance)live.insert(id);}
-        for(const auto& [id,lease]:impl_->leases)if(lease.second==instance&&!live.contains(id))throw ApiError(409,"lease_lost","A character lease expired; stop the world before serving further actions");
+        for(const auto& [id,lease]:impl_->leases)if(lease.second==instance&&!live.contains(id))missing.push_back(id);
     }
+    for(auto id:missing)if(!handed_off(connection,id,instance))throw ApiError(409,"lease_lost","A character lease expired; stop the world before serving further actions");
+    if(!missing.empty()){std::lock_guard guard(impl_->mutex);for(auto id:missing){auto it=impl_->leases.find(id);if(it!=impl_->leases.end()){impl_->departed[id]=it->second.first;impl_->leases.erase(it);}}}
     transaction.commit();
 }
-Json Store::take_world_commands(){
+Json Store::take_world_commands(std::string_view instance,int realm){
     Impl::Connection connection(*impl_);Transaction transaction(connection);
-    auto result=sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text");
+    // NONCANONICAL wave 30: a command targets one shard (target_instance), the shards of a realm (target_realm) or any shard.
+    // A row targeted at a shard that stopped heartbeating (stopped or crashed after the fan-out) would stay pending forever.
+    if(!instance.empty())sql(connection,std::string("UPDATE world_commands c SET consumed_at=now(),result='{\"ok\":false,\"error\":\"Hedef sunucu kapalı.\"}' WHERE consumed_at IS NULL AND target_instance IS NOT NULL AND NOT EXISTS (SELECT 1 FROM world_instances s WHERE s.instance=c.target_instance AND ")+shard_live+")");
+    auto result=instance.empty()
+        ?sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text")
+        :sql(connection,"UPDATE world_commands SET consumed_at=now() WHERE id IN (SELECT id FROM world_commands WHERE consumed_at IS NULL AND (target_instance IS NULL OR target_instance=$1) AND (target_realm IS NULL OR target_realm=$2::integer) ORDER BY id LIMIT 16 FOR UPDATE SKIP LOCKED) RETURNING id,command,arguments::text",
+             {std::string(instance),std::to_string(realm)});
     transaction.commit();Json rows=Json::array();
     for(int i=0;i<PQntuples(result.get());++i)rows.push_back({{"id",integer(result,i,0)},{"command",cell(result,i,1)},{"arguments",Json::parse(cell(result,i,2))}});
     std::sort(rows.begin(),rows.end(),[](const Json& a,const Json& b){return a.at("id").get<std::int64_t>()<b.at("id").get<std::int64_t>();});
@@ -517,17 +611,42 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
     }
     auto who=authenticate(bearer);impl_->rate("account:"+std::to_string(who.account_id),600,peer.starts_with("admin:"));
     if(method=="POST"&&path=="/v1/logout"){Impl::Connection connection(*impl_);Transaction transaction(connection);sql(connection,"UPDATE sessions SET revoked_at=now() WHERE token_hash=$1",{token_hash(bearer)});audit(connection,"session.logout",who.account_id,who.account_id);transaction.commit();return {{"ok",true}};}
+    // NONCANONICAL wave 30 realm list (the original server-list screen, exe 0x0048dbe0, showed several servers).
+    if(method=="GET"&&path=="/v1/realms")return realms(who.account_id);
     if(method=="GET"&&path=="/v1/characters"){
         Impl::Connection connection(*impl_);auto result=sql(connection,std::string("SELECT ")+character_columns+" FROM characters c LEFT JOIN chat_moderation m ON m.character_id=c.id WHERE c.account_id=$1::bigint AND c.deleted_at IS NULL ORDER BY c.id",{std::to_string(who.account_id)});Json rows=Json::array();for(int i=0;i<PQntuples(result.get());++i)rows.push_back(character_row(result,i));return {{"characters",rows}};
     }
     if(method=="POST"&&path=="/v1/characters"){
         auto name=text(body,"name",2,32);if(std::any_of(name.begin(),name.end(),[](unsigned char c){return c<32||c==127;}))throw ApiError(400,"invalid_name","Karakter ismi geçersiz karakter içeriyor.");
         auto class_id=number(body,"class_id",1,3);auto appearance=body.value("appearance",Json::object());
+        // realm_id defaults to 1 for clients older than wave 30; names are unique per realm.
+        const auto realm=body.contains("realm_id")?number(body,"realm_id",1,32767):1;
         if(!valid_appearance(appearance)||body.contains("state"))throw ApiError(400,"invalid_request","Geçersiz karakter görünümü.");
         Impl::Connection connection(*impl_);Transaction transaction(connection);sql(connection,"SELECT id FROM accounts WHERE id=$1::bigint FOR UPDATE",{std::to_string(who.account_id)});
+        if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint",{std::to_string(realm)}).get()))throw ApiError(400,"invalid_realm","Böyle bir diyar yok.");
         auto count=sql(connection,"SELECT count(*) FROM characters WHERE account_id=$1::bigint AND deleted_at IS NULL",{std::to_string(who.account_id)});if(integer(count,0,0)>=8)throw ApiError(409,"character_limit","En fazla 8 karakteriniz olabilir.");
-        auto result=sql(connection,"INSERT INTO characters(account_id,name,class_id,appearance) VALUES($1::bigint,$2,$3::integer,$4::jsonb) RETURNING id",{std::to_string(who.account_id),name,std::to_string(class_id),appearance.dump()});auto id=integer(result,0,0);
-        auto record=sql(connection,std::string("SELECT ")+character_columns+" FROM characters c LEFT JOIN chat_moderation m ON m.character_id=c.id WHERE c.id=$1::bigint",{std::to_string(id)});auto response=character_row(record,0);audit(connection,"character.create",who.account_id,id);transaction.commit();return response;
+        auto result=sql(connection,"INSERT INTO characters(account_id,name,class_id,appearance,realm_id) VALUES($1::bigint,$2,$3::integer,$4::jsonb,$5::smallint) RETURNING id",{std::to_string(who.account_id),name,std::to_string(class_id),appearance.dump(),std::to_string(realm)});auto id=integer(result,0,0);
+        auto record=sql(connection,std::string("SELECT ")+character_columns+" FROM characters c LEFT JOIN chat_moderation m ON m.character_id=c.id WHERE c.id=$1::bigint",{std::to_string(id)});auto response=character_row(record,0);audit(connection,"character.create",who.account_id,id,{{"realm_id",realm}});transaction.commit();return response;
+    }
+    // NONCANONICAL wave 30: the shard a character should connect to. A pending ticket (mid party/phase transfer) wins;
+    // otherwise the least-loaded live shard of the home realm.
+    if(method=="GET"&&path.starts_with("/v1/characters/")&&path.ends_with("/world")){
+        const auto prefix=std::string_view("/v1/characters/").size();
+        auto id=id_value(path.substr(prefix,path.size()-prefix-std::string_view("/world").size()));
+        std::int64_t realm=0;
+        {
+            Impl::Connection connection(*impl_);
+            auto owned=sql(connection,"SELECT realm_id FROM characters WHERE id=$1::bigint AND account_id=$2::bigint AND deleted_at IS NULL",{std::to_string(id),std::to_string(who.account_id)});
+            if(!PQntuples(owned.get()))throw ApiError(404,"character_not_found","Karakter bulunamadı.");
+            realm=integer(owned,0,0);
+            auto pending=first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM transfer_tickets t JOIN world_instances s ON s.instance=t.to_instance WHERE t.character_id=$1::bigint AND t.consumed_at IS NULL AND t.expires_at>now() AND "+shard_live+" ORDER BY t.created_at DESC LIMIT 1",{std::to_string(id)}));
+            if(pending)return {{"host",pending->host},{"port",pending->port},{"instance",pending->instance}};
+        }
+        if(auto chosen=pick_shard(static_cast<int>(realm)))return {{"host",chosen->host},{"port",chosen->port},{"instance",chosen->instance}};
+        Impl::Connection connection(*impl_);
+        auto live=sql(connection,std::string("SELECT count(*) FROM world_instances s WHERE s.realm_id=$1::smallint AND ")+shard_live,{std::to_string(realm)});
+        if(integer(live,0,0))throw ApiError(503,"realm_full","Diyar dolu; biraz sonra tekrar deneyin.");
+        throw ApiError(503,"realm_offline","Diyar şu anda kapalı.");
     }
     if(method=="DELETE"&&path.starts_with("/v1/characters/")){
         auto id=id_value(path.substr(std::string_view("/v1/characters/").size()));auto confirm=text(body,"confirm_name",2,32);Impl::Connection connection(*impl_);Transaction transaction(connection);
@@ -587,13 +706,32 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         audit(connection,"character."+action,who.account_id,id);transaction.commit();return {{"ok",true}};
     }
     // World commands travel through world_commands; the world consumes them at its 1 s heartbeat and records a result.
+    // NONCANONICAL wave 30 targeting: an optional body "instance" names one shard and "realm_id" limits a command to a realm.
+    // Otherwise a character command goes to the shard leasing that character, a world-wide command (announcements, weather,
+    // clock, settings, respawn, player list, restart/shutdown/cancel) gets one row per live shard, and anything else is taken
+    // by the first shard. command_id is the first row; command_ids lists every row.
     const auto enqueue=[&](const std::string& command,const Json& arguments)->Json{
         Impl::Connection connection(*impl_);Transaction transaction(connection);
         auto pending=sql(connection,"SELECT count(*),count(*) FILTER (WHERE command IN ('restart','shutdown')) FROM world_commands WHERE consumed_at IS NULL");
         if(integer(pending,0,0)>=64)throw ApiError(429,"command_queue_full","64 world commands are already pending; check that the world is running");
         if((command=="restart"||command=="shutdown")&&integer(pending,0,1))throw ApiError(409,"command_pending","A world control command is pending");
-        auto id=sql(connection,"INSERT INTO world_commands(command,arguments,actor_id) VALUES($1,$2::jsonb,$3::bigint) RETURNING id",{command,arguments.dump(),std::to_string(who.account_id)});
-        audit(connection,"world."+command,who.account_id,0,arguments);transaction.commit();return {{"ok",true},{"command_id",integer(id,0,0)}};
+        const std::string realm=body.contains("realm_id")?std::to_string(number(body,"realm_id",1,32767)):"";
+        static const std::set<std::string> broadcast{"announce","weather","clock","settings","respawn","players","restart","shutdown","cancel"};
+        std::vector<std::pair<std::string,std::string>> targets; // (target_instance, target_realm); "" = NULL
+        if(body.contains("instance"))targets.emplace_back(text(body,"instance",1,128),"");
+        else if(arguments.contains("character_id")){
+            auto lease=sql(connection,"SELECT lease_instance FROM characters WHERE id=$1::bigint AND lease_instance IS NOT NULL AND lease_expires_at>now()",{std::to_string(arguments.at("character_id").get<std::int64_t>())});
+            targets.emplace_back(PQntuples(lease.get())?cell(lease,0,0):"",realm);
+        }else if(broadcast.contains(command)){
+            auto live=sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE (NULLIF($1,'')::integer IS NULL OR s.realm_id=NULLIF($1,'')::integer) AND ")+shard_live+" ORDER BY s.updated_at DESC,s.instance",{realm});
+            for(int i=0;i<PQntuples(live.get());++i)targets.emplace_back(cell(live,i,0),"");
+            if(targets.empty())targets.emplace_back("",realm);
+        }else targets.emplace_back("",realm);
+        Json ids=Json::array();
+        for(const auto& [instance,target_realm]:targets)
+            ids.push_back(integer(sql(connection,"INSERT INTO world_commands(command,arguments,actor_id,target_instance,target_realm) VALUES($1,$2::jsonb,$3::bigint,NULLIF($4,''),NULLIF($5,'')::smallint) RETURNING id",
+                                      {command,arguments.dump(),std::to_string(who.account_id),instance,target_realm}),0,0));
+        audit(connection,"world."+command,who.account_id,0,arguments);transaction.commit();return {{"ok",true},{"command_id",ids.front()},{"command_ids",ids}};
     };
     const auto line=[&](const Json& source,const char* key,std::size_t min,std::size_t max){
         auto value=text(source,key,min,max);
@@ -639,6 +777,42 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         settings["disabled_zones"]=zones;
         {Impl::Connection connection(*impl_);sql(connection,"INSERT INTO world_settings(id,settings,actor_id) VALUES(1,$1::jsonb,$2::bigint) ON CONFLICT(id) DO UPDATE SET settings=EXCLUDED.settings,actor_id=EXCLUDED.actor_id,updated_at=now()",{settings.dump(),std::to_string(who.account_id)});}
         auto result=enqueue("settings",settings);result["settings"]=settings;return result;
+    }
+    // NONCANONICAL wave 30 realm administration: list with live shards and populations, create, rename.
+    if(path=="/v1/admin/realms"){
+        if(method=="GET"){
+            Impl::Connection connection(*impl_);auto rows=realm_rows(connection,0);
+            auto shards=sql(connection,"SELECT s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity,s.updated_at>now()-interval '15 seconds' AND s.port>0,to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM world_instances s WHERE s.updated_at>now()-interval '1 hour' ORDER BY s.realm_id,s.instance");
+            for(auto& row:rows){
+                Json list=Json::array();
+                for(int i=0;i<PQntuples(shards.get());++i)if(integer(shards,i,1)==row["id"].get<std::int64_t>()){
+                    auto shard=shard_json(shard_row(shards,i));shard["online"]=boolean(shards,i,6);shard["updated_at"]=cell(shards,i,7);list.push_back(std::move(shard));
+                }
+                row["shards"]=std::move(list);
+            }
+            return {{"realms",rows}};
+        }
+        if(method!="POST")throw ApiError(404,"not_found","Route not found");
+        const auto action=text(body,"action",6,6);
+        auto name=line(body,"name",2,32);
+        Impl::Connection connection(*impl_);Transaction transaction(connection);
+        if(action=="create"){
+            const auto kind=body.contains("kind")?text(body,"kind",2,6):std::string("normal");
+            if(kind!="normal"&&kind!="pvp"&&kind!="rp")throw ApiError(400,"invalid_request","kind is normal, pvp or rp");
+            const auto sort=body.contains("sort")?number(body,"sort",-32768,32767):0;
+            sql(connection,"LOCK TABLE realms IN SHARE ROW EXCLUSIVE MODE");
+            const auto id=body.contains("id")?number(body,"id",1,32767):integer(sql(connection,"SELECT COALESCE(max(id),0)+1 FROM realms"),0,0);
+            if(id>32767)throw ApiError(409,"realm_limit","No realm id left");
+            sql(connection,"INSERT INTO realms(id,name,kind,sort) VALUES($1::smallint,$2,$3,$4::smallint)",{std::to_string(id),name,kind,std::to_string(sort)});
+            audit(connection,"realm.create",who.account_id,id,{{"name",name},{"kind",kind},{"sort",sort}});transaction.commit();
+            return {{"ok",true},{"id",id}};
+        }
+        if(action!="rename")throw ApiError(400,"invalid_request","action is create or rename");
+        const auto id=number(body,"id",1,32767);
+        auto renamed=sql(connection,"UPDATE realms SET name=$2 WHERE id=$1::smallint RETURNING id",{std::to_string(id),name});
+        if(!PQntuples(renamed.get()))throw ApiError(404,"realm_not_found","Realm not found");
+        audit(connection,"realm.rename",who.account_id,id,{{"name",name}});transaction.commit();
+        return {{"ok",true},{"id",id}};
     }
     if(path=="/v1/admin/backups"){
         const char* configured=std::getenv("IKV_BACKUP_DIR");auto directory=std::filesystem::path(configured?configured:"backups");
@@ -708,5 +882,138 @@ std::int64_t Store::create_bot_character(std::int64_t account,const std::string&
     Impl::Connection connection(*impl_);Transaction transaction(connection);
     auto result=sql(connection,"INSERT INTO characters(account_id,name,class_id,appearance,state) VALUES($1::bigint,$2,$3::integer,$4::jsonb,$5::jsonb) RETURNING id",{std::to_string(account),name,std::to_string(class_id),appearance.dump(),state.dump()});
     const auto id=integer(result,0,0);audit(connection,"character.create",account,id,{{"bot",true}});transaction.commit();return id;
+}
+
+// ---- Realms, shards, transfer tickets, lockouts and the shard bus (wave 30, NONCANONICAL; migration 009) ----
+Json Store::realms(std::int64_t account) {
+    Impl::Connection connection(*impl_);auto rows=realm_rows(connection,account);
+    for(auto& row:rows)row.erase("sort");
+    return rows;
+}
+void Store::register_shard(const ShardInfo& info) {
+    const auto instance=instance_name(info.instance);
+    if(info.realm_id<1||info.realm_id>32767)throw ApiError(400,"invalid_realm","Invalid realm");
+    if(info.host.size()>253||!printable(info.host)||info.host.find(' ')!=std::string::npos)throw ApiError(400,"invalid_host","Invalid public host");
+    if(info.port==0)throw ApiError(400,"invalid_port","A shard needs its world port");
+    if(info.capacity<1||info.capacity>32||info.players<0||info.players>32)throw ApiError(400,"invalid_capacity","Shard capacity is 1-32 and players 0-32");
+    Impl::Connection connection(*impl_);
+    if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint",{std::to_string(info.realm_id)}).get()))throw ApiError(400,"invalid_realm","Realm does not exist");
+    sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint) "
+        "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,updated_at=now()",
+        {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players)});
+}
+void Store::retire_shard(std::string_view instance) {
+    Impl::Connection connection(*impl_);
+    sql(connection,"UPDATE world_instances SET updated_at=now()-interval '1 minute',players=0 WHERE instance=$1",{instance_name(instance)});
+}
+std::optional<ShardInfo> Store::pick_shard(int realm) {
+    Impl::Connection connection(*impl_);
+    return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE s.realm_id=$1::integer AND "+shard_live+" AND s.players<s.capacity ORDER BY s.players,s.updated_at DESC,s.instance LIMIT 1",{std::to_string(realm)}));
+}
+std::optional<ShardInfo> Store::shard(std::string_view instance) {
+    if(instance.empty()||instance.size()>128)return std::nullopt;
+    Impl::Connection connection(*impl_);
+    return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE s.instance=$1 AND "+shard_live,{std::string(instance)}));
+}
+std::optional<ShardInfo> Store::locate(int realm,std::string_view name) {
+    if(name.size()<2||name.size()>32)return std::nullopt;
+    Impl::Connection connection(*impl_);
+    return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM characters c JOIN world_instances s ON s.instance=c.lease_instance WHERE c.realm_id=$1::integer AND lower(c.name)=lower($2) AND c.deleted_at IS NULL AND c.lease_expires_at>now() AND "+shard_live+" LIMIT 1",{std::to_string(realm),std::string(name)}));
+}
+std::vector<ShardInfo> Store::shards(int realm) {
+    Impl::Connection connection(*impl_);
+    auto result=sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE ($1::integer=0 OR s.realm_id=$1::integer) AND "+shard_live+" ORDER BY s.realm_id,s.instance",{std::to_string(realm)});
+    std::vector<ShardInfo> out;out.reserve(static_cast<std::size_t>(PQntuples(result.get())));
+    for(int i=0;i<PQntuples(result.get());++i)out.push_back(shard_row(result,i));
+    return out;
+}
+int Store::character_realm(std::int64_t id) {
+    Impl::Connection connection(*impl_);
+    auto result=sql(connection,"SELECT realm_id FROM characters WHERE id=$1::bigint AND deleted_at IS NULL",{std::to_string(id)});
+    if(!PQntuples(result.get()))throw ApiError(404,"character_not_found","Character not found");
+    return static_cast<int>(integer(result,0,0));
+}
+std::string Store::issue_ticket(std::int64_t character,std::string_view from_view,std::string_view to_view,std::string_view reason,const Json& payload) {
+    const auto from=instance_name(from_view),to=instance_name(to_view);
+    if(from==to)throw ApiError(400,"invalid_instance","A ticket must name another shard");
+    if(character<=0)throw ApiError(400,"invalid_id","Geçersiz kimlik.");
+    if(reason!="party"&&reason!="home"&&reason!="layer"&&reason!="instance")throw ApiError(400,"invalid_reason","Ticket reason is party, home, layer or instance");
+    std::string payload_text=payload.is_null()?"{}":""; // {} at a call site is a null Json: an empty payload
+    if(payload.is_object())try{payload_text=payload.dump();}catch(const Json::exception&){}
+    if(payload_text.empty()||payload_text.size()>4096)throw ApiError(400,"invalid_payload","Ticket payload must be a UTF-8 object of at most 4 KiB");
+    const auto raw=random_hex(32);
+    Impl::Connection connection(*impl_);Transaction transaction(connection);
+    auto lease=sql(connection,"SELECT 1 FROM characters WHERE id=$1::bigint AND deleted_at IS NULL AND lease_instance=$2 AND lease_expires_at>now() FOR UPDATE",{std::to_string(character),from});
+    if(!PQntuples(lease.get()))throw ApiError(409,"lease_lost","Character is not leased by the issuing shard");
+    auto destination=sql(connection,std::string("SELECT s.players,s.capacity FROM world_instances s WHERE s.instance=$1 AND ")+shard_live,{to});
+    if(!PQntuples(destination.get()))throw ApiError(503,"shard_offline","Hedef sunucu şu anda kapalı.");
+    if(integer(destination,0,0)>=integer(destination,0,1))throw ApiError(503,"shard_full","Hedef sunucu dolu; daha sonra tekrar deneyin.");
+    sql(connection,"DELETE FROM transfer_tickets WHERE expires_at<now()-interval '1 hour'");
+    sql(connection,"UPDATE transfer_tickets SET expires_at=now() WHERE character_id=$1::bigint AND expires_at>now()",{std::to_string(character)}); // a newer ticket voids older ones
+    sql(connection,"INSERT INTO transfer_tickets(ticket_hash,character_id,from_instance,to_instance,reason,payload,expires_at) VALUES(decode($1,'hex'),$2::bigint,$3,$4,$5,$6::jsonb,now()+interval '60 seconds')",
+        {token_hash(raw),std::to_string(character),from,to,std::string(reason),payload_text});
+    transaction.commit();
+    return raw;
+}
+Json Store::redeem_ticket(std::string_view raw,std::int64_t character,std::string_view to) {
+    const auto invalid=ApiError(403,"invalid_ticket","Geçiş bileti geçersiz ya da süresi dolmuş.");
+    if(raw.size()!=64||!std::all_of(raw.begin(),raw.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');})||character<=0||to.empty()||to.size()>128)throw invalid;
+    Impl::Connection connection(*impl_);
+    // One conditional UPDATE: a ticket is consumed exactly once, before expiry, by its character at its destination.
+    auto result=sql(connection,"UPDATE transfer_tickets SET consumed_at=now() WHERE ticket_hash=decode($1,'hex') AND consumed_at IS NULL AND expires_at>now() AND character_id=$2::bigint AND to_instance=$3 RETURNING payload::text",
+        {token_hash(raw),std::to_string(character),std::string(to)});
+    if(!PQntuples(result.get()))throw invalid;
+    return Json::parse(cell(result,0,0));
+}
+Json Store::lockouts(std::int64_t character) {
+    Impl::Connection connection(*impl_);
+    auto result=sql(connection,"SELECT zone,floor(extract(epoch FROM expires_at))::bigint FROM instance_lockouts WHERE character_id=$1::bigint AND expires_at>now() ORDER BY zone",{std::to_string(character)});
+    Json out=Json::object();for(int i=0;i<PQntuples(result.get());++i)out[cell(result,i,0)]=integer(result,i,1);
+    return out;
+}
+void Store::set_lockout(std::int64_t character,std::string_view zone,std::int64_t expires) {
+    if(character<=0)throw ApiError(400,"invalid_id","Geçersiz kimlik.");
+    if(zone.empty()||zone.size()>32||!printable(zone))throw ApiError(400,"invalid_zone","Invalid lockout zone");
+    if(expires<0||expires>4102444800)throw ApiError(400,"invalid_expiry","Invalid lockout expiry");
+    Impl::Connection connection(*impl_);Transaction transaction(connection);
+    sql(connection,"DELETE FROM instance_lockouts WHERE character_id=$1::bigint AND (expires_at<=now() OR zone=$2)",{std::to_string(character),std::string(zone)});
+    sql(connection,"INSERT INTO instance_lockouts(character_id,zone,expires_at) SELECT $1::bigint,$2,to_timestamp($3::bigint) WHERE to_timestamp($3::bigint)>now()",{std::to_string(character),std::string(zone),std::to_string(expires)});
+    transaction.commit();
+}
+int Store::bus_fd() {
+    std::lock_guard lock(impl_->bus_mutex);
+    return PQsocket(impl_->bus_listener());
+}
+void Store::bus_send(std::string_view to_view,const Json& body) {
+    const auto to=instance_name(to_view);
+    if(!body.is_object())throw ApiError(400,"invalid_message","Bus message must be an object");
+    std::string text;
+    try { text=body.dump(); } catch(const Json::exception&) { throw ApiError(400,"invalid_message","Bus message must be valid UTF-8 JSON"); }
+    if(text.size()>4096)throw ApiError(400,"invalid_message","Bus message exceeds 4 KiB");
+    Impl::Connection connection(*impl_);Transaction transaction(connection);
+    auto pending=sql(connection,"SELECT count(*) FROM shard_messages WHERE to_instance=$1 AND consumed_at IS NULL",{to});
+    if(integer(pending,0,0)>=1024)throw ApiError(429,"bus_full","1024 messages are already pending for that shard");
+    sql(connection,"DELETE FROM shard_messages WHERE id IN (SELECT id FROM shard_messages WHERE (consumed_at<now()-interval '1 hour') OR created_at<now()-interval '1 day' ORDER BY id LIMIT 256)");
+    sql(connection,"INSERT INTO shard_messages(to_instance,body) VALUES($1,$2::jsonb)",{to,text});
+    sql(connection,"SELECT pg_notify('ikv_bus',$1)",{to}); // delivered at commit; carries only the destination
+    transaction.commit();
+}
+std::vector<Json> Store::bus_take(std::string_view instance_view) {
+    const auto instance=instance_name(instance_view);
+    {
+        // Clear the LISTEN socket's readability; notifications are wake-ups only, the rows are the messages.
+        std::lock_guard lock(impl_->bus_mutex);
+        if(auto* listener=impl_->listener){
+            if(!PQconsumeInput(listener)){PQfinish(listener);impl_->listener=nullptr;throw ApiError(503,"bus_error","Shard bus connection lost; call bus_fd again");}
+            while(PGnotify* notify=PQnotifies(listener))PQfreemem(notify);
+        }
+    }
+    Impl::Connection connection(*impl_);
+    auto result=sql(connection,"UPDATE shard_messages SET consumed_at=now() WHERE id IN (SELECT id FROM shard_messages WHERE to_instance=$1 AND consumed_at IS NULL ORDER BY id LIMIT 64 FOR UPDATE SKIP LOCKED) RETURNING id,body::text",{instance});
+    std::vector<std::pair<std::int64_t,Json>> rows;rows.reserve(static_cast<std::size_t>(PQntuples(result.get())));
+    for(int i=0;i<PQntuples(result.get());++i)rows.emplace_back(integer(result,i,0),Json::parse(cell(result,i,1)));
+    std::sort(rows.begin(),rows.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+    std::vector<Json> out;out.reserve(rows.size());for(auto& row:rows)out.push_back(std::move(row.second));
+    return out;
 }
 }

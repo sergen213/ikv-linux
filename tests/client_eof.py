@@ -95,7 +95,7 @@ class WorldProxy(AbstractContextManager):
                         assert 2 <= size <= 65535, "invalid actual world frame length"
                         if len(pending) >= 4 + size:
                             self.target = bytes(pending[:4 + size])
-                            assert self.target[4] == 2, "unexpected actual world wire version"
+                            assert self.target[4] == 3, "unexpected actual world wire version"
                             if self.fault_kind is not None and self.target[5] != self.fault_kind:
                                 self.records.append(self.target)
                                 client.sendall(self.target)
@@ -113,7 +113,7 @@ class WorldProxy(AbstractContextManager):
                         break
                     record = bytes(pending[:4 + size])
                     del pending[:4 + size]
-                    assert record[4] == 2, "unexpected actual world wire version"
+                    assert record[4] == 3, "unexpected actual world wire version"
                     assert record[5] in (2, 4, 5, 6), "unexpected actual world record type"
                     if not self.records:
                         assert record[5] == 2, "world did not welcome authenticated native client first"
@@ -551,6 +551,7 @@ def source_requires_assets(services):
     assert source_ids and all(type(registry) is int and 0 <= registry <= 70 for registry in source_ids)
     for zone in config["zones"].values():
         zone.pop("instances", None)  # instance copies are original registry rows too
+        zone.pop("raid", None)  # wave 30 raid zones need their instance copies
     # Only remove the source associations: the real TLS, store and all other
     # production gameplay fields must successfully reach listening readiness.
     independent = services.root / "source-root-control.json"

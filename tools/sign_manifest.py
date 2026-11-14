@@ -27,7 +27,7 @@ def safe_path(name):
     components = name.split("/")
     if components[0] == ".ikv-update" or any(
         component in ("", ".", "..") or len(component) > 128
-        or re.fullmatch(r"[A-Za-z0-9._-]+", component) is None
+        or re.fullmatch(r"[A-Za-z0-9._+-]+", component) is None
         for component in components
     ):
         raise ValueError("unsafe payload path: " + repr(name))
@@ -185,6 +185,9 @@ def main():
     parser.add_argument("--version", required=True)
     parser.add_argument("--sequence", required=True)
     parser.add_argument("--channel", choices=("stable", "experimental"), required=True)
+    # Windows update packages carry a signed "platform" so a Linux launcher can never install one (and vice versa);
+    # Linux manifests omit the field, exactly as every launcher since schema 2 expects.
+    parser.add_argument("--platform", choices=("linux", "windows"), default="linux")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--signature", type=Path, required=True)
     parser.add_argument("--key-file", type=Path, required=True)
@@ -222,6 +225,8 @@ def main():
                     "package": package.name, "package_size": package_size,
                     "package_sha256": package_sha256,
                     "files": [files[name] for name in sorted(files)]}
+        if args.platform != "linux":
+            manifest["platform"] = args.platform
         encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         if len(encoded) > 1024 * 1024:
             raise ValueError("encoded manifest exceeds 1 MiB")

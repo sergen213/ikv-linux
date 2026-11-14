@@ -1,0 +1,18 @@
+[Unit]
+Description=IKV automatic signed update (install the newest release, announce and restart the services)
+Documentation=file:/usr/local/share/doc/ikv/SELF_HOSTING.md
+After=network-online.target ikv-auth.service ikv-server.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Root: it owns the release root (/var/lib/ikv-release, verified by ikv-updater) and restarts ikv-auth and every
+# world shard (ikv-server.service, ikv-server@REALM-SHARD.service).
+EnvironmentFile=-/etc/ikv/update.env
+Environment=HOME=/var/lib/ikv-release-home
+StateDirectory=ikv-release-home
+ExecStart=/usr/local/libexec/ikv/ikv-auto-update.sh
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes

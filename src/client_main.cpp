@@ -2,11 +2,13 @@
 #include "ikv/effects.hpp"
 #include "ikv/client_admin.hpp"
 #include "ikv/client_map.hpp"
+#include "ikv/client_raid.hpp"
 #include "ikv/client_charsel.hpp"
 #include "ikv/client_session.hpp"
 #include "ikv/client_mutation.hpp"
 #include "ikv/client_trade.hpp"
 #include "ikv/client_ui.hpp"
+#include "ikv/client_update.hpp"
 #include "ikv/renderer.hpp"
 #include "ikv/scene.hpp"
 #include <SDL3/SDL.h>
@@ -114,10 +116,11 @@ Json read_json(const std::filesystem::path& path, std::uintmax_t cap) {
 constexpr std::array<float,11> view_distances{200,300,400,500,650,800,1000,1300,1700,2200,0};
 struct Options {
     std::string host,renderer="opengl",appearance="original",rt="off",rt_style="faithful",auth;
-    std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map;
+    std::filesystem::path ca,assets,settings,screenshot,commands,audio,model_map,sound_map,update_signal;
     std::uint16_t port=7000;
     std::uint64_t character=0;
     int width=1280,height=800,dx=0,dy=0,ticks=0;
+    int realm=1; // NONCANONICAL wave 30 --realm from the launcher (the original server list lived in launcher.exe)
     bool headless=false,session_stdin=false,fullscreen=false,parallax=true,tessellation=true;
     float volume=.5f,music_volume=1; // master device gain; original MusicVolume (music + ambient beds)
     // Ayarlar sliders 3-7 (original globals 0x5eabc0..0x5eabdc, 0..1): Karakter Detay Mes., Görüş Mesafesi (fog distance
@@ -175,6 +178,7 @@ Options parse_options(int argc,char** argv) {
             std::cout << "İKV independent native client (custom authenticated TLSv2; not official protocol)\n"
                 "--host HOST --port PORT --ca PEM --session-stdin (--character ID | --auth HTTPS_ORIGIN)\n"
                 "  --auth: graphical in-client character selection/creation over the account service's HTTPS API (same CA)\n"
+                "  --realm ID: realm whose characters --auth lists and creates (1..32767, default 1; NONCANONICAL)\n"
                 "[--headless --ticks N --commands JSON --dx -1|0|1 --dy -1|0|1]\n"
                 "[--asset-root DIR --renderer opengl|vulkan --appearance original|enhanced]\n"
                 "[--model-map JSON --sound-map JSON --audio ORIGINAL_OGG (replaces zone music)]\n"
@@ -186,6 +190,7 @@ Options parse_options(int argc,char** argv) {
                 "[--parallax on|off]  enhanced parallax occlusion relief on static zone surfaces (NONCANONICAL; default on)\n"
                 "[--tessellation on|off]  enhanced tessellated PBR-pack relief where supported (NONCANONICAL; default on)\n"
                 "[--texture-detail 0|1|2 --lightmap-detail 0|1|2]  original texture/lightmap packs _4/_2/_1 (default 2 and 1)\n"
+                "[--update-signal FILE]  launcher's 'new release installed' file: show the notice and exit 75 (NONCANONICAL)\n"
                 "Ground click moves; WASD/arrows control camera; F1 displays recovered Turkish help.\n"
                 "Graphical scene, grid and character appearance follow the admitted authoritative source registry.\n";
             std::exit(0);
@@ -193,18 +198,19 @@ Options parse_options(int argc,char** argv) {
         if (flag=="--headless") { o.headless=true; continue; }
         if (flag=="--session-stdin") { o.session_stdin=true; continue; }
         if (flag=="--fullscreen") { o.fullscreen=true; continue; }
-        if (flag!="--host" && flag!="--port" && flag!="--ca" && flag!="--character" && flag!="--auth" &&
+        if (flag!="--host" && flag!="--port" && flag!="--ca" && flag!="--character" && flag!="--auth" && flag!="--realm" &&
             flag!="--asset-root" && flag!="--renderer" && flag!="--appearance" && flag!="--rt" && flag!="--rt-style" && flag!="--render-scale" &&
             flag!="--upscaler" && flag!="--fsr-mode" && flag!="--fsr-sharpness" && flag!="--frame-generation" && flag!="--parallax" && flag!="--tessellation" &&
             flag!="--texture-detail" && flag!="--lightmap-detail" &&
             flag!="--settings" && flag!="--width" && flag!="--height" && flag!="--ticks" &&
             flag!="--commands" && flag!="--screenshot" && flag!="--audio" && flag!="--dx" && flag!="--dy" &&
-            flag!="--model-map" && flag!="--sound-map")
+            flag!="--model-map" && flag!="--sound-map" && flag!="--update-signal")
             throw std::invalid_argument("unknown option");
         if (++i==argc) throw std::invalid_argument("missing option value");
         const std::string_view value=argv[i];
         if (flag=="--host") o.host=value;
         else if (flag=="--auth") o.auth=value;
+        else if (flag=="--realm") o.realm=ikv::parse_realm_id(value);
         else if (flag=="--port") o.port=static_cast<std::uint16_t>(number(value,1,65535));
         else if (flag=="--ca") o.ca=value;
         else if (flag=="--character") o.character=character_number(value);
@@ -237,6 +243,7 @@ Options parse_options(int argc,char** argv) {
         else if (flag=="--audio") o.audio=value;
         else if (flag=="--model-map") o.model_map=value;
         else if (flag=="--sound-map") o.sound_map=value;
+        else if (flag=="--update-signal") o.update_signal=value;
         else if (flag=="--width") o.width=number(value,640,3840);
         else if (flag=="--height") o.height=number(value,480,2160);
         else if (flag=="--ticks") o.ticks=number(value,1,INT32_MAX);
@@ -346,25 +353,46 @@ void print_snapshot(const ikv::ClientSession& s) {
     if (!std::cout) throw std::runtime_error("snapshot output failed");
 }
 int headless(const Options& o,const Secret& secret) {
-    ikv::ClientSession session(o.host,o.port,o.ca,secret.view(),o.character);
+    std::string host=o.host;
+    auto session=std::make_unique<ikv::ClientSession>(host,o.port,o.ca,secret.view(),o.character);
     Script script(o.commands);
-    session.intent(o.dx,o.dy);
+    session->intent(o.dx,o.dy);
     int count=0; bool finishing=false;
-    while (!finishing || !session.drained()) {
-        if (interrupted && !finishing) { finishing=true; session.stop(); }
-        session.pump(10,[&](ikv::Type type) {
-            if (type==ikv::Type::snapshot) {
-                ++count; print_snapshot(session);
-                if (!finishing) script.run(count,session,[](const std::string&){},[](float,float){},[](const std::string&){}); // headless: no visuals
-                if (o.ticks && count>=o.ticks && !finishing) { finishing=true; session.stop(); }
-            } else if (type==ikv::Type::state) {
-                std::cout << Json{{"type","state"},{"state",session.state}}.dump() << '\n' << std::flush;
-                if (!std::cout) throw std::runtime_error("state output failed");
+    while (!finishing || !session->drained()) {
+        if (interrupted && !finishing) { finishing=true; session->stop(); }
+        // NONCANONICAL wave 30 shard transfer: after the old shard's goodbye "transfer" close, hello again on the
+        // destination with the single-use ticket. The old shard's own close or silence is not a failure here.
+        if (!finishing && session->handoff_due(std::chrono::steady_clock::now())) {
+            const auto transfer=*session->transfer;
+            std::cout << Json{{"type","transfer"},{"host",transfer.host},{"port",transfer.port},{"reason",transfer.reason},
+                              {"realm",transfer.realm},{"farewell",session->farewell}}.dump() << '\n' << std::flush;
+            session.reset();
+            if (!transfer.host.empty()) host=transfer.host; // empty: the destination shares the current host
+            session=std::make_unique<ikv::ClientSession>(host,transfer.port,o.ca,secret.view(),o.character,transfer.ticket);
+            session->intent(o.dx,o.dy);
+            continue;
+        }
+        try {
+            session->pump(10,[&](ikv::Type type) {
+                if (type==ikv::Type::snapshot) {
+                    ++count; print_snapshot(*session);
+                    if (!finishing) script.run(count,*session,[](const std::string&){},[](float,float){},[](const std::string&){}); // headless: no visuals
+                    if (o.ticks && count>=o.ticks && !finishing) { finishing=true; session->stop(); }
+                } else if (type==ikv::Type::state) {
+                    std::cout << Json{{"type","state"},{"state",session->state}}.dump() << '\n' << std::flush;
+                    if (!std::cout) throw std::runtime_error("state output failed");
+                }
+            });
+        } catch (const std::exception&) {
+            if (session->farewell_code==ikv::outdated_goodbye) { // NONCANONICAL: same "new release" exit as the graphical client
+                std::cerr << ikv::client_update::message(session->farewell_version) << '\n';
+                return ikv::client_update::exit_code;
             }
-        });
-        if (session.eof && !finishing) {
-            if (!session.self || (o.ticks && count<o.ticks)) throw std::runtime_error("server closed before requested world state");
-            finishing=true; session.stop();
+            if (!session->transfer || finishing) throw; // a transferring shard may cut the line
+        }
+        if (session->eof && !finishing && !session->transfer) {
+            if (!session->self || (o.ticks && count<o.ticks)) throw std::runtime_error("server closed before requested world state");
+            finishing=true; session->stop();
         }
     }
     return 0;
@@ -525,6 +553,7 @@ float unoccluded_distance(const ikv::Scene& scene,const ikv::Camera& camera) {
 
 class Application {
     Options options_;
+    ikv::client_update::Watch update_{options_.update_signal}; // NONCANONICAL: return to the launcher for a new release
     CpuTiming cpu_timing_;
     const Secret& secret_;
     ikv::Scene scene_;
@@ -597,6 +626,11 @@ class Application {
     std::vector<Label> labels_;
     Json group_members_=Json::array(); std::uint32_t group_leader_=0;
     bool quit_=false,disconnected_=false,editing_=false,reconnect_=false,captured_=false;
+    // NONCANONICAL wave 30 shard transfer: transferring_ from the handoff until the destination's first state;
+    // a failure then returns to character selection (charsel_pending_) with the server's message.
+    bool transferring_=false,charsel_pending_=false;
+    std::string charsel_message_;
+    std::string world_host_; std::uint16_t world_port_=0; // configured world endpoint (pre-realm fallback)
     std::string screenshot_request_; // PrintScreen file name, written after the next rendered frame (00468010)
     bool hud_dirty_=true;
     bool world_dirty_=false; // only name labels/floaters changed: paint_world alone (hud_dirty_ repaints both)
@@ -677,6 +711,7 @@ class Application {
     std::array<int,4> map_rect_{};
     // NONCANONICAL wave 29 quest markers and Dünya Haritası (M): data (ikv::ClientMap), marker art, window/view rectangles.
     ikv::ClientMap map_;
+    ikv::ClientRaid raid_; // NONCANONICAL wave 30 raid roster (client_raid.cpp)
     ikv::assets::DdsImage map_arrow_{},map_disc_{},map_ring_{};
     bool world_map_open_=false,map_panning_=false;
     std::array<int,4> world_map_frame_{},world_map_area_{};
@@ -686,9 +721,10 @@ class Application {
     struct LoadingArt { ikv::assets::DdsImage art{},logo{}; std::vector<ikv::assets::DdsImage> frames; } loading_art_;
     ikv::Scene loading_scene_; // empty scene: the renderer presents only the loading overlay
     float loading_progress_=0;
-    std::array<bool,7> chat_hidden_{}; // 'F' filter; Sistem cannot be filtered
+    std::array<bool,8> chat_hidden_{}; // 'F' filter; Sistem cannot be filtered
     std::uint32_t whisper_to_=0,whisper_from_=0;
     std::string whisper_name_,whisper_from_name_;
+    std::string whisper_realm_,whisper_from_realm_; // NONCANONICAL wave 30: a recipient addressed as Ad-Realm (no local id)
     // Chat A/G toggles (0040d330/0040d220, flags 0x5e98a1/0x5e98a0, both allowed at start): blocked trade requests are
     // declined ('Fqrt', 004a8afc) and blocked group/guild invites are dropped (004a7f40/004a8010).
     bool trade_allowed_=true,invites_allowed_=true;
@@ -735,6 +771,7 @@ public:
             try { effects_=std::make_unique<ikv::EffectSystem>(asset_base()); }
             catch (const std::exception& e) { std::cerr << "Özgün parçacık efektleri yüklenemedi: " << e.what() << '\n'; }
             if (!model_map_.empty()) notice("Açık operatör model eşlemesi bağımsızdır; gerçek kaynak PC görünümünün yerine geçer.");
+            world_host_=options_.host; world_port_=options_.port;
             if (!quit_ && (options_.character || choose_character())) connect();
             last_frame_=Clock::now();
         } catch (...) { shutdown(); throw; }
@@ -750,15 +787,26 @@ public:
             input(dt);
             cpu_timing_.begin();
             if (interrupted && !quit_) leave();
+            if (const auto text=update_.poll(); text && !quit_) disconnect(*text); // the launcher installed a newer release
+            if (update_.due() && !quit_) leave();
             if (reconnect_ && !quit_) { reconnect_=false; connect(); }
+            if (charsel_pending_ && !quit_) { charsel_pending_=false; reselect(); }
             if (session_ && !disconnected_) {
                 try {
                     pump_network();
                     apply_pending();
-                    if (session_->eof && !quit_) disconnect(!session_->farewell.empty()?session_->farewell:"Sunucu bağlantıyı kapattı. Yeniden bağlanabilir veya başlatıcıda giriş yapabilirsiniz.");
+                    if (session_->eof && !quit_ && !session_->transfer) disconnect(outdated()?update_.trigger(session_->farewell_version):!session_->farewell.empty()?session_->farewell:"Sunucu bağlantıyı kapattı. Yeniden bağlanabilir veya başlatıcıda giriş yapabilirsiniz.");
                 } catch (const std::exception& e) {
-                    if (options_.ticks || !renderer_) throw;
-                    disconnect(std::string("Bağlantı hatası: ")+e.what());
+                    // The old shard of a transfer may drop the line after its goodbye; the handoff below proceeds.
+                    if (outdated()) disconnect(update_.trigger(session_->farewell_version)); // refused before welcome
+                    else if (!session_ || !session_->transfer) {
+                        if (options_.ticks || !renderer_) throw;
+                        disconnect(std::string("Bağlantı hatası: ")+e.what());
+                    }
+                }
+                if (session_ && !disconnected_ && session_->transfer && !quit_) {
+                    begin_loading(); // the door-transfer loading screen (original loadingN.jpg) while the shard changes
+                    if (session_->handoff_due(Clock::now())) hand_off();
                 }
             }
             cpu_timing_.mark(CpuTiming::network);
@@ -781,7 +829,7 @@ public:
                 SDL_DelayPrecise(static_cast<Uint64>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::milliseconds(4)-spent).count()));
         }
         if (!options_.screenshot.empty() && !captured_) throw std::runtime_error("no authoritative native frame available for capture");
-        save_settings(); return 0;
+        save_settings(); return update_.triggered() ? ikv::client_update::exit_code : 0;
     }
 private:
     void queue_state() {
@@ -910,7 +958,10 @@ private:
         }
         poll_assembly();
         const bool changed_state=state_pending_;
-        if (changed_state) { state_=session_->state; state_pending_=false; map_.update(state_,session_->self,group_members_); }
+        if (changed_state) {
+            state_=session_->state; state_pending_=false; map_.update(state_,session_->self,group_members_); raid_.update(state_,session_->self);
+            if (std::exchange(transferring_,false)) loading_=false; // the destination shard admitted the transfer
+        }
         bool changed_snapshot=false;
         if (snapshot_source_!=scene_.source_registry_id ||
             (!state_.empty() && session_->tick<state_.at("tick").get<std::uint32_t>())) {
@@ -980,19 +1031,46 @@ private:
 #endif
     }
     // Original charsel/chargen module (docs/PORTING_GAPS.md #12, #13) when the launcher passes --auth instead of --character.
-    bool choose_character() {
+    // NONCANONICAL wave 30: characters of the launcher's --realm only; the chosen character enters the shard that
+    // GET /v1/characters/{id}/world names (a pre-realm server answers 404: the configured --host/--port). A refused
+    // world entry (realm full/offline) returns to the screen with the server's message.
+    bool choose_character(std::string message={}) {
         ikv::CharacterApi api(options_.auth,options_.ca,secret_.view());
-        begin_loading();
-        auto scene=load_cpu([&]{return ikv::load_charsel_scene(options_.assets);});
-        apply_view(scene);
-        loading_=false;
-        const ikv::CharacterScreenArt art{original_ui1_,loading_art_.logo,asset_base()/"fonts/verdana.ttf"};
-        const auto chosen=ikv::run_character_screen(window_,*renderer_,*audio_,effects_.get(),scene,options_.assets,art,api,
-                                                    []{return interrupted!=0;});
-        // Providers borrow the charsel Scene: restore the world camera and rebuild before it is destroyed.
-        renderer_->set_camera(options_.camera); reset_renderer();
-        if (!chosen) { quit_=true; return false; }
-        options_.character=*chosen; return true;
+        for (;;) {
+            begin_loading();
+            auto scene=load_cpu([&]{return ikv::load_charsel_scene(options_.assets);});
+            apply_view(scene);
+            loading_=false;
+            const ikv::CharacterScreenArt art{original_ui1_,loading_art_.logo,asset_base()/"fonts/verdana.ttf"};
+            const auto chosen=ikv::run_character_screen(window_,*renderer_,*audio_,effects_.get(),scene,options_.assets,art,api,
+                                                        [this]{return interrupted!=0 || update_.poll().has_value() || update_.triggered();},
+                                                        options_.realm,message);
+            // Providers borrow the charsel Scene: restore the world camera and rebuild before it is destroyed.
+            renderer_->set_camera(options_.camera); reset_renderer();
+            if (!chosen) { quit_=true; return false; }
+            options_.character=*chosen;
+            try {
+                const auto world=api.world(*chosen);
+                options_.host=world?(world->host.empty()?api.host():world->host):world_host_; options_.port=world?world->port:world_port_;
+                return true;
+            } catch (const std::exception& e) { message=e.what(); }
+        }
+    }
+    // A failed shard transfer: back to character selection with the server's message, then enter the world again.
+    void reselect() {
+        const auto message=std::exchange(charsel_message_,std::string{});
+        group_members_=Json::array(); group_leader_=0; // the party lived on the shard that was left
+        if (choose_character(message)) connect();
+    }
+    // NONCANONICAL wave 30: the old shard sent {type:"transfer"} and closed with goodbye "transfer". Reconnect to the
+    // destination with the single-use ticket; chat history, open windows and party frames stay (connect() keeps them).
+    void hand_off() {
+        const auto transfer=*session_->transfer;
+        notice(transfer.realm.empty()?std::string("Başka bir sunucuya geçiliyor."):transfer.realm+" sunucusuna geçiliyor."); // NONCANONICAL text
+        if (!transfer.host.empty()) options_.host=transfer.host; // empty: the destination shares the current host
+        options_.port=transfer.port;
+        transferring_=true;
+        connect(transfer.ticket);
     }
     void load_authoritative_scene(unsigned source) {
         if (scene_.source_registry_id && *scene_.source_registry_id==source) return;
@@ -1270,11 +1348,12 @@ private:
                 percent(124.5f*s_,(y+31)*s_,resource_ratio(*p,"mana","max_mana"));
                 if (const auto where=party_zone(*p);!where.empty()) label(S(36),S(y+48)-lh()/2,fit(where,S(125)),dim_rgba); // right of the frame's round ornament
             }
-            label(S(15),S(y+15)-lh()/2,fit(e?e->value("name",std::string{}):p?p->value("name",std::string{}):"#"+std::to_string(id),S(92)));
+            label(S(15),S(y+15)-lh()/2,fit(e?ikv::realm_label(*e):p?ikv::realm_label(*p):"#"+std::to_string(id),S(92))); // wave 30: "Ad (Realm)"
             hits_.push_back({0,S(y),S(168),S(60),nullptr,-1,"target:"+std::to_string(id)});
             y+=74;
             if (y>330) break;
         }
+        if (session_) raid_.paint(*ui_,0,S(y+4),s_); // NONCANONICAL wave 30 raid roster under the party frames
         Json self_row;
         const Json* subject=entity(target_);
         if (!subject && session_ && target_==session_->self && target_) {
@@ -1303,7 +1382,7 @@ private:
             percent((x+82)*s_,26*s_,target_hp);
         }
         const std::string suffix=subject->contains("level")?" ("+std::to_string(subject->value("level",0))+")":"";
-        label(S(x+14),S(player?15.f:9.f)-lh()/2,fit(subject->value("name",std::to_string(target_)),S(92)-ui_->text_width(suffix))+suffix);
+        label(S(x+14),S(player?15.f:9.f)-lh()/2,fit(subject->contains("name")?ikv::realm_label(*subject):std::to_string(target_),S(92)-ui_->text_width(suffix))+suffix);
         hits_.push_back({S(x),0,S(168),S(player?74.f:54.f),nullptr,-1,"context"});
         paint_effects(subject->value("debuffs",Json::array()),x+168,5,15); // the target's effects beside its frame, at most 15
         if (!context_) return;
@@ -1319,6 +1398,9 @@ private:
             if (session_ && target_==session_->self) { // 0041a230 self: PRVL Gruptan Çık in a group, else MDBK Kabadayı Moduna Geç; BANK; privileged SNAY
                 if (!group_members_.empty()) items.emplace_back("Gruptan Çık",nullptr,"group-leave");
                 else if (!st.value("kabadayi",false)) items.emplace_back("Kabadayı Moduna Geç",nullptr,"kabadayi");
+                // NONCANONICAL wave 30 raids (no original menu items): a group leader converts the group, a member leaves the raid.
+                if (raid_.active()) items.emplace_back("Baskından Çık",Json{{"action","raid_leave"}},"");
+                else if (group_leader_==session_->self && !group_members_.empty()) items.emplace_back("Baskın Kur",Json{{"action","raid_convert"}},"");
                 items.emplace_back("Kasamı Göster",nullptr,"bank-open"); // 0x58ec64 'BANK', always listed; the server checks Kasa Erişimi (guide l.875-878)
                 if (state_.value("admin",false)) {
                     items.emplace_back("İsim Yansıt",nullptr,"reflect:"+std::to_string(target_));
@@ -1357,6 +1439,10 @@ private:
         items.emplace_back("Fısılda",nullptr,"whisper:"+sid);
         if (!chat && leading && std::find(group_members_.begin(),group_members_.end(),Json(id))!=group_members_.end()) items.emplace_back("Gruptan Çıkar",nullptr,"group-kick:"+sid);
         else if (chat || group_members_.empty() || leading) items.emplace_back("Gruba Davet Et",act("group_invite"),"");
+        if (raid_.active() && session_ && raid_.leader()==session_->self) { // NONCANONICAL wave 30 raid leader items
+            const bool member=std::any_of(raid_.parties().begin(),raid_.parties().end(),[&](const auto& p){return std::find(p.begin(),p.end(),id)!=p.end();});
+            items.emplace_back(member?"Baskından Çıkar":"Baskına Davet Et",act(member?"raid_kick":"raid_invite"),"");
+        }
         if (own.contains("guild") && own.at("guild").is_object()) {
             items.emplace_back("Loncaya Davet Et",act("guild_invite"),"");
             if (const Json* e=entity(id); !chat && e && e->value("guild",std::string{})==own.at("guild").value("name",std::string{}))
@@ -1375,7 +1461,7 @@ private:
     std::string name_of(std::uint32_t id) const {
         if (id==chat_menu_id_ && !chat_menu_name_.empty()) return chat_menu_name_;
         const Json* e=entity(id);
-        return e?e->value("name",std::string{}):"#"+std::to_string(id);
+        return e?ikv::realm_label(*e):"#"+std::to_string(id);
     }
     std::optional<std::array<int,2>> project(float x,float y,float z) const {
         const auto m=ikv::camera_view_projection(renderer_->camera(),width_,height_);
@@ -1547,7 +1633,7 @@ private:
         for (const auto& l:labels_) {
             const Json* e=l.name?entity(l.id):nullptr;
             if (!e) continue;
-            const auto name=e->value("name",std::string{});
+            const auto name=ikv::realm_label(*e); // NONCANONICAL wave 30: another realm's player reads "Ad (Realm)"
             // 00471e41 (relation 00478090): hostile 0xffaa22dd, same clan 0xff33cccc, otherwise white. Rect left = x − width/2;
             // the name's top is 14 px above the lifted anchor and a Lonca member's "<%s>" (0x595f7c) line starts at it.
             const int clan=character_state(state_).value("clan",0);
@@ -1607,7 +1693,7 @@ private:
         if (skip>0) chat_scroll_-=skip; // clamp scrolling at the oldest retained line
         const int by=iy+S(h);
         const auto& channel=chat_channels[static_cast<std::size_t>(channel_)];
-        const std::string prefix=std::string(channel.prefix)+(channel_==chat_whisper?"["+whisper_name_+"] ":"");
+        const std::string prefix=std::string(channel.prefix)+(channel_==chat_whisper?"["+whisper_name_+(whisper_realm_.empty()?"":" ("+whisper_realm_+")")+"] ":"");
         std::string shown=input_;
         const int available=S(266)-ui_->text_width(prefix);
         while (!shown.empty() && ui_->text_width(shown+(editing_?"|":""))>available) {
@@ -1770,7 +1856,7 @@ private:
         if (std::string_view(chat_channels[static_cast<std::size_t>(channel_)].wire)=="roleplay") return; // Rol yap (original channel 5) is not in 0042e8c0's list
         if (Clock::now()<link_ready_) { chat_line("Bu yazışma kanalını gereksiz yere kirletmemeye özen gösteriniz.",original_rgba(chat_channels[chat_system].argb)); return; }
         Json action{{"action","chat"},{"channel",chat_channels[static_cast<std::size_t>(channel_)].wire},{"link",uid}};
-        if (channel_==chat_whisper) { if (!whisper_to_) return; action["to"]=whisper_to_; }
+        if (channel_==chat_whisper && !whisper_address(action)) return;
         link_ready_=Clock::now()+std::chrono::seconds(2); send(action);
     }
     // 004344b0 vendor branch: target flag +0x82&0x40 (0x591f54), itemflag bit 2 (0x591f40), no price (0x591eb8), Klan Parası goods
@@ -2841,7 +2927,7 @@ private:
                 const Json* e=entity(member_id);
                 const Json* p=e?nullptr:party_row(member_id);
                 std::string text=session_ && member_id==session_->self?state_.at("character").value("name",std::string{}):
-                    e?e->value("name",std::string{}):p?p->value("name",std::string{})+printf_text("  %.0f%%",100*resource_ratio(*p,"hp","max_hp")):"#"+std::to_string(member_id);
+                    e?ikv::realm_label(*e):p?ikv::realm_label(*p)+printf_text("  %.0f%%",100*resource_ratio(*p,"hp","max_hp")):"#"+std::to_string(member_id);
                 if (p) if (const auto where=party_zone(*p);!where.empty()) text+=" · "+where;
                 if (y+lh()<=bottom) ui_->text(left,y,fit(text,width));
                 y+=lh();
@@ -3467,25 +3553,39 @@ private:
     // ---- Chat: original channel table 0040c3a0 (+0xec, stride 0x24) and helps.xml 'Mesaj Kanalları'. Klan ('/k') is the
     // Arzın Çocukları/Lodos clan channel, Lonca (FF33FF33) the player guild; '/l' for Lonca is NONCANONICAL. ----
     struct ChatChannel { const char* prefix; std::uint32_t argb; const char* wire; char command; bool once; };
-    static constexpr std::array<ChatChannel,8> chat_channels{{
+    static constexpr std::array<ChatChannel,9> chat_channels{{
         {"Bölge: ",0xffff8033,"zone",'b',true},{"Klan: ",0xff33ffff,"clan",'k',false},{"Grup: ",0xffff3333,"group",'g',false},
         {"Söyle: ",0xffffffff,"local",'s',false},{"Rol yap: ",0xff60a0ff,"roleplay",'r',true},{"Fısılda: ",0xffff33ff,"private",'f',true},
-        {"Lonca: ",0xff33ff33,"guild",'l',false},{"",0xffffff00,"",0,false}}};
-    static constexpr int chat_say=3,chat_whisper=5,chat_system=7;
+        {"Lonca: ",0xff33ff33,"guild",'l',false},{"Baskın: ",0xffff9933,"raid",'a',false} /* NONCANONICAL wave 30 raid channel, '/a' */,{"",0xffffff00,"",0,false}}};
+    static constexpr int chat_say=3,chat_whisper=5,chat_system=8;
     static_assert(chat_system+1==static_cast<int>(chat_channels.size()) && chat_system==std::tuple_size_v<decltype(chat_hidden_)>);
     // Fısıldama, Rol yapma and Bölge stay active for one message, then the previous channel returns.
     void select_channel(int channel) { if (!chat_channels[static_cast<std::size_t>(channel_)].once) chat_previous_=channel_; channel_=channel; }
-    void whisper(std::uint32_t id,std::string name) { if (!id) return; whisper_to_=id; whisper_name_=std::move(name); select_channel(chat_whisper); }
-    // '/s', '/r', '/g', '/k', '/b' + space switch channels; '/f name' + space picks a whisper recipient (by visible name).
+    // A visible recipient is addressed by entity id; one known only as "Ad" / "Ad-Realm" (another shard) by name and realm.
+    void whisper(std::uint32_t id,std::string name,std::string realm={}) {
+        if (!id && name.empty()) return;
+        whisper_to_=id; whisper_name_=std::move(name); whisper_realm_=std::move(realm); select_channel(chat_whisper);
+    }
+    bool whisper_address(Json& action) const {
+        if (whisper_to_) action["to"]=whisper_to_;
+        else if (!whisper_name_.empty()) ikv::address_by_name(action,{whisper_name_,whisper_realm_});
+        else return false;
+        return true;
+    }
+    // '/s', '/r', '/g', '/k', '/b' + space switch channels; '/f name' + space picks a whisper recipient: a visible player by
+    // name, else (NONCANONICAL wave 30) "Ad" or "Ad-Realm" addressed by name so the server can relay it to another shard.
     void chat_command() {
         if (input_.size()<3 || input_[0]!='/' || input_.back()!=' ') return;
         if (input_.size()==3) for (int i=0;i<chat_system;++i) if (i!=chat_whisper && input_[1]==chat_channels[static_cast<std::size_t>(i)].command) { select_channel(i); input_.clear(); return; }
         if (!input_.starts_with("/f ") || input_.size()<5) return;
-        const auto name=input_.substr(3,input_.size()-4);
-        if (name.find(' ')!=std::string::npos) return;
+        const auto who=ikv::split_realm_name(std::string_view(input_).substr(3,input_.size()-4));
+        if (!who) return;
         input_.clear();
-        for (const auto& e:hud_entities_) if (e.contains("class_id") && e.value("name",std::string{})==name) { whisper(e.value("id",0u),name); return; }
-        notice("Görüş alanında bu isimde oyuncu yok: "+name); // native private chat addresses entity ids
+        for (const auto& e:hud_entities_)
+            if (e.contains("class_id") && e.value("name",std::string{})==who->name && e.value("realm",std::string{})==who->realm) {
+                whisper(e.value("id",0u),who->name,who->realm); return;
+            }
+        whisper(0,who->name,who->realm);
     }
     // Window tooltip (0048b6a0 lines into the manager's box, placed by 0048de14): width = widest line + 6, height = 12 +
     // line height·1.2 per line, at pointer + (6, 20) kept 16 px inside the screen. ponytail: no hover delay (+0xac tick).
@@ -4000,7 +4100,7 @@ private:
     void alert(std::string message) { notice(std::move(message)); flash_color_=original_rgba(0xffff7777); }
     // 004b8230 "Dikkat" yes/no box (param 0): the action sent on ✓, its text, and ui\alert.raw (UI sound slot 0x77d2f4).
     void ask(Json action,std::string text) { confirm_=std::move(action); confirm_text_=std::move(text); audio_->play_event("ui\\alert.raw"); }
-    void connect() {
+    void connect(std::string_view ticket={}) {
         trade_.reset(); trade_seen_rows_=0; trade_seen_revision_=0; trade_pending_present_=false; trade_items_=Json::array(); trade_currency_=0;
         admin_.reset();
         session_.reset(); count_=0; entities_.clear(); tick_epoch_.reset(); epoch_tick_=0;
@@ -4008,11 +4108,12 @@ private:
         state_=Json::object(); state_pending_=false; players_.clear(); has_snapshot_=false; map_.update(state_,0,Json::array());
         snapshot_source_.reset(); snapshot_revision_=painted_snapshot_revision_=0;
         try {
-            session_=std::make_unique<ikv::ClientSession>(options_.host,options_.port,options_.ca,secret_.view(),options_.character);
+            session_=std::make_unique<ikv::ClientSession>(options_.host,options_.port,options_.ca,secret_.view(),options_.character,ticket);
             disconnected_=false; target_=0; notice("Güvenli bağlantı kuruldu; karakter doğrulanıyor.");
             resurrect_at_=Clock::now()+std::chrono::milliseconds(15000); // a character admitted dead restarts the countdown (World::admit)
         } catch (const std::exception& e) {
             if (options_.ticks) throw;
+            if (transferring_) { disconnect(std::string("Bağlantı kurulamadı: ")+e.what()); return; }
             disconnected_=true; notice(std::string("Bağlantı kurulamadı: ")+e.what());
         }
     }
@@ -4020,8 +4121,13 @@ private:
         // 'sjfr' 0045b6c5: "Bağlantınız kesildi çünkü %s" is the one-button 004b8230 box, which plays ui\warning.raw (0x77d314).
         disconnected_=true; loading_=false; session_.reset(); trade_.reset(); trade_seen_rows_=0; trade_pending_present_=false; notice(message);
         audio_->play_event("ui\\warning.raw");
+        // NONCANONICAL wave 30: a shard transfer that failed (refused ticket, unreachable or full shard) returns to
+        // character selection with the server's message when the launcher gave --auth; otherwise R reconnects.
+        if (std::exchange(transferring_,false) && !options_.auth.empty()) { charsel_message_=message; charsel_pending_=true; }
     }
     void leave() { quit_=true; if (session_ && !disconnected_) session_->stop(); }
+    // The server refused this client as outdated (goodbye code "outdated_client" with its release version).
+    bool outdated() const { return session_ && session_->farewell_code==ikv::outdated_goodbye; }
     void send(const Json& action) {
         if (!session_ || !session_->self || disconnected_) { notice("Dünyaya bağlı değilsiniz."); return; }
         try {
@@ -4172,8 +4278,10 @@ private:
                 const auto wire=event.value("channel",std::string{});
                 int channel=chat_say;
                 for (int i=0;i<chat_system;++i) if (wire==chat_channels[static_cast<std::size_t>(i)].wire) channel=i;
-                const auto name=event.value("name",std::string{"Sohbet"});
-                if (channel==chat_whisper && session_ && event.value("from",0u)!=session_->self) { whisper_from_=event.value("from",0u); whisper_from_name_=name; }
+                const auto name=event.contains("name")?ikv::realm_label(event):std::string{"Sohbet"}; // wave 30: "Ad (Realm)"
+                if (channel==chat_whisper && session_ && event.value("from",0u)!=session_->self) {
+                    whisper_from_=event.value("from",0u); whisper_from_name_=event.value("name",std::string{}); whisper_from_realm_=event.value("realm",std::string{});
+                }
                 const auto from=event.value("from",0u);
                 std::string text=event.value("text",std::string{}); Json link;
                 if (const auto l=event.find("link");l!=event.end() && l->is_object() && l->contains("item") && l->at("item").is_string() && l->contains("definition") && l->at("definition").is_object() &&
@@ -4260,16 +4368,19 @@ private:
                 group_members_=members.is_array()?members:Json::array(); group_leader_=event.value("leader",0u);
                 notice("Grup durumu güncellendi.");
             }
+            else if (type=="raid") { if (raid_.receive(event)) notice(raid_.active()?"Baskın durumu güncellendi.":"Baskın dağıldı."); } // NONCANONICAL wave 30
+            else if (type=="raid_invite" && invites_allowed_) // NONCANONICAL wave 30 wording
+                ask(Json{{"action","raid_accept"}},event.value("name",std::string{"?"})+" sizi baskınına davet ediyor. Kabul ediyor musunuz?");
             // 004a7f40 / 004a8010: "Dikkat" yes/no prompts (accept callbacks 004102b0/00410290) only while G allows invites.
             else if (type=="group_invite" && invites_allowed_) {
-                ask(Json{{"action","group_accept"}},event.value("name",std::string{"?"})+" sizi grubuna davet ediyor. Kabul ediyor musunuz?");
+                ask(Json{{"action","group_accept"}},(event.contains("name")?ikv::realm_label(event):std::string{"?"})+" sizi grubuna davet ediyor. Kabul ediyor musunuz?");
             }
             else if (type=="arena_stake") { // /kpsavas: Dikkat confirm (server text, NONCANONICAL), then arena_join with the same code and stake
                 ask(Json{{"action","arena_join"},{"code",event.value("code",0)},{"stake",event.value("stake",0)}},event.value("text",std::string{}));
             }
             else if (type=="guild_invite" && invites_allowed_) { // the original %s is server text; this wording is NONCANONICAL
                 const auto& guild=event.value("guild",Json::object());
-                ask(Json{{"action","guild_accept"}},event.value("name",std::string{"?"})+" sizi "+(guild.is_object()?guild.value("name",std::string{}):std::string{})+" loncasına davet ediyor. Kabul ediyor musunuz?");
+                ask(Json{{"action","guild_accept"}},(event.contains("name")?ikv::realm_label(event):std::string{"?"})+" sizi "+(guild.is_object()?guild.value("name",std::string{}):std::string{})+" loncasına davet ediyor. Kabul ediyor musunuz?");
             }
             else if (type=="complaint") notice("Şikayet: "+event.value("name",std::string{})+" → "+event.value("target_name",std::string{})); // administrators only
             else if (type=="announce") notice("Duyuru: "+event.value("text",std::string{})); // NONCANONICAL web-admin broadcast
@@ -4293,12 +4404,19 @@ private:
                 const auto action=Json::parse(input_.substr(1));
                 if (!action.is_object() || !action.contains("action")) throw std::invalid_argument("typed action object required");
                 send(action);
+            } else if (input_.starts_with("/davet ") || input_.starts_with("/lonca ")) {
+                // NONCANONICAL wave 30: invite by name, "Ad" or "Ad-Realm", to the group (/davet) or guild (/lonca); the
+                // server delivers it to a player on another shard or realm. Visible players keep the target menus.
+                const auto who=ikv::split_realm_name(std::string_view(input_).substr(7));
+                if (!who) { notice("Kullanım: /davet İsim veya /davet İsim-Sunucu (lonca için /lonca)."); return; }
+                Json action{{"action",input_.starts_with("/davet ")?"group_invite":"guild_invite"}};
+                ikv::address_by_name(action,*who);
+                send(action);
             } else {
                 const auto& channel=chat_channels[static_cast<std::size_t>(channel_)];
                 Json action{{"action","chat"},{"channel",channel.wire},{"text",input_}};
-                if (channel_==chat_whisper) {
-                    if (!whisper_to_) { notice("Fısıldama için '/f isim ' yazın veya hedefte Özel mesaj seçin."); return; }
-                    action["to"]=whisper_to_;
+                if (channel_==chat_whisper && !whisper_address(action)) {
+                    notice("Fısıldama için '/f isim ' (başka sunucu: '/f isim-sunucu ') yazın veya hedefte Özel mesaj seçin."); return;
                 }
                 chat_hidden_[static_cast<std::size_t>(channel_)]=false; // help: sending re-enables a filtered channel
                 send(action);
@@ -4369,7 +4487,7 @@ private:
                     else if (key==SDLK_RETURN || key==SDLK_KP_ENTER) admin_enter();
                     else if (key==SDLK_BACKSPACE) admin_.backspace();
                 } else if ((event.key.mod&SDL_KMOD_CTRL) && (key==SDLK_C || key==SDLK_X)) {
-                    if (key==SDLK_C) whisper(whisper_from_,whisper_from_name_); else whisper(whisper_to_,whisper_name_);
+                    if (key==SDLK_C) whisper(whisper_from_,whisper_from_name_,whisper_from_realm_); else whisper(whisper_to_,whisper_name_,whisper_realm_);
                     if (channel_==chat_whisper) editing_=true;
                 } else if (key==SDLK_ESCAPE) {
                     if (editing_) editing_=false;
@@ -4804,7 +4922,7 @@ private:
         line(16,100,"Para: "+dotted(own.at("currency").get<std::uint64_t>()));
         line(128,100,"Para: "+dotted(other.at("currency").get<std::uint64_t>()));
         line(16,142,state_.contains("character")?state_.at("character").value("name",std::string{}):std::string{});
-        line(128,142,terms.at("peer_name").get<std::string>());
+        line(128,142,ikv::realm_label(terms,"peer_name","peer_realm"));
         auto& scroll=scroll_[win_trade];
         const auto count=std::max(mine.size(),theirs.size());
         scroll=std::clamp(scroll,0,std::max(0,static_cast<int>((count+2)/3)-2));
@@ -4841,6 +4959,8 @@ private:
     void draw(float dt) {
         // Before the first authoritative scene the loading screen stands in for the world (VOD 02:12).
         if (!scene_.source_registry_id && session_ && !disconnected_ && !quit_) { begin_loading(); paint_loading(); }
+        // NONCANONICAL wave 30 shard transfer: the loading screen stands in until the destination's first state.
+        if (!disconnected_ && !quit_ && (transferring_ || (session_ && session_->transfer))) { begin_loading(); paint_loading(); return; }
         if (!scene_.source_registry_id || !original_ui_cached_) return;
         const int old_width=width_,old_height=height_;
         if (!SDL_GetWindowSizeInPixels(window_,&width_,&height_) || width_<=0 || height_<=0) return;

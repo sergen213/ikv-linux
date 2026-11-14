@@ -1,29 +1,38 @@
 #include "ikv/updates.hpp"
 
-#include <archive.h>
-#include <archive_entry.h>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <zlib.h>
 
 #include <algorithm>
-#include <charconv>
 #include <array>
+#include <cctype>
 #include <cerrno>
-#include <cstring>
+#include <charconv>
 #include <cstdlib>
-#include <fcntl.h>
-#include <linux/fs.h>
+#include <cstring>
 #include <limits>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
 #include <stdexcept>
 #include <string_view>
+#include <vector>
+#include <utility>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <linux/fs.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#endif
 
 namespace ikv::updates {
 namespace {
@@ -36,16 +45,119 @@ constexpr std::size_t max_manifest = 1U << 20;
 
 [[noreturn]] void fail(const std::string& reason) { throw std::runtime_error("update: " + reason); }
 void require(bool condition, const std::string& reason) { if (!condition) fail(reason); }
+
+// ---- Platform file primitives: no-follow regular-file reads, exclusive creation, durable writes ----
+#ifdef _WIN32
+// NONCANONICAL (Windows self-update): per-user %LOCALAPPDATA% ACLs replace POSIX owner/mode checks; reparse points
+// (symlinks, junctions) are refused everywhere instead.
+using Native = HANDLE;
+[[noreturn]] void win_fail(const std::string& reason) { fail(reason + ": Windows error " + std::to_string(GetLastError())); }
+struct Fd {
+    HANDLE value{INVALID_HANDLE_VALUE};
+    explicit Fd(HANDLE handle) : value(handle) {}
+    Fd(Fd&& other) noexcept : value(std::exchange(other.value, INVALID_HANDLE_VALUE)) {}
+    ~Fd() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    Fd(const Fd&) = delete;
+    Fd& operator=(const Fd&) = delete;
+};
+BY_HANDLE_FILE_INFORMATION file_info(HANDLE handle) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle, &info)) win_fail("stat file");
+    return info;
+}
+Fd open_regular(const fs::path& path) {
+    Fd fd(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    if (fd.value == INVALID_HANDLE_VALUE) win_fail("open " + path.string());
+    const auto info = file_info(fd.value);
+    require(GetFileType(fd.value) == FILE_TYPE_DISK && !(info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)),
+            "expected regular file: " + path.string());
+    return fd;
+}
+Fd create_exclusive(const fs::path& path, bool) {
+    Fd fd(CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (fd.value == INVALID_HANDLE_VALUE) win_fail("create " + path.string());
+    return fd;
+}
+std::uint64_t regular_size(HANDLE handle) {
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(handle, &size) || size.QuadPart < 0) win_fail("stat file size");
+    return static_cast<std::uint64_t>(size.QuadPart);
+}
+std::size_t read_some(HANDLE handle, char* buffer, std::size_t count) {
+    DWORD got = 0;
+    if (!ReadFile(handle, buffer, static_cast<DWORD>(std::min<std::size_t>(count, 1U << 20)), &got, nullptr)) win_fail("read file");
+    return got;
+}
+void write_all(HANDLE handle, const void* data, std::size_t count) {
+    auto* bytes = static_cast<const char*>(data);
+    while (count) {
+        DWORD written = 0;
+        if (!WriteFile(handle, bytes, static_cast<DWORD>(std::min<std::size_t>(count, 1U << 20)), &written, nullptr) || !written) win_fail("write staged file");
+        bytes += written;
+        count -= written;
+    }
+}
+void finish_file(HANDLE handle, bool) { if (!FlushFileBuffers(handle)) win_fail("sync file"); }
+void rewind(HANDLE handle) { if (!SetFilePointerEx(handle, LARGE_INTEGER{}, nullptr, FILE_BEGIN)) win_fail("rewind package"); }
+#else
+using Native = int;
 void system_check(bool success, const std::string& reason) {
     if (!success) fail(reason + ": " + std::strerror(errno));
 }
 struct Fd {
     int value{-1};
     explicit Fd(int fd) : value(fd) {}
+    Fd(Fd&& other) noexcept : value(std::exchange(other.value, -1)) {}
     ~Fd() { if (value >= 0) ::close(value); }
     Fd(const Fd&) = delete;
     Fd& operator=(const Fd&) = delete;
 };
+Fd open_regular(const fs::path& path) {
+    Fd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    system_check(fd.value >= 0, "open " + path.string());
+    return fd;
+}
+Fd create_exclusive(const fs::path& path, bool) {
+    Fd fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
+    system_check(fd.value >= 0, "create " + path.string());
+    return fd;
+}
+std::uint64_t regular_size(int fd) {
+    struct stat st{};
+    system_check(::fstat(fd, &st) == 0, "stat file");
+    require(S_ISREG(st.st_mode) && st.st_size >= 0, "expected regular file");
+    return static_cast<std::uint64_t>(st.st_size);
+}
+std::size_t read_some(int fd, char* buffer, std::size_t count) {
+    for (;;) {
+        const auto n = ::read(fd, buffer, count);
+        if (n < 0 && errno == EINTR) continue;
+        system_check(n >= 0, "read file");
+        return static_cast<std::size_t>(n);
+    }
+}
+void write_all(int fd, const void* data, std::size_t count) {
+    auto* bytes = static_cast<const char*>(data);
+    while (count) {
+        const auto n = ::write(fd, bytes, count);
+        if (n < 0 && errno == EINTR) continue;
+        system_check(n > 0, "write staged file");
+        bytes += n;
+        count -= static_cast<std::size_t>(n);
+    }
+}
+// Signed executable flags normalize payload modes to 0755/0644.
+void finish_file(int fd, bool executable) {
+    system_check(::fchmod(fd, executable ? 0755 : 0644) == 0 && ::fsync(fd) == 0, "set mode/sync file");
+}
+void rewind(int fd) { system_check(::lseek(fd, 0, SEEK_SET) == 0, "rewind package"); }
+void sync_dir(const fs::path& path) {
+    Fd fd(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
+    system_check(fd.value >= 0 && ::fsync(fd.value) == 0, "sync directory " + path.string());
+}
+#endif
+
 struct Digest {
     std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx{EVP_MD_CTX_new(), EVP_MD_CTX_free};
     Digest() { require(ctx && EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) == 1, "SHA256 initialization failed"); }
@@ -65,72 +177,57 @@ struct Digest {
         return result;
     }
 };
-
-std::uint64_t regular_size(int fd) {
-    struct stat st{};
-    system_check(::fstat(fd, &st) == 0, "stat file");
-    require(S_ISREG(st.st_mode) && st.st_size >= 0, "expected regular file");
-    return static_cast<std::uint64_t>(st.st_size);
+std::string sha256_hex(std::string_view bytes) {
+    Digest digest;
+    digest.add(bytes.data(), bytes.size());
+    return digest.finish();
 }
 std::string read_bounded(const fs::path& path, std::size_t limit) {
-    Fd fd(::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-    system_check(fd.value >= 0, "open " + path.string());
+    const auto fd = open_regular(path);
     require(regular_size(fd.value) <= limit, "file exceeds size limit: " + path.string());
     std::string bytes;
     std::array<char, 8192> buffer{};
-    for (;;) {
-        const auto n = ::read(fd.value, buffer.data(), buffer.size());
-        if (n < 0 && errno == EINTR) continue;
-        system_check(n >= 0, "read " + path.string());
-        if (n == 0) break;
-        require(bytes.size() + static_cast<std::size_t>(n) <= limit, "file grew beyond size limit");
-        bytes.append(buffer.data(), static_cast<std::size_t>(n));
+    while (const auto n = read_some(fd.value, buffer.data(), buffer.size())) {
+        require(bytes.size() + n <= limit, "file grew beyond size limit");
+        bytes.append(buffer.data(), n);
     }
     return bytes;
 }
-void write_all(int fd, const void* data, std::size_t count) {
-    auto* bytes = static_cast<const char*>(data);
-    while (count) {
-        const auto n = ::write(fd, bytes, count);
-        if (n < 0 && errno == EINTR) continue;
-        system_check(n > 0, "write staged file");
-        bytes += n;
-        count -= static_cast<std::size_t>(n);
-    }
-}
 void save_file(const fs::path& path, const std::string& bytes) {
-    Fd fd(::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644));
-    system_check(fd.value >= 0, "create metadata");
+    const auto fd = create_exclusive(path, false);
     write_all(fd.value, bytes.data(), bytes.size());
-    system_check(::fsync(fd.value) == 0, "sync metadata");
+    finish_file(fd.value, false);
 }
-void sync_dir(const fs::path& path) {
-    Fd fd(::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW));
-    system_check(fd.value >= 0 && ::fsync(fd.value) == 0, "sync directory " + path.string());
-}
-std::string hash_fd(int fd, std::uint64_t expected) {
+std::string hash_fd(Native fd, std::uint64_t expected) {
     require(regular_size(fd) == expected, "file size mismatch");
     Digest digest;
     std::array<char, 65536> buffer{};
     std::uint64_t count = 0;
-    for (;;) {
-        const auto n = ::read(fd, buffer.data(), buffer.size());
-        if (n < 0 && errno == EINTR) continue;
-        system_check(n >= 0, "read hash input");
-        if (!n) break;
-        count += static_cast<std::uint64_t>(n);
+    while (const auto n = read_some(fd, buffer.data(), buffer.size())) {
+        count += n;
         require(count <= expected, "hash input grew");
-        digest.add(buffer.data(), static_cast<std::size_t>(n));
+        digest.add(buffer.data(), n);
     }
     require(count == expected, "hash input truncated");
     return digest.finish();
 }
+#ifdef _WIN32 // unique staging/pointer names (POSIX uses mkstemp/mkdtemp)
+std::string random_token() {
+    std::array<unsigned char, 8> raw{};
+    require(RAND_bytes(raw.data(), static_cast<int>(raw.size())) == 1, "random name failed");
+    constexpr char hex[] = "0123456789abcdef";
+    std::string token;
+    for (const auto byte : raw) { token += hex[byte >> 4]; token += hex[byte & 15]; }
+    return token;
+}
+#endif
 bool ascii_name(std::string_view value, std::size_t max) {
     if (value.empty() || value.size() > max) return false;
     auto alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); };
     if (!alnum(value.front())) return false;
     return std::all_of(value.begin(), value.end(), [&](char c) { return alnum(c) || c == '.' || c == '_' || c == '-'; });
 }
+// Components: letters, digits, '.', '_', '-' and '+' (libstdc++-6.dll, PostgreSQL's Etc/GMT+1).
 bool valid_path(std::string_view path) {
     if (path.empty() || path.size() > 512) return false;
     std::size_t start = 0;
@@ -140,12 +237,21 @@ bool valid_path(std::string_view path) {
         if (component.empty() || component.size() > 128 || component == "." || component == ".." ||
             (start == 0 && component == ".ikv-update")) return false;
         for (char c : component) {
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) return false;
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-' || c == '+')) return false;
         }
         if (end == path.npos) return true;
         start = end + 1;
     }
     return false;
+}
+// Windows packages additionally avoid DOS device names, trailing dots and case-insensitive collisions.
+bool windows_component(std::string_view component) {
+    if (component.back() == '.') return false;
+    std::string stem(component.substr(0, component.find('.')));
+    for (auto& c : stem) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    static const std::set<std::string> reserved{"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+                                                "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
+    return !reserved.contains(stem);
 }
 bool valid_hash(const std::string& hash) {
     return hash.size() == 64 && std::all_of(hash.begin(), hash.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
@@ -185,9 +291,17 @@ SignedManifest load_signed(const fs::path& manifest_path, const fs::path& signat
         return true;
     };
     const auto json = Json::parse(result.bytes, callback);
-    exact_keys(json, {"schema", "version", "channel", "sequence", "package", "package_size", "package_sha256", "files"});
-    require(bounded_uint(json.at("schema"), 2) == 2, "unsupported manifest schema");
     auto& m = result.manifest;
+    // Linux manifests have exactly the eight schema-2 fields (every launcher since 0.4 rejects others); a Windows
+    // package names its platform, so neither launcher can install the other's payload.
+    if (json.is_object() && json.contains("platform")) {
+        exact_keys(json, {"schema", "version", "channel", "sequence", "package", "package_size", "package_sha256", "files", "platform"});
+        m.platform = json.at("platform").get<std::string>();
+        require(m.platform == "windows", "unsupported release platform");
+    } else {
+        exact_keys(json, {"schema", "version", "channel", "sequence", "package", "package_size", "package_sha256", "files"});
+    }
+    require(bounded_uint(json.at("schema"), 2) == 2, "unsupported manifest schema");
     m.version = json.at("version").get<std::string>();
     m.channel = json.at("channel").get<std::string>();
     m.sequence = bounded_uint(json.at("sequence"), std::numeric_limits<std::uint64_t>::max());
@@ -201,12 +315,18 @@ SignedManifest load_signed(const fs::path& manifest_path, const fs::path& signat
     const auto& files = json.at("files");
     require(files.is_array() && !files.empty() && files.size() <= 10000, "invalid manifest file count");
     m.files.reserve(files.size());
-    std::set<std::string> paths;
+    std::set<std::string> paths, folded;
     std::uint64_t total = 0;
     for (const auto& entry : files) {
         exact_keys(entry, {"path", "size", "sha256", "executable"});
         File file{entry.at("path").get<std::string>(), entry.at("sha256").get<std::string>(), bounded_uint(entry.at("size"), max_file), entry.at("executable").get<bool>()};
         require(valid_path(file.path) && valid_hash(file.sha256) && paths.insert(file.path).second, "unsafe/duplicate manifest path or hash");
+        if (m.platform == "windows") {
+            auto lower = file.path;
+            for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            require(folded.insert(lower).second, "manifest paths collide case-insensitively");
+            for (const auto& component : fs::path(file.path)) require(windows_component(component.string()), "manifest path is not a safe Windows name");
+        }
         total += file.size;
         require(total <= max_total, "unpacked release exceeds limit");
         m.files.push_back(std::move(file));
@@ -217,6 +337,301 @@ SignedManifest load_signed(const fs::path& manifest_path, const fs::path& signat
     }
     return result;
 }
+std::set<std::string> expected_directories(const Manifest& manifest) {
+    std::set<std::string> dirs;
+    for (const auto& file : manifest.files)
+        for (auto parent = fs::path(file.path).parent_path(); !parent.empty(); parent = parent.parent_path()) dirs.insert(parent.generic_string());
+    return dirs;
+}
+
+// ---- Bounded tar/gzip extraction (POSIX ustar only), shared by both platforms ----
+// Authenticates the actual compressed bytes handed to zlib, never reads beyond the signed compressed size, and bounds
+// decompressed tar bytes to the signed payload plus 64 MiB before any header is parsed.
+class PackageStream {
+public:
+    PackageStream(Native fd, const Manifest& manifest) : fd_(fd), remaining_(manifest.package_size) {
+        tar_remaining_ = 64ULL << 20;
+        for (const auto& file : manifest.files) tar_remaining_ += file.size;
+        require(inflateInit2(&zlib_, 16 + MAX_WBITS) == Z_OK, "gzip initialization failed");
+    }
+    ~PackageStream() { inflateEnd(&zlib_); }
+    PackageStream(const PackageStream&) = delete;
+    PackageStream& operator=(const PackageStream&) = delete;
+    // Up to count decompressed bytes; 0 only at the end of the gzip member.
+    std::size_t read(char* out, std::size_t count) {
+        if (ended_ || !count) return 0;
+        zlib_.next_out = reinterpret_cast<Bytef*>(out);
+        zlib_.avail_out = static_cast<uInt>(std::min<std::size_t>(count, 1U << 20));
+        const auto wanted = zlib_.avail_out;
+        while (zlib_.avail_out == wanted) {
+            if (!zlib_.avail_in) {
+                require(remaining_ > 0, "truncated gzip package");
+                const auto got = read_some(fd_, input_.data(), static_cast<std::size_t>(std::min<std::uint64_t>(remaining_, input_.size())));
+                require(got > 0, "package shorter than signed size");
+                remaining_ -= got;
+                digest_.add(input_.data(), got);
+                zlib_.next_in = reinterpret_cast<Bytef*>(input_.data());
+                zlib_.avail_in = static_cast<uInt>(got);
+            }
+            const int status = inflate(&zlib_, Z_NO_FLUSH);
+            if (status == Z_STREAM_END) { ended_ = true; break; }
+            require(status == Z_OK || status == Z_BUF_ERROR, "gzip decompression failed");
+        }
+        const std::size_t produced = wanted - zlib_.avail_out;
+        require(produced <= tar_remaining_, "decompressed tar exceeds signed payload plus metadata bound");
+        tar_remaining_ -= produced;
+        return produced;
+    }
+    void read_exact(char* out, std::size_t count) {
+        while (count) {
+            const auto n = read(out, count);
+            require(n > 0, "truncated tar archive");
+            out += n;
+            count -= n;
+        }
+    }
+    // Ignored tar padding still passes the same bound and the gzip CRC/size check; then the compressed bytes must be
+    // exactly the signed package.
+    void finish(const std::string& sha256) {
+        std::array<char, 65536> scratch{};
+        while (const auto n = read(scratch.data(), scratch.size()))
+            require(std::all_of(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(n), [](char c) { return c == 0; }), "invalid trailing tar data");
+        require(zlib_.avail_in == 0 && remaining_ == 0, "invalid or oversized trailing package data");
+        require(digest_.finish() == sha256, "actual extracted package SHA256/size mismatch");
+        char extra;
+        require(read_some(fd_, &extra, 1) == 0, "compressed package grew beyond signed size");
+    }
+private:
+    Native fd_;
+    std::uint64_t remaining_, tar_remaining_;
+    z_stream zlib_{};
+    bool ended_ = false;
+    Digest digest_;
+    std::array<char, 65536> input_{};
+};
+std::uint64_t octal(const char* field, std::size_t size) {
+    std::size_t i = 0;
+    while (i < size && field[i] == ' ') ++i;
+    std::uint64_t value = 0;
+    bool any = false;
+    for (; i < size && field[i] >= '0' && field[i] <= '7'; ++i, any = true) {
+        require(value <= (std::numeric_limits<std::uint64_t>::max() >> 3), "tar number overflow");
+        value = value * 8 + static_cast<std::uint64_t>(field[i] - '0');
+    }
+    for (; i < size; ++i) require(field[i] == ' ' || field[i] == '\0', "invalid tar number field");
+    require(any, "empty tar number field");
+    return value;
+}
+std::string tar_string(const char* field, std::size_t size) { return std::string(field, strnlen(field, size)); }
+void extract_package(Native package_fd, const Manifest& manifest, const fs::path& stage) {
+    rewind(package_fd);
+    PackageStream stream(package_fd, manifest);
+    std::map<std::string, const File*> expected;
+    for (const auto& file : manifest.files) expected.emplace(file.path, &file);
+    const auto dirs = expected_directories(manifest);
+    std::set<std::string> seen;
+    std::array<char, 512> header{};
+    std::array<char, 65536> buffer{};
+    for (std::size_t entries = 0;; ++entries) {
+        require(entries <= 50000, "archive entry count exceeds limit");
+        stream.read_exact(header.data(), header.size());
+        if (std::all_of(header.begin(), header.end(), [](char c) { return c == 0; })) break;
+        std::uint64_t sum = 0;
+        for (std::size_t i = 0; i < header.size(); ++i) sum += (i >= 148 && i < 156) ? ' ' : static_cast<unsigned char>(header[i]);
+        require(octal(header.data() + 148, 8) == sum, "tar header checksum mismatch");
+        require(std::memcmp(header.data() + 257, "ustar\0" "00", 8) == 0, "update archives must be POSIX ustar");
+        const auto name = tar_string(header.data(), 100), prefix = tar_string(header.data() + 345, 155);
+        std::string path = prefix.empty() ? name : prefix + "/" + name;
+        const char type = header[156];
+        require(tar_string(header.data() + 157, 100).empty() && (type == '0' || type == '\0' || type == '5'),
+                "links, special files and tar extensions are not allowed in update archive");
+        const auto mode = octal(header.data() + 100, 8);
+        const auto size = octal(header.data() + 124, 12);
+        if (type == '5' && path.ends_with('/')) path.pop_back();
+        require(valid_path(path) && seen.insert(path).second, "unsafe or duplicate archive path");
+        if (type == '5') {
+            require(dirs.contains(path) && size == 0, "unlisted or nonempty archive directory");
+            continue;
+        }
+        require(expected.contains(path), "special or unlisted archive file");
+        const auto& file = *expected.at(path);
+        require(size == file.size, "archive file size mismatch");
+        require((mode & 07000) == 0 && static_cast<bool>(mode & 0111) == file.executable, "archive executable/privileged mode mismatch");
+        const auto destination = stage / fs::path(file.path);
+        fs::create_directories(destination.parent_path());
+        const auto output = create_exclusive(destination, file.executable);
+        Digest digest;
+        for (std::uint64_t left = size; left;) {
+            const auto n = static_cast<std::size_t>(std::min<std::uint64_t>(left, buffer.size()));
+            stream.read_exact(buffer.data(), n);
+            digest.add(buffer.data(), n);
+            write_all(output.value, buffer.data(), n);
+            left -= n;
+        }
+        require(digest.finish() == file.sha256, "unpacked file hash mismatch");
+        finish_file(output.value, file.executable);
+        if (const auto padding = (512 - size % 512) % 512) stream.read_exact(buffer.data(), static_cast<std::size_t>(padding));
+        expected.erase(path);
+    }
+    require(expected.empty(), "truncated archive or missing signed files");
+    stream.finish(manifest.package_sha256);
+}
+
+#ifdef _WIN32
+// ---- Windows installation layout: releases/<version>, one atomic current.json {"current","previous"} pointer ----
+void plain_directory(const fs::path& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT),
+            "install directories must be real directories, not links or junctions: " + path.string());
+}
+void replace_file(const fs::path& source, const fs::path& target) {
+    if (!MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const auto error = GetLastError();
+        std::error_code ignored;
+        fs::remove(source, ignored);
+        SetLastError(error);
+        win_fail("replace " + target.string());
+    }
+}
+struct InstallLock {
+    fs::path root;
+    Fd lock{INVALID_HANDLE_VALUE};
+    explicit InstallLock(const fs::path& path) : root(fs::absolute(path).lexically_normal()) {
+        require(!path.empty(), "empty install root");
+        fs::create_directories(root);
+        plain_directory(root);
+        fs::create_directory(root / "releases");
+        plain_directory(root / "releases");
+        lock.value = CreateFileW((root / ".update-lock").c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (lock.value == INVALID_HANDLE_VALUE) win_fail("open updater lock");
+        require(!(file_info(lock.value).dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "unsafe updater lock");
+        OVERLAPPED overlapped{};
+        if (!LockFileEx(lock.value, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)) win_fail("lock updater");
+    }
+};
+struct Highwater {
+    std::uint64_t sequence{};
+    std::string manifest_sha256;
+};
+Highwater check_highwater(const fs::path& root, const Manifest& manifest, const std::string& hash) {
+    const auto directory = root / ".update-highwater";
+    fs::create_directory(directory);
+    plain_directory(directory);
+    const auto path = directory / (manifest.channel + ".json");
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND) return {};
+    const auto json = Json::parse(read_bounded(path, 4096));
+    exact_keys(json, {"sequence", "manifest_sha256"});
+    Highwater result{bounded_uint(json.at("sequence"), std::numeric_limits<std::uint64_t>::max()), json.at("manifest_sha256").get<std::string>()};
+    require(result.sequence > 0 && valid_hash(result.manifest_sha256), "invalid update highwater");
+    require(manifest.sequence >= result.sequence, "release sequence is below channel highwater");
+    require(manifest.sequence != result.sequence || hash == result.manifest_sha256, "release sequence conflicts with authenticated manifest");
+    return result;
+}
+void raise_highwater(const fs::path& root, const Manifest& manifest, const std::string& hash, const Highwater& highwater) {
+    if (manifest.sequence == highwater.sequence) return;
+    const auto directory = root / ".update-highwater";
+    const auto temporary = directory / (".highwater-" + random_token());
+    save_file(temporary, Json{{"sequence", manifest.sequence}, {"manifest_sha256", hash}}.dump());
+    replace_file(temporary, directory / (manifest.channel + ".json"));
+}
+struct Pointers { std::string current, previous; };
+Pointers read_pointers(const fs::path& root) {
+    const auto path = root / "current.json";
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND) return {};
+    const auto json = Json::parse(read_bounded(path, 4096));
+    exact_keys(json, {"current", "previous"});
+    Pointers result{json.at("current").get<std::string>(), json.at("previous").get<std::string>()};
+    require(ascii_name(result.current, 96) && (result.previous.empty() || ascii_name(result.previous, 96)), "unsafe release pointer");
+    return result;
+}
+// One file holds both pointers, so install and rollback switch them in a single atomic replace (no journal needed).
+void write_pointers(const fs::path& root, const Pointers& pointers) {
+    const auto temporary = root / (".current-" + random_token());
+    save_file(temporary, Json{{"current", pointers.current}, {"previous", pointers.previous}}.dump());
+    replace_file(temporary, root / "current.json");
+}
+Manifest verify_release_locked(const fs::path& root, const std::string& version, const fs::path& trusted_pem) {
+    require(ascii_name(version, 96), "unsafe release version");
+    const auto release = root / "releases" / version;
+    plain_directory(release);
+    plain_directory(release / ".ikv-update");
+    const auto signed_manifest = load_signed(release / ".ikv-update/manifest.json", release / ".ikv-update/signature.bin", trusted_pem);
+    const auto& manifest = signed_manifest.manifest;
+    require(manifest.version == version, "release directory/version mismatch");
+    require(manifest.platform == platform, "installed release is for another platform");
+    std::map<std::string, const File*> files;
+    for (const auto& file : manifest.files) files.emplace(file.path, &file);
+    auto dirs = expected_directories(manifest);
+    dirs.insert(".ikv-update");
+    // Manual recursion checks every entry's attributes before descending, so a junction is never followed.
+    const std::function<void(const fs::path&)> walk = [&](const fs::path& directory) {
+        for (const auto& entry : fs::directory_iterator(directory)) {
+            const auto relative = entry.path().lexically_relative(release).generic_string();
+            const DWORD attributes = GetFileAttributesW(entry.path().c_str());
+            require(attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT), "release contains a link or junction");
+            if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
+                require(dirs.contains(relative), "unlisted release directory");
+                walk(entry.path());
+                continue;
+            }
+            if (relative == ".ikv-update/manifest.json" || relative == ".ikv-update/signature.bin") continue;
+            require(files.contains(relative), "unlisted release file");
+            const auto& file = *files.at(relative);
+            const auto fd = open_regular(entry.path());
+            require(file_info(fd.value).nNumberOfLinks == 1, "installed file has hard links");
+            require(hash_fd(fd.value, file.size) == file.sha256, "installed file hash mismatch");
+            files.erase(relative);
+        }
+    };
+    walk(release);
+    require(files.empty(), "installed release missing signed files");
+    return manifest;
+}
+Manifest install_locked(const SignedManifest& signed_manifest, Native package, const fs::path& trusted_pem, const fs::path& root) {
+    const auto& manifest = signed_manifest.manifest;
+    const auto manifest_hash = sha256_hex(signed_manifest.bytes);
+    const auto highwater = check_highwater(root, manifest, manifest_hash);
+    const auto pointers = read_pointers(root);
+    const auto target = root / "releases" / manifest.version;
+    const bool existing = GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES;
+    if (existing) {
+        (void)verify_release_locked(root, manifest.version, trusted_pem);
+        require(read_bounded(target / ".ikv-update/manifest.json", max_manifest) == signed_manifest.bytes &&
+                read_bounded(target / ".ikv-update/signature.bin", 64) == signed_manifest.signature,
+                "existing version differs from signed update; versions are never overwritten");
+    } else {
+        const auto stage = root / "releases" / (".staging-" + random_token());
+        if (!CreateDirectoryW(stage.c_str(), nullptr)) win_fail("create isolated staging directory");
+        try {
+            extract_package(package, manifest, stage);
+            fs::create_directory(stage / ".ikv-update");
+            save_file(stage / ".ikv-update/manifest.json", signed_manifest.bytes);
+            save_file(stage / ".ikv-update/signature.bin", signed_manifest.signature);
+            if (!MoveFileExW(stage.c_str(), target.c_str(), MOVEFILE_WRITE_THROUGH)) win_fail("publish release directory");
+        } catch (...) {
+            std::error_code ignored;
+            fs::remove_all(stage, ignored);
+            throw;
+        }
+    }
+    // The freshness floor is raised before the pointer switch; an interrupted switch only resumes these signed bytes.
+    raise_highwater(root, manifest, manifest_hash, highwater);
+    if (pointers.current != manifest.version)
+        write_pointers(root, {manifest.version, pointers.current.empty() ? pointers.previous : pointers.current});
+    return manifest;
+}
+Manifest rollback_locked(const fs::path& root, const fs::path& trusted_pem) {
+    const auto pointers = read_pointers(root);
+    require(!pointers.current.empty() && !pointers.previous.empty() && pointers.current != pointers.previous, "no distinct rollback release");
+    const auto manifest = verify_release_locked(root, pointers.previous, trusted_pem);
+    write_pointers(root, {pointers.previous, pointers.current});
+    return manifest;
+}
+std::string current_locked(const fs::path& root) { return read_pointers(root).current; }
+void recover_transaction(const fs::path&) {}
+#else
+// ---- Linux installation layout: releases/<version>, current/previous symlinks, durable transaction journal ----
 void owned_directory(const fs::path& path) {
     struct stat st{};
     system_check(::lstat(path.c_str(), &st) == 0, "stat install directory");
@@ -379,134 +794,6 @@ void begin_transaction(const fs::path& root, const std::string& version,
         throw;
     }
 }
-std::set<std::string> expected_directories(const Manifest& manifest) {
-    std::set<std::string> dirs;
-    for (const auto& file : manifest.files)
-        for (auto parent = fs::path(file.path).parent_path(); !parent.empty(); parent = parent.parent_path()) dirs.insert(parent.generic_string());
-    return dirs;
-}
-// Authenticate the actual compressed bytes handed to libarchive, not a mutable
-// inode's earlier contents; never read beyond the signed compressed size.
-struct PackageStream {
-    int fd;
-    std::uint64_t remaining;
-    Digest digest;
-    std::array<char, 65536> buffer{};
-    PackageStream(int source, std::uint64_t size) : fd(source), remaining(size) {}
-    static la_ssize_t read(archive* reader, void* context, const void** output) {
-        auto& stream = *static_cast<PackageStream*>(context);
-        if (!stream.remaining) return 0;
-        const auto wanted = static_cast<std::size_t>(std::min<std::uint64_t>(stream.remaining, stream.buffer.size()));
-        ssize_t n;
-        do { n = ::read(stream.fd, stream.buffer.data(), wanted); } while (n < 0 && errno == EINTR);
-        if (n < 0 || (n > 0 && EVP_DigestUpdate(stream.digest.ctx.get(), stream.buffer.data(), static_cast<std::size_t>(n)) != 1)) {
-            archive_set_error(reader, EIO, "compressed input read/hash failed");
-            return -1;
-        }
-        stream.remaining -= static_cast<std::uint64_t>(n);
-        *output = stream.buffer.data();
-        return n;
-    }
-};
-// Bound decompression BEFORE the tar parser can consume a huge extension header.
-// Two streaming libarchive readers avoid a second on-disk copy of the package.
-struct TarStream {
-    archive* compressed;
-    std::uint64_t remaining;
-    std::array<char, 65536> buffer{};
-    static la_ssize_t read(archive* reader, void* context, const void** output) {
-        auto& stream = *static_cast<TarStream*>(context);
-        const auto n = archive_read_data(stream.compressed, stream.buffer.data(), stream.buffer.size());
-        if (n < 0) {
-            archive_set_error(reader, EIO, "gzip decompression failed");
-            return -1;
-        }
-        if (static_cast<std::uint64_t>(n) > stream.remaining) {
-            archive_set_error(reader, EFBIG, "decompressed tar exceeds signed payload plus metadata bound");
-            return -1;
-        }
-        stream.remaining -= static_cast<std::uint64_t>(n);
-        *output = stream.buffer.data();
-        return n;
-    }
-};
-void extract_package(int package_fd, const Manifest& manifest, const fs::path& stage) {
-    system_check(::lseek(package_fd, 0, SEEK_SET) == 0, "rewind package");
-    std::unique_ptr<archive, decltype(&archive_read_free)> compressed(archive_read_new(), archive_read_free);
-    std::unique_ptr<archive, decltype(&archive_read_free)> reader(archive_read_new(), archive_read_free);
-    require(compressed && reader, "archive allocation failed");
-    require(archive_read_support_filter_gzip(compressed.get()) == ARCHIVE_OK &&
-            archive_read_support_format_raw(compressed.get()) == ARCHIVE_OK, "gzip initialization failed");
-    PackageStream input(package_fd, manifest.package_size);
-    require(archive_read_open(compressed.get(), &input, nullptr, PackageStream::read, nullptr) == ARCHIVE_OK, "cannot open bounded tar/gzip package");
-    archive_entry* raw_entry = nullptr;
-    require(archive_read_next_header(compressed.get(), &raw_entry) == ARCHIVE_OK, "empty package stream");
-    std::uint64_t tar_limit = 64ULL << 20;
-    for (const auto& file : manifest.files) tar_limit += file.size;
-    TarStream stream{compressed.get(), tar_limit, {}};
-    require(archive_read_support_filter_none(reader.get()) == ARCHIVE_OK &&
-            archive_read_support_format_tar(reader.get()) == ARCHIVE_OK, "tar initialization failed");
-    require(archive_read_open(reader.get(), &stream, nullptr, TarStream::read, nullptr) == ARCHIVE_OK, "cannot read bounded tar stream");
-    std::map<std::string, const File*> expected;
-    for (const auto& file : manifest.files) expected.emplace(file.path, &file);
-    const auto dirs = expected_directories(manifest);
-    std::set<std::string> seen;
-    archive_entry* entry = nullptr;
-    std::array<char, 65536> buffer{};
-    std::size_t entries = 0;
-    int status;
-    while ((status = archive_read_next_header(reader.get(), &entry)) == ARCHIVE_OK) {
-        require(++entries <= 50000, "archive entry count exceeds limit");
-        const auto* raw = archive_entry_pathname(entry);
-        require(raw != nullptr, "archive path missing");
-        std::string path(raw);
-        const auto type = archive_entry_filetype(entry);
-        if (type == AE_IFDIR && path.ends_with('/')) path.pop_back();
-        require(valid_path(path) && seen.insert(path).second, "unsafe or duplicate archive path");
-        require(!archive_entry_symlink(entry) && !archive_entry_hardlink(entry) && !archive_entry_is_encrypted(entry), "links/encryption not allowed in update archive");
-        require(archive_entry_sparse_count(entry) == 0 && archive_entry_xattr_count(entry) == 0, "sparse files/extended attributes not allowed");
-        if (type == AE_IFDIR) {
-            require(dirs.contains(path) && archive_entry_size(entry) == 0, "unlisted or nonempty archive directory");
-            require(archive_read_data_skip(reader.get()) == ARCHIVE_OK, "invalid archive directory data");
-            continue;
-        }
-        require(type == AE_IFREG && expected.contains(path), "special or unlisted archive file");
-        const auto& file = *expected.at(path);
-        require(archive_entry_size_is_set(entry) && archive_entry_size(entry) >= 0 && static_cast<std::uint64_t>(archive_entry_size(entry)) == file.size, "archive file size mismatch");
-        require((archive_entry_perm(entry) & 07000) == 0 && static_cast<bool>(archive_entry_perm(entry) & 0111) == file.executable, "archive executable/privileged mode mismatch");
-        const auto destination = stage / file.path;
-        fs::create_directories(destination.parent_path());
-        Fd output(::open(destination.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600));
-        system_check(output.value >= 0, "create staged payload");
-        Digest digest;
-        std::uint64_t count = 0;
-        for (;;) {
-            const auto n = archive_read_data(reader.get(), buffer.data(), buffer.size());
-            require(n >= 0, "archive data decompression failed");
-            if (!n) break;
-            count += static_cast<std::uint64_t>(n);
-            require(count <= file.size, "archive file exceeds signed size");
-            digest.add(buffer.data(), static_cast<std::size_t>(n));
-            write_all(output.value, buffer.data(), static_cast<std::size_t>(n));
-        }
-        require(count == file.size && digest.finish() == file.sha256, "unpacked file hash mismatch");
-        system_check(::fchmod(output.value, file.executable ? 0755 : 0644) == 0 && ::fsync(output.value) == 0, "set mode/sync payload");
-        expected.erase(path);
-    }
-    require(status == ARCHIVE_EOF && expected.empty(), "truncated archive or missing signed files");
-    require(archive_read_close(reader.get()) == ARCHIVE_OK, "archive close failed");
-    // Drain even ignored tar padding through the same bound and gzip checksum check.
-    const void* discarded = nullptr;
-    la_ssize_t n;
-    do { n = TarStream::read(reader.get(), &stream, &discarded); } while (n > 0);
-    require(n == 0 && archive_read_close(compressed.get()) == ARCHIVE_OK, "invalid or oversized trailing package data");
-    do { n = PackageStream::read(compressed.get(), &input, &discarded); } while (n > 0);
-    require(n == 0 && input.remaining == 0 && input.digest.finish() == manifest.package_sha256, "actual extracted package SHA256/size mismatch");
-    char extra;
-    ssize_t tail;
-    do { tail = ::read(package_fd, &extra, 1); } while (tail < 0 && errno == EINTR);
-    require(tail == 0, "compressed package grew beyond signed size");
-}
 Manifest verify_release_locked(const fs::path& root, const std::string& version, const fs::path& trusted_pem) {
     require(ascii_name(version, 96), "unsafe release version");
     const auto release = root / "releases" / version;
@@ -515,6 +802,7 @@ Manifest verify_release_locked(const fs::path& root, const std::string& version,
     const auto signed_manifest = load_signed(release / ".ikv-update/manifest.json", release / ".ikv-update/signature.bin", trusted_pem);
     const auto& manifest = signed_manifest.manifest;
     require(manifest.version == version, "release directory/version mismatch");
+    require(manifest.platform == platform, "installed release is for another platform");
     std::map<std::string, const File*> files;
     for (const auto& file : manifest.files) files.emplace(file.path, &file);
     auto dirs = expected_directories(manifest);
@@ -530,8 +818,7 @@ Manifest verify_release_locked(const fs::path& root, const std::string& version,
             if (relative == ".ikv-update/manifest.json" || relative == ".ikv-update/signature.bin") continue;
             require(files.contains(relative), "unlisted release file");
             const auto& file = *files.at(relative);
-            Fd fd(::open(entry.path().c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-            system_check(fd.value >= 0, "open installed file");
+            const auto fd = open_regular(entry.path());
             struct stat st{};
             system_check(::fstat(fd.value, &st) == 0, "stat installed file");
             require(st.st_uid == ::geteuid() && st.st_nlink == 1 && !(st.st_mode & (S_IWGRP | S_IWOTH | 07000)) && static_cast<bool>(st.st_mode & 0111) == file.executable, "unsafe installed file mode/owner/links");
@@ -542,6 +829,81 @@ Manifest verify_release_locked(const fs::path& root, const std::string& version,
     require(files.empty(), "installed release missing signed files");
     return manifest;
 }
+Manifest install_locked(const SignedManifest& signed_manifest, Native package, const fs::path& trusted_pem, const fs::path& root) {
+    const auto& manifest = signed_manifest.manifest;
+    const auto manifest_hash = sha256_hex(signed_manifest.bytes);
+    const auto highwater = check_highwater(root, manifest, manifest_hash);
+    const auto current = link_version(root, "current", true);
+    const auto previous = link_version(root, "previous", true);
+    const auto target = root / "releases" / manifest.version;
+    const bool existing = fs::symlink_status(target).type() != fs::file_type::not_found;
+    fs::path stage;
+    bool committed = false;
+    if (existing) {
+        (void)verify_release_locked(root, manifest.version, trusted_pem);
+        require(read_bounded(target / ".ikv-update/manifest.json", max_manifest) == signed_manifest.bytes &&
+                read_bounded(target / ".ikv-update/signature.bin", 64) == signed_manifest.signature,
+                "existing version differs from signed update; versions are never overwritten");
+        if (current == manifest.version) {
+            raise_highwater(root, manifest, manifest_hash, highwater);
+            return manifest;
+        }
+    } else {
+        std::string temporary = (root / "releases/.staging-XXXXXX").string();
+        system_check(::mkdtemp(temporary.data()) != nullptr, "create isolated staging directory");
+        stage = temporary;
+    }
+    bool transaction = false;
+    try {
+        if (!existing) {
+            extract_package(package, manifest, stage);
+            fs::create_directory(stage / ".ikv-update");
+            save_file(stage / ".ikv-update/manifest.json", signed_manifest.bytes);
+            save_file(stage / ".ikv-update/signature.bin", signed_manifest.signature);
+            for (const auto& entry : fs::recursive_directory_iterator(stage)) {
+                if (entry.is_directory()) {
+                    system_check(::chmod(entry.path().c_str(), 0755) == 0, "set payload directory mode");
+                    sync_dir(entry.path());
+                }
+            }
+            system_check(::chmod(stage.c_str(), 0755) == 0, "set release directory mode");
+            sync_dir(stage);
+        }
+        transaction = true;
+        begin_transaction(root, manifest.version, current, previous);
+        if (!existing) {
+            fs::rename(stage, target);
+            committed = true;
+            sync_dir(root / "releases");
+        }
+        // This independently durable freshness floor is never undone by pointer
+        // journal recovery: a failed cutover may only resume these same signed bytes.
+        raise_highwater(root, manifest, manifest_hash, highwater);
+        if (!current.empty()) switch_link(root, "previous", current);
+        switch_link(root, "current", manifest.version);
+        clear_transaction(root);
+        transaction = false;
+    } catch (...) {
+        if (!existing && !committed) { std::error_code ignored; fs::remove_all(stage, ignored); }
+        if (transaction) recover_transaction(root);
+        throw;
+    }
+    return manifest;
+}
+Manifest rollback_locked(const fs::path& root, const fs::path& trusted_pem) {
+    const auto current = link_version(root, "current", false);
+    const auto previous = link_version(root, "previous", false);
+    require(current != previous, "no distinct rollback release");
+    const auto manifest = verify_release_locked(root, previous, trusted_pem);
+    system_check(::syscall(SYS_renameat2, AT_FDCWD, (root / "current").c_str(),
+                          AT_FDCWD, (root / "previous").c_str(), RENAME_EXCHANGE) == 0,
+                 "atomically exchange rollback pointers");
+    sync_dir(root);
+    return manifest;
+}
+std::string current_locked(const fs::path& root) { return link_version(root, "current", true); }
+#endif
+
 struct SemVer { std::array<std::uint64_t, 3> core{}; std::vector<std::string_view> pre; };
 bool digits(std::string_view s) { return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; }); }
 SemVer parse_version(std::string_view text) {
@@ -594,75 +956,15 @@ Manifest install(const fs::path& manifest_path, const fs::path& signature_path, 
                  const fs::path& trusted_pem, const fs::path& install_root) {
     const auto signed_manifest = load_signed(manifest_path, signature_path, trusted_pem);
     const auto& manifest = signed_manifest.manifest;
+    require(manifest.platform == platform, "signed package is for another platform (" + manifest.platform + ")");
     require(package_path.filename() == manifest.package, "package basename mismatch");
-    Fd package(::open(package_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
-    system_check(package.value >= 0, "open package");
-    // Reject unauthenticated packages before parsing; the extraction callback
+    const auto package = open_regular(package_path);
+    // Reject unauthenticated packages before parsing; the extraction stream
     // independently authenticates the reread bytes to close mutable-input races.
     require(hash_fd(package.value, manifest.package_size) == manifest.package_sha256, "package SHA256 mismatch");
     InstallLock installation(install_root);
-    const auto& root = installation.root;
-    recover_transaction(root);
-    Digest manifest_digest;
-    manifest_digest.add(signed_manifest.bytes.data(), signed_manifest.bytes.size());
-    const auto manifest_hash = manifest_digest.finish();
-    const auto highwater = check_highwater(root, manifest, manifest_hash);
-    const auto current = link_version(root, "current", true);
-    const auto previous = link_version(root, "previous", true);
-    const auto target = root / "releases" / manifest.version;
-    const bool existing = fs::symlink_status(target).type() != fs::file_type::not_found;
-    fs::path stage;
-    bool committed = false;
-    if (existing) {
-        (void)verify_release_locked(root, manifest.version, trusted_pem);
-        require(read_bounded(target / ".ikv-update/manifest.json", max_manifest) == signed_manifest.bytes &&
-                read_bounded(target / ".ikv-update/signature.bin", 64) == signed_manifest.signature,
-                "existing version differs from signed update; versions are never overwritten");
-        if (current == manifest.version) {
-            raise_highwater(root, manifest, manifest_hash, highwater);
-            return manifest;
-        }
-    } else {
-        std::string temporary = (root / "releases/.staging-XXXXXX").string();
-        system_check(::mkdtemp(temporary.data()) != nullptr, "create isolated staging directory");
-        stage = temporary;
-    }
-    bool transaction = false;
-    try {
-        if (!existing) {
-            extract_package(package.value, manifest, stage);
-            fs::create_directory(stage / ".ikv-update");
-            save_file(stage / ".ikv-update/manifest.json", signed_manifest.bytes);
-            save_file(stage / ".ikv-update/signature.bin", signed_manifest.signature);
-            for (const auto& entry : fs::recursive_directory_iterator(stage)) {
-                if (entry.is_directory()) {
-                    system_check(::chmod(entry.path().c_str(), 0755) == 0, "set payload directory mode");
-                    sync_dir(entry.path());
-                }
-            }
-            system_check(::chmod(stage.c_str(), 0755) == 0, "set release directory mode");
-            sync_dir(stage);
-        }
-        transaction = true;
-        begin_transaction(root, manifest.version, current, previous);
-        if (!existing) {
-            fs::rename(stage, target);
-            committed = true;
-            sync_dir(root / "releases");
-        }
-        // This independently durable freshness floor is never undone by pointer
-        // journal recovery: a failed cutover may only resume these same signed bytes.
-        raise_highwater(root, manifest, manifest_hash, highwater);
-        if (!current.empty()) switch_link(root, "previous", current);
-        switch_link(root, "current", manifest.version);
-        clear_transaction(root);
-        transaction = false;
-    } catch (...) {
-        if (!existing && !committed) { std::error_code ignored; fs::remove_all(stage, ignored); }
-        if (transaction) recover_transaction(root);
-        throw;
-    }
-    return manifest;
+    recover_transaction(installation.root);
+    return install_locked(signed_manifest, package.value, trusted_pem, installation.root);
 }
 Manifest verify_release(const fs::path& install_root, const std::string& version, const fs::path& trusted_pem) {
     InstallLock installation(install_root);
@@ -671,16 +973,12 @@ Manifest verify_release(const fs::path& install_root, const std::string& version
 }
 Manifest rollback(const fs::path& install_root, const fs::path& trusted_pem) {
     InstallLock installation(install_root);
-    const auto& root = installation.root;
-    recover_transaction(root);
-    const auto current = link_version(root, "current", false);
-    const auto previous = link_version(root, "previous", false);
-    require(current != previous, "no distinct rollback release");
-    const auto manifest = verify_release_locked(root, previous, trusted_pem);
-    system_check(::syscall(SYS_renameat2, AT_FDCWD, (root / "current").c_str(),
-                          AT_FDCWD, (root / "previous").c_str(), RENAME_EXCHANGE) == 0,
-                 "atomically exchange rollback pointers");
-    sync_dir(root);
-    return manifest;
+    recover_transaction(installation.root);
+    return rollback_locked(installation.root, trusted_pem);
+}
+std::string current_release(const fs::path& install_root) {
+    InstallLock installation(install_root);
+    recover_transaction(installation.root);
+    return current_locked(installation.root);
 }
 } // namespace ikv::updates

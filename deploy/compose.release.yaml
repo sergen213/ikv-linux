@@ -1,0 +1,66 @@
+# Automatic updates for Docker Compose (docs/SELF_HOSTING.md "Automatic updates"): auth and world run the active
+# extracted signed release that deploy/ikv-auto-update.sh (IKV_UPDATE_MODE=compose) installs into /var/lib/ikv-release.
+#   docker compose -f compose.yaml -f deploy/compose.release.yaml up -d
+# NONCANONICAL wave 30 realms and shards (docs/SELF_HOSTING.md "Realms and shards"), off unless the profile is chosen:
+#   docker compose -f compose.yaml -f deploy/compose.release.yaml --profile realms up -d
+# The base `world` service stays realm 1 shard 1 (port 7000). world-1-2 is a second shard (layer) of realm 1 and
+# world-2-1 hosts realm 2, which must exist first (management panel Diyarlar tab or POST /v1/admin/realms; until then
+# it restarts on failure). Each shard listens on the port it publishes, because it registers that port for clients;
+# set IKV_PUBLIC_HOST to the address players reach this host at. ikv-auto-update.sh restarts every world* service.
+x-shard: &shard
+  image: ikv-native-backend:local
+  command: ["world"]
+  profiles: [realms]
+  depends_on:
+    database: {condition: service_healthy}
+    auth: {condition: service_healthy}
+  secrets: [{source: dsn, target: dsn}, {source: tls-cert, target: tls-cert}, {source: tls-key, target: tls-key}, {source: tls-ca, target: tls-ca}]
+  volumes:
+    - type: bind
+      source: "${IKV_ASSET_ROOT:?set IKV_ASSET_ROOT to the readable local original asset directory}"
+      target: /srv/ikv/original
+      read_only: true
+      bind: {create_host_path: false}
+    - /var/lib/ikv-release:/opt/ikv-release:ro
+  tmpfs:
+    - /run/ikv:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001,size=1m
+    - /tmp:rw,noexec,nosuid,nodev,mode=0700,uid=10001,gid=10001,size=16m
+  networks: [backend, frontend]
+  restart: on-failure
+  stop_grace_period: 20s
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  cpus: 2.0
+  mem_limit: 1g
+  pids_limit: 64
+  healthcheck:
+    test: ["CMD", "/bin/sh", "/usr/local/libexec/ikv/container-health.sh", "world"]
+    interval: 10s
+    timeout: 5s
+    start_period: 10s
+    retries: 5
+  logging:
+    driver: local
+    options: {max-size: "10m", max-file: "3"}
+
+services:
+  auth:
+    environment:
+      IKV_RELEASE: /opt/ikv-release/active
+    volumes:
+      - /var/lib/ikv-release:/opt/ikv-release:ro
+  world:
+    environment:
+      IKV_RELEASE: /opt/ikv-release/active
+      IKV_PUBLIC_HOST: "${IKV_PUBLIC_HOST:-}"
+    volumes:
+      - /var/lib/ikv-release:/opt/ikv-release:ro
+  world-1-2:
+    <<: *shard
+    environment: {IKV_RELEASE: /opt/ikv-release/active, IKV_ASSET_ROOT: /srv/ikv/original, IKV_REALM: "1", IKV_WORLD_PORT: "7001", IKV_PUBLIC_HOST: "${IKV_PUBLIC_HOST:-}"}
+    ports: ["${IKV_BIND:-127.0.0.1}:7001:7001/tcp"]
+  world-2-1:
+    <<: *shard
+    environment: {IKV_RELEASE: /opt/ikv-release/active, IKV_ASSET_ROOT: /srv/ikv/original, IKV_REALM: "2", IKV_WORLD_PORT: "7002", IKV_PUBLIC_HOST: "${IKV_PUBLIC_HOST:-}"}
+    ports: ["${IKV_BIND:-127.0.0.1}:7002:7002/tcp"]

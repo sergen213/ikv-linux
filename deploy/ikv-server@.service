@@ -1,0 +1,55 @@
+# NONCANONICAL wave 30 (docs/SELF_HOSTING.md "Realms and shards"): one ikv-server per shard. The instance name is
+# REALM-SHARD (e.g. ikv-server@1-1, ikv-server@1-2, ikv-server@2-1); /etc/ikv/world-%i.env sets the shard:
+#   IKV_REALM=1             realm id (create realms other than 1 first: management panel Diyarlar or POST /v1/admin/realms)
+#   IKV_WORLD_PORT=7000     TLS world port of this shard (every shard of the host needs its own)
+#   IKV_CAPACITY=32         players on this shard (1..32)
+#   IKV_BIND=127.0.0.1      listen address (a reverse TCP proxy or 0.0.0.0 for direct players)
+#   IKV_SERVER_ARGS=        extra options, e.g. --public-host play.example.org (the address clients reach this shard at;
+#                           default: the account service's host) or --bots 0
+# The single-world ikv-server.service equals ikv-server@1-1 with port 7000; run one or the other for realm 1 shard 1.
+[Unit]
+Description=IKV authoritative TLS community world shard %i
+Requires=ikv-auth.service
+After=network-online.target postgresql.service ikv-auth.service
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ikv
+Group=ikv
+WorkingDirectory=/usr/local/share/ikv
+RuntimeDirectory=ikv-world-%i
+RuntimeDirectoryMode=0700
+Environment=IKV_ASSET_ROOT=/srv/ikv/original IKV_BIND=127.0.0.1 IKV_CAPACITY=32
+EnvironmentFile=-/etc/ikv/world.env
+EnvironmentFile=/etc/ikv/world-%i.env
+LoadCredential=dsn:/etc/ikv/dsn
+LoadCredential=tls-cert:/etc/ikv/tls-cert
+LoadCredential=tls-key:/etc/ikv/tls-key
+ExecStartPre=/usr/bin/install -m 0600 %d/dsn /run/ikv-world-%i/dsn
+ExecStart=/usr/local/bin/ikv-server --bind ${IKV_BIND} --port ${IKV_WORLD_PORT} --realm ${IKV_REALM} --capacity ${IKV_CAPACITY} --cert %d/tls-cert --key %d/tls-key --dsn-file /run/ikv-world-%i/dsn --gameplay /usr/local/share/ikv/config/gameplay.json --asset-root ${IKV_ASSET_ROOT} $IKV_SERVER_ARGS
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+UMask=0077
+LimitNOFILE=1024
+MemoryMax=1G
+CPUQuota=200%
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

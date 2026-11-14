@@ -2,9 +2,9 @@
 // Host mode ("mode":"host-server"): required install_root (new/empty owned dir), source (owned
 // genuine asset directory to import), admin_username, admin_password; optional bots (default 2), base_port
 // (default 27400; base..base+3 must be free), timeout_seconds, lan_address and PNG paths install_/host_/creating_/accounts_/rates_/
-// host_running_/chip_/players_/backups_/reattached_/log_screenshot_path. It drives install opt-in + import,
+// host_running_/chip_/players_/backups_/reattached_/realms_/log_screenshot_path. It drives install opt-in + import,
 // guided creation (base_port deliberately occupied), auto-login, the native Sunucu Yönetimi panel (status,
-// live bots, broadcast, backup, restore), keep-alive reattach, stop, auto-start and Sunucuyu sil (see
+// live bots, broadcast, backup, restore), keep-alive reattach, realms/shards (Diyarlar), stop, auto-start and Sunucuyu sil (see
 // hostServerSmoke). Needs ikv-launcher (supervisor), ikv-auth and ikv-server beside it.
 // Required: install_root, source, auth_url, world_host, world_port, ca,
 // username, password (optional trust: update-key override). world_host/world_port are the expected
@@ -26,6 +26,7 @@
 #define main ikv_launcher_entrypoint
 #include "../src/launcher_main.cpp"
 #undef main
+#include <QSet>
 #include <QDesktopServices>
 #include <QTextBrowser>
 
@@ -409,7 +410,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
                   "the PostgreSQL step in progress"); // provisioning takes seconds: the progress list is observable
         if (!ctl(static_cast<QListWidget*>(nullptr), "hostSteps")->item(2)->text().startsWith(QString::fromUtf8("✓"))) throw std::runtime_error("Steps out of order");
         capture(dialog(), "creating_screenshot_path");
-        waitUntil([&] { return running() && control<QLabel>(*launcher, "status")->text() == QString::fromUtf8("Giriş yapıldı") &&
+        // Wave 30: after login the hosted account service's realm list loads ("Oyun başlamaya hazır.").
+        const auto loggedIn = [&] { const auto text = control<QLabel>(*launcher, "status")->text(); return text == QString::fromUtf8("Giriş yapıldı") || text == QString::fromUtf8("Oyun başlamaya hazır."); };
+        waitUntil([&] { return running() && loggedIn() &&
                                label("hostIdentity").startsWith(QString::fromUtf8("Yönetici:")); }, 900, "creation, auto-login and admin session");
         occupied.close();
         const auto state = json(serverDir + "/state.json");
@@ -491,6 +494,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         {
             auto aged = json(serverDir + "/state.json");
             aged["version"] = "0.0.0";
+            aged.remove("upgrades"); // a pre-wave-30 supervisor: it cannot hand over itself, so the launcher stops and starts it
             QFile file(serverDir + "/state.json");
             if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(QJsonDocument(aged).toJson()) < 0) throw std::runtime_error("Cannot age state.json");
         }
@@ -503,6 +507,70 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         click("hostLogin");
         waitUntil([&] { return label("hostIdentity").startsWith(QString::fromUtf8("Yönetici:")) && botCount() == bots + 1; }, 60, "admin login after reattach");
         capture(dialog(), "reattached_screenshot_path");
+
+        // NONCANONICAL wave 30: add a realm through the panel (/v1/admin/realms), host realm 1 on two shards and realm 2 on one;
+        // the supervisor applies the layout live, every shard registers, and a killed shard is restarted.
+        stage = "realms";
+        tab("Diyarlar");
+        click("hostRealmAdd");
+        waitUntil([&] {
+            for (auto* widget : QApplication::topLevelWidgets())
+                if (auto* open = qobject_cast<QDialog*>(widget); open && open->isVisible() && open->objectName() == "hostRealmDialog") {
+                    open->findChild<QLineEdit*>("hostRealmName")->setText(QString::fromUtf8("Galata"));
+                    open->findChild<QSpinBox*>("hostRealmShards")->setValue(1);
+                    open->accept();
+                    return true;
+                }
+            return false;
+        }, 10, "the Diyar ekle dialog");
+        auto* realmsTable = ctl(static_cast<QTableWidget*>(nullptr), "hostRealmsTable");
+        auto* shardsTable = ctl(static_cast<QTableWidget*>(nullptr), "hostShardsTable");
+        waitUntil([&] { return realmsTable->rowCount() == 2 && realmsTable->item(1, 0)->text().startsWith("Galata"); }, 30, "the new realm row");
+        realmsTable->selectRow(0);
+        ctl(static_cast<QSpinBox*>(nullptr), "hostShardCount")->setValue(2);
+        click("hostShardApply");
+        const auto shardsReady = [&] {
+            if (shardsTable->rowCount() != 3) return false;
+            for (int row = 0; row < 3; ++row)
+                if (!shardsTable->item(row, 4)->text().startsWith(QString::fromUtf8("Çalışıyor")) || !shardsTable->item(row, 3)->text().endsWith("/ 32")) return false;
+            return true;
+        };
+        waitUntil(shardsReady, 600, "three registered shards (realm 1 x2, realm 2 x1) in the shard table");
+        {
+            const auto layout = json(serverDir + "/host.json").value("realms").toArray();
+            if (layout.size() != 2 || layout[0].toObject().value("shards").toInt() != 2 || layout[1].toObject().value("shards").toInt() != 1)
+                throw std::runtime_error("host.json did not store the realm layout");
+            const auto realms = pinned("GET", QString("https://127.0.0.1:%1/v1/admin/realms").arg(json(serverDir + "/state.json").value("admin_port").toInt()),
+                                       serverDir + "/secrets/client-ca.pem", {}, adminToken()).value("realms").toArray();
+            QSet<QString> online, hosted; // (realm, port) of every live registry row / every supervisor shard
+            for (const auto& realm : realms)
+                for (const auto& shard : realm.toObject().value("shards").toArray())
+                    if (shard.toObject().value("online").toBool()) online << QString("%1:%2").arg(shard.toObject().value("realm_id").toInt()).arg(shard.toObject().value("port").toInt());
+            for (const auto& shard : json(serverDir + "/state.json").value("shards").toArray())
+                hosted << QString("%1:%2").arg(shard.toObject().value("realm").toInt()).arg(shard.toObject().value("port").toInt());
+            if (hosted.size() != 3 || !online.contains(hosted))
+                throw std::runtime_error("Not every shard registered: " + QStringList(online.begin(), online.end()).join(',').toStdString() + " vs " + QStringList(hosted.begin(), hosted.end()).join(',').toStdString());
+        }
+        capture(dialog(), "realms_screenshot_path");
+        qint64 killed = 0;
+        for (const auto& value : json(serverDir + "/state.json").value("shards").toArray())
+            if (value.toObject().value("realm").toInt() == 1 && value.toObject().value("index").toInt() == 2) killed = value.toObject().value("pid").toInteger();
+        if (killed <= 1) throw std::runtime_error("state.json lacks shard 1-2's pid");
+#ifdef _WIN32
+        if (const HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, static_cast<DWORD>(killed))) { TerminateProcess(process, 9); CloseHandle(process); }
+#else
+        ::kill(static_cast<pid_t>(killed), SIGKILL);
+#endif
+        waitUntil([&] {
+            for (const auto& value : json(serverDir + "/state.json").value("shards").toArray()) {
+                const auto shard = value.toObject();
+                if (shard.value("realm").toInt() == 1 && shard.value("index").toInt() == 2)
+                    return shard.value("pid").toInteger() != killed && shard.value("state").toString() == "running" && shardsReady();
+            }
+            return false;
+        }, 600, "the killed shard to be restarted");
+        std::fprintf(stderr, "TRACE host-server %s\n", QJsonDocument(QJsonObject{{"run", "realms"}, {"state", json(serverDir + "/state.json")}}).toJson(QJsonDocument::Compact).constData());
+
         tab("Hesaplar");
         waitUntil([&] { return ctl(static_cast<QTableWidget*>(nullptr), "hostAccountsTable")->rowCount() >= 1; }, 30, "the account list");
         capture(dialog(), "accounts_screenshot_path");
@@ -522,8 +590,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
             QFile log(serverDir + "/server.log"); // the world finished its loop and saved (not killed after the 20 s grace)
             const auto text = log.open(QIODevice::ReadOnly) ? QString::fromUtf8(log.readAll()) : QString();
             const auto at = text.lastIndexOf(QString::fromUtf8("durdurma isteği alındı"));
-            if (at < 0 || text.indexOf("ikv-server: STOP tick=", at) < 0 || text.indexOf(QString::fromUtf8("ikv-server çıktı: kod=0"), at) < 0)
-                throw std::runtime_error("Durdur did not stop the world gracefully (STOP tick + exit 0)");
+            for (const char* shard : {"ikv-server[1-1]", "ikv-server[1-2]", "ikv-server[2-1]"}) // every shard saves (wave 30 layout below)
+                if (at < 0 || text.indexOf(QString::fromLatin1(shard) + ": STOP tick=", at) < 0 || text.indexOf(QString::fromLatin1(shard) + QString::fromUtf8(" çıktı: kod=0"), at) < 0)
+                    throw std::runtime_error(std::string("Durdur did not stop ") + shard + " gracefully (STOP tick + exit 0)");
         }
 
         stage = "autostart";
@@ -549,7 +618,7 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         waitUntil([&] { return control<QPushButton>(*launcher, "hostButton")->text() == "Sunucu Kur"; }, 5, "chip reset");
         result = 0;
         reason = "Install opt-in, guided creation with port auto-pick, auto-login, native panel status, live bots, broadcast, backup, "
-                 "restore, keep-alive reattach, admin re-login, stop, auto-start, close-stops-server and delete passed";
+                 "restore, keep-alive reattach, admin re-login, realm add + 2x(2,1) shards + killed-shard restart, stop, auto-start, close-stops-server and delete passed";
     } catch (const std::exception& error) {
         reason = QString::fromUtf8(error.what());
         if (launcher) reason += "; host status=" + label("hostStatus") + "; notice=" + label("hostNotice") + "; logs=" + ctl(static_cast<QPlainTextEdit*>(nullptr), "hostLogs")->toPlainText().right(2500);
@@ -572,6 +641,210 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
     std::fprintf(stderr, "%s launcher-gui stage=%s: %s\n", result ? "FAIL" : "PASS", stage.toUtf8().constData(), reason.toUtf8().constData());
     return result;
 }
+// "mode":"auto-update" (tests/update_integration.py): the real Launcher with the IKVCommunity/IKVLauncher settings of
+// the caller's XDG_CONFIG_HOME (release API, trust, CA, install root). Starts the fixture's "client" command as the game
+// (private launch step), then the normal startup: the automatic check installs the newer release without any button.
+// Prints "DEFERRED client_running=1 label=…" once the restart waits for the game; when the fake client exits, the
+// launcher restarts into the installed release, which replaces this process (no return on success).
+struct LauncherTestAccess {
+    static void launch(Launcher& launcher, const QString& executable, const QStringList& args) { launcher.launch(executable, args); }
+    static bool clientRunning(const Launcher& launcher) { return launcher.clientRunning(); }
+    static void startup(Launcher& launcher) { launcher.startup({}, 3600); }
+    static QString label(const Launcher& launcher) { return launcher.updateLabel->text(); }
+};
+int autoUpdateSmoke(int& argc, char** argv, const QJsonObject& fixture) {
+    QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
+    ikv::launcher_release::rememberArguments(argc, argv);
+    QApplication app(argc, argv);
+    const auto command = fixture.value("client").toVariant().toStringList();
+    if (command.isEmpty()) throw std::runtime_error("auto-update fixture needs a client command");
+    const int seconds = fixture.value("timeout_seconds").toInt(60);
+    Launcher launcher;
+    LauncherTestAccess::launch(launcher, command.front(), command.mid(1));
+    QElapsedTimer clock; clock.start();
+    while (!LauncherTestAccess::clientRunning(launcher)) {
+        if (clock.elapsed() > 10000) throw std::runtime_error("fake client did not start");
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    }
+    LauncherTestAccess::startup(launcher);
+    bool deferred = false;
+    while (clock.elapsed() < seconds * 1000LL) {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        if (!deferred && LauncherTestAccess::label(launcher).contains("oyun kapanınca yeniden başlatılacak")) {
+            deferred = true;
+            std::printf("DEFERRED client_running=%d label=%s\n", LauncherTestAccess::clientRunning(launcher) ? 1 : 0,
+                        LauncherTestAccess::label(launcher).toUtf8().constData());
+            std::fflush(stdout);
+        }
+    }
+    throw std::runtime_error(deferred ? "launcher did not restart after the game closed" : "automatic update did not defer for the running game");
+}
+#ifndef _WIN32
+// Realm mode ("mode":"realms", NONCANONICAL wave 30). Required: install_root (new/empty owned dir), source (owned
+// genuine asset directory, imported directly; a launcher.exe beside it gives the original skin), auth_url, ca,
+// username/password (an existing account), expected_realms ([{id,label}] in list order), select_realm (id).
+// Optional: screenshot_path (list with the choice), warning_screenshot_path, relogin_screenshot_path,
+// timeout_seconds (default 120). Proves: the realm list fills from the real /v1/realms with population labels and
+// the original status texts, nothing preselected, OYNA without a choice shows "Lütfen bir sunucu seçiniz." (Uyarı)
+// and starts nothing, OYNA passes --realm <id> to the client, and a fresh launcher preselects the profile's last
+// used realm. Prints one JSON evidence object on stdout.
+int realmSmoke(int& argc, char** argv, const QJsonObject& fixture, QString& stage) {
+    const QString installRoot = requiredString(fixture, "install_root"), source = requiredString(fixture, "source"),
+                  auth = requiredString(fixture, "auth_url"), certificate = requiredString(fixture, "ca"),
+                  username = requiredString(fixture, "username"), password = requiredString(fixture, "password");
+    const int selectRealm = fixture.value("select_realm").toInt(0), seconds = fixture.value("timeout_seconds").toInt(120);
+    const auto expected = fixture.value("expected_realms").toArray();
+    if (selectRealm < 1 || expected.isEmpty() || seconds < 1 || seconds > 3600)
+        throw std::runtime_error("select_realm, expected_realms and timeout_seconds 1..3600 required");
+    QTemporaryDir profile;
+    if (!profile.isValid()) throw std::runtime_error("Cannot create temporary launcher profile");
+    qputenv("XDG_CONFIG_HOME", (profile.path() + "/config").toUtf8());
+    qputenv("XDG_DATA_HOME", (profile.path() + "/data").toUtf8());
+    qputenv("XDG_CACHE_HOME", (profile.path() + "/cache").toUtf8());
+    QCoreApplication::setAttribute(Qt::AA_DontUseNativeDialogs);
+    QApplication app(argc, argv);
+    QCoreApplication::setOrganizationName("IKVCommunity");
+    QCoreApplication::setApplicationName("IKVLauncher");
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, profile.path() + "/config");
+    stage = "import";
+    const auto report = ikv::launcher_assets::importAssets(source, installRoot);
+    if (!report.ok()) throw std::runtime_error("Genuine source import failed");
+    const QString profileName = "Realm smoke";
+    {
+        QSettings saved;
+        saved.setValue("installation/root", installRoot); saved.setValue("assets/source", source);
+        saved.setValue("profiles/" + profileName, QJsonDocument(QJsonObject{{"auth", auth}, {"ca", certificate}}).toJson(QJsonDocument::Compact));
+        saved.setValue("profileNames", QStringList{"Localhost", profileName}); saved.setValue("lastProfile", profileName);
+        saved.sync();
+    }
+    const QDeadlineTimer deadline(seconds * 1000);
+    // Every message box is recorded and closed (an error dialog would otherwise block this loop); only the
+    // no-selection stage expects one.
+    QStringList dialogs;
+    bool warningExpected = false;
+    QTimer watcher; watcher.setInterval(20);
+    QObject::connect(&watcher, &QTimer::timeout, [&] {
+        for (auto* widget : QApplication::topLevelWidgets())
+            if (auto* box = qobject_cast<QMessageBox*>(widget); box && box->isVisible()) {
+                dialogs << box->windowTitle() + ": " + box->text();
+                if (!warningExpected) { // which child process an error dialog refers to
+                    QStringList processes;
+                    for (auto* top : QApplication::topLevelWidgets())
+                        for (auto* process : top->findChildren<QProcess*>())
+                            processes << QString("%1 state=%2 exit=%3/%4").arg(process->program()).arg(process->state()).arg(process->exitStatus()).arg(process->exitCode());
+                    dialogs << "processes: " + processes.join(", ");
+                }
+                const QString path = fixture.value("warning_screenshot_path").toString();
+                if (warningExpected && !path.isEmpty() && !QFileInfo::exists(path) && !box->grab().save(path, "PNG"))
+                    dialogs << "cannot save warning PNG";
+                box->accept();
+            }
+    });
+    watcher.start();
+    const auto waitFor = [&](const char* what, const std::function<bool()>& ready) {
+        while (!ready()) {
+            if (!dialogs.isEmpty()) throw std::runtime_error("Unexpected dialog: " + dialogs.join(" | ").toStdString());
+            if (deadline.hasExpired()) throw std::runtime_error(std::string("Timed out waiting for ") + what);
+            QCoreApplication::processEvents(QEventLoop::AllEvents);
+            QThread::msleep(2);
+        }
+    };
+    const auto capture = [](QWidget* widget, const QString& path) {
+        if (!path.isEmpty() && !widget->grab().save(path, "PNG")) throw std::runtime_error("Cannot save launcher PNG");
+    };
+    const auto clientOf = [](Launcher& launcher) -> QProcess* {
+        for (auto* process : launcher.findChildren<QProcess*>())
+            if (process->program().endsWith("/ikv-client")) return process;
+        return nullptr;
+    };
+    QJsonObject evidence;
+    QStringList statuses;
+    const auto login = [&](Launcher& launcher) {
+        launcher.show();
+        waitFor("login page", [&] { return currentPage(launcher) == "loginPage"; });
+        control<QLineEdit>(launcher, "username")->setText(username);
+        control<QLineEdit>(launcher, "password")->setText(password);
+        control<QPushButton>(launcher, "loginButton")->click();
+        auto* status = control<QLabel>(launcher, "status");
+        statuses.clear();
+        waitFor("Oyun başlamaya hazır.", [&] {
+            if (statuses.isEmpty() || statuses.last() != status->text()) statuses << status->text();
+            return status->text() == QString::fromUtf8("Oyun başlamaya hazır.");
+        });
+        if (currentPage(launcher) != "playPage" || !statuses.contains(QString::fromUtf8("Sunucu listesi bekleniyor...")))
+            throw std::runtime_error("Login did not show the play page and the original waiting status");
+        auto* list = control<QListWidget>(launcher, "realmList");
+        if (!list->isVisible()) throw std::runtime_error("Realm list is not visible after login");
+        QJsonArray rows;
+        for (int row = 0; row < list->count(); ++row)
+            rows.append(QJsonObject{{"id", list->item(row)->data(Qt::UserRole).toInt()}, {"label", list->item(row)->text()}});
+        if (rows != expected) throw std::runtime_error("Realm rows differ: " + QJsonDocument(rows).toJson(QJsonDocument::Compact).toStdString());
+        return list;
+    };
+    {
+        stage = "first-login";
+        Launcher launcher;
+        const bool skinned = launcher.findChild<QWidget*>("skin") != nullptr;
+        auto* list = login(launcher);
+        evidence.insert("skinned", skinned);
+        evidence.insert("rows", expected);
+        evidence.insert("statuses", QJsonArray::fromStringList(statuses));
+        if (!list->selectedItems().isEmpty()) throw std::runtime_error("A realm was preselected without a last used realm");
+        if (skinned && (control<QComboBox>(launcher, "profiles")->isVisible() || list->parentWidget() == control<QWidget>(launcher, "realmPanel")))
+            throw std::runtime_error("Skin did not move the realm list into the left Sunucu frame");
+
+        stage = "no-selection-warning";
+        warningExpected = true;
+        control<QPushButton>(launcher, "playButton")->click(); // returns once the watcher closed the modal box
+        warningExpected = false;
+        const QString shown = dialogs.join(" | ");
+        dialogs.clear();
+        const auto colon = shown.indexOf(": ");
+        const QString title = shown.left(colon), text = shown.mid(colon + 2);
+        if (title != QString::fromUtf8("Uyarı") || text != QString::fromUtf8("Lütfen bir sunucu seçiniz.") || clientOf(launcher))
+            throw std::runtime_error("OYNA without a realm did not warn (got '" + title.toStdString() + "': '" + text.toStdString() + "') or started a client");
+        evidence.insert("warning", QJsonObject{{"title", title}, {"text", text}});
+
+        stage = "play-with-realm";
+        for (int row = 0; row < list->count(); ++row)
+            if (list->item(row)->data(Qt::UserRole).toInt() == selectRealm) list->setCurrentRow(row);
+        if (list->selectedItems().isEmpty()) throw std::runtime_error("select_realm is not listed");
+        QCoreApplication::processEvents();
+        capture(&launcher, fixture.value("screenshot_path").toString());
+        control<QPushButton>(launcher, "playButton")->click();
+        waitFor("ikv-client start", [&] { return clientOf(launcher) != nullptr; });
+        const auto arguments = clientOf(launcher)->arguments();
+        const auto at = arguments.indexOf("--realm");
+        if (at < 0 || at + 1 >= arguments.size() || arguments[at + 1] != QString::number(selectRealm))
+            throw std::runtime_error("OYNA did not pass --realm " + std::to_string(selectRealm));
+        evidence.insert("client_realm_argument", arguments[at + 1]);
+        auto* child = clientOf(launcher);
+        // The client handles SIGTERM with a normal exit (a kill would raise the launcher's "Process crashed" dialog).
+        // Give it time to install its handler (or exit by itself, e.g. a pre-wave-30 client rejecting --realm).
+        const QDeadlineTimer settle(3000);
+        waitFor("ikv-client settle", [&] { return child->state() == QProcess::NotRunning || settle.hasExpired(); });
+        if (child->state() != QProcess::NotRunning) child->terminate();
+        waitFor("ikv-client exit", [&] { return child->state() == QProcess::NotRunning; });
+        evidence.insert("client_exit_code", child->exitCode());
+        QSettings saved; saved.sync();
+        if (saved.value("lastRealm/" + profileName).toInt() != selectRealm) throw std::runtime_error("Last used realm was not persisted per profile");
+        evidence.insert("persisted_key", "lastRealm/" + profileName);
+    }
+    {
+        stage = "relogin";
+        Launcher launcher;
+        auto* list = login(launcher);
+        const auto chosen = list->selectedItems();
+        if (chosen.size() != 1 || chosen.first()->data(Qt::UserRole).toInt() != selectRealm)
+            throw std::runtime_error("A fresh launcher did not preselect the last used realm");
+        capture(&launcher, fixture.value("relogin_screenshot_path").toString());
+        evidence.insert("preselected_after_restart", selectRealm);
+    }
+    std::printf("%s\n", QJsonDocument(evidence).toJson(QJsonDocument::Compact).constData());
+    std::fprintf(stderr, "PASS launcher-gui realms\n");
+    return 0;
+}
+#endif
 } // namespace
 
 int main(int argc, char** argv) {
@@ -596,11 +869,19 @@ int main(int argc, char** argv) {
         if (parse.error != QJsonParseError::NoError || !document.isObject())
             throw std::runtime_error("Stdin must contain one fixture JSON object");
         const auto fixture = document.object();
+        if (fixture.value("mode").toString() == "auto-update") return autoUpdateSmoke(argc, argv, fixture);
         if (fixture.value("mode").toString() == "host-server") {
             secretPassword = requiredString(fixture, "admin_password");
             ownedUsername = requiredString(fixture, "admin_username");
             return hostServerSmoke(argc, argv, fixture, stage);
         }
+#ifndef _WIN32
+        if (fixture.value("mode").toString() == "realms") {
+            secretPassword = requiredString(fixture, "password");
+            ownedUsername = requiredString(fixture, "username");
+            return realmSmoke(argc, argv, fixture, stage);
+        }
+#endif
 #ifdef _WIN32
         throw std::runtime_error("The Windows build of this smoke runs only \"mode\":\"host-server\"");
 #else
@@ -1094,15 +1375,25 @@ int main(int argc, char** argv) {
                         stage = "login"; step = Step::Login; queueClick("loginButton");
                     }
                     break;
-                case Step::Login:
-                    if (statusLabel->text() == QString::fromUtf8("Giriş yapıldı")) {
+                case Step::Login: {
+                    // Wave 30: an account service with /v1/realms lists realms ("Oyun başlamaya hazır."); OYNA then
+                    // needs a chosen realm (realm 1 here). Without the route the status stays "Giriş yapıldı".
+                    const bool listed = statusLabel->text() == QString::fromUtf8("Oyun başlamaya hazır.");
+                    if (listed || statusLabel->text() == QString::fromUtf8("Giriş yapıldı")) {
                         if (currentPage(launcher) != "playPage")
                             throw std::runtime_error("Login did not switch to the play page");
                         if (control<QLabel>(launcher, "account")->text().indexOf(ownedUsername.toHtmlEscaped()) < 0)
                             throw std::runtime_error("Play page does not name the authenticated account");
+                        if (listed) {
+                            auto* realms = control<QListWidget>(launcher, "realmList");
+                            for (int row = 0; row < realms->count(); ++row)
+                                if (realms->item(row)->data(Qt::UserRole).toInt() == 1) realms->setCurrentRow(row);
+                            if (realms->selectedItems().isEmpty()) throw std::runtime_error("Realm list lacks realm 1");
+                        }
                         stage = "play"; step = Step::Play; queueClick("playButton");
                     }
                     break;
+                }
                 case Step::Play:
                 case Step::Paint:
                 case Step::Stable: {

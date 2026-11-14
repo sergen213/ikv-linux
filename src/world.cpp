@@ -19,7 +19,7 @@ struct Rejected { std::string code, message; };
 struct TradePersistenceFailure { uint32_t peer; uint64_t revision; };
 bool critical_event(const Json& value) {
     const auto& type=value.at("type");
-    return type=="trade" || type=="trade_invite" || type=="trade_complete" || type=="trade_cancel" || type=="kick" ||
+    return type=="trade" || type=="trade_invite" || type=="trade_complete" || type=="trade_cancel" || type=="kick" || type=="transfer" ||
            (type=="error" && value.value("code","")=="trade_persistence");
 }
 void require(bool ok, const char* code, const char* message) { if (!ok) throw Rejected{code, message}; }
@@ -560,6 +560,7 @@ World::World(Json config, std::function<void(std::span<const CharacterSave>)> pe
                 }
             }
         }
+        raid_validate(); // NONCANONICAL wave 30 raid zones and scaled Şefs in raid copies (world_instance.cpp)
         // Quests: giver (accept; not for auto quests) and turn_in (completion, default giver) must list the quest. Objectives:
         // kill an enemy template; collect items (in the bag at hand-in; with a target, its kills drop them while the quest is
         // active; "also": further items); talk (completes at turn_in); visit a spot (zone, x, y, radius: <loc> trigger, prop
@@ -829,11 +830,17 @@ bool World::passable(const std::string& zone, int32_t x, int32_t y) const {
     return grid==source_zones_.end() ? initializing_ : zone_height(*grid->second,float(x)/1000.0f,float(y)/1000.0f).has_value();
 }
 std::string World::instance(uint32_t id, const std::string& zone) const {
-    const auto leader = group(id);
-    if (!leader || !config_.at("zones").at(zone).contains("instances")) return zone;
-    const auto copies = config_.at("zones").at(zone).at("instances").size();
+    const auto& z = config_.at("zones").at(zone);
+    if (!z.contains("instances")) return zone;
+    // NONCANONICAL wave 30: a raid zone gives the whole raid one copy (raid leader first); groups and solo players use the shared zone.
+    const bool raid_zone = z.contains("raid");
+    const auto raid = raid_zone ? raid_of(id) : 0;
+    const auto leader = raid_zone ? (raid ? raids_.at(raid).leader : 0) : group(id);
+    if (!leader) return zone;
+    const auto copies = z.at("instances").size();
+    const auto same = [&](uint32_t other) { return raid_zone ? raid_of(other) == raid : group(other) == leader; };
     const auto occupant = [&](const std::string& name, bool member) {
-        for (const auto& [other, b] : actors_) if (other != id && b.character.at("state").at("zone") == name && (!member || group(other) == leader)) return true;
+        for (const auto& [other, b] : actors_) if (other != id && b.character.at("state").at("zone") == name && (!member || same(other))) return true;
         return false;
     };
     // Wave 15 party rule: the leader's copy first, so a member who held another copy before joining follows the leader's.
@@ -1257,6 +1264,7 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
         for (const auto& [other,a] : actors_) { (void)other; require(a.character_id != character,"identity","Character already connected"); }
         Actor a; a.account_id = account; a.character_id = character; a.admin = admin; a.bot = bot;
         a.externally_muted = record.value("moderation",Json::object()).value("muted",false);
+        a.realm = record.contains("realm_id") ? integer(record.at("realm_id"),1,32767) : 1; // wave 30 home realm
         const auto appearance=record.value("appearance",Json::object());
         require(valid_appearance(appearance),"appearance","Character appearance invalid");
         require(record.at("name").dump().size()<=66,"name","Character name envelope exceeded");
@@ -1386,6 +1394,7 @@ void World::admit(uint32_t id, int64_t account, int64_t character, const Json& r
         integer(s.value("san",Json(0)),0,1000000000); integer(s.value("clan_currency",Json(0)),0,999000000); integer(s.value("akce",Json(0)),0,999000000);
         const auto stamp = [](const Json& v) { require(v.is_number_integer() && v.get<int64_t>() >= 0, "state", "Time stamp invalid"); };
         integer(s.value("karizma",Json(100)),0,100); stamp(s.value("karizma_reset",Json(0)));
+        merge_lockouts(s, record); // NONCANONICAL wave 30: lockouts stored by the server (Store::lockouts) join the state's own
         if (s.contains("lockouts")) { require(s.at("lockouts").is_object() && s.at("lockouts").size()<=32,"state","Lockout list invalid"); for (const auto& [locked,until] : s.at("lockouts").items()) { text(locked,32); stamp(until); } }
         if (s.contains("contacts")) for (const char* list : {"friends","ignored"}) {
             const auto& entries=s.at("contacts").at(list);
@@ -1402,7 +1411,7 @@ void World::remove(uint32_t id) {
     auto found = actors_.find(id); if (found == actors_.end()) return;
     const auto& a = found->second; CharacterSave save{a.account_id,a.character_id,a.character.at("state")}; persisted_visual(save.state);
     persist_(std::span<const CharacterSave>(&save,1));
-    cancel_trade(id); leave_group(id); invites_.erase(id); guild_invites_.erase(id);
+    cancel_trade(id); leave_group(id); invites_.erase(id); raid_invites_.erase(id); guild_invites_.erase(id); remote_invites_.erase(id);
     if (bots_.erase(id)) released_bots_.emplace_back(save.account_id,save.character_id);
     const auto& s = a.character.at("state"); const auto zone = s.at("zone").get<std::string>(); index(id,zone,s.at("x"),s.at("y"),false); actors_.erase(found);
     for (auto& [npc_id,n] : npcs_) { (void)npc_id; n.threat.erase(id); if (n.owner == id) n.owner = 0; }
@@ -1454,6 +1463,9 @@ std::pair<Json,Json> World::trade_events(const Trade& t) const {
            {"phase",t.open?"open":"invited"},{"revision",t.revision},{"own",first},{"other",second}};
     Json b{{"type","trade"},{"peer",t.a},{"peer_name",actors_.at(t.a).character.at("name")},{"initiator",t.a},
            {"phase",t.open?"open":"invited"},{"revision",t.revision},{"own",std::move(second)},{"other",std::move(first)}};
+    // Wave 30: a peer from another realm, when the event still fits the trade schema envelope (realm names are not in its bound).
+    if (auto r=realm_label(t.a,t.b); r && a.dump().size()+Json(*r).dump().size()+14<=32768) a["peer_realm"]=*r;
+    if (auto r=realm_label(t.b,t.a); r && b.dump().size()+Json(*r).dump().size()+14<=32768) b["peer_realm"]=*r;
     require(a.dump().size()<=32768 && b.dump().size()<=32768,"config","Alışveriş şartları çok büyük.");
     return {std::move(a),std::move(b)};
 }
@@ -1481,6 +1493,7 @@ void World::validate_offer(uint32_t id, const Json& offer) {
 }
 uint32_t World::group(uint32_t id) const { for (const auto& [leader,members] : groups_) if (std::find(members.begin(),members.end(),id) != members.end()) return leader; return 0; }
 void World::leave_group(uint32_t id) {
+    if (raid_of(id)) { raid_remove(id); return; } // NONCANONICAL wave 30: leaving the party leaves the raid (world_instance.cpp)
     auto leader = group(id); if (!leader) return; auto members = groups_.at(leader); groups_.erase(leader); std::erase(members,id);
     emit(id,{{"type","group"},{"leader",0},{"members",Json::array()}});
     if (members.size() > 1) { auto next = members.front(); groups_[next] = members; for (auto member : members) emit(member,{{"type","group"},{"leader",next},{"members",members}}); }
@@ -1503,10 +1516,9 @@ bool World::combat(uint32_t id, uint32_t target, int damage, Json caster, Json e
     uint32_t owner = n.owner;
     if (!owner || !actors_.contains(owner) || actors_.at(owner).character.at("state").at("hp").get<int>() == 0) owner = id;
     const int hp = std::max(0,n.hp-damage); std::map<uint32_t,Json> proposed{{id,std::move(caster)}}, quest_events;
+    std::vector<std::tuple<int64_t,std::string,int64_t>> stamped; // NONCANONICAL wave 30 lockouts for the lockout sink
     if (!hp) {
-        std::vector<uint32_t> recipients{owner}; auto leader = group(owner);
-        if (leader) { recipients.clear(); for (auto member : groups_.at(leader)) if (close(owner,member,config_.at("aoi")) && actors_.at(member).character.at("state").at("hp").get<int>() > 0) recipients.push_back(member); }
-        if (recipients.empty()) recipients.push_back(owner);
+        const auto recipients = sharers(owner); // group members, or with wave 30 raid members, in range and alive (world_instance.cpp)
         for (auto member : recipients) {
             if (!proposed.contains(member)) proposed[member] = actors_.at(member).character.at("state");
             auto& reward = proposed.at(member);
@@ -1514,9 +1526,8 @@ bool World::combat(uint32_t id, uint32_t target, int damage, Json caster, Json e
             auto& events = quest_events[member] = Json::array();
             xp(reward,amount/static_cast<int>(recipients.size()),events);
             quest_kill(reward, n.definition, events);
-            // NONCANONICAL lockout: a Şef's kill credit in a group-zone copy bars re-entry to that group zone (handle "interact").
-            if (const auto& z = config_.at("zones").at(n.definition.at("zone").get<std::string>()); n.definition.value("boss",false) && z.contains("instance_of"))
-                reward["lockouts"][z.at("instance_of").get<std::string>()] = int64_t(std::time(nullptr)) + config_.at("activities").at("lockout").get<int64_t>();
+            // NONCANONICAL lockout: a Şef's kill credit in a group-zone or raid copy bars re-entry to that zone (entry()).
+            if (const auto [zone, until] = stamp_lockout(reward, n.definition); !zone.empty()) stamped.emplace_back(actors_.at(member).character_id, zone, until);
         }
         // Guide groups randomly assign loot among nearby members; this RNG is not an original-server formula.
         if (recipients.size() > 1) { unsigned int value; if (RAND_bytes(reinterpret_cast<unsigned char*>(&value),sizeof(value)) != 1) throw std::runtime_error("loot assignment failed"); owner = recipients[value % recipients.size()]; }
@@ -1524,6 +1535,7 @@ bool World::combat(uint32_t id, uint32_t target, int damage, Json caster, Json e
     // A summon's bite carries its own NPC id as "source": it draws the threat and animates; kill credit stays with `id`.
     const uint32_t source = event.value("source",id);
     commit(proposed); n.owner = owner; n.hp = hp; n.threat[source] += damage;
+    persist_lockouts(stamped);
     for (auto& [member, events] : quest_events) for (auto& e : events) emit(member, std::move(e));
     if (!hp) {
         n.respawn_at = tick_ + n.definition.at("respawn").get<uint32_t>(); n.looted = false; n.debuffs = Json::array();
@@ -1915,14 +1927,20 @@ bool World::bank_reach(uint32_t id, const Actor& a) const {
 void World::handle(uint32_t id, const Json& request) {
     require(request.is_object() && request.dump().size() <= 8192,"request","İstek çok büyük.");
     auto& a = actor(id); require(!a.kicked,"permission","Yönetici tarafından oyundan atıldınız.");
+    require(!a.departing,"transfer","Başka bir sunucuya geçiliyor..."); // wave 30: a phase ticket is out
     const auto action = text(request.at("action"),32); auto& current = a.character.at("state");
-    require(current.at("hp").get<int>() > 0 || action == "resurrect" || action == "chat" || action == "trade_cancel" || action == "group_leave" || action == "quickbar" || action == "admin", "dead", "Ölüyken bunu yapamazsınız!"); // 0x58ece4
+    require(current.at("hp").get<int>() > 0 || action == "resurrect" || action == "chat" || action == "trade_cancel" || action == "group_leave" || action == "raid_leave" || action == "quickbar" || action == "admin", "dead", "Ölüyken bunu yapamazsınız!"); // 0x58ece4
     const auto target = [&]() { return target_id(request.at("target")); };
     const auto ack = [&]() { emit(id,{{"type","ack"},{"action",action}}); };
     if (action == "craft" || action == "gather" || action == "recipe_forget" || action.starts_with("bank_") ||
         (action == "use" && config_.at("recipes").contains(owned(current,text(request.at("uid"),32)).at("item").get<std::string>()))) { economy(id,action,request); return; }
+    if (shard_action(id,action,request)) return; // wave 30 by-name invites/whispers and cross-shard accepts
     if (social(id,action,request)) return;
     if (action.starts_with("arena_")) { arena(id,action,request); return; }
+    if (action.starts_with("raid_")) { // NONCANONICAL wave 30 raids (world_instance.cpp)
+        try { raid_action(id,action,request); } catch (const Refusal& r) { throw Rejected{r.code,r.message}; }
+        ack(); return;
+    }
     if (action == "interact") {
         auto t = target();
         // Click-to-talk like click-to-attack: an NPC beyond interaction_range is walked to (engage()), then interacted with.
@@ -1960,10 +1978,10 @@ void World::handle(uint32_t id, const Json& request) {
                     if (other.hp > 0 && other.definition.at("source_class") == door.at("required_death") && other.definition.at("zone") == n.definition.at("zone"))
                         throw Rejected{"door", other.definition.at("name").get<std::string>() + " yenilmeden bu geçit açılmaz."};
             const std::string to = door.at("to");
-            // NONCANONICAL group-zone lockout (stamped by a Şef kill in a copy): the zone stays shut until it expires.
-            if (const auto until = current.value("lockouts",Json::object()).value(to,int64_t(0)); until > std::time(nullptr) && config_.at("zones").at(to).contains("instances"))
-                throw Rejected{"lockout", "Bu grup bölgesinin şefini yakın zamanda yendiniz; " + std::to_string((until - std::time(nullptr) + 59) / 60) + " dakika sonra tekrar girebilirsiniz."};
-            transfer(id,current.at("zone") == to ? to : instance(id,to),door.at("arrive")[0],door.at("arrive")[1]); ack(); return;
+            // NONCANONICAL group-zone and raid lockouts (stamped by a Şef kill in a copy), raid size and copies: entry() (world_instance.cpp).
+            std::string destination;
+            try { destination = entry(id,to); } catch (const Refusal& r) { throw Rejected{r.code,r.message}; }
+            transfer(id,destination,door.at("arrive")[0],door.at("arrive")[1]); ack(); return;
         }
         // banker: the original Bankacı dialogue offers "Kasamı göster" (0x58ebfc), which opens the Banka window.
         emit(id,{{"type","dialogue"},{"target",t},{"text",n.definition.at("dialogue")},{"quests",quests_at(n,current,a.character.at("class_id"))},{"shop",n.definition.at("shop")},{"bank",n.definition.value("banker",false)}}); return;
@@ -2464,7 +2482,9 @@ void World::handle(uint32_t id, const Json& request) {
             auto t=target();auto& other=actor(t);const auto& s=other.character.at("state");
             require(t!=id && (!s.contains("guild") || s.at("guild").is_null()),"guild","Bu kişi zaten bir loncada.");
             require(current.at("guild").at("members").size()<64,"guild","Lonca dolu.");
-            guild_invites_[t]=current.at("guild");emit(t,{{"type","guild_invite"},{"from",id},{"name",a.character.at("name")},{"guild",current.at("guild")}});ack();return;
+            guild_invites_[t]=current.at("guild");Json invite{{"type","guild_invite"},{"from",id},{"name",a.character.at("name")},{"guild",current.at("guild")}};
+            if (auto r=realm_label(t,id)) invite["realm"]=*r; // wave 30: guilds are cross-realm
+            emit(t,std::move(invite));ack();return;
         }
         Json g;uint32_t departing=0;int64_t donated=0;
         if (action == "guild_create") {
@@ -2473,12 +2493,16 @@ void World::handle(uint32_t id, const Json& request) {
             g={{"id",new_uid()},{"name",name},{"leader_character_id",a.character_id},{"members",Json::array({a.character_id})},{"revision",1},{"level",config_.at("economy").value("guild_level",1)}};
         } else if (action == "guild_accept") {
             require(!member && guild_invites_.contains(id),"guild","Lonca davetiniz yok.");g=guild_invites_.at(id);
-            bool leader_online=false;
-            for (const auto& [other,b] : actors_) {
-                (void)other;const auto& s=b.character.at("state");
-                if (b.character_id==g.at("leader_character_id").get<int64_t>() && s.contains("guild") && !s.at("guild").is_null() && s.at("guild").at("id")==g.at("id")) {g=s.at("guild");leader_online=true;break;}
+            const Json remote=g.contains("remote")?g.at("remote"):Json(nullptr);g.erase("remote");
+            if (!remote.is_null()) g=shard_guild_latest(g); // wave 30: invited from another shard, the Lonca Reisi is not here
+            else {
+                bool leader_online=false;
+                for (const auto& [other,b] : actors_) {
+                    (void)other;const auto& s=b.character.at("state");
+                    if (b.character_id==g.at("leader_character_id").get<int64_t>() && s.contains("guild") && !s.at("guild").is_null() && s.at("guild").at("id")==g.at("id")) {g=s.at("guild");leader_online=true;break;}
+                }
+                require(leader_online,"guild","Davet eden Lonca Reisi artık oyunda değil.");
             }
-            require(leader_online,"guild","Davet eden Lonca Reisi artık oyunda değil.");
             require(g.at("members").size()<64,"guild","Lonca dolu.");g["members"].push_back(a.character_id);g["revision"]=g.at("revision").get<int64_t>()+1;
         } else if (action == "guild_donate") {
             // NONCANONICAL lonca progression (minloncalevel gates purchases; the original rule is server-only): members donate
@@ -2510,8 +2534,13 @@ void World::handle(uint32_t id, const Json& request) {
         if (donated) proposed.at(id)["clan_currency"]=current.value("clan_currency",int64_t(0))-donated;
         commit(proposed);
         if (departing) {actor(departing).character["state"].erase("guild");guild_invites_.erase(departing);}
-        if (action=="guild_accept")guild_invites_.erase(id);
+        if (action=="guild_accept") {
+            const auto& invite=guild_invites_.at(id);
+            if (invite.contains("remote") && link_) link_->send(invite.at("remote").at("instance"),{{"kind","guild_answer"},{"to_char",invite.at("remote").at("from_char")},{"from_char",a.character_id},{"from_name",a.character.at("name")},{"from_realm",a.realm},{"accepted",true}});
+            guild_invites_.erase(id);
+        }
         for (const auto& [other,s] : proposed) {(void)s;emit(other,{{"type","guild"},{"guild",other==departing?Json(nullptr):g}});}
+        shard_guild(g); // wave 30: members on other shards reload the roster
         ack();return;
     }
     if (action == "chat") {
@@ -2547,7 +2576,11 @@ void World::handle(uint32_t id, const Json& request) {
             a.chat_ready = tick_+10; return;
         }
         // Yasaklılar: a listener never receives chat from a character on its ignore list.
-        const auto deliver=[&](uint32_t other) { if (other == id || !ignores(other,a.character_id)) emit(other,value); };
+        const auto deliver=[&](uint32_t other) {
+            if (other != id && ignores(other,a.character_id)) return;
+            if (auto r=realm_label(other,id)) { auto tagged=value; tagged["realm"]=*r; emit(other,std::move(tagged)); } // wave 30
+            else emit(other,value);
+        };
         // Original help: Söyle and Rol yapma reach the view range, Bölge the whole region (native zone). Guide (rehberi "Bölge kanalı",
         // "Lonca kanalı"): writing on Bölge needs Plus Paket (or a web-shop "Genel sohbet" product, not ported) and on Lonca Plus Paket.
         // NONCANONICAL refusal wording: the client holds no such string (the official server sent it).
@@ -2556,9 +2589,11 @@ void World::handle(uint32_t id, const Json& request) {
         else if (channel == "zone") { for (const auto& [other,b] : actors_) if (b.character.at("state").at("zone") == current.at("zone")) deliver(other); }
         else if (channel == "private") { auto to = target_id(request.at("to")); actor(to); deliver(to); if (to != id) emit(id,value); }
         else if (channel == "group") { auto leader = group(id); require(leader,"group","Bir grupta değilsiniz."); for (auto other : groups_.at(leader)) deliver(other); }
+        else if (channel == "raid") { const auto raid = raid_of(id); require(raid,"raid","Bir baskında değilsiniz."); for (auto other : raid_members(raid)) deliver(other); } // NONCANONICAL wave 30
         else if (channel == "guild") {
             require(current.contains("guild") && !current.at("guild").is_null(),"guild","Bir loncada değilsiniz.");
             for (const auto& [other,b] : actors_) { const auto& s=b.character.at("state");if (s.contains("guild") && !s.at("guild").is_null() && s.at("guild").at("id")==current.at("guild").at("id"))deliver(other); }
+            shard_guild_chat(current.at("guild"),value); // wave 30: members on other shards
         }
         else if (channel == "clan") { // help "Klan Kanalı": everyone bound to the same clan
             require(current.contains("clan"),"clan","Bir klanda değilsiniz.");
@@ -2570,17 +2605,19 @@ void World::handle(uint32_t id, const Json& request) {
     // NONCANONICAL [INFERENCE]: the original also offered "Gruba Davet Et" on chat names, so invite and accept reach any online
     // character, not only one within the AOI (wave 15 connected parties).
     if (action == "group_invite") {
-        auto t = target(); actor(t); require(t != id && !group(t),"group","Bu kişi zaten bir grupta.");
-        auto leader = group(id); require(!leader || leader == id,"group","Yalnızca grup lideri davet edebilir."); require(!leader || groups_.at(leader).size() < 6,"group","Grup dolu."); invites_[t] = id; emit(t,{{"type","group_invite"},{"from",id},{"name",a.character.at("name")}}); ack(); return;
+        auto t = target(); actor(t); require(!raid_of(id),"raid","Baskındayken baskın davetini kullanın."); require(t != id && !group(t),"group","Bu kişi zaten bir grupta.");
+        auto leader = group(id); require(!leader || leader == id,"group","Yalnızca grup lideri davet edebilir."); require(!leader || groups_.at(leader).size() < 6,"group","Grup dolu."); invites_[t] = id;
+        Json invite{{"type","group_invite"},{"from",id},{"name",a.character.at("name")}}; if (auto r=realm_label(t,id)) invite["realm"]=*r;
+        emit(t,std::move(invite)); ack(); return;
     }
     if (action == "group_accept") {
-        require(invites_.contains(id) && !group(id),"group","Grup davetiniz yok."); auto leader = invites_.at(id); actor(leader); require(!group(leader) || group(leader) == leader,"group","Davet eden artık grup lideri değil.");
+        require(invites_.contains(id) && !group(id),"group","Grup davetiniz yok."); auto leader = invites_.at(id); actor(leader); require(!raid_of(leader),"raid","Davet eden artık bir baskında."); require(!group(leader) || group(leader) == leader,"group","Davet eden artık grup lideri değil.");
         if (!groups_.contains(leader)) groups_[leader] = {leader};
         require(groups_.at(leader).size() < 6,"group","Grup dolu."); groups_[leader].push_back(id); invites_.erase(id); for (auto other : groups_.at(leader)) emit(other,{{"type","group"},{"leader",leader},{"members",groups_.at(leader)}}); return;
     }
     if (action == "group_leave") { leave_group(id); ack(); return; }
     if (action == "group_kick") { // original İşlemler "Gruptan Çıkar" (VMER, 0041a4f0): leader removes a member
-        auto t = target(); require(t != id && group(id) == id && group(t) == id,"group","Yalnızca grup lideri kendi grubundan birini atabilir."); leave_group(t); ack(); return;
+        auto t = target(); require(!raid_of(id),"raid","Baskında üyeleri baskın penceresinden çıkarın."); require(t != id && group(id) == id && group(t) == id,"group","Yalnızca grup lideri kendi grubundan birini atabilir."); leave_group(t); ack(); return;
     }
     // Original "Şikayet Et" sends 'lpmc' with the player id (0040af4c/004192a8); its handling was server-side.
     // NONCANONICAL: online administrators receive a complaint event.
@@ -2901,7 +2938,31 @@ Json World::state(uint32_t id) {
     // constructor bounds five), then nearest-first while they fit. At extreme crowding the farthest players drop out of a
     // frame; NPCs then fill what remains.
     used+=a.event_bytes+a.events.size();
+    // Wave 30 realm names ("Ad (Realm)") are budgeted, not part of the static bound (no room left in it): a frame too full for a
+    // label carries the row without it.
+    const auto labelled=[&](Json& row,uint32_t subject){
+        const auto r=realm_label(id,subject); if(!r)return;
+        const size_t bytes=Json(*r).dump().size()+9; // ,"realm":
+        if(used+bytes>65533)return;
+        row["realm"]=*r; used+=bytes;
+    };
+    for(auto& row:result["party"])labelled(row,row.at("id").get<uint32_t>());
+    // NONCANONICAL wave 30 raid (world_instance.cpp raid_view): leader and parties, then a compact row per other-party member, budgeted
+    // right after the own group's entities (which the static bound covers) and before strangers and NPCs: the static bound has no
+    // room left for a full raid (65482 of 65533 bytes on config/gameplay.json), so a frame too full for a row omits it and the
+    // client keeps that member's last row.
+    bool raid_added=false;
+    const auto add_raid=[&]{
+        raid_added=true; auto raid=raid_view(id); if(raid.is_null())return;
+        Json rows=std::move(raid["rows"]); raid["rows"]=Json::array();
+        const size_t header=raid.dump().size()+8; // ,"raid":
+        if(used+header>65533)return;
+        used+=header;
+        for(auto& row:rows){const size_t bytes=row.dump().size()+1;if(used+bytes>65533)break;used+=bytes;raid["rows"].push_back(std::move(row));}
+        result["raid"]=std::move(raid);
+    };
     for(const auto& [stranger,d,other]:players) {
+        if(stranger && !raid_added)add_raid();
         (void)d;const auto& p=actors_.at(other);const auto& s=p.character.at("state");
         Json e={{"id",other},{"kind","player"},{"name",p.character.at("name")},{"appearance",p.character.at("appearance")},{"class_id",p.character.at("class_id")},{"equipment",visible_equipment(s)},{"x",s.at("x")},{"y",s.at("y")},{"hp",s.at("hp")},{"max_hp",s.at("max_hp")},{"level",s.at("level")},{"alive",s.at("hp").get<int>()>0}};
         if (p.posture) e["posture"]=p.posture;
@@ -2911,8 +2972,9 @@ Json World::state(uint32_t id) {
         if(s.contains("guild") && !s.at("guild").is_null())e["guild"]=s.at("guild").at("name");
         const size_t bytes=e.dump().size()+1;
         if(stranger && used+bytes>65533)continue;
-        used+=bytes;result["entities"].push_back(std::move(e));
+        used+=bytes;labelled(e,other);result["entities"].push_back(std::move(e));
     }
+    if(!raid_added)add_raid();
     // NONCANONICAL wave 29 catalogs.map (world_map.cpp) is budgeted like the NPCs it precedes: the static bound above leaves
     // no room for it, so a frame too full for it goes without (the client then marks only what it sees). Catalogs are resent
     // only when they change.

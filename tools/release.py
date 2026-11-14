@@ -10,7 +10,11 @@
    tools/sign_manifest.py (channel experimental, next sequence from the local ledger) into dist/manifest.json
    + manifest.sig, proves it with the image's own ikv-updater install against packaging/ikv-release-public.pem,
    and only then advances the ledger.
-5. --publish: commit, push main, gh release create vX.Y.Z with the six assets, download them back and verify.
+5. --publish: commit, push main, gh release create vX.Y.Z with the six Linux assets, download them back and verify.
+6. --upload-windows (after tools/package_windows.py X.Y.Z, which signs the Windows update trio): upload the eight
+   Windows assets (Setup.exe, .zip, their .sha256, the .json report, ikv-windows-x86_64-X.Y.Z.tar.gz,
+   manifest-windows.json, manifest-windows.sig) to the existing vX.Y.Z release, download them back, verify, and
+   require the complete release: 14 assets (6 Linux + 8 Windows). Windows launchers self-update from the trio.
 """
 from __future__ import annotations
 
@@ -63,6 +67,38 @@ def assets(version: str) -> list[Path]:
     image = f"IKV-Linux-{version}-x86_64.AppImage"
     return [ROOT / "dist" / n for n in (image, image + ".sha256", image + ".json", "manifest.json", "manifest.sig",
                                          f"ikv-linux-x86_64-{version}.tar.gz")]
+
+
+WINDOWS_ASSET_COUNT, RELEASE_ASSET_COUNT = 8, 14
+
+
+def windows_assets(version: str) -> list[Path]:
+    base = f"IKV-Windows-{version}-x64"
+    return [ROOT / "dist" / n for n in (base + "-Setup.exe", base + "-Setup.exe.sha256", base + ".zip", base + ".zip.sha256",
+                                         base + ".json", f"ikv-windows-x86_64-{version}.tar.gz",
+                                         "manifest-windows.json", "manifest-windows.sig")]
+
+
+def upload_windows(version: str, public: Path) -> None:
+    files = windows_assets(version)
+    missing = [p.name for p in files if not p.is_file()]
+    if missing:
+        die("missing Windows assets (run tools/package_windows.py " + version + "): " + ", ".join(missing))
+    run("openssl", "pkeyutl", "-verify", "-pubin", "-inkey", public, "-rawin", "-in", files[-2], "-sigfile", files[-1], capture=True)
+    document = json.loads(files[-2].read_bytes())
+    if document.get("platform") != "windows" or document.get("version") != version or document.get("package") != files[-3].name:
+        die("manifest-windows.json does not describe " + files[-3].name)
+    run("gh", "release", "upload", "v" + version, "--repo", REPO, "--clobber", *files)
+    with tempfile.TemporaryDirectory(prefix="ikv-release-windows-") as name:
+        back = Path(name)
+        run("gh", "release", "download", "v" + version, "--repo", REPO, "--dir", back)
+        for path in files:
+            if sha256(back / path.name) != sha256(path):
+                die(f"downloaded {path.name} differs from {path}")
+        count = sum(1 for p in back.iterdir() if p.is_file())
+        if count != RELEASE_ASSET_COUNT:
+            die(f"release v{version} has {count} assets; a complete release has {RELEASE_ASSET_COUNT} (6 Linux + {WINDOWS_ASSET_COUNT} Windows)")
+    print(f"uploaded and verified {WINDOWS_ASSET_COUNT} Windows assets; v{version} has all {RELEASE_ASSET_COUNT} assets")
 
 
 def preflight(args) -> None:
@@ -158,6 +194,8 @@ def main() -> None:
     parser.add_argument("version")
     parser.add_argument("--publish", action="store_true")
     parser.add_argument("--notes", type=Path)
+    parser.add_argument("--upload-windows", action="store_true",
+                        help="upload the signed Windows assets to the existing release and verify all 14 assets")
     # Key rotation only: sign with the previous key (and check with its public half) so installed launchers
     # accept a release that compiles in the new packaging/ikv-release-public.pem.
     parser.add_argument("--signing-key", type=Path, default=KEY)
@@ -165,6 +203,9 @@ def main() -> None:
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", args.version):
         die("version must be X.Y.Z")
+    if args.upload_windows:
+        upload_windows(args.version, args.verify_public)
+        return
     preflight(args)
     version, dist = args.version, ROOT / "dist"
     bump(version)

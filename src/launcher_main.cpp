@@ -1,5 +1,6 @@
 #include "ikv/release_defaults.hpp"
 #include "ikv/updates.hpp"
+#include "ikv/launcher_release.hpp"
 #include "ikv/launcher_assets.hpp"
 #include "ikv/launcher_extraction.hpp"
 
@@ -82,7 +83,7 @@ using Callback = std::function<void(const QByteArray&)>;
 QString failure(const std::exception& e) { return QString::fromUtf8(e.what()); }
 std::filesystem::path fs(const QString& p) { return std::filesystem::path(p.toStdU16String()); }
 #ifdef _WIN32
-// NONCANONICAL: the AppImage self-update is Linux-only. Hosting (launcher_server.cpp) runs on both since wave 19.
+// Hosting (launcher_server.cpp) since wave 19; signed self-update (portable-tree package) since wave 30.
 constexpr char platformName[] = "Windows", innoextractName[] = "innoextract.exe", innoextractLabel[] = "innoextract.exe",
                innoextractPrompt[] = "innoextract.exe programını seçin (Windows)", innoextractMagic[] = "MZ";
 #else
@@ -120,66 +121,9 @@ bool frameProcessLines(QByteArray& pending, const QByteArray& chunk, const QByte
     if (finished && !pending.isEmpty()) publish();
     return true;
 }
-#ifndef _WIN32
-// Startup argv before QApplication strips Qt options; handoff/restart re-exec with exactly these.
-std::vector<QByteArray> startArguments;
-// ikv-updater and verify_release take a PEM path: an empty trust setting selects the compiled-in
-// release key, materialised once per process in a private temporary file (removed before exec).
-std::unique_ptr<QTemporaryFile> builtinTrust;
-QString trustPem(const QString& configured) {
-    if (!configured.isEmpty()) return configured;
-    if (!builtinTrust) {
-        auto file = std::make_unique<QTemporaryFile>(QDir::tempPath() + "/ikv-release-trust-XXXXXX.pem");
-        const QByteArray pem(ikv::release::trust_pem);
-        if (!file->open() || file->write(pem) != pem.size() || !file->flush())
-            throw std::runtime_error("Yerleşik sürüm anahtarı hazırlanamadı");
-        builtinTrust = std::move(file);
-    }
-    return builtinTrust->fileName();
-}
-// The signed, hash-verified bin/ikv-linux.AppImage of <root>/current; empty when nothing is installed
-// or (onlyNewer) the installed release is not SemVer-newer than this build.
-QString installedAppImage(const QString& root, const QString& trust, bool onlyNewer) {
-    if (!QFileInfo(root + "/current").isSymLink()) return {};
-    const auto release = std::filesystem::canonical(fs(root) / "current");
-    const auto version = release.filename().string();
-    if (onlyNewer && ikv::updates::compare_versions(version, ikv::release::version) <= 0) return {};
-    const auto manifest = ikv::updates::verify_release(fs(root), version, fs(trustPem(trust)));
-    if (release != std::filesystem::canonical(fs(root) / "releases" / version))
-        throw std::runtime_error("Kurulu sürüm işaretçisi releases/ dışına çıkıyor");
-    if (std::none_of(manifest.files.begin(), manifest.files.end(), [](const auto& file) { return file.path == "bin/ikv-linux.AppImage" && file.executable; }))
-        throw std::runtime_error("Kurulu " + version + " sürümü bir AppImage (bin/ikv-linux.AppImage) içermiyor");
-    return QString::fromStdString((release / "bin/ikv-linux.AppImage").string());
-}
-// Replace this process with appImage (same argv). IKV_UPDATE_HANDOFF stops a handoff loop even if a
-// release's manifest version disagrees with its compiled version. Returns only by throwing.
-[[noreturn]] void execInto(const QString& appImage) {
-    builtinTrust.reset();
-    ::setenv("IKV_UPDATE_HANDOFF", "1", 1);
-    const QByteArray path = QFile::encodeName(appImage);
-    std::vector<char*> argv{const_cast<char*>(path.constData())};
-    for (std::size_t i = 1; i < startArguments.size(); ++i) argv.push_back(startArguments[i].data());
-    argv.push_back(nullptr);
-    std::fflush(nullptr);
-    ::execv(path.constData(), argv.data());
-    throw std::runtime_error("Yeni sürüm başlatılamadı (" + path.toStdString() + "): " + std::strerror(errno));
-}
-// Startup handoff: an installed, verified release newer than this build takes over. Returns the
-// Turkish reason when an installed release exists but cannot be used (shown, never ignored).
-QString handoff() {
-    if (qEnvironmentVariableIsSet("IKV_UPDATE_HANDOFF")) return {};
-    try {
-        QSettings settings;
-        const QString target = installedAppImage(settings.value("installation/root", dataRoot()).toString(),
-                                                 settings.value("updates/trust").toString(), true);
-        if (!target.isEmpty()) execInto(target);
-        return {};
-    } catch (const std::exception& e) {
-        return "Kurulu güncelleme kullanılamadı; bu sürümle devam ediliyor: " + failure(e);
-    }
-}
-#endif
+using ikv::launcher_release::trustPem;
 class Launcher final : public QWidget {
+    friend struct LauncherTestAccess; // launcher-gui-smoke (tests/launcher_gui_smoke.cpp) drives private steps
     QSettings settings;
     QNetworkAccessManager network;
     QLineEdit *root{}, *assetSource{}, *extractor{}, *username{}, *password{}, *repo{}, *trust{},
@@ -192,17 +136,27 @@ class Launcher final : public QWidget {
     QCheckBox *fullscreen{}, *frameGeneration{}, *hostAfterInstall{};
     QPlainTextEdit *logs{};
     QLabel *status{}, *installNote{}, *updateLabel{};
-    QWidget* updateBanner{}; // 'Güncelleme mevcut' + Güncelle / Yeniden başlat
+    QWidget* updateBanner{}; // 'Güncelleme mevcut' / 'Güncelleme indirildi…' + Güncelle / Yeniden başlat
     QPushButton* updateNow{};
     QJsonObject offeredRelease; // newest channel release newer than this build (from the release API)
     QString offeredVersion;
-    bool updateInstalled = false;
+    QString installedVersion;   // installed by this launcher; restart pending (the game is still running)
+    QTimer updateTimer;         // periodic automatic re-check while the launcher stays open
+    bool serverUpdate = false;  // --update-once --server: install only, exit 10 (headless/dedicated servers)
     QProgressBar *progress{};
     QStackedWidget *pages{};
     QWidget *installPage{}, *loginPage{}, *playPage{};
     QLabel *account{};
     QDialog *settingsDialog{}, *serverDialog{}, *hostDialog{}; // hostDialog: ikv::launcher_server panel
     QByteArray session;
+    // NONCANONICAL wave 30 realm list: the original launcher.exe listed servers (0x0048dbe0 URL, parser 0x0040a6a0,
+    // name-only ListBox 0x3fa in the left frame); here a logged-in profile lists its account service's /v1/realms.
+    enum class Realms { None, Waiting, Ready, Unsupported } realmState = Realms::None;
+    QWidget* realmPanel{};    // plain layout: "Sunucu" heading + list on the play page
+    QListWidget* realmList{}; // rows carry the realm id (Qt::UserRole); in the skin it moves into the left frame
+    QJsonArray realmRows;
+    QTimer* realmRetry{};
+    quint64 realmGeneration = 0; // bumped by logout/profile change so late responses are discarded
     QProcess *client{};
     bool busy = false;
     bool automation = false;
@@ -210,8 +164,12 @@ class Launcher final : public QWidget {
     struct TransferBudget {
         QDeadlineTimer deadline;
         qint64 bytes = 0, limit = 0;
+        int status = 0; // last final HTTP status, for fail handlers that distinguish e.g. 404
         QUrl origin;
         bool github = false;
+        // Background reads (the realm list and its retries) never hold the install/update gate `replies`, so an
+        // automatic update check or install never waits behind them (wave 30 integration).
+        bool background = false;
         std::function<void(const QString&)> fail; // set: report failures here instead of error()
         bool allows(const QUrl& url) const {
             if (github) return url.port(443) == 443 && (url.host() == "api.github.com" || url.host() == "github.com" || url.host().endsWith(".githubusercontent.com"));
@@ -219,7 +177,7 @@ class Launcher final : public QWidget {
         }
     };
     QList<QThread*> workers;
-    QList<QNetworkReply*> replies;
+    QList<QNetworkReply*> replies, backgroundReplies;
     QString authSessionOrigin;
     // Original-launcher skin (read at runtime from the user's launcher.exe; null = plain UI).
     QImage skinFrame;
@@ -324,12 +282,10 @@ class Launcher final : public QWidget {
             throw std::runtime_error("OpenGL renders natively; select Vulkan for FSR 3.1.4");
         settings.setValue("installation/root", root->text()); settings.setValue("assets/source", assetSource->text());
         settings.setValue("assets/extractor", extractor->text());
-#ifndef _WIN32
         settings.setValue("updates/repo", repo->text());
         settings.setValue("updates/trust", trust->text()); settings.setValue("updates/ca", updateCa->text());
         // release_channel replaces 0.3's updates/channel, which saved an unchosen "stable" default.
         settings.setValue("updates/api", releaseApi->text()); settings.setValue("updates/release_channel", channel->currentText()); settings.remove("updates/channel");
-#endif
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/renderer", renderer->currentText());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/render_scale", renderScale->value());
         if (renderer->currentIndex() >= 0) settings.setValue("graphics/fsr", upscaler->currentData().toString());
@@ -357,7 +313,7 @@ class Launcher final : public QWidget {
         installNote->setText("Kurulum klasörü: " + root->text());
         pages->setCurrentWidget(!hasAssets() ? installPage : session.isEmpty() ? loginPage : playPage);
     }
-    void clearSession() { session.fill('\0'); session.clear(); password->clear(); authSessionOrigin.clear(); showPage(); }
+    void clearSession() { session.fill('\0'); session.clear(); password->clear(); authSessionOrigin.clear(); resetRealms(); showPage(); }
     void paintEvent(QPaintEvent* event) override {
         if (skinFrame.isNull()) QWidget::paintEvent(event); else QPainter(this).drawImage(0, 0, skinFrame);
     }
@@ -365,12 +321,16 @@ class Launcher final : public QWidget {
         if (!skinFrame.isNull() && event->button() == Qt::LeftButton && windowHandle()) windowHandle()->startSystemMove();
         else QWidget::mousePressEvent(event);
     }
-    // OYNA is the current page's primary action; the server box only applies before login.
+    // OYNA is the current page's primary action; before login the server box chooses the profile, after login it
+    // lists the profile's realms (when the account service has /v1/realms).
+    bool realmsListed() const { return !session.isEmpty() && (realmState == Realms::Waiting || realmState == Realms::Ready); }
     void syncSkin() {
-        if (skinFrame.isNull()) return;
+        const bool listed = realmsListed() && pages->currentWidget() == playPage;
+        if (skinFrame.isNull()) { realmPanel->setVisible(listed); return; }
         const auto* page = pages->currentWidget();
         skinLogin->setVisible(page == loginPage); skinPlay->setVisible(page == playPage);
-        skinActions->setEnabled(!busy); skinLeft->setEnabled(!busy && page == loginPage);
+        realmList->setVisible(listed); profiles->setVisible(!listed); findChild<QPushButton*>("addServer")->setVisible(!listed);
+        skinActions->setEnabled(!busy); skinLeft->setEnabled(!busy && (page == loginPage || listed));
     }
     // Once original files are imported, re-present the existing widgets inside the original
     // launcher artwork (launcher.exe RT_BITMAP 139 frame + buttons). Any problem keeps the plain UI.
@@ -421,7 +381,10 @@ class Launcher final : public QWidget {
             "QProgressBar { background: white; border: none; } QProgressBar::chunk { background: #b0306f; }"
             "QPlainTextEdit { font-size: 7pt; }"
             "QScrollBar:vertical { width: 8px; background: #0d050f; } QScrollBar::handle:vertical { background: #6b3a7a; min-height: 16px; }"
-            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }");
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; }"
+            // Original server ListBox 0x3fa colours (OnCtlColor 0x00485a20): white text on #505050.
+            "QListWidget#realmList { background: #505050; color: #ffffff; border: 1px solid #6b3a7a; outline: none; }"
+            "QListWidget#realmList::item:selected { background: #8a2f8f; color: #ffffff; }");
         const auto place = [skin](QWidget* widget, const QRect& where) { widget->setParent(skin); widget->setGeometry(where); widget->show(); };
         const auto box = [&](const QRect& where, const QString& title) {
             auto* w = new QWidget; place(w, where);
@@ -443,7 +406,9 @@ class Launcher final : public QWidget {
         skinLeft = left->parentWidget();
         auto* form = loginPage->findChild<QFormLayout*>();
         auto* addServer = findChild<QPushButton*>("addServer");
-        left->addWidget(profiles); left->addWidget(addServer); left->addStretch();
+        // After login the same frame holds the realm list (the original's server ListBox at ≈(40,349) 134×128).
+        left->addWidget(profiles); left->addWidget(addServer); left->addWidget(realmList, 1); left->addStretch();
+        realmPanel->hide();
         form->removeRow(0); // the emptied "Sunucu" row of the login form
 
         auto* activity = box({64, 558, 229, 112}, "Etkinlik");
@@ -474,9 +439,9 @@ class Launcher final : public QWidget {
         const bool shown = isVisible();
         setAttribute(Qt::WA_TranslucentBackground); setWindowFlag(Qt::FramelessWindowHint);
         setFixedSize(frame.size()); setMask(QBitmap::fromImage(frame.createAlphaMask()));
-        connect(pages, &QStackedWidget::currentChanged, this, [this] { syncSkin(); });
         if (shown) show();
         syncSkin();
+        if (!realmRows.isEmpty()) fillRealms(); // skin-only population colours
         log("Özgün başlatıcı görünümü: " + app + "/launcher.exe");
     }
     QUrl validatedUrl(const QString& input) {
@@ -514,7 +479,8 @@ class Launcher final : public QWidget {
             if (session.isEmpty() || authSessionOrigin != authUrl()) throw std::runtime_error("Önce seçili sunucuya giriş yapın");
             request.setRawHeader("Authorization", "Bearer " + session);
         }
-        auto* reply = network.sendCustomRequest(request, method, body); replies.append(reply);
+        auto* reply = network.sendCustomRequest(request, method, body);
+        auto* owner = budget->background ? &backgroundReplies : &replies; owner->append(reply);
         reply->setReadBufferSize(65536);
         struct Download { QByteArray bytes; std::unique_ptr<QSaveFile> file; qint64 size = 0; QString issue; QUrl redirect; QDeadlineTimer deadline; };
         auto state = std::make_shared<Download>();
@@ -523,7 +489,7 @@ class Launcher final : public QWidget {
         state->deadline = QDeadlineTimer(wall);
         if (!destination.isEmpty()) {
             state->file = std::make_unique<QSaveFile>(destination);
-            if (!state->file->open(QIODevice::WriteOnly)) { reply->abort(); reply->deleteLater(); replies.removeOne(reply); throw std::runtime_error("Cannot stage HTTPS download"); }
+            if (!state->file->open(QIODevice::WriteOnly)) { reply->abort(); reply->deleteLater(); owner->removeOne(reply); throw std::runtime_error("Cannot stage HTTPS download"); }
         }
         auto drain = [reply, state, budget, maximum] {
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -566,12 +532,13 @@ class Launcher final : public QWidget {
             } catch (const std::exception& e) { state->issue = failure(e); }
             reply->abort(); // Never wait for a redirect/error body to finish before enforcing policy.
         });
-        connect(reply, &QNetworkReply::finished, this, [this, reply, timer, state, budget, drain, done = std::move(done), certificate, method, body, bearer, maximum, destination, redirects] {
+        connect(reply, &QNetworkReply::finished, this, [this, owner, reply, timer, state, budget, drain, done = std::move(done), certificate, method, body, bearer, maximum, destination, redirects] {
             timer->stop();
             if (state->issue.isEmpty() && budget->deadline.hasExpired()) state->issue = "HTTPS operation wall deadline exceeded";
             else if (state->issue.isEmpty() && state->deadline.hasExpired()) state->issue = "HTTPS request wall deadline exceeded";
-            drain(); replies.removeOne(reply);
+            drain(); owner->removeOne(reply);
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            budget->status = code;
             if (!state->redirect.isEmpty() && state->issue.isEmpty()) {
                 reply->deleteLater(); state->file.reset();
                 try { fetch(state->redirect, certificate, method, body, false, maximum, destination, done, redirects + 1, budget); }
@@ -599,19 +566,115 @@ class Launcher final : public QWidget {
             done(bytes);
         });
     }
-#ifndef _WIN32
-    void runHelper(const QStringList& arguments, std::function<void()> done) {
+    // ---- NONCANONICAL wave 30 realm list (docs/LAUNCHER_UPDATES.md "Using the launcher") ----
+    // Rows are name-only like the original ListBox (launcher.exe 0x00485db0 LB_ADDSTRING of field 1); the population
+    // suffix is NONCANONICAL (the original showed none), worded from the guide's "yoğun" and the client's "dolu"/"kapalı".
+    static QString realmLabel(const QJsonObject& realm) {
+        static const QMap<QString, QString> words{{"low", "Sakin"}, {"medium", "Normal"}, {"high", "Yoğun"}, {"full", "Dolu"}};
+        const QString word = realm.value("status").toString() != "online" ? QString("Kapalı") : words.value(realm.value("population").toString());
+        return word.isEmpty() ? realm.value("name").toString() : realm.value("name").toString() + " (" + word + ")";
+    }
+    QString realmKey() const { return "lastRealm/" + profiles->currentText(); }
+    void resetRealms() {
+        ++realmGeneration;
+        if (realmRetry) realmRetry->stop();
+        realmState = Realms::None; realmRows = {};
+        if (realmList) realmList->clear();
+    }
+    // Keeps the current selection across refreshes; otherwise only the profile's last used realm is preselected
+    // (NONCANONICAL convenience: the original never sent LB_SETCURSEL).
+    void fillRealms() {
+        const auto selected = realmList->selectedItems();
+        const QVariant keep = selected.isEmpty() ? settings.value(realmKey()) : selected.first()->data(Qt::UserRole);
+        realmList->clear();
+        for (const auto& value : realmRows) {
+            const auto realm = value.toObject();
+            const int id = realm.value("id").toInt();
+            auto* item = new QListWidgetItem(realmLabel(realm), realmList);
+            item->setData(Qt::UserRole, id);
+            if (!skinFrame.isNull()) { // NONCANONICAL colours from the client palette; the row background never changes
+                const QString population = realm.value("population").toString();
+                if (realm.value("status").toString() != "online") item->setForeground(QColor(0x9a, 0x9a, 0x9a));
+                else if (population == "full") item->setForeground(QColor(0xff, 0x6b, 0x5b));
+                else if (population == "high") item->setForeground(QColor(0xf4, 0xc5, 0x42));
+            }
+            if (keep.isValid() && keep.toInt() == id) realmList->setCurrentItem(item);
+        }
+    }
+    // After login: GET /v1/realms. "Sunucu listesi bekleniyor..." (0x0049d858) until it arrives, then
+    // "Oyun başlamaya hazır." (0x0049d588). Transient failures retry every second (the original retried every
+    // ~50 ms, NONCANONICAL slower); an account service without the route (404) keeps the pre-realm OYNA.
+    void loadRealms() {
+        const auto generation = ++realmGeneration;
+        realmRetry->stop();
+        if (session.isEmpty()) return;
+        const bool first = realmState != Realms::Ready;
+        if (first) { realmState = Realms::Waiting; status->setText("Sunucu listesi bekleniyor..."); }
+        syncSkin();
+        const QUrl base = validatedUrl(authUrl());
+        auto budget = std::make_shared<TransferBudget>();
+        budget->deadline = QDeadlineTimer(networkTimeoutMs); budget->limit = 256 * 1024 + 6 * 65536; budget->origin = base;
+        budget->background = true;
+        budget->fail = [this, generation, budget](const QString& issue) {
+            if (generation != realmGeneration || session.isEmpty()) return;
+            if (budget->status == 404) {
+                realmState = Realms::Unsupported; realmRows = {}; realmList->clear();
+                status->setText("Giriş yapıldı"); syncSkin(); return;
+            }
+            log("Sunucu listesi alınamadı: " + issue);
+            if (budget->status == 0 || budget->status == 429 || budget->status >= 500) realmRetry->start(1000);
+            else status->setText("Sunucu listesi alınamadı: " + issue);
+        };
+        fetch(base.resolved(QUrl("/v1/realms")), serverCertificate(), "GET", {}, true, 256 * 1024, {}, [this, generation, first](const QByteArray& bytes) {
+            if (generation != realmGeneration || session.isEmpty()) return;
+            QJsonParseError parse; const auto document = QJsonDocument::fromJson(bytes, &parse);
+            if (parse.error != QJsonParseError::NoError || !document.isArray() || document.array().size() > 256)
+                throw std::runtime_error("Sunucu listesi geçersiz");
+            for (const auto& value : document.array()) {
+                const auto realm = value.toObject();
+                const double id = realm.value("id").toDouble(-1);
+                const QString name = realm.value("name").toString();
+                if (!value.isObject() || id < 1 || id > 32767 || id != std::floor(id) || name.trimmed().isEmpty() || name.size() > 200 ||
+                    !realm.value("status").isString() || !realm.value("population").isString())
+                    throw std::runtime_error("Sunucu listesi geçersiz");
+            }
+            realmRows = document.array(); realmState = Realms::Ready;
+            fillRealms(); syncSkin();
+            if (first) { status->setText("Oyun başlamaya hazır."); log(QString("Sunucu listesi: %1 sunucu").arg(realmRows.size())); }
+        }, 0, budget);
+    }
+    // ---- Signed self-update (docs/LAUNCHER_UPDATES.md "Self-update"): automatic on Linux and Windows ----
+#ifdef _WIN32
+    static constexpr char manifestAsset[] = "manifest-windows.json", signatureAsset[] = "manifest-windows.sig";
+#else
+    static constexpr char manifestAsset[] = "manifest.json", signatureAsset[] = "manifest.sig";
+#endif
+    static constexpr int clientUpdateExit = 75; // ikv-client: "Yeni sürüm hazır; oyun güncelleniyor" (src/client_update.cpp)
+    bool clientRunning() const { return client && client->state() != QProcess::NotRunning; }
+    // A release installed while the game runs tells the client through this file (--update-signal).
+    QString clientSignal() const { return root->text() + "/.client-update"; }
+    // Automatic checks/installs report to the status line and log only and retry at the next check; explicit ones
+    // (and --update-once) keep the dialog / exit status.
+    std::function<void(const QString&)> updateFailure(bool automatic) {
+        if (!automatic || automation) return [this](const QString& issue) { error("Güncelleme başarısız: " + issue); };
+        return [this](const QString& issue) {
+            setBusy(false);
+            status->setText("Otomatik güncelleme başarısız; önceki sürüm korundu, yeniden denenecek: " + issue); log(status->text());
+        };
+    }
+    void runHelper(const QStringList& arguments, std::function<void()> done, std::function<void(const QString&)> fail = {}) {
         if (busy || !replies.isEmpty()) throw std::runtime_error("Another installation/update or HTTPS request is active");
-        QString helper = QCoreApplication::applicationDirPath() + "/ikv-updater";
-        if (!QFileInfo(helper).isExecutable()) throw std::runtime_error("Native signed updater helper missing beside launcher");
+        const QString helper = QStandardPaths::findExecutable("ikv-updater", {QCoreApplication::applicationDirPath()});
+        if (helper.isEmpty()) throw std::runtime_error("Native signed updater helper missing beside launcher");
+        if (!fail) fail = [this](const QString& issue) { error(issue); };
         setBusy(true); auto* p = new QProcess(this); p->setProgram(helper); p->setArguments(arguments);
         const auto output = attachProcessLog(p);
-        connect(p, &QProcess::errorOccurred, this, [this, p](QProcess::ProcessError e) { if (e == QProcess::FailedToStart) { busy = false; error(p->errorString()); p->deleteLater(); } });
-        connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, p, output, done = std::move(done)](int code, QProcess::ExitStatus exit) {
+        connect(p, &QProcess::errorOccurred, this, [this, p, fail](QProcess::ProcessError e) { if (e == QProcess::FailedToStart) { setBusy(false); fail(p->errorString()); p->deleteLater(); } });
+        connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, p, output, fail, done = std::move(done)](int code, QProcess::ExitStatus exit) {
             setBusy(false); p->deleteLater(); if (output->failed) return;
-            if (code || exit != QProcess::NormalExit) { error("İmzalı güncelleyici başarısız oldu; önceki sürüm korundu (ayrıntılar tanılama kaydında)"); return; }
+            if (code || exit != QProcess::NormalExit) { fail("İmzalı güncelleyici başarısız oldu; önceki sürüm korundu (ayrıntılar tanılama kaydında)"); return; }
             status->setText("Kurulum tamamlandı");
-            try { done(); } catch (const std::exception& e) { error(failure(e)); }
+            try { done(); } catch (const std::exception& e) { fail(failure(e)); }
         });
         p->start();
     }
@@ -641,16 +704,20 @@ class Launcher final : public QWidget {
         budget->origin = endpoint; budget->github = releaseApi->text().isEmpty();
         return budget;
     }
-    // Ask the release API for the newest channel release (highest vX.Y.Z tag; drafts and other tags
-    // ignored) and offer it when SemVer-newer than this build. Background (startup) failures go to the
-    // status line and log instead of a dialog; the launcher stays usable either way.
+    void showUpdate(const QString& label, const QString& action) {
+        updateLabel->setText(label); updateNow->setText(action); updateBanner->show();
+        status->setText(label); log(label + QString(" (çalışan v%1)").arg(ikv::release::version));
+    }
+    // Ask the release API for the newest channel release (highest vX.Y.Z tag; drafts and other tags ignored). A
+    // SemVer-newer one is installed automatically (no button press) unless it is not newer than the release the user
+    // explicitly rolled back from (updates/skip_version). Background failures go to the status line and log only.
     void checkUpdates(bool background) {
         if (busy || !replies.isEmpty()) throw std::runtime_error("Başka bir kurulum, güncelleme veya HTTPS isteği sürüyor");
         const QUrl endpoint = releaseEndpoint();
         auto budget = releaseBudget(endpoint);
         if (background) budget->fail = [this](const QString& issue) { status->setText("Güncellemeler denetlenemedi: " + issue); log(status->text()); };
         status->setText("Güncellemeler denetleniyor…");
-        fetch(endpoint, updateCa->text(), "GET", {}, false, 4 * 1024 * 1024, {}, [this](const QByteArray& bytes) {
+        fetch(endpoint, updateCa->text(), "GET", {}, false, 4 * 1024 * 1024, {}, [this, background](const QByteArray& bytes) {
             QJsonParseError parse; const auto doc = QJsonDocument::fromJson(bytes, &parse);
             if (parse.error != QJsonParseError::NoError || !doc.isArray()) throw std::runtime_error("Sürüm API'si GitHub sürüm dizisi döndürmedi");
             QJsonObject newest; QString newestVersion;
@@ -665,62 +732,101 @@ class Launcher final : public QWidget {
                 newest = release; newestVersion = QString::fromStdString(version);
             }
             if (newestVersion.isEmpty()) throw std::runtime_error("Seçili kanalda (" + updateChannel().toStdString() + ") sürüm bulunamadı");
-            if (ikv::updates::compare_versions(newestVersion.toStdString(), ikv::release::version) <= 0) {
-                status->setText(QString("Başlatıcı güncel (v%1)").arg(ikv::release::version)); log(status->text());
+            // --server updates the install root's services, which run its current release, not this launcher binary.
+            std::string baseline = ikv::release::version;
+            if (serverUpdate) if (const auto current = ikv::updates::current_release(fs(root->text())); !current.empty()) baseline = current;
+            if (ikv::updates::compare_versions(newestVersion.toStdString(), baseline) <= 0) {
+                status->setText(QString("Başlatıcı güncel (v%1)").arg(QString::fromStdString(baseline))); log(status->text());
                 if (automation) { std::printf("ikv-launcher %s: güncel (en yeni v%s)\n", ikv::release::version, qPrintable(newestVersion)); QCoreApplication::exit(0); }
                 return;
             }
-            offeredRelease = newest; offeredVersion = newestVersion; updateInstalled = false;
-            updateLabel->setText("Güncelleme mevcut: v" + newestVersion); updateNow->setText("Güncelle"); updateBanner->show();
-            status->setText(updateLabel->text()); log(updateLabel->text() + QString(" (çalışan v%1)").arg(ikv::release::version));
-            if (automation) updateNow->click(); // --update-once drives the same button
+            if (newestVersion == installedVersion) return; // installed already; restarting once the game closes
+            offeredRelease = newest; offeredVersion = newestVersion;
+            showUpdate("Güncelleme mevcut: v" + newestVersion, "Güncelle");
+            const QString skip = settings.value("updates/skip_version").toString();
+            bool rolledBack = false;
+            try { rolledBack = !skip.isEmpty() && ikv::updates::compare_versions(newestVersion.toStdString(), skip.toStdString()) <= 0; } catch (const std::exception&) {}
+            if (rolledBack && !automation) {
+                status->setText("v" + newestVersion + " önceki sürüme dönüldüğü için otomatik kurulmuyor; daha yeni bir sürüm çıkınca kurulur (elle: Güncelle)");
+                log(status->text());
+                return;
+            }
+            installUpdate(background);
         }, 0, budget);
     }
-    // Güncelle: download the offered release's signed manifest, signature and package, verify, install
-    // through ikv-updater into the install root (assets/settings untouched), then restart into it.
-    void installUpdate() {
+    // Download the offered release's signed manifest, signature and package, verify, install through ikv-updater into
+    // the install root (assets/settings untouched), then restart into it, or once the game has closed.
+    void installUpdate(bool automatic) {
         persist(); if (busy || !replies.isEmpty()) throw std::runtime_error("Başka bir kurulum, güncelleme veya HTTPS isteği sürüyor");
         if (offeredVersion.isEmpty()) throw std::runtime_error("Önce güncellemeleri denetleyin");
         const QString version = offeredVersion, key = trustPem(trust->text());
         auto temp = std::make_shared<QTemporaryDir>(); if (!temp->isValid()) throw std::runtime_error("Güncelleme hazırlama klasörü oluşturulamadı");
         auto budget = releaseBudget(releaseEndpoint());
-        budget->fail = [this](const QString& issue) { error("Güncelleme başarısız: " + issue); };
+        const auto fail = updateFailure(automatic);
+        budget->fail = fail;
         auto urls = std::make_shared<QMap<QString, QUrl>>();
         for (const auto& value : offeredRelease.value("assets").toArray()) { const auto a = value.toObject(); urls->insert(a.value("name").toString(), validatedUrl(a.value("browser_download_url").toString())); }
-        if (!urls->contains("manifest.json") || !urls->contains("manifest.sig")) throw std::runtime_error("Sürümde imzalı manifest (manifest.json/manifest.sig) yok");
-        const QString manifest = temp->filePath("manifest.json"), sig = temp->filePath("manifest.sig");
-        setBusy(true); status->setText("v" + version + " indiriliyor…");
-        fetch(urls->value("manifest.json"), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, manifest, [this, temp, urls, manifest, sig, budget, version, key](const QByteArray&) {
-            fetch(urls->value("manifest.sig"), updateCa->text(), "GET", {}, false, 64, sig, [this, temp, urls, manifest, sig, budget, version, key](const QByteArray&) {
+        if (!urls->contains(manifestAsset) || !urls->contains(signatureAsset))
+            throw std::runtime_error(std::string("Sürümde imzalı manifest (") + manifestAsset + "/" + signatureAsset + ") yok");
+        const QString manifest = temp->filePath(manifestAsset), sig = temp->filePath(signatureAsset);
+        setBusy(true); status->setText("v" + version + " indiriliyor…"); log(status->text());
+        fetch(urls->value(manifestAsset), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, manifest, [this, temp, urls, manifest, sig, budget, version, key, fail](const QByteArray&) {
+            fetch(urls->value(signatureAsset), updateCa->text(), "GET", {}, false, 64, sig, [this, temp, urls, manifest, sig, budget, version, key, fail](const QByteArray&) {
                 const auto m = ikv::updates::verify_manifest(fs(manifest), fs(sig), fs(key));
                 if (QString::fromStdString(m.channel) != updateChannel()) throw std::runtime_error("İmzalı manifest kanalı uyuşmuyor");
                 if (QString::fromStdString(m.version) != version) throw std::runtime_error("İmzalı manifest sürümü (" + m.version + ") sürüm etiketiyle uyuşmuyor");
+                if (m.platform != ikv::updates::platform) throw std::runtime_error("İmzalı paket başka bir platform için (" + m.platform + ")");
                 budget->limit = static_cast<qint64>(m.package_size) + 7 * 1024 * 1024;
                 budget->deadline = QDeadlineTimer(3 * networkTimeoutMs + static_cast<qint64>(m.package_size / 128));
                 const QString name = QString::fromStdString(m.package); if (!urls->contains(name)) throw std::runtime_error("İmzalı paket sürüm dosyaları arasında yok");
                 const QString package = temp->filePath(name);
-                fetch(urls->value(name), updateCa->text(), "GET", {}, false, static_cast<qint64>(m.package_size), package, [this, temp, manifest, sig, package, version, key](const QByteArray&) {
+                fetch(urls->value(name), updateCa->text(), "GET", {}, false, static_cast<qint64>(m.package_size), package, [this, temp, manifest, sig, package, version, key, fail](const QByteArray&) {
                     setBusy(false);
-                    runHelper({"install", "--manifest", manifest, "--signature", sig, "--package", package, "--trust", key, "--root", root->text()}, [this, temp, version] {
-                        updateInstalled = true;
-                        updateLabel->setText("v" + version + " kuruldu"); updateNow->setText("Yeniden başlat");
-                        log(updateLabel->text() + "; yeni sürüm başlatılıyor");
-                        if (automation) std::printf("ikv-launcher %s: v%s kuruldu, yeniden başlatılıyor\n", ikv::release::version, qPrintable(version));
-                        restartIntoInstalled();
-                    });
+                    runHelper({"install", "--manifest", manifest, "--signature", sig, "--package", package, "--trust", key, "--root", root->text()},
+                              [this, temp, version] { updateInstalled(version); }, fail);
                 }, 0, budget);
             }, 0, budget);
         }, 0, budget);
     }
-    // Exec the verified AppImage of <install-root>/current (after Güncelle or Önceki sürüme dön).
-    void restartIntoInstalled() {
-        if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Yeniden başlatmak için önce oyunu kapatın");
-        const QString target = installedAppImage(root->text(), trust->text(), false);
-        if (target.isEmpty()) throw std::runtime_error("Kurulu sürüm bulunamadı: " + root->text().toStdString() + "/current");
-        settings.sync();
-        execInto(target);
+    void updateInstalled(const QString& version) {
+        installedVersion = version;
+        settings.remove("updates/skip_version"); // a newer release replaced the one rolled back to (or the user chose it)
+        showUpdate("v" + version + " kuruldu", "Yeniden başlat");
+        if (automation) {
+            std::printf("ikv-launcher %s: v%s kuruldu%s\n", ikv::release::version, qPrintable(version), serverUpdate ? "" : ", yeniden başlatılıyor");
+            std::fflush(stdout);
+            if (serverUpdate) { QCoreApplication::exit(10); return; } // the caller restarts its services (deploy/ikv-auto-update.sh)
+        }
+        if (clientRunning()) {
+            QSaveFile signal(clientSignal()); // the running client shows "Yeni sürüm hazır" and returns to the launcher
+            if (!signal.open(QIODevice::WriteOnly) || signal.write(version.toUtf8() + '\n') < 0 || !signal.commit())
+                log("İstemciye güncelleme bildirilemedi: " + clientSignal());
+            showUpdate("Güncelleme indirildi; oyun kapanınca yeniden başlatılacak (v" + version + ")", "Yeniden başlat");
+            return;
+        }
+        log("Yeni sürüm başlatılıyor: v" + version);
+        restartIntoInstalled();
     }
-#endif
+    // Run the verified launcher of <install-root>'s current release (after an update or Önceki sürüme dön).
+    void restartIntoInstalled() {
+        if (clientRunning()) throw std::runtime_error("Yeniden başlatmak için önce oyunu kapatın");
+        const auto target = ikv::launcher_release::installed(root->text(), trust->text(), false);
+        if (target.launcher.isEmpty()) throw std::runtime_error("Kurulu sürüm bulunamadı: " + root->text().toStdString());
+        settings.sync();
+        ikv::launcher_release::execInto(target.launcher);
+    }
+    // The game closed: restart into a release installed meanwhile, or install the one it asked for (exit 75).
+    void clientClosed(int code) {
+        QFile::remove(clientSignal());
+        try {
+            if (!installedVersion.isEmpty()) restartIntoInstalled();
+            else if (code == clientUpdateExit) { log("Oyun yeni bir sürüm gerektirdi; güncelleniyor"); checkUpdates(true); }
+        } catch (const std::exception& e) { status->setText(failure(e)); log(status->text()); }
+    }
+    void automaticCheck() {
+        if (busy || !replies.isEmpty() || !installedVersion.isEmpty()) return; // next tick
+        try { checkUpdates(true); } catch (const std::exception& e) { status->setText("Güncellemeler denetlenemedi: " + failure(e)); log(status->text()); }
+    }
     void play() {
 #if !IKV_HAS_VULKAN
         if (renderer->currentIndex() < 0)
@@ -731,6 +837,17 @@ class Launcher final : public QWidget {
         persist();
         if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Client is already running");
         if (session.isEmpty() || authSessionOrigin != authUrl()) throw std::runtime_error("Önce seçili sunucuya giriş yapın");
+        // A listed realm must be chosen first: the original's OYNA without a selection (launcher.exe 0x00486dd8).
+        QString realm;
+        if (realmsListed()) {
+            const auto chosen = realmList->selectedItems();
+            if (chosen.isEmpty()) {
+                if (automation) throw std::runtime_error("Lütfen bir sunucu seçiniz.");
+                QMessageBox::warning(this, "Uyarı", "Lütfen bir sunucu seçiniz.");
+                return;
+            }
+            realm = QString::number(chosen.first()->data(Qt::UserRole).toInt());
+        }
         const QUrl origin = validatedUrl(authUrl());
         const QString host = origin.host();
         const QString assets = root->text() + "/assets";
@@ -763,6 +880,7 @@ class Launcher final : public QWidget {
         args << "--upscaler" << (fsrMode() == "off" ? "bilinear" : "fsr3") << "--fsr-sharpness" << QString::number(fsrSharpness->value(), 'g', 17);
         args << "--frame-generation" << (frameGeneration->isChecked() ? "on" : "off");
         if (fsrMode() != "off") args << "--fsr-mode" << fsrMode();
+        args << "--update-signal" << clientSignal(); // a release installed meanwhile returns the game to the launcher
         if (!modelMap->text().isEmpty()) args << "--model-map" << modelMap->text();
         if (!soundMap->text().isEmpty()) args << "--sound-map" << soundMap->text();
         if (!audioPath->text().isEmpty()) {
@@ -771,7 +889,8 @@ class Launcher final : public QWidget {
             args << "--audio" << QString::fromStdU16String((fs(assets) / relative).u16string());
         }
         status->setText("Sunucu denetleniyor…");
-        api("/v1/status", "GET", {}, false, [this, executable, host, args](const QByteArray& bytes) {
+        if (!realm.isEmpty()) args << "--realm" << realm; // NONCANONICAL wave 30: the client lists/creates this realm's characters
+        api("/v1/status", "GET", {}, false, [this, executable, host, args, realm](const QByteArray& bytes) {
             const auto state = QJsonDocument::fromJson(bytes).object();
             if (!state.value("online").toBool()) throw std::runtime_error("Dünya sunucusu çevrimdışı");
             const int port = state.value("world").toObject().value("world_port").toInt(7000);
@@ -779,17 +898,21 @@ class Launcher final : public QWidget {
             if (client && client->state() != QProcess::NotRunning) throw std::runtime_error("Client is already running");
             if (session.isEmpty()) throw std::runtime_error("Önce seçili sunucuya giriş yapın");
             launch(executable, QStringList{"--host", host, "--port", QString::number(port)} + args);
+            if (!realm.isEmpty()) settings.setValue(realmKey(), realm.toInt()); // per profile; preselected next time
         });
     }
     void launch(const QString& executable, const QStringList& args) {
         if (client) client->deleteLater();
+        QFile::remove(clientSignal()); // a stale signal from an earlier session must not end the new game
         client = new QProcess(this); client->setProgram(executable); client->setArguments(args);
         auto* process = client;
         const auto output = attachProcessLog(process, session);
         connect(process, &QProcess::started, this, [this, process] { process->write(session + '\n'); process->closeWriteChannel(); status->setText("İstemci başlatıldı"); });
         connect(process, &QProcess::errorOccurred, this, [this, process, output](QProcess::ProcessError) { if (!output->failed) error(process->errorString()); });
-        connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, output](int code, QProcess::ExitStatus) {
+        connect(process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, output](int code, QProcess::ExitStatus exit) {
             log(QString("Client exit %1").arg(code)); if (!output->failed) status->setText("İstemci kapandı");
+            clientClosed(exit == QProcess::NormalExit ? code : -1); // may restart into / install a newer release first
+            if (realmState == Realms::Ready) { try { loadRealms(); } catch (const std::exception& e) { log(failure(e)); } } // fresh populations
         });
         client->start();
     }
@@ -973,7 +1096,6 @@ class Launcher final : public QWidget {
         auto* ir = new QHBoxLayout; iv->addLayout(ir);
         button(ir, "Dosyaları doğrula", "verifyButton", [this] { verifyAssets(false); });
         button(ir, "Onar", "repairButton", [this] { verifyAssets(true); });
-#ifndef _WIN32
         button(ir, "İmzalı paket kur", "installButton", [this] { installBundle(); });
         auto* updates = new QGroupBox("Güncellemeler"); auto* uv = new QVBoxLayout(updates); auto* uf = new QFormLayout; uv->addLayout(uf); av->addWidget(updates);
         repo = text(uf, "GitHub OWNER/REPOSITORY", "updateRepo", settings.value("updates/repo").toString());
@@ -988,9 +1110,16 @@ class Launcher final : public QWidget {
         button(ur, "Güncellemeleri denetle", "updateButton", [this] { persist(); checkUpdates(false); });
         button(ur, "Önceki sürüme dön", "rollbackButton", [this] {
             persist();
-            runHelper({"rollback", "--trust", trustPem(trust->text()), "--root", root->text()}, [this] { restartIntoInstalled(); });
+            // Automatic updates must not undo an explicit rollback: the release rolled back from (and anything not newer)
+            // is skipped until a strictly newer release appears (docs/LAUNCHER_UPDATES.md).
+            auto from = QString::fromStdString(ikv::updates::current_release(fs(root->text())));
+            if (from.isEmpty()) from = ikv::release::version;
+            runHelper({"rollback", "--trust", trustPem(trust->text()), "--root", root->text()}, [this, from] {
+                settings.setValue("updates/skip_version", from); settings.sync();
+                log("Önceki sürüme dönüldü; v" + from + " otomatik olarak yeniden kurulmayacak");
+                restartIntoInstalled();
+            });
         });
-#endif
         auto* content = new QGroupBox("Özgün içerik eşlemeleri (isteğe bağlı)"); auto* cf = new QFormLayout(content); av->addWidget(content);
         modelMap = text(cf, "Model eşlemesi (id:N → JSON)", "modelMap", settings.value("graphics/modelMap").toString());
         audioPath = text(cf, "Ses klasörü (göreli)", "audioPath", settings.value("graphics/audioPath").toString());
@@ -1071,7 +1200,7 @@ public:
         username = text(lf, "Kullanıcı adı", "username", settings.value("account/username").toString());
         password = text(lf, "Parola", "password"); password->setEchoMode(QLineEdit::Password);
         auto* ar = new QHBoxLayout; lv->addLayout(ar);
-        auto* login = button(ar, "Giriş Yap", "loginButton", [this] { api("/v1/login", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray& bytes) { session.fill('\0'); session = QJsonDocument::fromJson(bytes).object().value("session").toString().toUtf8(); password->clear(); if (session.size() != 64 || std::any_of(session.begin(), session.end(), [](char c) { return !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); })) { clearSession(); throw std::runtime_error("Sunucudan geçersiz oturum yanıtı geldi"); } authSessionOrigin = authUrl(); settings.setValue("account/username", username->text()); account->setText("<h3>" + username->text().toHtmlEscaped() + "</h3>Karakter seçimi ve yaratma oyunun içinde yapılır."); status->setText("Giriş yapıldı"); showPage(); }); });
+        auto* login = button(ar, "Giriş Yap", "loginButton", [this] { api("/v1/login", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray& bytes) { session.fill('\0'); session = QJsonDocument::fromJson(bytes).object().value("session").toString().toUtf8(); password->clear(); if (session.size() != 64 || std::any_of(session.begin(), session.end(), [](char c) { return !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')); })) { clearSession(); throw std::runtime_error("Sunucudan geçersiz oturum yanıtı geldi"); } authSessionOrigin = authUrl(); settings.setValue("account/username", username->text()); account->setText("<h3>" + username->text().toHtmlEscaped() + "</h3>Karakter seçimi ve yaratma oyunun içinde yapılır."); status->setText("Giriş yapıldı"); resetRealms(); showPage(); loadRealms(); }); });
         login->setMinimumHeight(40);
         button(ar, "Kayıt Ol", "registerButton", [this] { api("/v1/register", "POST", {{"username", username->text()}, {"password", password->text()}}, false, [this](const QByteArray&) { password->clear(); status->setText("Hesap oluşturuldu; giriş yapın"); }); })->setMinimumHeight(40);
         connect(password, &QLineEdit::returnPressed, login, &QPushButton::click);
@@ -1083,6 +1212,16 @@ public:
         playPage = new QWidget; playPage->setObjectName("playPage"); auto* cv = new QVBoxLayout(playPage);
         cv->addStretch();
         account = new QLabel; account->setObjectName("account"); account->setWordWrap(true); cv->addWidget(account);
+        // NONCANONICAL wave 30: the logged-in profile's realms (the skin moves the list into the original left frame).
+        realmPanel = new QWidget; realmPanel->setObjectName("realmPanel"); realmPanel->hide();
+        auto* rv = new QVBoxLayout(realmPanel); rv->setContentsMargins(0, 0, 0, 0);
+        rv->addWidget(new QLabel("<b>Sunucu</b>"));
+        realmList = new QListWidget; realmList->setObjectName("realmList"); realmList->setSelectionMode(QAbstractItemView::SingleSelection);
+        realmList->setMaximumHeight(160); rv->addWidget(realmList); cv->addWidget(realmPanel);
+        // Double-click/Enter plays (NONCANONICAL: the original had no list double-click handler).
+        connect(realmList, &QListWidget::itemActivated, this, [this] { findChild<QPushButton*>("playButton")->click(); });
+        realmRetry = new QTimer(this); realmRetry->setSingleShot(true);
+        connect(realmRetry, &QTimer::timeout, this, [this] { try { loadRealms(); } catch (const std::exception& e) { status->setText(failure(e)); } });
         auto* play = button(cv, "OYNA", "playButton", [this] { this->play(); });
         play->setMinimumHeight(56); play->setStyleSheet("font-size:18pt;font-weight:bold");
         auto* cr = new QHBoxLayout; cv->addLayout(cr); cr->addStretch();
@@ -1090,13 +1229,11 @@ public:
         cv->addStretch();
         pages->addWidget(playPage);
 
-#ifndef _WIN32
         updateBanner = new QWidget; updateBanner->setObjectName("updateBanner"); updateBanner->hide();
         auto* ub = new QHBoxLayout(updateBanner); ub->setContentsMargins(0, 0, 0, 0);
-        updateLabel = new QLabel; updateLabel->setObjectName("updateLabel"); ub->addWidget(updateLabel, 1);
-        updateNow = button(ub, "Güncelle", "updateNow", [this] { updateInstalled ? restartIntoInstalled() : installUpdate(); });
+        updateLabel = new QLabel; updateLabel->setObjectName("updateLabel"); updateLabel->setWordWrap(true); ub->addWidget(updateLabel, 1);
+        updateNow = button(ub, "Güncelle", "updateNow", [this] { installedVersion.isEmpty() ? installUpdate(false) : restartIntoInstalled(); });
         main->addWidget(updateBanner);
-#endif
         status = new QLabel("Hazır"); status->setObjectName("status"); status->setWordWrap(true); main->addWidget(status);
         progress = new QProgressBar; progress->setObjectName("progress"); progress->setTextVisible(false); progress->setVisible(false); main->addWidget(progress);
 
@@ -1106,26 +1243,28 @@ public:
         if (!names.contains("Localhost")) { names.prepend("Localhost"); settings.setValue("profileNames", names); }
         profiles->addItems(names); profiles->setCurrentText(settings.value("lastProfile").toString());
         connect(profiles, &QComboBox::currentIndexChanged, this, [this] { settings.setValue("lastProfile", profiles->currentText()); clearSession(); });
+        connect(pages, &QStackedWidget::currentChanged, this, [this] { syncSkin(); });
         showPage();
         log("Native Qt " QT_VERSION_STR " platform=" + QApplication::platformName());
     }
-#ifndef _WIN32
-    // Normal start: report an unusable installed release, then check for updates without blocking.
-    void startup(const QString& handoffIssue) {
+    // Normal start: report an unusable installed release, then check (and automatically install) without blocking, and
+    // again every intervalSeconds while the launcher stays open.
+    void startup(const QString& handoffIssue, int intervalSeconds) {
+        connect(&updateTimer, &QTimer::timeout, this, [this] { automaticCheck(); });
+        updateTimer.start(intervalSeconds * 1000);
         QTimer::singleShot(0, this, [this, handoffIssue] {
             if (!handoffIssue.isEmpty()) error(handoffIssue);
-            try { checkUpdates(true); } catch (const std::exception& e) { status->setText("Güncellemeler denetlenemedi: " + failure(e)); log(status->text()); }
+            automaticCheck();
         });
     }
-    // --update-once: the startup check with explicit configuration; a newer release is installed through
-    // the real Güncelle button and the launcher restarts into it (which then reports itself current).
+    // --update-once: the startup check with explicit configuration; a newer release is installed and the launcher
+    // restarts into it (which then reports itself current). --server: install only and exit 10.
     void updateOnce(const QCommandLineParser& parser) {
-        automation = true;
+        automation = true; serverUpdate = parser.isSet("server");
         networkTimeoutMs = parser.value("network-timeout-ms").toInt();
         root->setText(parser.value("install-root")); repo->setText(parser.value("repo")); trust->setText(parser.value("trust")); updateCa->setText(parser.value("update-ca")); releaseApi->setText(parser.value("release-api")); channel->setCurrentText(parser.value("channel"));
         QTimer::singleShot(0, this, [this] { try { persist(); checkUpdates(false); } catch (const std::exception& e) { error(failure(e)); } });
     }
-#endif
     ~Launcher() override { for (auto* worker : workers) worker->wait(); session.fill('\0'); }
 };
 } // namespace
@@ -1133,33 +1272,33 @@ int main(int argc, char** argv) {
     if (ikv::launcher_server::isSupervisorInvocation(argc, argv)) return ikv::launcher_server::supervisorMain(argc, argv);
     QCoreApplication::setOrganizationName("IKVCommunity"); QCoreApplication::setApplicationName("IKVLauncher");
     QCoreApplication::setApplicationVersion(ikv::release::version);
-#ifndef _WIN32
-    for (int i = 0; i < argc; ++i) startArguments.emplace_back(argv[i]);
-    const QString handoffIssue = handoff(); // returns only when this build stays in charge
+    ikv::launcher_release::rememberArguments(argc, argv);
+    const QString handoffIssue = ikv::launcher_release::handoff(); // returns only when this build stays in charge
     if (!handoffIssue.isEmpty()) fprintf(stderr, "ikv-launcher: %s\n", handoffIssue.toUtf8().constData());
-#endif
     QApplication app(argc, argv);
     QCommandLineParser parser; parser.setApplicationDescription("Native own-server İKV launcher; no official credentials or endpoints"); parser.addHelpOption(); parser.addVersionOption();
-#ifndef _WIN32
-    parser.addOption({"update-once", "Check the release API, install a newer release through Güncelle and restart into it; exit when current (no dialogs)"});
+    parser.addOption({"update-once", "Check the release API, install a newer release and restart into it; exit when current (no dialogs)"});
+    parser.addOption({"server", "With --update-once: only install (exit 10 when a release was installed, 0 when current); for dedicated servers"});
     for (const char* option : {"install-root", "repo", "trust", "update-ca", "release-api"}) parser.addOption({option, "Explicit update configuration", "value"});
     parser.addOption({"network-timeout-ms", "Reduce HTTPS wall deadlines (1..60000); operation deadline is three times this value", "milliseconds", "60000"});
     parser.addOption({"channel", "Release channel stable|experimental", "channel", ikv::release::channel});
-#endif
+    parser.addOption({"update-interval-seconds", "Automatic update re-check interval while open (10..86400)", "seconds", "1800"});
     parser.process(app);
     try {
     Launcher launcher;
-#ifdef _WIN32
-    launcher.show();
-#else
     if (parser.isSet("update-once")) {
-        for (const char* required : {"install-root", "repo", "trust", "update-ca"}) if (parser.value(required).isEmpty()) { fprintf(stderr, "--%s required\n", required); return 2; }
+        // --server (dedicated hosts) may rely on the compiled-in repository, release key and system trust.
+        for (const char* required : {"install-root", "repo", "trust", "update-ca"})
+            if (parser.value(required).isEmpty() && (!parser.isSet("server") || std::strcmp(required, "install-root") == 0)) { fprintf(stderr, "--%s required\n", required); return 2; }
         if (parser.value("channel") != "stable" && parser.value("channel") != "experimental") return 2;
         bool timeoutOk = false; const int timeout = parser.value("network-timeout-ms").toInt(&timeoutOk);
         if (!timeoutOk || timeout < 1 || timeout > 60000) return 2;
         launcher.updateOnce(parser);
-    } else { launcher.show(); launcher.startup(handoffIssue); }
-#endif
+    } else {
+        bool intervalOk = false; const int interval = parser.value("update-interval-seconds").toInt(&intervalOk);
+        if (!intervalOk || interval < 10 || interval > 86400) { fprintf(stderr, "--update-interval-seconds must be 10..86400\n"); return 2; }
+        launcher.show(); launcher.startup(handoffIssue, interval);
+    }
     return app.exec();
     } catch (const std::exception& e) {
         fprintf(stderr, "ikv-launcher: %s\n", e.what()); return 1;

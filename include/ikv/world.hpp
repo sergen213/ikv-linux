@@ -15,6 +15,19 @@
 
 namespace ikv {
 struct Zone;
+// NONCANONICAL wave 30 realms and shards (src/world_shard.cpp). The server process wires these to Store: locate finds the
+// live shard instance holding an online character of a realm, shard reads a live shard row, send posts a bus message to a
+// shard instance ("*": every other live shard). A World without a link (tests, tools) keeps every feature shard-local.
+struct ShardLink {
+    std::string instance;
+    int realm = 1;
+    std::function<std::optional<std::string>(int realm, const std::string& name)> locate;
+    std::function<std::optional<ShardInfo>(const std::string& instance)> shard;
+    std::function<void(const std::string& instance, const Json& body)> send;
+};
+// A phase the server must carry out: issue a ticket for actor `id` to `instance` (empty: a shard of the payload's "realm",
+// reason "home"), emit the transfer event (shard_departing) and close, or report the refusal (shard_failed).
+struct ShardTransfer { uint32_t id = 0; std::string instance, reason; Json payload; };
 class World {
 public:
     World(Json config, std::function<void(std::span<const CharacterSave>)> persist);
@@ -46,6 +59,21 @@ public:
     Json bot_returns(); // spawn specs of churned-out bots whose offline time is over (bots.offline_minutes)
     Json bot_character(int level) const; // a fresh bot {name, class_id, appearance, state} with original class/sex/cosmetics
     Json bot_plan(int total) const; // spawn specs from gameplay.json bots.spawn; total < 0: the configured counts, else round-robin
+    // ---- Realms and shards (wave 30, NONCANONICAL, src/world_shard.cpp) ----
+    void shard_link(ShardLink link);
+    void shard_realms(std::map<int, std::string> names); // realm id -> name, refreshed by the server
+    void shard_message(const Json& body); // one bus body (plan "Bus messages")
+    std::vector<ShardTransfer> shard_transfers(); // pending phases, taken once
+    void shard_departing(uint32_t id, Json transfer); // queue the critical transfer event; the actor accepts no more requests
+    void shard_failed(uint32_t id, const std::string& message); // a phase could not start (empty message: silent, retry later)
+    void shard_arrived(uint32_t id, const Json& payload); // admitted with a redeemed ticket: join the leader's group
+    void shard_tick(); // once a second: guests without a group go home after 60 s
+    int realm_of(uint32_t id) const; // actor's home realm (1 when unknown)
+    // NONCANONICAL wave 30 persistent lockouts (src/world_instance.cpp): called with (character_id, base zone, expiry unix) when a
+    // Şef kill stamps a group-zone or raid lockout, so the server stores it (Store::set_lockout) and phasing to another shard or
+    // reconnecting cannot bypass it. Admission records may carry "lockouts" {zone: expires_unix} (Store::lockouts); they are
+    // merged into the character state. World stays database-free: without a sink the stamp lives only in the character state.
+    void set_lockout_sink(std::function<void(int64_t, const std::string&, int64_t)> sink);
 private:
     struct RoutePending { int score, cost, key; bool operator<(const RoutePending& rhs) const { return score > rhs.score; } };
     struct RouteSearch {
@@ -73,6 +101,9 @@ private:
         uint32_t banker = 0, gathering = 0, gather_ready = 0; // open bank NPC (own id: Kasa Erişimi); Toplama node and completion tick
         int bank_tab = 0; // shown Banka tab (original page 0x611454)
         uint8_t posture = 0; // held RP clip (social.postures: sit/lay) shown to late joiners; cleared by moving, fighting, dying
+        int realm = 1; // home realm (characters.realm_id); wave 30
+        bool guest = false, departing = false; // guest: on a foreign realm/layer shard; departing: a phase ticket was issued
+        uint32_t alone_since = 0, home_retry = 0; // guest grace: tick the guest last had no group, next home attempt
     };
     struct Npc {
         Json definition;
@@ -119,6 +150,22 @@ private:
     std::map<uint32_t, std::vector<uint32_t>> groups_;
     std::map<uint32_t, uint32_t> invites_;
     std::map<uint32_t, Json> guild_invites_;
+    // Wave 30 shards: link, realm names, invites delivered over the bus (by invited actor), pending phases and the newest
+    // guild rosters heard from other shards (by guild id).
+    std::optional<ShardLink> link_;
+    std::map<int, std::string> realm_names_;
+    std::map<uint32_t, Json> remote_invites_;
+    std::vector<ShardTransfer> transfers_;
+    std::map<std::string, Json> guild_rosters_;
+    bool shard_action(uint32_t id, const std::string& action, const Json& request); // by-name invites/whispers, remote accept
+    std::optional<std::string> realm_label(uint32_t viewer, uint32_t subject) const; // subject's realm name if not the viewer's
+    std::string realm_name(int realm) const;
+    int realm_id(const std::string& name) const; // 0 when unknown
+    uint32_t find_player(int realm, const std::string& name) const; // online non-bot actor, 0 when none
+    uint32_t find_character(int64_t character_id) const;
+    void shard_guild(const Json& guild); // a roster change reaches the other shards
+    void shard_guild_chat(const Json& guild, const Json& line);
+    Json shard_guild_latest(const Json& guild) const; // the newest known roster of a guild
     uint32_t next_summon_ = 0xf0000000u; // summoned NPC ids, above the configured population
     // Er Meydanı match (guide rehberi "Er Meydanı"): per-clan score, end tick, Klan Parası stakes by actor (/kpsavas), and per
     // activities.arena.areas entry its holding clan plus the clan currently alone inside and for how many ticks.
@@ -231,6 +278,31 @@ private:
     std::pair<Json,Json> trade_events(const Trade& value) const;
     void validate_offer(uint32_t id, const Json& offer);
     uint32_t group(uint32_t id) const;
+    // NONCANONICAL wave 30 raids (src/world_instance.cpp): up to activities.raid.groups parties of six under one raid leader. Each
+    // non-empty party is mirrored as a groups_ entry (party leader = its first member), so party frames, group chat and group-zone
+    // copies keep working per party; raid zones (zone "raid": {min, lockout}) send the whole raid into one copy, kill XP/loot is
+    // shared by raid members in range, and state() carries compact rows of the other parties' members.
+    struct Refusal { std::string code, message; }; // thrown by world_instance.cpp, rethrown as a rejection by handle()
+    struct Raid { uint32_t leader = 0; std::array<std::vector<uint32_t>,4> parties; };
+    std::map<uint32_t, Raid> raids_; // by raid id
+    std::map<uint32_t, uint32_t> raid_invites_; // invitee -> raid id
+    uint32_t next_raid_ = 1;
+    std::function<void(int64_t, const std::string&, int64_t)> lockout_sink_;
+    void raid_validate(); // constructor: activities.raid, zone raid blocks, scaled Şefs in raid copies
+    uint32_t raid_of(uint32_t id) const; // raid id, 0 when not in a raid
+    std::vector<uint32_t> raid_members(uint32_t raid) const;
+    void raid_action(uint32_t id, const std::string& action, const Json& request); // raid_* actions; throws Refusal
+    void raid_remove(uint32_t id); // leave (or kicked/disconnected): succession or disband
+    void raid_disband(uint32_t raid);
+    void raid_sync(uint32_t raid, const std::vector<uint32_t>& gone = {}); // mirror parties into groups_, emit raid/group events
+    Json raid_view(uint32_t id) const; // state() "raid" member, null when not in a raid
+    std::vector<uint32_t> sharers(uint32_t owner) const; // kill XP/loot recipients: raid or group members in range and alive
+    // Zone entry through a door (handle "interact"): raid-copy minimum size and lockouts, group-zone lockouts; throws Refusal.
+    std::string entry(uint32_t id, const std::string& to);
+    // A Şef kill credit in a group-zone or raid copy: stamps the lockout into `state`, returns (zone, expiry) or empty zone.
+    std::pair<std::string, int64_t> stamp_lockout(Json& state, const Json& definition) const;
+    void persist_lockouts(const std::vector<std::tuple<int64_t, std::string, int64_t>>& stamped);
+    void merge_lockouts(Json& state, const Json& record) const; // admission: Store lockouts into state, expired dropped
     void leave_group(uint32_t id);
     void handle(uint32_t id, const Json& request);
     // Quests (world.cpp quest block). Character state keeps active quests in "quests" {id:{progress[,deadline]}} and

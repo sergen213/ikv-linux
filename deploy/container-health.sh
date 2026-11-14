@@ -8,7 +8,7 @@ case "${1:-}" in
         ;;
     world)
         # TLS listener and trust/SAN validity only; gameplay is tested separately.
-        timeout 4 openssl s_client -connect 127.0.0.1:7000 -servername localhost \
+        timeout 4 openssl s_client -connect "127.0.0.1:${IKV_WORLD_PORT:-7000}" -servername localhost \
             -CAfile /run/ikv/tls-ca -verify_hostname localhost -verify_return_error \
             -brief </dev/null
         ;;

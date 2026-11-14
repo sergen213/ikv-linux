@@ -19,6 +19,11 @@
   let zonesDirty = false;
   let latest = null; // last /v1/admin/status payload
   let settings = { xp_rate: 100, drop_rate: 100, regen_rate: 100, disabled_zones: [] };
+  // NONCANONICAL wave 30 realms (GET /v1/admin/realms): names for realm ids and shard instances.
+  let realms = [];
+  const realmName = (id) => { const realm = realms.find((entry) => entry.id === id); return realm ? realm.name : id == null ? '—' : `diyar ${id}`; };
+  const shardRealm = (instance) => realms.find((realm) => (realm.shards || []).some((shard) => shard.instance === instance));
+  const populationWords = { low: 'Sakin', medium: 'Normal', high: 'Yoğun', full: 'Dolu' };
 
   const text = (value) => value == null ? '—' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
   const node = (tag, value, className) => {
@@ -66,7 +71,7 @@
     element('login-form').setAttribute('aria-busy', String(busy));
   }
 
-  const tables = ['account-results', 'character-results', 'log-results', 'backup-results', 'zone-summary', 'recent-commands', 'online-players', 'bot-results', 'zone-controls', 'command-history', 'item-results', 'inventory-results', 'kit-equipment-results', 'kit-consumable-results'];
+  const tables = ['account-results', 'character-results', 'log-results', 'backup-results', 'zone-summary', 'recent-commands', 'online-players', 'bot-results', 'zone-controls', 'command-history', 'item-results', 'inventory-results', 'kit-equipment-results', 'kit-consumable-results', 'realm-results'];
   function clearSession(message, kind = 'info') {
     session = '';
     sessionVersion += 1;
@@ -80,7 +85,11 @@
     accountLoaded = false;
     characterLoaded = false;
     inventoryCharacter = 0;
-    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat', 'item-character', 'item-query', 'item-id', 'currency-amount', 'xp-amount', 'kit-level'].forEach((id) => { element(id).value = ''; });
+    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat', 'item-character', 'item-query', 'item-id', 'currency-amount', 'xp-amount', 'kit-level', 'realm-name', 'realm-rename-name'].forEach((id) => { element(id).value = ''; });
+    realms = [];
+    element('realm-sort').dataset.edited = 'false';
+    element('realm-rename-id').replaceChildren();
+    element('realm-state').textContent = '';
     element('kit-equip').checked = false;
     element('kit-state').textContent = 'Önizleme yapılmadı.';
     element('item-quantity').value = '1';
@@ -202,7 +211,6 @@
     latest = data;
     const world = currentWorld(data);
     const status = worldStatus(world);
-    const online = Array.isArray(status.online) ? status.online : [];
     const bots = Array.isArray(status.bots) ? status.bots : [];
     const zones = Array.isArray(status.zones) ? status.zones : [];
     const live = Boolean(world && world.online);
@@ -250,13 +258,18 @@
       history.append(row);
     });
 
+    // Every live shard's players (wave 30); the realm is the player's home realm when the world reports it,
+    // else the realm of the shard the player is on.
+    const shardPlayers = (Array.isArray(data?.worlds) ? data.worlds : []).filter((entry) => entry.online)
+      .flatMap((entry) => (Array.isArray(worldStatus(entry).online) ? worldStatus(entry).online : []).map((player) => ({ player, instance: entry.instance })));
     const players = element('online-players');
     players.replaceChildren();
-    if (!online.length) emptyRow(players, 6, live ? 'Çevrimiçi oyuncu yok.' : 'Dünya çevrimdışı.');
-    online.forEach((player) => {
+    if (!shardPlayers.length) emptyRow(players, 7, live ? 'Çevrimiçi oyuncu yok.' : 'Dünya çevrimdışı.');
+    shardPlayers.forEach(({ player, instance }) => {
       const row = node('tr');
+      const home = player.realm_id != null ? realmName(player.realm_id) : player.realm || shardRealm(instance)?.name || '—';
       row.append(node('td', player.id), node('td', `${text(player.name)} (#${text(player.character_id)})${player.admin ? ' · yönetici' : ''}${player.muted ? ' · susturulmuş' : ''}`),
-        node('td', player.level), node('td', `${text(player.hp)}/${text(player.max_hp)}`), node('td', `${text(player.zone)} (${text(player.x)}, ${text(player.y)})`));
+        node('td', `${home} / ${instance}`), node('td', player.level), node('td', `${text(player.hp)}/${text(player.max_hp)}`), node('td', `${text(player.zone)} (${text(player.x)}, ${text(player.y)})`));
       const actions = node('td');
       actions.append(
         actionButton('İncele', 'Inspect saved character state', () => { void perform(() => inspect(player)); }),
@@ -349,7 +362,7 @@
     if (!session) return;
     refreshTimer = setTimeout(async () => {
       if (!busy && !document.hidden) {
-        try { await refreshStatus(); }
+        try { await refreshStatus(); await refreshRealms(); }
         catch (error) { notice(error.message, 'error'); }
       }
       scheduleRefresh();
@@ -507,7 +520,7 @@
       row.dataset.id = id;
       row.setAttribute('aria-selected', String(id !== '' && id === selected));
       const label = kind === 'account' ? `${text(record.username)}${record.admin ? ' · yönetici' : ''}${record.plus ? ' · Plus' : ''}${record.kasa ? ' · Kasa Erişimi' : ''}${record.banned ? ' · YASAKLI' : ''}`
-        : `${text(record.name)} · hesap ${text(record.account_id)} · sv. ${text(record.state?.level)}${record.moderation?.muted ? ' · susturulmuş' : ''}`;
+        : `${text(record.name)} · ${realmName(record.realm_id)} · hesap ${text(record.account_id)} · sv. ${text(record.state?.level)}${record.moderation?.muted ? ' · susturulmuş' : ''}`;
       row.append(node('td', record.id), node('td', label));
       const details = node('td');
       details.append(detail(record));
@@ -546,6 +559,48 @@
     row?.querySelector('details')?.setAttribute('open', '');
     row?.scrollIntoView({ block: 'nearest' });
     notice(`Karakter ${player.name} (${id}) kaydı açıldı.`, 'success');
+  }
+
+  // NONCANONICAL wave 30 Sunucular tab: realms with live shards, populations and character counts.
+  function renderRealms() {
+    const target = element('realm-results');
+    target.replaceChildren();
+    if (!realms.length) emptyRow(target, 8, 'Diyar yok.');
+    const now = Date.now();
+    realms.forEach((realm) => {
+      const row = node('tr');
+      const online = realm.status === 'online';
+      const shards = node('td');
+      const list = node('ul', undefined, 'shard-list');
+      (realm.shards || []).forEach((shard) => {
+        const age = Math.max(0, Math.round((now - timestamp(shard.updated_at)) / 1000));
+        list.append(node('li', `${shard.instance} · ${shard.host || '(HTTPS sunucusu)'}:${shard.port} · ${shard.players}/${shard.capacity} oyuncu · ${shard.online ? 'canlı' : 'ÖLÜ'} · son bildirim ${Number.isFinite(age) ? `${age} sn önce` : '—'}`, shard.online ? 'ok' : 'bad'));
+      });
+      if (!list.childElementCount) list.append(node('li', 'Parça yok (son bir saatte bildirim yok).', 'bad'));
+      shards.append(list);
+      const actions = node('td');
+      actions.append(actionButton('Yeniden adlandır', 'Fill the rename form with this realm', () => { element('realm-rename-id').value = String(realm.id); element('realm-rename-name').value = realm.name; element('realm-rename-name').focus(); }));
+      row.append(node('td', realm.id), node('td', realm.name), node('td', realm.kind), node('td', online ? 'çevrimiçi' : 'kapalı', online ? 'ok' : 'bad'),
+        node('td', online ? `${populationWords[realm.population] || text(realm.population)} (${realm.population})` : 'Kapalı'), node('td', count(realm.characters)), shards, actions);
+      target.append(row);
+    });
+    const select = element('realm-rename-id');
+    const previous = select.value;
+    select.replaceChildren();
+    realms.forEach((realm) => { const option = node('option', `${realm.id} · ${realm.name}`); option.value = String(realm.id); select.append(option); });
+    if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+    const sortField = element('realm-sort'); // new realms go to the end of the launcher list unless an order was typed
+    if (sortField.dataset.edited !== 'true') sortField.value = String(Math.min(32767, Math.max(0, ...realms.map((realm) => Number(realm.sort) || 0)) + 1));
+    const live = realms.reduce((sum, realm) => sum + (realm.shards || []).filter((shard) => shard.online).length, 0);
+    element('realm-state').textContent = `${realms.length} diyar · ${live} canlı parça · ${new Date().toLocaleTimeString('tr-TR')}`;
+    updateControls();
+  }
+
+  async function refreshRealms() {
+    const data = await request('/v1/admin/realms');
+    realms = Array.isArray(data.realms) ? data.realms : [];
+    renderRealms();
+    if (latest) renderStatus(latest); // realm names in the players table
   }
 
   async function refreshBackups() {
@@ -599,10 +654,11 @@
 
   async function refreshAll() {
     await refreshStatus();
+    const realmResult = await Promise.allSettled([refreshRealms()]); // realm names for the character rows below
     const actions = [refreshBackups(), refreshSettings()];
     if (accountLoaded) actions.push(search('account'));
     if (characterLoaded) actions.push(search('character'));
-    const results = await Promise.allSettled(actions);
+    const results = [...realmResult, ...await Promise.allSettled(actions)];
     const errors = results.filter((result) => result.status === 'rejected').map((result) => result.reason.message);
     if (errors.length) throw new Error(errors.join('\n'));
   }
@@ -664,7 +720,7 @@
         clearSession(`Giriş tamamlanamadı: ${error.message}`, 'error');
         return;
       }
-      const results = await Promise.allSettled([search('account'), search('character'), refreshBackups(), refreshSettings()]);
+      const results = [...await Promise.allSettled([refreshRealms()]), ...await Promise.allSettled([search('account'), search('character'), refreshBackups(), refreshSettings()])];
       const errors = results.filter((result) => result.status === 'rejected').map((result) => result.reason.message);
       if (!session) return;
       notice(errors.length ? `Yönetim erişimi doğrulandı; bazı veriler alınamadı:\n${errors.join('\n')}` : 'Yönetim erişimi doğrulandı. Canlı veriler alındı.', errors.length ? 'error' : 'success');
@@ -724,6 +780,39 @@
       element('create-admin').checked = false;
       accountLoaded = true;
       await afterMutation(`Hesap oluşturuldu: ${username} (ID ${text(result.account_id)})${admin ? ' · yönetici' : ''}.`);
+    });
+  });
+
+  const realmNameBytes = (name) => {
+    const bytes = new TextEncoder().encode(name).length;
+    if (bytes < 2 || bytes > 32 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error('Diyar adı 2–32 UTF-8 bayt olmalı ve kontrol karakteri içermemelidir.');
+    return name;
+  };
+  element('realm-sort').addEventListener('input', () => { element('realm-sort').dataset.edited = 'true'; });
+  element('realm-create').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const name = element('realm-name').value.trim();
+    const kind = element('realm-kind').value;
+    const sort = Number(element('realm-sort').value);
+    void perform(async () => {
+      realmNameBytes(name);
+      if (!Number.isSafeInteger(sort) || sort < -32768 || sort > 32767) throw new Error('Sıra −32768–32767 arasında bir tamsayı olmalıdır.');
+      const result = await request('/v1/admin/realms', 'POST', { action: 'create', name, kind, sort });
+      element('realm-name').value = '';
+      element('realm-sort').dataset.edited = 'false';
+      await afterMutation(`Diyar oluşturuldu: ${name} (ID ${text(result.id)}). Parça başlatmak için: ikv-server … --realm ${text(result.id)}`);
+    });
+  });
+  element('realm-rename').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const id = Number(element('realm-rename-id').value);
+    const name = element('realm-rename-name').value.trim();
+    void perform(async () => {
+      positiveId(id, 'Diyar ID');
+      realmNameBytes(name);
+      await request('/v1/admin/realms', 'POST', { action: 'rename', id, name });
+      element('realm-rename-name').value = '';
+      await afterMutation(`Diyar ${id} yeniden adlandırıldı: ${name}.`);
     });
   });
 

@@ -29,7 +29,7 @@ def arguments(description):
     return parser.parse_args()
 
 
-def frame(kind, payload=b"", version=2):
+def frame(kind, payload=b"", version=3):  # wave 30 frame version (protocol.hpp protocol_version)
     body = bytes((version, kind)) + payload
     return struct.pack("!I", len(body)) + body
 
@@ -72,7 +72,7 @@ class WorldPeer(AbstractContextManager):
             self.fill()
         body = bytes(self.buffer[4:length + 4])
         del self.buffer[:length + 4]
-        assert body[0] == 2, "unexpected wire version"
+        assert body[0] == 3, "unexpected wire version"
         kind, payload = body[1], body[2:]
         if kind in (6, 8) or (kind == 5 and payload):  # a server goodbye carries {"reason"} (server_main refuse())
             payload = json.loads(payload)
