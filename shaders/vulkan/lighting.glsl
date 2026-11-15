@@ -55,7 +55,7 @@ float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 u
 layout(set=0,binding=14) uniform sampler2D heightMap;
 // NONCANONICAL wave 29 PBR pack (pbr.glsl; draw.pbr): albedo, normal and ORM maps (1x1 white = absent), sampled at pbrUV
 // (the original UVs or a world projection) with pbrDu1/pbrDu2 as gradients; pbrPu/pbrPv the surface's dP/du, dP/dv. A pack
-// height map replaces the derived relief in heightMap (with pbrParallax only; tessellated draws carry it in geometry).
+// height map replaces the derived relief in heightMap (with pbrParallax; tessellated draws: pbrReliefShare of it).
 layout(set=0,binding=18) uniform sampler2D pbrAlbedoMap;
 layout(set=0,binding=19) uniform sampler2D pbrNormalMap;
 layout(set=0,binding=20) uniform sampler2D pbrOrmMap;
@@ -109,8 +109,10 @@ void parallax(){
         pu=(dp1*du2.y-dp2*du1.y)/det;pv=(dp2*du1.x-dp1*du2.x)/det;
     }
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
-    float c=dot(v,nf),depth=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
+    // relief: the relief depth at this pixel; depth: the share parallax occlusion draws (tessellated draws: pbrReliefShare).
+    float c=dot(v,nf),relief=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
         (pack?min(draw.pbr.z,1.)*pbrMainWeight():min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
+    float depth=pack?relief*pbrReliefShare(draw.pbr,dist):relief;
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
     int steps=int(mix(24.,8.,c));float t=0,h=textureGrad(heightMap,base,du1,du2).r,lastT=0,lastF=h-1;
@@ -120,12 +122,15 @@ void parallax(){
     if(!pack||draw.pbr.x<=0.)surfaceUV=shifted; // the original maps follow only when they share the pack's UVs
     if(pack)pbrUV=shifted;
     vec2 slope=(textureGrad(heightMap,shifted,du1,du2).gb-.5)*.5*vec2(textureSize(heightMap,0)); // dh/du, dh/dv
-    parallaxGradient=.7*depth*(slope.x*gu+slope.y*gv);
+    // NONCANONICAL wave 31: the whole relief shapes the shading normal (the tessellated geometry shades with the flat
+    // source normal), also under a pack normal map (mappedNormal), as the derived relief always did: pack stones lit by
+    // their normal map alone read as flat cut stone beside the original cobbles' parallax-lit domes.
+    parallaxGradient=.7*relief*(slope.x*gu+slope.y*gv);
 }
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
     if(pbrOn&&(pbrFadeLayer||textureSize(pbrNormalMap,0).x>1)) { // fade layers never have a source normal map
-        vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(pbrDerivedRelief?normalize(n-parallaxGradient):n,pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
+        vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(normalize(n-parallaxGradient),pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
         if(!pbrFadeLayer)return m;
         vec3 f=pbrFadeOn&&textureSize(pbrFadeNormalMap,0).x>1?pbrNormal(n,pbrFadePu,pbrFadePv,textureGrad(pbrFadeNormalMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb):n;
         return normalize(mix(f,m,pbrMainWeight()));

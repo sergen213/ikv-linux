@@ -333,8 +333,9 @@ void parallax() {
         pu=(dp1*du2.y-dp2*du1.y)/det;pv=(dp2*du1.x-dp1*du2.x)/det;
     }
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
-    float c=dot(v,nf),depth=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
+    float c=dot(v,nf),relief=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
         (pack?min(pbr.z,1.0)*pbr_main_weight():min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
+    float depth=pack?relief*pbrReliefShare(pbr,dist):relief; // Vulkan parallax(): parallax occlusion's share of the relief
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
     int steps=int(mix(24.0,8.0,c));float t=0.0,h=textureGrad(height_map,base,du1,du2).r,last_t=0.0,last_f=h-1.0;
@@ -344,7 +345,7 @@ void parallax() {
     if(!pack||pbr.x<=0.0)surface_uv=shifted;
     if(pack)pbr_uv=shifted;
     vec2 slope=(textureGrad(height_map,shifted,du1,du2).gb-0.5)*0.5*vec2(textureSize(height_map,0));
-    parallax_gradient=0.7*depth*(slope.x*gu+slope.y*gv);
+    parallax_gradient=0.7*relief*(slope.x*gu+slope.y*gv); // wave 31: the whole relief, under pack normal maps too
 }
 bool source_normal_path(){return has_normal_map&&source_lighting&&length(source_tangent_eye)>0.00001;}
 // Original lit surface (display-referred). sun_visibility 0 drops the source directional term (Vulkan originalSurface).
@@ -476,7 +477,7 @@ void main() {
         float nlength=length(world_normal);
         vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
         if(pbr_on&&(pbr_fade_layer||pbr_maps.y>0.5)){ // wave 29; fade layers never have a source normal map
-            vec3 m=pbr_maps.y>0.5?pbrNormal(pbr_derived_relief?normalize(n-parallax_gradient):n,pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
+            vec3 m=pbr_maps.y>0.5?pbrNormal(normalize(n-parallax_gradient),pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
             if(pbr_fade_layer){vec3 f=pbr_fade_on&&pbr_fade_maps.y>0.5?pbrNormal(n,pbr_fade_pu,pbr_fade_pv,textureGrad(pbr_fade_normal_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb):n;
                 m=normalize(mix(f,m,pbr_main_weight()));}
             n=m;
