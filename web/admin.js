@@ -948,6 +948,9 @@
       const result = await request('/v1/admin/realms', 'POST', { action: 'create', name, kind, sort, shards, capacity, enabled });
       element('realm-name').value = '';
       element('realm-sort').dataset.edited = 'false';
+      element('realm-shards').value = '1';
+      element('realm-capacity').value = '32';
+      element('realm-start').checked = true;
       await afterMutation(`Diyar oluşturuldu: ${name} (ID ${text(result.id)}), ${shards} parça × ${capacity} oyuncu${enabled ? `. ${hostNote}` : ', durdurulmuş. Başlatmak için satırdaki “Başlat” düğmesini kullanın.'}`);
     });
   });
