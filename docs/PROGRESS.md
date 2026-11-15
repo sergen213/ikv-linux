@@ -233,7 +233,7 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
-## 2026-11-14 wave 32: the original cobble road, with parallax and tessellation
+## 2026-11-14 wave 32 (0.16.2): the original cobble road, with parallax and tessellation
 
 User request: bring back the old cobble road — the original `arnavut_kaldirim` texture as in 0.14.0 (warm, even stones, its colour and scale), with 0.14's parallax and tessellation. Captures of 0.14.0, 0.16.1 and the fix at the Eminönü cobble street (`1320,1480`; close, mid, grazing, far, low × Vulkan enhanced, Vulkan RT faithful, GL enhanced): `analysis/porting-wave32/Cobble/index.md`. Everything below is NONCANONICAL, enhanced appearance only; Vulkan, Vulkan RT and GL share `pbr.glsl`.
 
@@ -242,6 +242,8 @@ User request: bring back the old cobble road — the original `arnavut_kaldirim`
 - **Kept like 0.14:** the cobble terrains' fade layer (`toprak`, `kkoy_toprak`, `kkoy_asfalt`) is no longer replaced by the gravel/dirt/asphalt pack under a derived-height material (`pbr_fade_material`; the gravel speckle had greyed the stones), and the relief and its normal tilt cover the whole blend as 0.14's did (`pbrReliefLayer`).
 - **Tessellated frame:** on displaced triangles the parallax frame takes the undisplaced surface's (position derivatives minus their normal component); without it the parallax smeared the stones.
 - **Cost** (GPU scene pass, 1280×720, `IKV_VSYNC=0`, mean of two alternating rounds; 0.16.1 → fixed code with the 0.16.1 manifest → fixed): Vulkan enhanced 0.667 → 0.668 → 0.632 ms; RT faithful 3.180 → 3.193 → 3.153 ms; GL enhanced 0.727 → 0.722 → 0.664 ms (no pack maps sampled on the street).
+
+Verification (merged tree, `analysis/porting-wave32/Verify/`): `build-full` and `build-gl-only` **25/25** (321.2 s each, run together) and `build-full-sanitized` **25/25** alone (495.2 s), all `--output-on-failure --parallel 1`, all three warning-free. RT smoke **5/5** ok with `errors []`; signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED; Eminönü cobble street captures of the merged `build-full` (close and grazing, Vulkan and GL enhanced, private `kwin_wayland --virtual`, `cobble/sheet.png`) inspected: the original warm fan-pattern stones with lit domes and dark joints in both backends. The historical sanitizer shutdown timeout stays open (not hit in these runs).
 
 ## 2026-11-14 wave 31 (0.16.1): full server control, cobble relief
 
