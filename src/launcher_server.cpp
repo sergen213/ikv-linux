@@ -436,7 +436,7 @@ QList<RealmLayout> hostLayout(const QJsonObject& host) {
         const auto realm = value.toObject();
         const int id = realm.value("id").toInt(), shards = std::clamp(realm.value("shards").toInt(1), 0, maxShardsPerRealm);
         if (id < 1 || id > 32767 || std::any_of(layout.begin(), layout.end(), [id](const RealmLayout& r) { return r.id == id; })) continue;
-        layout.append({id, std::min(shards, maxShards - total), std::clamp(realm.value("capacity").toInt(32), 1, 32)});
+        layout.append({id, std::min(shards, maxShards - total), std::clamp(realm.value("capacity").toInt(32), 1, 32), {}});
         total += layout.last().shards;
     }
     if (layout.isEmpty() || total == 0) layout = {RealmLayout{}};
