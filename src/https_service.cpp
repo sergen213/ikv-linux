@@ -5,6 +5,7 @@
 #include <boost/asio/ssl.hpp>
 #include <boost/beast.hpp>
 #include <boost/beast/ssl.hpp>
+#include <openssl/crypto.h>
 #include <openssl/ssl.h>
 
 #include <chrono>
@@ -60,6 +61,7 @@ struct Service {
     std::string javascript;
     const std::size_t capacity;
     std::size_t active{}; // One I/O thread; public and administration have independent admission slots.
+    std::string host_token{}; // NONCANONICAL wave 31: administration listener only; empty disables /v1/host/layout
 };
 
 class Session : public std::enable_shared_from_this<Session> {
@@ -108,6 +110,43 @@ class Session : public std::enable_shared_from_this<Session> {
 
     void error(unsigned status, std::string_view code, std::string_view message) {
         respond(status, Json{{"error", {{"code", code}, {"message", message}}}}.dump());
+    }
+
+    // NONCANONICAL wave 31 host layout channel for the launcher supervisor: only on the private administration listener
+    // from a private peer, only with --host-token-file, authenticated by "Authorization: Host <token>" (constant time).
+    void host(std::string_view path, Json body) {
+        const auto& request = parser_.get();
+        if (!management_ || !private_peer_ || service_.host_token.empty() || path != "/v1/host/layout") {
+            error(404, "not_found", "Route not found");
+            return;
+        }
+        const bool put = request.method() == http::verb::put;
+        if (!put && request.method() != http::verb::get) {
+            error(405, "method_not_allowed", "Use GET or PUT");
+            return;
+        }
+        const auto header = request[http::field::authorization];
+        const std::string_view authorization(header.data(), header.size());
+        const auto& token = service_.host_token;
+        if (!authorization.starts_with("Host ") || authorization.size() != 5 + token.size() ||
+            CRYPTO_memcmp(authorization.data() + 5, token.data(), token.size()) != 0) {
+            error(401, "host_unauthorized", "A valid host token is required");
+            return;
+        }
+        net::post(service_.workers, [self = shared_from_this(), put, body = std::move(body)]() {
+            unsigned status = 200;
+            std::string result;
+            try {
+                result = (put ? self->service_.store.set_host_layout(body) : self->service_.store.host_layout()).dump();
+            } catch (const ApiError& e) {
+                status = static_cast<unsigned>(e.status);
+                result = Json{{"error", {{"code", e.code}, {"message", e.what()}}}}.dump();
+            } catch (...) {
+                status = 500;
+                result = R"({"error":{"code":"internal_error","message":"İşlem tamamlanamadı."}})";
+            }
+            net::post(self->service_.io, [self, status, result = std::move(result)]() mutable { self->respond(status, std::move(result)); });
+        });
     }
 
     void dispatch() {
@@ -166,6 +205,10 @@ class Session : public std::enable_shared_from_this<Session> {
                 error(400, "invalid_json", "A JSON object is required");
                 return;
             }
+        }
+        if (path.starts_with("/v1/host/")) {
+            host(path, std::move(body));
+            return;
         }
         std::string bearer;
         const auto header_authorization = request[http::field::authorization];
@@ -300,7 +343,7 @@ void run_https(Store& store, const HttpsConfig& config) {
     net::thread_pool admin_workers(2);
     Service player_service{store, io, player_workers, {}, {}, 8, 0};
     Service admin_service{store, io, admin_workers, asset(config.web_root / "admin.html"),
-                          asset(config.web_root / "admin.js"), 4, 0};
+                          asset(config.web_root / "admin.js"), 4, 0, config.host_token};
     Listener player(io, tls, player_service, config.bind, config.port, false);
     Listener admin(io, tls, admin_service, config.admin_bind, config.admin_port, true);
     net::signal_set signals(io, SIGINT, SIGTERM);

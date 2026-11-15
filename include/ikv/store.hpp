@@ -59,8 +59,14 @@ public:
     Json realms(std::int64_t account_id);                       // [{id,name,kind,status,population,characters}]
     void register_shard(const ShardInfo&);                     // also the heartbeat (players); throws ApiError
     void retire_shard(std::string_view instance);              // clean stop: the row stops being live at once (not after 15 s)
-    std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room
+    std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room; none for disabled/deleted realms
     std::optional<ShardInfo> shard(std::string_view instance); // live shard (heartbeat within 15 s)
+    // NONCANONICAL wave 31 host layout (migration 010) for the launcher supervisor; the HTTPS service authenticates the
+    // host token on the private listener before calling these. host_layout: {realms:[{id,name,shards,capacity,enabled}],
+    // revision} of every non-deleted realm. set_host_layout {realms:[{id,shards,capacity?}]} is authoritative: listed realms
+    // get those desired shards/capacity, unlisted realms 0 shards; returns host_layout(). Throws ApiError 400/409.
+    Json host_layout();
+    Json set_host_layout(const Json& body);
     std::optional<ShardInfo> locate(int realm_id, std::string_view name); // online character's live shard
     std::vector<ShardInfo> shards(int realm_id = 0);           // live shards (0: every realm), by realm then instance
     int character_realm(std::int64_t character_id);            // home realm; throws ApiError 404
