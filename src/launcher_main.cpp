@@ -1162,6 +1162,10 @@ class Launcher final : public QWidget {
                 if (secret.isEmpty()) return;
                 password->setText(secret); // automatic launcher login with the just-created administrator
                 if (auto* login = findChild<QPushButton*>("loginButton")) login->click();
+            },
+            [this]() -> std::pair<QString, QByteArray> {
+                if (profiles->currentText() != "Localhost" || session.isEmpty() || authSessionOrigin != authUrl()) return {};
+                return {authSessionOrigin, session};
             }};
     }
 public:
