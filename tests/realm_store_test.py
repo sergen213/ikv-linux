@@ -4,7 +4,8 @@
 Applies migrations 001-008 through a real ikv-auth, populates accounts/characters/guilds through the API and SQL, then
 restarts auth with every migration so 009 and 010 run over that populated database. realm-store-test then drives the
 Store API (shards, tickets, lease handoff, bus, lockouts) and this script checks the realm HTTPS routes, the wave 31 realm
-control actions (create/update/start/stop/restart/delete) and the host layout channel (--host-token-file).
+control actions (create/update/start/stop/restart/stop_shard/start_shard/delete) and the host layout channel
+(--host-token-file).
 """
 
 import argparse
@@ -83,7 +84,7 @@ def realm_control(services, args, first, second, twin, mehmet):
     listing = lambda: {row["id"]: row for row in services.api("GET", "/v1/admin/realms", session=first, admin=True)["realms"]}
     public = lambda: {row["id"]: row for row in services.api("GET", "/v1/realms", session=second)}
     rows = listing()
-    assert {key: rows[1][key] for key in ("desired_shards", "capacity", "enabled")} == {"desired_shards": 1, "capacity": 32, "enabled": True}, rows[1]
+    assert {key: rows[1][key] for key in ("desired_shards", "capacity", "enabled", "held_shards")} == {"desired_shards": 1, "capacity": 32, "enabled": True, "held_shards": []}, rows[1]
     assert isinstance(rows[1]["shards"], list), "the live shard list keeps its wave 30 name"
     assert "desired_shards" not in public()[1], "players do not see the host layout"
 
@@ -140,6 +141,38 @@ def realm_control(services, args, first, second, twin, mehmet):
     assert error["error"]["code"] == "realm_offline", error
     admin({"action": "restart", "id": 1, "delay_seconds": 3601}, status=400)
 
+    # Per-shard Durdur / Başlat: a hold on one shard index (realms.held_shards) the host supervisor applies; idempotent,
+    # bounded by the desired shard count, dropped when the shard count shrinks below it, audited.
+    held = admin({"action": "stop_shard", "id": kadikoy, "index": 2})
+    assert (held["held"], held["changed"], held["index"]) == (True, True, 2), held
+    assert admin({"action": "stop_shard", "id": kadikoy, "index": 2})["changed"] is False
+    admin({"action": "stop_shard", "id": kadikoy, "index": 3})
+    assert listing()[kadikoy]["held_shards"] == [2, 3]
+    error = admin({"action": "stop_shard", "id": kadikoy, "index": 4}, status=404)
+    assert error["error"]["code"] == "shard_not_found", error
+    admin({"action": "stop_shard", "id": kadikoy, "index": 0}, status=400)
+    admin({"action": "stop_shard", "id": kadikoy, "index": 17}, status=400)
+    admin({"action": "stop_shard", "id": kadikoy, "index": "1"}, status=400)
+    admin({"action": "stop_shard", "id": kadikoy}, status=400)
+    admin({"action": "stop_shard", "id": 999, "index": 1}, status=404)
+    started = admin({"action": "start_shard", "id": kadikoy, "index": 3})
+    assert (started["held"], started["changed"]) == (False, True), started
+    assert admin({"action": "start_shard", "id": kadikoy, "index": 3})["changed"] is False
+    assert listing()[kadikoy]["held_shards"] == [2]
+    admin({"action": "stop_shard", "id": 1, "index": 1}, status=200)
+    services.api("POST", "/v1/admin/realms", {"action": "stop_shard", "id": 1, "index": 1}, session=second, admin=True, status=403)
+    admin({"action": "start_shard", "id": 1, "index": 1})
+    admin({"action": "update", "id": kadikoy, "shards": 1})
+    assert listing()[kadikoy]["held_shards"] == [], "a smaller shard count drops holds of shards that no longer exist"
+    admin({"action": "update", "id": kadikoy, "shards": 3})
+    assert listing()[kadikoy]["held_shards"] == []
+    assert services.sql("SELECT count(*)||':'||count(*) FILTER (WHERE (details->>'changed')::boolean) FROM audit_events WHERE action='realm.shard_stop'") == "4:3"
+    assert services.sql("SELECT count(*) FROM audit_events WHERE action='realm.shard_start'") == "3"
+    # A supervised shard reports its layout index (ikv-server --shard-index), listed next to the live shard.
+    services.sql("UPDATE world_instances SET shard_index=2 WHERE instance='h2'")
+    indexes = {shard["instance"]: shard["index"] for shard in listing()[1]["shards"]}
+    assert indexes["h2"] == 2 and indexes["h1"] == 0, indexes
+
     # Total desired shards per host are capped at 64.
     services.sql("UPDATE realms SET shards=0 WHERE deleted_at IS NULL")
     for realm in (1, 2, kadikoy):
@@ -165,7 +198,7 @@ def realm_control(services, args, first, second, twin, mehmet):
     assert again != extra
     admin({"action": "delete", "id": again})
     assert services.sql("SELECT string_agg(DISTINCT action,',' ORDER BY action) FROM audit_events WHERE action LIKE 'realm.%'") == \
-        "realm.create,realm.delete,realm.rename,realm.restart,realm.start,realm.stop,realm.update"
+        "realm.create,realm.delete,realm.rename,realm.restart,realm.shard_start,realm.shard_stop,realm.start,realm.stop,realm.update"
 
     # Host layout: unavailable without --host-token-file, then refused for unsafe token files.
     token = "0123456789abcdef" * 4
@@ -194,7 +227,7 @@ def realm_control(services, args, first, second, twin, mehmet):
     host_api(services, "GET", authorization="Host " + token, path="/v1/host/other", status=404)
     layout = host_api(services, "GET", authorization="Host " + token)
     assert [row["id"] for row in layout["realms"]] == [row["id"] for row in services.api("GET", "/v1/admin/realms", session=first, admin=True)["realms"]]
-    assert set(layout["realms"][0]) == {"id", "name", "shards", "capacity", "enabled"} and isinstance(layout["revision"], int), layout
+    assert set(layout["realms"][0]) == {"id", "name", "shards", "capacity", "enabled", "held_shards"} and isinstance(layout["revision"], int), layout
 
     host_api(services, "PUT", {"realms": [{"id": 999, "shards": 1}]}, authorization="Host " + token, status=400)
     host_api(services, "PUT", {"realms": [{"id": 1, "shards": 17}]}, authorization="Host " + token, status=400)
@@ -211,6 +244,13 @@ def realm_control(services, args, first, second, twin, mehmet):
     assert after["revision"] > put["revision"] and next(row for row in after["realms"] if row["id"] == kadikoy)["enabled"] is False
     row = listing()[1]
     assert (row["desired_shards"], row["capacity"]) == (2, 24), row
+    # A hold reaches the host layout with a new revision; releasing it does too.
+    admin({"action": "stop_shard", "id": 1, "index": 2})
+    holding = host_api(services, "GET", authorization="Host " + token)
+    assert next(row for row in holding["realms"] if row["id"] == 1)["held_shards"] == [2] and holding["revision"] > after["revision"], holding
+    admin({"action": "start_shard", "id": 1, "index": 2})
+    released = host_api(services, "GET", authorization="Host " + token)
+    assert next(row for row in released["realms"] if row["id"] == 1)["held_shards"] == [] and released["revision"] > holding["revision"], released
     assert services.sql("SELECT count(*) FROM audit_events WHERE action='realm.layout' AND actor_id IS NULL") == "2"
 
 

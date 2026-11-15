@@ -371,7 +371,7 @@
     clearTimeout(refreshTimer);
     if (!session) return;
     // Poll every 3 s while the Sunucular tab shows a realm whose shards are still starting or stopping (wave 31).
-    const settling = !element('page-realms').hidden && realms.some((realm) => realmStarting(realm) || (realmLive(realm).length > (realmEnabled(realm) ? realmDesired(realm) : 0)));
+    const settling = !element('page-realms').hidden && realms.some((realm) => realmStarting(realm) || (realmLive(realm).length > (realmEnabled(realm) ? realmWanted(realm) : 0)));
     refreshTimer = setTimeout(async () => {
       if (!busy && !document.hidden) {
         try { await refreshStatus(); await refreshRealms(); }
@@ -578,7 +578,10 @@
   const realmLive = (realm) => (Array.isArray(realm.shards) ? realm.shards : []).filter((shard) => shard.online);
   const realmDesired = (realm) => Number.isInteger(realm.desired_shards) ? realm.desired_shards : realmLive(realm).length;
   const realmEnabled = (realm) => realm.enabled !== false;
-  const realmStarting = (realm) => realmEnabled(realm) && realmLive(realm).length < realmDesired(realm);
+  // Shard indexes an administrator holds stopped (held_shards, stop_shard/start_shard); the host keeps them down.
+  const realmHeld = (realm) => (Array.isArray(realm.held_shards) ? realm.held_shards : []).filter((index) => Number.isInteger(index) && index >= 1 && index <= realmDesired(realm));
+  const realmWanted = (realm) => realmDesired(realm) - realmHeld(realm).length;
+  const realmStarting = (realm) => realmEnabled(realm) && realmLive(realm).length < realmWanted(realm);
 
   function trackRealmShortage(now) {
     const seen = new Set();
@@ -593,29 +596,53 @@
   function realmStatusCell(realm, now) {
     const cell = node('td');
     const live = realmLive(realm).length;
-    const desired = realmDesired(realm);
+    const desired = realmWanted(realm);
+    const held = realmHeld(realm).length;
     if (!realmEnabled(realm)) cell.append(node('span', live ? `Durduruluyor (${live} canlı parça)` : 'Durduruldu', 'bad'));
-    else if (desired === 0) cell.append(node('span', live ? 'Kapatılıyor' : 'Parça istenmiyor', 'bad'));
-    else if (live >= desired) cell.append(node('span', 'Çalışıyor', 'ok'));
+    else if (desired === 0) cell.append(node('span', live ? 'Kapatılıyor' : held ? 'Bütün parçalar durduruldu' : 'Parça istenmiyor', 'bad'));
+    else if (live >= desired) cell.append(node('span', held ? `Çalışıyor (${held} parça durduruldu)` : 'Çalışıyor', 'ok'));
     else {
       const since = realmShortSince.get(realm.id) ?? now;
       const late = now - since >= realmShortHintMs;
       cell.append(node('span', live ? `Başlatılıyor (${live}/${desired})` : 'Başlatılıyor', late ? 'bad' : undefined));
       if (late) {
         const units = [];
-        for (let shard = live + 1; shard <= desired && units.length < 4; shard += 1) units.push(`ikv-server@${realm.id}-${shard}`);
+        const held = realmHeld(realm);
+        for (let shard = 1; shard <= realmDesired(realm) && units.length < 4; shard += 1) {
+          if (!held.includes(shard) && !realmLive(realm).some((entry) => entry.index === shard)) units.push(`ikv-server@${realm.id}-${shard}`);
+        }
         cell.append(node('p', `Bu sunucu barındırıcı tarafından başlatılmadı; elle kurulumda ${units.join(', ')}${desired - live > units.length ? ' …' : ''} birimini başlatın.`, 'realm-hint bad'));
       }
     }
     return cell;
   }
 
+  // One row per layout shard index (Parça N) with its live process, if the host reports the index (--shard-index), and
+  // per-shard Durdur / Başlat (stop_shard / start_shard); then any other live process (started by hand: index 0).
   function realmShardList(realm, now) {
     const cell = node('td');
     const list = node('ul', undefined, 'shard-list');
-    (Array.isArray(realm.shards) ? realm.shards : []).forEach((shard) => {
+    const shards = Array.isArray(realm.shards) ? realm.shards : [];
+    const describe = (shard) => {
       const age = Math.max(0, Math.round((now - timestamp(shard.updated_at)) / 1000));
-      const item = node('li', `${shard.instance} · ${shard.host || '(HTTPS sunucusu)'}:${shard.port} · ${shard.players}/${shard.capacity} oyuncu · ${shard.online ? 'canlı' : 'ÖLÜ'} · son bildirim ${Number.isFinite(age) ? `${age} sn önce` : '—'}`, shard.online ? 'ok' : 'bad');
+      return `${shard.instance} · ${shard.host || '(HTTPS sunucusu)'}:${shard.port} · ${shard.players}/${shard.capacity} oyuncu · ${shard.online ? 'canlı' : 'ÖLÜ'} · son bildirim ${Number.isFinite(age) ? `${age} sn önce` : '—'}`;
+    };
+    const shown = new Set();
+    const held = realmHeld(realm);
+    for (let index = 1; index <= realmDesired(realm); index += 1) {
+      const shard = shards.find((entry) => entry.index === index && entry.online);
+      if (shard) shown.add(shard);
+      const stopped = held.includes(index);
+      const state = stopped ? (shard ? 'durduruluyor (oyuncular kaydediliyor)' : 'durduruldu (yönetici)') : shard ? describe(shard) : realmEnabled(realm) ? 'çalışan süreç yok' : 'diyar durduruldu';
+      const item = node('li', `Parça ${index}: ${state}`, stopped ? 'bad' : shard ? 'ok' : undefined);
+      item.dataset.shardIndex = String(index);
+      if (shard && !stopped) item.append(actionButton('Yeniden başlat', 'Fill the restart form with this shard', () => fillRestart(realm.id, shard.instance)));
+      if (stopped) item.append(actionButton('Başlat', 'Let the host start this shard again', () => { void setShardHeld(realm, index, false); }, ''));
+      else item.append(actionButton('Durdur', 'Save this shard\'s players and stop only this shard', () => { void setShardHeld(realm, index, true); }, 'danger'));
+      list.append(item);
+    }
+    shards.filter((shard) => !shown.has(shard)).forEach((shard) => {
+      const item = node('li', describe(shard), shard.online ? 'ok' : 'bad');
       if (shard.online) item.append(actionButton('Yeniden başlat', 'Fill the restart form with this shard', () => fillRestart(realm.id, shard.instance)));
       list.append(item);
     });
@@ -982,6 +1009,15 @@
       if (!enabled && !window.confirm(`Diyar ${realm.name} (ID ${realm.id}) durdurulsun mu? Çevrimiçi oyuncular kaydedilir ve bütün parçaları kapanır.`)) { notice('İşlem iptal edildi.'); return; }
       await request('/v1/admin/realms', 'POST', { action: 'update', id: realm.id, enabled });
       await afterMutation(`Diyar ${realm.name} ${enabled ? 'başlatılıyor' : 'durduruluyor'}. ${hostNote}`);
+    });
+  }
+
+  // NONCANONICAL wave 31 per-shard Durdur / Başlat: a database hold (realms.held_shards) the host supervisor applies.
+  async function setShardHeld(realm, index, stop) {
+    await perform(async () => {
+      if (stop && !window.confirm(`Diyar ${realm.name} parça ${index} durdurulsun mu? Bu parçadaki oyuncular kaydedilir ve bağlantıları kesilir; diyarın diğer parçaları çalışmaya devam eder.`)) { notice('İşlem iptal edildi.'); return; }
+      await request('/v1/admin/realms', 'POST', { action: stop ? 'stop_shard' : 'start_shard', id: realm.id, index });
+      await afterMutation(`Diyar ${realm.name} parça ${index} ${stop ? 'durduruluyor' : 'başlatılıyor'}. ${hostNote}`);
     });
   }
 

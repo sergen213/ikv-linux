@@ -65,6 +65,17 @@ pollfd poll_entry(int fd, short events) { return {fd, events, 0}; }
 int socket_error() { return errno; }
 void close_socket(int fd) { ::close(fd); }
 #endif
+// NONCANONICAL wave 31: the world port is taken by another process. main() exits with port_in_use_exit so the launcher
+// supervisor picks another port instead of counting a crash.
+constexpr int port_in_use_exit = 98;
+struct PortInUse : std::runtime_error { using std::runtime_error::runtime_error; };
+bool address_in_use(int error) {
+#ifdef _WIN32
+    return error == WSAEADDRINUSE || error == WSAEACCES; // SO_EXCLUSIVEADDRUSE conflicts report either
+#else
+    return error == EADDRINUSE;
+#endif
+}
 class Socket {
 public:
     explicit Socket(int fd = -1) : fd_(fd) {}
@@ -460,6 +471,7 @@ struct Options {
     // NONCANONICAL wave 30 realms: this shard's realm, the address clients reach it at (empty: the HTTPS host) and its
     // advertised player capacity (at most max_players).
     int realm = 1, capacity = static_cast<int>(max_players);
+    int shard_index = 0; // NONCANONICAL wave 31: index in the realm layout when a host supervisor starts the shard (0: none)
     std::string public_host;
     std::uint16_t port = 7000;
     std::optional<std::uint32_t> ticks, bots;
@@ -482,7 +494,7 @@ Options options(int argc, char** argv) {
                          "                  [--gameplay config/gameplay.json] [--ticks N] [--bots N (0..256; default gameplay.json bots.spawn)]\n"
                          "                  [--asset-root ROOT (required by source-associated gameplay zones)]\n"
                          "                  [--realm ID (default 1)] [--public-host NAME (address clients connect to; default: the HTTPS host)]\n"
-                         "                  [--capacity N (1..32 players, default 32)]\n"
+                         "                  [--capacity N (1..32 players, default 32)] [--shard-index N (1..16, set by the host supervisor)]\n"
                          "                  [--stop-on-stdin-eof (graceful stop when stdin closes; the Windows launcher supervisor)]\n";
             std::exit(0);
         }
@@ -508,6 +520,10 @@ Options options(int argc, char** argv) {
             const auto capacity = number(value);
             if (!capacity || capacity > max_players) throw std::invalid_argument("capacity must be 1..32");
             result.capacity = static_cast<int>(capacity);
+        } else if (option == "--shard-index") {
+            const auto index = number(value);
+            if (!index || index > 16) throw std::invalid_argument("shard index must be 1..16");
+            result.shard_index = static_cast<int>(index);
         }
         else if (option == "--port") {
             const auto port = number(value);
@@ -557,6 +573,28 @@ int run(const Options& opts) {
         SSL_CTX_use_PrivateKey_file(context.get(), opts.key.c_str(), SSL_FILETYPE_PEM) != 1 ||
         SSL_CTX_check_private_key(context.get()) != 1) throw std::runtime_error("TLS configuration failed");
     SSL_CTX_set_options(context.get(), SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION);
+    // The world port is bound (reserved, no connections accepted) before the database and the zones load, so a port another
+    // process holds fails within milliseconds with its own exit code (port_in_use_exit) instead of after a long startup,
+    // and no ephemeral socket can take it meanwhile; listen() follows once the world is ready (NONCANONICAL wave 31).
+    sockaddr_in address {}; address.sin_family = AF_INET; address.sin_port = htons(opts.port);
+    if (inet_pton(AF_INET, opts.bind.c_str(), &address.sin_addr) != 1) throw std::invalid_argument("bind must be numeric IPv4");
+    Socket listener(static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)));
+    if (listener.get() < 0) throw std::runtime_error("socket failed");
+    nonblocking(listener.get());
+#ifdef _WIN32
+    const BOOL exclusive = TRUE; // Windows SO_REUSEADDR would let another process take over the bound port
+    if (setsockopt(static_cast<SOCKET>(listener.get()), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) < 0 ||
+#else
+    const int reuse = 1;
+    if (setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0 ||
+#endif
+        bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
+        if (address_in_use(socket_error())) throw PortInUse("world port in use");
+        throw std::runtime_error("bind failed");
+    }
+    socklen_t address_size = sizeof(address);
+    if (getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) < 0)
+        throw std::runtime_error("bound address failed");
     ikv::Store store(secret_file(opts.dsn_file));
     std::ifstream config_file(opts.gameplay, std::ios::binary | std::ios::ate);
     if (!config_file || config_file.tellg() <= 0 || config_file.tellg() > 4194304) // wave 11: spawn groups/props took gameplay.json past 1 MiB
@@ -590,23 +628,10 @@ int run(const Options& opts) {
     const auto instance = instance_id();
     ikv::BotHost bots(world, store, instance); // NONCANONICAL server-side bot players (reserved bot account)
     bots.start(opts.bots);
-    sockaddr_in address {}; address.sin_family = AF_INET; address.sin_port = htons(opts.port);
-    if (inet_pton(AF_INET, opts.bind.c_str(), &address.sin_addr) != 1) throw std::invalid_argument("bind must be numeric IPv4");
-    Socket listener(static_cast<int>(socket(AF_INET, SOCK_STREAM, 0)));
-    if (listener.get() < 0) throw std::runtime_error("socket failed");
-    nonblocking(listener.get());
-#ifdef _WIN32
-    const BOOL exclusive = TRUE; // Windows SO_REUSEADDR would let another process take over the bound port
-    if (setsockopt(static_cast<SOCKET>(listener.get()), SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&exclusive), sizeof(exclusive)) < 0 ||
-#else
-    const int reuse = 1;
-    if (setsockopt(listener.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0 ||
-#endif
-        bind(listener.get(), reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0 ||
-        listen(listener.get(), static_cast<int>(max_connections)) < 0) throw std::runtime_error("listen failed");
-    socklen_t address_size = sizeof(address);
-    if (getsockname(listener.get(), reinterpret_cast<sockaddr*>(&address), &address_size) < 0)
-        throw std::runtime_error("bound address failed");
+    if (listen(listener.get(), static_cast<int>(max_connections)) < 0) {
+        if (address_in_use(socket_error())) throw PortInUse("world port in use");
+        throw std::runtime_error("listen failed");
+    }
     std::list<Peer> peers;
     std::uint64_t next_connection = 1;
     std::uint32_t next_id = 1;
@@ -625,7 +650,7 @@ int run(const Options& opts) {
     initial_status["realm_id"] = opts.realm;
     store.world_status(initial_status);
     // NONCANONICAL wave 30: the shard registry row (realm, public address, capacity) shares the 1 s heartbeat.
-    ikv::ShardInfo shard{instance, opts.realm, opts.public_host, ntohs(address.sin_port), 0, opts.capacity};
+    ikv::ShardInfo shard{instance, opts.realm, opts.public_host, ntohs(address.sin_port), 0, opts.capacity, opts.shard_index};
     store.register_shard(shard);
     // NONCANONICAL wave 30 shard link: by-name lookups, live shard rows and bus sends for World (src/world_shard.cpp). A failed
     // lookup reads as "not online"; a failed send is logged and dropped (the bus is best effort, the tick never waits on it).
@@ -885,5 +910,6 @@ int run(const Options& opts) {
 }
 int main(int argc, char** argv) {
     try { return run(options(argc, argv)); }
+    catch (const PortInUse&) { std::cerr << "server port in use\n"; return port_in_use_exit; }
     catch (const std::exception&) { std::cerr << "server startup/runtime error\n"; return 1; }
 }

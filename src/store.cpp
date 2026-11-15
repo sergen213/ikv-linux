@@ -233,16 +233,16 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
 }
 // ---- Realms and shards (wave 30, NONCANONICAL) ----
 // A shard row is selectable only with a real port and a heartbeat within 15 seconds.
-constexpr const char* shard_columns="s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity";
+constexpr const char* shard_columns="s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity,s.shard_index";
 constexpr const char* shard_live="s.kind='world' AND s.port>0 AND s.updated_at>now()-interval '15 seconds'";
 // NONCANONICAL wave 31: a shard only accepts logins while its realm is enabled and not deleted.
 constexpr const char* realm_open="EXISTS (SELECT 1 FROM realms r WHERE r.id=s.realm_id AND r.enabled AND r.deleted_at IS NULL)";
 ShardInfo shard_row(const Result& result,int row) {
     return {cell(result,row,0),static_cast<int>(integer(result,row,1)),cell(result,row,2),static_cast<std::uint16_t>(integer(result,row,3)),
-        static_cast<int>(integer(result,row,4)),static_cast<int>(integer(result,row,5))};
+        static_cast<int>(integer(result,row,4)),static_cast<int>(integer(result,row,5)),static_cast<int>(integer(result,row,6))};
 }
 std::optional<ShardInfo> first_shard(const Result& result) { if(!PQntuples(result.get()))return std::nullopt; return shard_row(result,0); }
-Json shard_json(const ShardInfo& s) { return {{"instance",s.instance},{"realm_id",s.realm_id},{"host",s.host},{"port",s.port},{"players",s.players},{"capacity",s.capacity}}; }
+Json shard_json(const ShardInfo& s) { return {{"instance",s.instance},{"realm_id",s.realm_id},{"host",s.host},{"port",s.port},{"players",s.players},{"capacity",s.capacity},{"index",s.index}}; }
 bool printable(std::string_view value) { return std::none_of(value.begin(),value.end(),[](unsigned char c){return c<32||c==127;}); }
 std::string instance_name(std::string_view value) {
     if(value.empty()||value.size()>128||!printable(value))throw ApiError(400,"invalid_instance","Invalid world instance");
@@ -261,10 +261,10 @@ bool handed_off(PGconn* connection,std::int64_t character,const std::string& ins
 }
 // Realm rows with live-shard population; characters counts the given account's live characters (account 0: everyone's).
 // NONCANONICAL wave 31: deleted realms are hidden and disabled ones are offline even while their shards drain. desired
-// adds the administrator layout fields (desired_shards, capacity, enabled) next to the live shard list.
+// adds the administrator layout fields (desired_shards, capacity, enabled, held_shards) next to the live shard list.
 Json realm_rows(PGconn* connection,std::int64_t account,bool desired=false) {
     auto result=sql(connection,std::string("SELECT r.id,r.name,r.kind,r.sort,count(s.instance),COALESCE(sum(s.players),0),COALESCE(sum(s.capacity),0),count(s.instance) FILTER (WHERE s.players<s.capacity),"
-        "(SELECT count(*) FROM characters c WHERE c.realm_id=r.id AND ($1::bigint=0 OR c.account_id=$1::bigint) AND c.deleted_at IS NULL),r.shards,r.capacity,r.enabled "
+        "(SELECT count(*) FROM characters c WHERE c.realm_id=r.id AND ($1::bigint=0 OR c.account_id=$1::bigint) AND c.deleted_at IS NULL),r.shards,r.capacity,r.enabled,array_to_json(r.held_shards)::text "
         "FROM realms r LEFT JOIN world_instances s ON s.realm_id=r.id AND ")+shard_live+" WHERE r.deleted_at IS NULL GROUP BY r.id ORDER BY r.sort,r.id",{std::to_string(account)});
     Json rows=Json::array();
     for(int i=0;i<PQntuples(result.get());++i){
@@ -272,16 +272,18 @@ Json realm_rows(PGconn* connection,std::int64_t account,bool desired=false) {
         const auto live=enabled?integer(result,i,4):0;
         rows.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"kind",cell(result,i,2)},{"sort",integer(result,i,3)},{"status",live?"online":"offline"},
             {"population",realm_population(live,integer(result,i,5),integer(result,i,6),integer(result,i,7))},{"characters",integer(result,i,8)}});
-        if(desired){rows.back()["desired_shards"]=integer(result,i,9);rows.back()["capacity"]=integer(result,i,10);rows.back()["enabled"]=enabled;}
+        if(desired){rows.back()["desired_shards"]=integer(result,i,9);rows.back()["capacity"]=integer(result,i,10);rows.back()["enabled"]=enabled;rows.back()["held_shards"]=Json::parse(cell(result,i,12));}
     }
     return rows;
 }
-// NONCANONICAL wave 31 host layout (GET /v1/host/layout and the PUT response): every non-deleted realm's desired shards.
+// NONCANONICAL wave 31 host layout (GET /v1/host/layout and the PUT response): every non-deleted realm's desired shards
+// and the shard indexes an administrator holds stopped (held_shards, sorted subset of 1..shards).
 Json layout_rows(PGconn* connection) {
-    auto result=sql(connection,"SELECT id,name,shards,capacity,enabled,(SELECT COALESCE(max(revision),0) FROM realms) FROM realms WHERE deleted_at IS NULL ORDER BY sort,id");
+    auto result=sql(connection,"SELECT id,name,shards,capacity,enabled,(SELECT COALESCE(max(revision),0) FROM realms),array_to_json(held_shards)::text FROM realms WHERE deleted_at IS NULL ORDER BY sort,id");
     Json realms=Json::array();std::int64_t revision=0;
     for(int i=0;i<PQntuples(result.get());++i){
-        realms.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"shards",integer(result,i,2)},{"capacity",integer(result,i,3)},{"enabled",boolean(result,i,4)}});
+        realms.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"shards",integer(result,i,2)},{"capacity",integer(result,i,3)},{"enabled",boolean(result,i,4)},
+            {"held_shards",Json::parse(cell(result,i,6))}});
         revision=integer(result,i,5);
     }
     return {{"realms",realms},{"revision",revision}};
@@ -802,23 +804,24 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         auto result=enqueue("settings",settings);result["settings"]=settings;return result;
     }
     // NONCANONICAL wave 30/31 realm administration: list with desired layout, live shards and populations; create, update
-    // (rename, kind, desired shards, capacity, enabled), start/stop (enabled), restart (one shard or every live shard) and
-    // soft delete. The host supervisor follows the desired layout over GET /v1/host/layout.
+    // (rename, kind, desired shards, capacity, enabled), start/stop (enabled), restart (one shard or every live shard),
+    // stop_shard/start_shard (hold one shard index down while the realm runs) and soft delete. The host supervisor follows
+    // the desired layout over GET /v1/host/layout.
     if(path=="/v1/admin/realms"){
         if(method=="GET"){
             Impl::Connection connection(*impl_);auto rows=realm_rows(connection,0,true);
-            auto shards=sql(connection,"SELECT s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity,s.updated_at>now()-interval '15 seconds' AND s.port>0,to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM world_instances s WHERE s.updated_at>now()-interval '1 hour' ORDER BY s.realm_id,s.instance");
+            auto shards=sql(connection,std::string("SELECT ")+shard_columns+",s.updated_at>now()-interval '15 seconds' AND s.port>0,to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM world_instances s WHERE s.updated_at>now()-interval '1 hour' ORDER BY s.realm_id,s.shard_index,s.instance");
             for(auto& row:rows){
                 Json list=Json::array();
                 for(int i=0;i<PQntuples(shards.get());++i)if(integer(shards,i,1)==row["id"].get<std::int64_t>()){
-                    auto shard=shard_json(shard_row(shards,i));shard["online"]=boolean(shards,i,6);shard["updated_at"]=cell(shards,i,7);list.push_back(std::move(shard));
+                    auto shard=shard_json(shard_row(shards,i));shard["online"]=boolean(shards,i,7);shard["updated_at"]=cell(shards,i,8);list.push_back(std::move(shard));
                 }
                 row["shards"]=std::move(list); // live shards (registered within the last hour); desired_shards is the layout
             }
             return {{"realms",rows}};
         }
         if(method!="POST")throw ApiError(404,"not_found","Route not found");
-        const auto action=text(body,"action",4,7);
+        const auto action=text(body,"action",4,11);
         const auto flag=[&](const char* key){if(!body[key].is_boolean())throw ApiError(400,"invalid_request",std::string(key)+" is a boolean");return body[key].get<bool>();};
         const auto kind_of=[&]{const auto kind=text(body,"kind",2,6);if(kind!="normal"&&kind!="pvp"&&kind!="rp")throw ApiError(400,"invalid_request","kind is normal, pvp or rp");return kind;};
         Impl::Connection connection(*impl_);Transaction transaction(connection);
@@ -838,10 +841,23 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
             audit(connection,"realm.create",who.account_id,id,{{"name",name},{"kind",kind},{"sort",sort},{"shards",shards},{"capacity",capacity},{"enabled",enabled}});transaction.commit();
             return {{"ok",true},{"id",id}};
         }
-        if(action!="update"&&action!="rename"&&action!="start"&&action!="stop"&&action!="delete"&&action!="restart")
-            throw ApiError(400,"invalid_request","action is create, update, start, stop, restart, delete or rename");
+        if(action!="update"&&action!="rename"&&action!="start"&&action!="stop"&&action!="delete"&&action!="restart"&&action!="stop_shard"&&action!="start_shard")
+            throw ApiError(400,"invalid_request","action is create, update, start, stop, restart, stop_shard, start_shard, delete or rename");
         const auto id=number(body,"id",1,32767);
         if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint AND deleted_at IS NULL FOR UPDATE",{std::to_string(id)}).get()))throw ApiError(404,"realm_not_found","Realm not found");
+        if(action=="stop_shard"||action=="start_shard"){
+            // A held shard is saved and stopped by the host supervisor (the same graceful stop as a realm Durdur) and stays
+            // down until start_shard; the realm's other shards keep running. Lowering the shard count drops the hold.
+            const auto index=number(body,"index",1,16);
+            auto current=sql(connection,"SELECT shards,$2::smallint=ANY(held_shards) FROM realms WHERE id=$1::smallint",{std::to_string(id),std::to_string(index)});
+            if(index>integer(current,0,0))throw ApiError(404,"shard_not_found","Bu diyarda böyle bir parça yok.");
+            const bool stop=action=="stop_shard",changed=boolean(current,0,1)!=stop;
+            // start_shard always bumps the layout revision: the supervisor also retries a shard it gave up after failures.
+            if(changed||!stop)sql(connection,stop?"UPDATE realms SET held_shards=array_append(held_shards,$2::smallint) WHERE id=$1::smallint"
+                                                 :"UPDATE realms SET held_shards=array_remove(held_shards,$2::smallint) WHERE id=$1::smallint",{std::to_string(id),std::to_string(index)});
+            audit(connection,stop?"realm.shard_stop":"realm.shard_start",who.account_id,id,{{"index",index},{"changed",changed}});transaction.commit();
+            return {{"ok",true},{"id",id},{"index",index},{"held",stop},{"changed",changed}};
+        }
         if(action=="delete"){
             if(id==1)throw ApiError(409,"realm_protected","İlk diyar (Eminönü) silinemez.");
             if(integer(sql(connection,"SELECT count(*) FROM characters WHERE realm_id=$1::smallint AND deleted_at IS NULL",{std::to_string(id)}),0,0))
@@ -977,11 +993,12 @@ void Store::register_shard(const ShardInfo& info) {
     if(info.host.size()>253||!printable(info.host)||info.host.find(' ')!=std::string::npos)throw ApiError(400,"invalid_host","Invalid public host");
     if(info.port==0)throw ApiError(400,"invalid_port","A shard needs its world port");
     if(info.capacity<1||info.capacity>32||info.players<0||info.players>32)throw ApiError(400,"invalid_capacity","Shard capacity is 1-32 and players 0-32");
+    if(info.index<0||info.index>16)throw ApiError(400,"invalid_shard","Shard index is 0-16");
     Impl::Connection connection(*impl_);
     if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint",{std::to_string(info.realm_id)}).get()))throw ApiError(400,"invalid_realm","Realm does not exist");
-    sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint) "
-        "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,updated_at=now()",
-        {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players)});
+    sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players,shard_index) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint,$7::smallint) "
+        "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,shard_index=EXCLUDED.shard_index,updated_at=now()",
+        {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players),std::to_string(info.index)});
 }
 void Store::retire_shard(std::string_view instance) {
     Impl::Connection connection(*impl_);

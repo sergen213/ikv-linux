@@ -589,6 +589,30 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         controlEvidence.insert("web_realm_spawn_ms", webClock.elapsed());
         waitUntil([&] { return allRunning(pera, 1) && realmText(pera, 2).startsWith(QString::fromUtf8("Çalışıyor")); }, 600, "the web-created realm to run (Çalışıyor)");
         controlEvidence.insert("web_realm_running_ms", webClock.elapsed());
+        // Per-shard Durdur / Başlat as the web panel sends them (stop_shard / start_shard: realms.held_shards): the hosted
+        // supervisor saves and stops only that shard, keeps it down, and starts it again on release.
+        const auto realmPost = [&](const QJsonObject& body) {
+            return pinned("POST", QString("https://127.0.0.1:%1/v1/admin/realms").arg(json(serverDir + "/state.json").value("admin_port").toInt()),
+                          serverDir + "/secrets/client-ca.pem", body, controlToken);
+        };
+        const auto liveIndexes = [&](int realm) { // shard indexes the live registry rows report (ikv-server --shard-index)
+            QList<int> indexes;
+            for (const auto& value : adminRealms().value(realm).value("shards").toArray())
+                if (value.toObject().value("online").toBool()) indexes << value.toObject().value("index").toInt();
+            return indexes;
+        };
+        waitUntil([&] { return liveIndexes(pera) == QList<int>{1}; }, 30, "the web-created realm's live shard reporting index 1");
+        const auto peraPid = shardsOf(pera).value(1).value("pid").toInteger();
+        if (!realmPost({{"action", "stop_shard"}, {"id", pera}, {"index", 1}}).value("held").toBool()) throw std::runtime_error("stop_shard did not hold the shard");
+        waitUntil([&] { const auto now = shardsOf(pera).value(1); return now.value("pid").toInteger() == 0 && now.value("state").toString() == "held" && liveIndexes(pera).isEmpty(); },
+                  60, "the web-stopped shard saved and held");
+        if (adminRealms().value(pera).value("held_shards").toArray() != QJsonArray{1}) throw std::runtime_error("The held shard is missing from /v1/admin/realms held_shards");
+        if (!logText().contains(QString("ikv-server[%1-1] çıktı: kod=0").arg(pera))) throw std::runtime_error("The web Durdur did not stop the shard gracefully (exit 0)");
+        realmPost({{"action", "start_shard"}, {"id", pera}, {"index", 1}});
+        waitUntil([&] { const auto now = shardsOf(pera).value(1); return now.value("state").toString() == "running" && now.value("pid").toInteger() > 1 && now.value("pid").toInteger() != peraPid; },
+                  600, "the web-started shard running again");
+        waitUntil([&] { return liveIndexes(pera) == QList<int>{1} && adminRealms().value(pera).value("held_shards").toArray().isEmpty(); }, 30, "the released shard live again");
+        controlEvidence.insert("web_shard_stop_start", true);
 
         stage = "launcher-create";
         click("hostRealmAdd");
@@ -660,9 +684,11 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         press("hostShardStop");
         waitUntil([&] { const auto now = shardsOf(galata).value(2); return now.value("pid").toInteger() == 0 && now.value("state").toString() == "held"; }, 60, "the stopped shard");
         if (!logText().contains(QString("ikv-server[%1-2] çıktı: kod=0").arg(galata))) throw std::runtime_error("Parçayı durdur did not save and exit 0");
+        if (adminRealms().value(galata).value("held_shards").toArray() != QJsonArray{2}) throw std::runtime_error("Parçayı durdur did not hold the shard in the database");
         pick(shardsTable, {QString::number(galata), "2"});
         press("hostShardStart");
         waitUntil([&] { const auto now = shardsOf(galata).value(2); return now.value("state").toString() == "running" && now.value("pid").toInteger() != second; }, 600, "the shard started again");
+        if (!adminRealms().value(galata).value("held_shards").toArray().isEmpty()) throw std::runtime_error("Parçayı başlat did not release the database hold");
 
         stage = "realm-stop";
         pick(realmsTable, {QString::number(galata)});

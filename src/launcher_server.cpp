@@ -424,9 +424,11 @@ QString countText(const QJsonValue& value) { return value.isDouble() ? QString::
 // NONCANONICAL wave 30/31 hosting layout: which realms run on how many shards. Wave 31 keeps it in the database (realms
 // shards/capacity/enabled, migration 010); the supervisor reads it from GET /v1/host/layout. A wave 30 host.json "realms" =
 // [{"id":N,"shards":K,"capacity":C}] is written into the database once (PUT /v1/host/layout), then host.json records
-// "layout_in_db": true and is no longer the layout source.
-struct RealmLayout { int id = 1, shards = 1, capacity = 32; };
+// "layout_in_db": true and is no longer the layout source. held: shard indexes an administrator stopped one by one
+// (realms.held_shards; stop_shard/start_shard from Sunucu Yönetimi or the web panel).
+struct RealmLayout { int id = 1, shards = 1, capacity = 32; QList<int> held; };
 constexpr int maxShardsPerRealm = 16, maxShards = 64;
+constexpr int portInUseExit = 98; // ikv-server: its world port is taken by another process (src/server_main.cpp, wave 31)
 QList<RealmLayout> hostLayout(const QJsonObject& host) {
     QList<RealmLayout> layout;
     int total = 0;
@@ -477,7 +479,6 @@ public:
             if (QFile::remove(dir_ + "/stop.request")) stopRequested = 1; // askSupervisorStop
 #endif
             if (stopRequested) { say("durdurma isteği alındı"); shutdown({}); return; }
-            shardRequests(); // the panel's per-shard Durdur / Başlat
             if (++ticks_ % 4) return;
             if (!readJson(dir_ + "/host.json").value("keep_alive").toBool() && !anyHolder(dir_ + "/launcher.lock")) {
                 say("başlatıcı kapandı ve 'Başlatıcı kapanınca da çalışsın' kapalı");
@@ -532,11 +533,12 @@ public:
 private:
     enum class Auth { Plain, Register, Bootstrap };
     // NONCANONICAL wave 30: one ikv-server process per shard (docs/SELF_HOSTING.md "Realms and shards"). Wave 31: a shard the
-    // administrator stopped alone (Sunucu Yönetimi per-shard Durdur) stays "held" until its Başlat or its realm restarts.
+    // administrator stopped alone (per-shard Durdur in Sunucu Yönetimi or the web panel: realms.held_shards) stays "held"
+    // until its Başlat. portRetries counts starts refused because another process held the port (not crashes).
     struct Shard {
-        int realm = 1, index = 1, capacity = 32, port = 0, actualPort = 0;
+        int realm = 1, index = 1, capacity = 32, port = 0, actualPort = 0, portRetries = 0;
         QProcess* process = nullptr;
-        bool ready = false, failed = false, retired = false, held = false;
+        bool ready = false, failed = false, retired = false, held = false, restart = false; // restart: start once the old process is gone
         QList<qint64> crashes;
         QString problem;
         QString name() const { return QString("ikv-server[%1-%2]").arg(realm).arg(index); }
@@ -550,9 +552,11 @@ private:
     int authPort_ = 0, adminPort_ = 0, ticks_ = 0;
     qint64 started_ = QDateTime::currentMSecsSinceEpoch();
     QList<qint64> authCrashes_;
+    QSet<int> refusedPorts_; // ports a shard start was refused on (another process took them); never probed again
     QList<RealmLayout> layout_; // effective layout from /v1/host/layout (a disabled realm wants 0 shards)
     QJsonArray layoutRows_;     // the same rows with names, written to state.json for the panel
     bool layoutKnown_ = false, fetching_ = false;
+    qint64 layoutRevision_ = 0;
     QString layoutSeen_, layoutProblem_; // layout the failed shards were given up for; last reported fetch problem
     QNetworkAccessManager network_;
     QTimer watch_;
@@ -718,10 +722,10 @@ private:
             }
             if (refused) return; // the next poll reads the database layout
             layoutProblem_.clear();
-            applyLayout(reply.value("realms").toArray());
+            applyLayout(reply.value("realms").toArray(), reply.value("revision").toInteger());
         });
     }
-    void applyLayout(const QJsonArray& rows) {
+    void applyLayout(const QJsonArray& rows, qint64 revision) {
         QList<QJsonObject> realms; // hosting order = realm id: realm 1 shard 1 keeps the world port and the bots
         for (const auto& value : rows) realms << value.toObject();
         std::sort(realms.begin(), realms.end(), [](const QJsonObject& a, const QJsonObject& b) { return a.value("id").toInt() < b.value("id").toInt(); });
@@ -731,42 +735,16 @@ private:
             const int id = realm.value("id").toInt();
             if (id < 1 || id > 32767) continue;
             const int shards = realm.value("enabled").toBool(true) ? std::min(std::clamp(realm.value("shards").toInt(), 0, maxShardsPerRealm), maxShards - total) : 0;
-            layout.append({id, shards, std::clamp(realm.value("capacity").toInt(32), 1, 32)});
+            QList<int> held;
+            for (const auto& index : realm.value("held_shards").toArray()) if (index.toInt() >= 1 && index.toInt() <= shards) held << index.toInt();
+            layout.append({id, shards, std::clamp(realm.value("capacity").toInt(32), 1, 32), held});
             total += shards;
         }
         const bool rowsChanged = rows != layoutRows_;
-        layout_ = layout; layoutRows_ = rows; layoutKnown_ = true;
+        layout_ = layout; layoutRows_ = rows; layoutKnown_ = true; layoutRevision_ = revision;
         reconcile();
         if (!running_) settle();
         else if (rowsChanged) shardsChanged();
-    }
-    // Sunucu Yönetimi's per-shard Durdur / Başlat (NONCANONICAL wave 31): DIR/shard-R-I.request {"action":"stop"|"start"}.
-    // A stopped shard saves its players like any SIGTERM and stays down ("held") while its realm keeps running.
-    void shardRequests() {
-        const auto names = QDir(dir_).entryList({"shard-*.request"}, QDir::Files);
-        for (const auto& name : names) {
-            const auto request = readJson(dir_ + "/" + name);
-            QFile::remove(dir_ + "/" + name);
-            if (stopping_ || !upgradeLauncher_.isEmpty() || !auth_) continue;
-            const int realm = request.value("realm").toInt(), index = request.value("index").toInt();
-            const auto action = request.value("action").toString();
-            const auto it = std::find_if(shards_.begin(), shards_.end(), [&](const auto& s) { return s->realm == realm && s->index == index && !s->retired; });
-            if (it == shards_.end()) { say(QString("parça isteği yok sayıldı: %1-%2 barındırılmıyor").arg(realm).arg(index)); continue; }
-            auto& shard = **it;
-            if (action == "stop" && !shard.held) {
-                shard.held = true; shard.failed = false; shard.problem.clear(); shard.ready = false;
-                say(shard.name() + " yönetici isteğiyle kaydedip durduruluyor");
-                if (shard.process) {
-                    askChildStop(shard.process);
-                    QTimer::singleShot(20000, shard.process, [process = QPointer<QProcess>(shard.process)] { if (process) process->kill(); });
-                }
-            } else if (action == "start" && !shard.process && (shard.held || shard.failed)) {
-                shard.held = shard.failed = false; shard.crashes.clear(); shard.problem.clear();
-                say(shard.name() + " yönetici isteğiyle başlatılıyor");
-                try { startShard(shard); } catch (const std::exception& e) { giveUp(shard, failure(e)); }
-            } else continue;
-            shardsChanged();
-        }
     }
     // Register the typed administrator over the pinned CA, then restart auth once with --admin-bootstrap for exactly
     // that account. A retry after a half-finished creation proves ownership by logging in instead.
@@ -787,26 +765,51 @@ private:
             });
         });
     }
-    // Next free world port from host.json world_port (0 = OS-assigned for every shard), skipping the account/admin ports
-    // and the other shards' ports, in hosting order: realm 1 shard 1 = world_port, the next shard the next free port.
+    // host.json world_port (0 = OS-assigned for every shard) is realm 1 shard 1's port and nobody else's, even while that
+    // shard is held or not in the layout. Every other shard takes the next free port above it, skipping the account/admin
+    // ports, the other shards' ports and ports a shard start was refused on; a shard keeps its port across restarts. The
+    // probe can still lose a race to another process: ikv-server then exits with portInUseExit and the shard moves on
+    // (exited), which is not counted as a crash.
+    bool fixedPort(const Shard& shard) const { return shard.realm == 1 && shard.index == 1; }
     int shardPort(const Shard& self) const {
         const int base = config_.value("world_port").toInt();
         if (base == 0) return 0;
-        QList<int> used{config_.value("auth_port").toInt(), config_.value("admin_port").toInt(), authPort_, adminPort_};
+        if (fixedPort(self)) return base;
+        QList<int> used{base, config_.value("auth_port").toInt(), config_.value("admin_port").toInt(), authPort_, adminPort_};
         for (const auto& shard : shards_) if (shard.get() != &self) used << shard->port << shard->actualPort;
         const QHostAddress address(config_.value("bind").toString());
-        for (int port = base; port < std::min(65536, base + 400); ++port) {
-            if (used.contains(port)) continue;
+        for (int port = base + 1; port < std::min(65536, base + 400); ++port) {
+            if (used.contains(port) || refusedPorts_.contains(port)) continue;
             QTcpServer probe;
             if (probe.listen(address, static_cast<quint16>(port))) return port;
         }
-        throw hostIssue(QString("Dünya portu %1 ve sonraki 400 port dolu").arg(base));
+        throw hostIssue(QString("Dünya portu %1 üstündeki 400 port dolu").arg(base));
+    }
+    // A shard the layout holds is saved and stopped (SIGTERM / stdin EOF: the same graceful stop as a realm Durdur) and
+    // stays down; a released hold starts it again.
+    void hold(Shard& shard, bool held) {
+        if (shard.held == held) return;
+        shard.held = held;
+        if (held) {
+            shard.failed = shard.restart = false; shard.problem.clear(); shard.ready = false;
+            say(shard.name() + " yönetici isteğiyle kaydedip durduruluyor");
+            if (shard.process) {
+                askChildStop(shard.process);
+                QTimer::singleShot(20000, shard.process, [process = QPointer<QProcess>(shard.process)] { if (process) process->kill(); });
+            }
+        } else {
+            shard.failed = false; shard.crashes.clear(); shard.problem.clear(); shard.portRetries = 0;
+            if (shard.process) { shard.restart = true; return; } // still saving after the hold: exited() starts it once it is gone
+            say(shard.name() + " yönetici isteğiyle başlatılıyor");
+            try { startShard(shard); } catch (const std::exception& e) { giveUp(shard, failure(e)); }
+        }
     }
     // Start shards the layout adds, retire (save and stop) the ones it removes; a changed layout retries given-up shards.
     void reconcile() {
         if (stopping_ || !upgradeLauncher_.isEmpty() || !auth_ || !authPort_ || !layoutKnown_) return;
         const auto& layout = layout_;
-        const auto signature = QJsonDocument(layoutJson(layout)).toJson(QJsonDocument::Compact);
+        // Any database realm change (a new revision: e.g. start_shard on a failed shard) retries given-up shards.
+        const auto signature = QJsonDocument(layoutJson(layout)).toJson(QJsonDocument::Compact) + QByteArray::number(layoutRevision_);
         const bool changed = signature != layoutSeen_;
         layoutSeen_ = signature;
         bool touched = false;
@@ -826,15 +829,17 @@ private:
         std::erase_if(shards_, [](const auto& shard) { return shard->retired && !shard->process; });
         for (const auto& realm : layout)
             for (int index = 1; index <= realm.shards; ++index) {
+                const bool held = realm.held.contains(index);
                 const auto it = std::find_if(shards_.begin(), shards_.end(), [&](const auto& s) { return s->realm == realm.id && s->index == index && !s->retired; });
                 if (it != shards_.end()) {
-                    if ((*it)->failed && changed) { (*it)->failed = false; (*it)->crashes.clear(); (*it)->problem.clear(); startShard(**it); touched = true; }
+                    if ((*it)->held != held) { hold(**it, held); touched = true; }
+                    else if ((*it)->failed && !held && changed) { (*it)->failed = false; (*it)->crashes.clear(); (*it)->problem.clear(); (*it)->portRetries = 0; startShard(**it); touched = true; }
                     continue;
                 }
                 auto shard = std::make_unique<Shard>();
-                shard->realm = realm.id; shard->index = index; shard->capacity = realm.capacity;
+                shard->realm = realm.id; shard->index = index; shard->capacity = realm.capacity; shard->held = held;
                 shards_.push_back(std::move(shard));
-                try { shards_.back()->port = shardPort(*shards_.back()); startShard(*shards_.back()); }
+                try { shards_.back()->port = shardPort(*shards_.back()); if (!held) startShard(*shards_.back()); }
                 catch (const std::exception& e) { giveUp(*shards_.back(), failure(e)); }
                 touched = true;
             }
@@ -843,7 +848,7 @@ private:
     void startShard(Shard& shard) {
         const auto bind = config_.value("bind").toString();
         QStringList args{"--bind", bind, "--port", QString::number(shard.port), "--realm", QString::number(shard.realm),
-                         "--capacity", QString::number(shard.capacity)};
+                         "--capacity", QString::number(shard.capacity), "--shard-index", QString::number(shard.index)};
         if (bind == "0.0.0.0") args << "--public-host" << config_.value("host").toString(); // LAN players reach every shard here
         const bool first = shards_.front().get() == &shard; // server-side bots (NONCANONICAL) live on the first shard only
         args << tls() << "--gameplay" << hostResource("config/gameplay.json") << "--asset-root" << assets_
@@ -852,7 +857,7 @@ private:
         shard.ready = false;
         Shard* self = &shard;
         shard.process = spawn("ikv-server", shard.name(), args, "READY world_port=(\\d+)", 600, [this, self](const QRegularExpressionMatch& match) {
-            self->actualPort = match.captured(1).toInt(); self->ready = true;
+            self->actualPort = match.captured(1).toInt(); self->ready = true; self->portRetries = 0;
             settle();
         }, [this, self] {
             if (!self->process) return;
@@ -911,6 +916,8 @@ private:
         }
         if (shard->retired) { std::erase_if(shards_, [shard](const auto& s) { return s.get() == shard; }); shardsChanged(); return; }
         if (shard->held) { shardsChanged(); return; } // the panel's per-shard Durdur: saved, stays down
+        if (std::exchange(shard->restart, false)) { say(shard->name() + " yönetici isteğiyle başlatılıyor"); startShard(*shard); return; } // Başlat while it was still saving
+        if (status == QProcess::NormalExit && code == portInUseExit && !wasReady) { portRefused(*shard); return; }
         if (status == QProcess::NormalExit && code == 75) { say(name + ": yönetici yeniden başlatması"); startShard(*shard); return; }
         if (status == QProcess::NormalExit && code == 0) { // the administrator's shutdown reaches every shard
             say(name + ": yönetici kapatması");
@@ -926,6 +933,26 @@ private:
         if (crashes.size() > 3) { giveUp(*shard, QString("%1 10 dakikada 4 kez çöktü (kod=%2); yerleşim değişene kadar yeniden başlatılmıyor").arg(name).arg(code)); return; }
         say(name + " yeniden başlatılıyor");
         startShard(*shard);
+    }
+    // Another process took the shard's port between the probe and ikv-server's bind (or holds world_port). Realm 1 shard 1
+    // waits for world_port; any other shard moves to the next free port. Neither counts as a crash; 20 refusals in a row
+    // give the shard up.
+    void portRefused(Shard& shard) {
+        if (++shard.portRetries > 20) { giveUp(shard, shard.name() + QString(": port %1 başka bir süreç tarafından kullanılıyor (20 deneme)").arg(shard.port)); return; }
+        if (!fixedPort(shard)) {
+            if (refusedPorts_.size() > 256) refusedPorts_.clear();
+            refusedPorts_.insert(shard.port);
+            try { shard.port = shardPort(shard); } catch (const std::exception& e) { giveUp(shard, failure(e)); return; }
+            say(QString("%1: port kullanımda; port %2 ile yeniden deneniyor").arg(shard.name()).arg(shard.port));
+            startShard(shard);
+            return;
+        }
+        say(QString("%1: dünya portu %2 kullanımda; 1 sn sonra yeniden deneniyor").arg(shard.name()).arg(shard.port));
+        QTimer::singleShot(1000, this, [this, self = &shard] {
+            if (stopping_ || !upgradeLauncher_.isEmpty()) return;
+            const auto it = std::find_if(shards_.begin(), shards_.end(), [self](const auto& s) { return s.get() == self; });
+            if (it != shards_.end() && !self->process && !self->held && !self->retired && !self->failed) startShard(*self);
+        });
     }
     void stopServices() {
         for (auto& shard : shards_) if (shard->process) askChildStop(shard->process); // every shard saves in parallel
@@ -1957,13 +1984,13 @@ private:
         }
         realmAction(body, QString("%1 %2 sn sonra yeniden başlatılacak (oyunculara duyuruldu)").arg(what).arg(delay));
     }
-    // Per-shard Durdur / Başlat go to the supervisor that owns the process (DIR/shard-R-I.request); NONCANONICAL wave 31.
+    // Per-shard Durdur / Başlat (NONCANONICAL wave 31): POST /v1/admin/realms stop_shard / start_shard, the same database
+    // hold the web panel sets; the supervisor saves and stops the held shard and starts it again when released.
     void shardRequest(const char* action) {
         const auto row = selected(shardsTable_, "parça");
-        if (!alive()) throw hostIssue("Yerel sunucu çalışmıyor");
-        saveJson(dir() + QString("/shard-%1-%2.request").arg(row.value(0), row.value(1)),
-                 {{"action", action}, {"realm", row.value(0).toInt()}, {"index", row.value(1).toInt()}});
-        info(QString("Parça %1-%2 %3").arg(row.value(0), row.value(1), QString::fromLatin1(action) == "stop" ? QString("kaydedip durduruluyor") : QString("başlatılıyor")));
+        const bool stop = QString::fromLatin1(action) == "stop";
+        realmAction({{"action", stop ? "stop_shard" : "start_shard"}, {"id", row.value(0).toInt()}, {"index", row.value(1).toInt()}},
+                    QString("Parça %1-%2 %3").arg(row.value(0), row.value(1), stop ? QString("kaydedip durduruluyor") : QString("başlatılıyor")));
     }
     // Live bot count: spawn (≤50 per command) or despawn the newest bots (≤64 ids per command); also kept for the next start.
     void applyBots(int target) {
