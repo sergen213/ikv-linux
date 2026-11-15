@@ -649,9 +649,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         {
             const auto text = QString::fromUtf8(clientOutput);
             const auto at = text.indexOf(QString::fromUtf8("saniye içinde yeniden başlatılacak"));
-            const auto event = text.lastIndexOf("\"announce\"", at);
-            if (at < 0 || event < 0 || at - event > 400) throw std::runtime_error("The restart countdown did not arrive as an announce event");
-            controlEvidence.insert("shard_restart_announce", text.mid(event, at - event + 60));
+            const auto event = text.indexOf("\"type\":\"announce\"", at); // {"text":"Sunucu N saniye içinde …","type":"announce"}
+            if (at < 0 || event < 0 || event - at > 400) throw std::runtime_error("The restart countdown did not arrive as an announce event");
+            controlEvidence.insert("shard_restart_announce", text.mid(std::max<qsizetype>(0, at - 20), event - at + 40));
         }
 
         stage = "shard-stop";
