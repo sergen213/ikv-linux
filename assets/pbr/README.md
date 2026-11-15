@@ -39,6 +39,13 @@ RGBA or palette, non-interlaced. Installed next to the shaders: `share/ikv/pbr` 
 - `parallax`: parallax occlusion mapping with the height map (`--parallax on`, the default); fades out by ~22 m. The
   relief also tilts the shading normal (under `normal.png` too), as the original's derived relief does.
 - `tint_keep_original`: 0..1 blend from the pack albedo (0) back to the original diffuse (1).
+- `height` (wave 32, optional): `"derived"` (with `scale` null) — a material without maps of its own: the original
+  texture is kept whole (colour, scale, terrain fade-layer blend; `tint_keep_original` is forced to 1) and its relief is
+  the one derived from the original art (`scene.cpp parallax_height`, the 0.14 parallax relief) on the original UVs: full
+  parallax occlusion (the 0.14 depth) plus tessellated displacement of `height_scale` on top, over the whole terrain
+  blend. `cobble_original` uses it for the cobble streets (`arnavut_kaldirim`, `kkoy_arnavut`); 0.07 m = the 0.14
+  parallax depth there (12 relief texels of the 512-texel derived relief at ~3 m per tile). Scene materials without a
+  derived relief (flat art) keep their original look. Such a material has no folder (no images).
 
 ## Texture keys
 

@@ -1555,7 +1555,9 @@ std::array<const Image*,material_images> material_maps(const SceneSet& set,const
          if(found!=set.pbr_images.end())for(unsigned i=0;i<4;++i)if(found->second[i].view)pack[i]=&found->second[i];
          // A material keeping the whole original albedo without relief of its own keeps the derived one (lighting.glsl
          // pbrDerivedRelief); other pack materials replace it with theirs or none (it belongs to the original art).
-         if(p->parallax||p->tessellate)height=options_.parallax||(p->tessellate&&tess_enabled_)?pack[3]:&white_;
+         // NONCANONICAL wave 32: a derived-height material's relief is the original art's derived one (pbr.hpp).
+         if(p->derived_height)height=options_.parallax||(p->tessellate&&tess_enabled_)?&texture(set,m.height,white_):&white_;
+         else if(p->parallax||p->tessellate)height=options_.parallax||(p->tessellate&&tess_enabled_)?pack[3]:&white_;
          else if(p->tint_keep_original<1.f)height=&white_;
          const auto fading=fade?set.pbr_images.find(fade):set.pbr_images.end();
          if(fading!=set.pbr_images.end())for(unsigned i=0;i<3;++i)if(fading->second[i].view)fade_pack[i]=&fading->second[i];
@@ -1855,9 +1857,9 @@ std::vector<std::uint8_t> resolve_pbr(SceneSet& set,bool retain,UploadBatch& bat
         for(unsigned k=0;k<4;++k)if(!maps[k]->data.empty())found->second[k]=upload_texture(*maps[k],&batch);
     };
     for(std::size_t i=0;i<s.materials.size();++i) {
-        if(!eligible[i]||!(set.pbr[i]=pbr_pack_->find(s.materials[i].diffuse)))continue;
+        if(!eligible[i]||!(set.pbr[i]=pbr_main_material(*pbr_pack_,s.materials[i])))continue;
         ++mapped;upload(set.pbr[i]);
-        if(pbr_fade_layer(s.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(s.materials[i].luminance))){++fades;upload(set.pbr_fade[i]);}
+        if(pbr_fade_layer(s.materials[i])&&(set.pbr_fade[i]=pbr_fade_material(*pbr_pack_,s.materials[i],*set.pbr[i]))){++fades;upload(set.pbr_fade[i]);}
     }
     set.pbr_gains=pbr_low_gains(s,set.pbr,set.pbr_fade);
     std::vector<std::uint8_t> tess(s.meshes.size(),0);

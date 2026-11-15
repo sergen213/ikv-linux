@@ -42,8 +42,9 @@ void main(){
         if(fade>0.){
             vec2 uv=draw.pbr.x>0.?pbrWorldUV(world,n,draw.pbr.xy):LERP(tUV);
             float lod=pbrHeightLod(draw.pbr,d,frame.cameraUp.w,frame.viewport.y,float(textureSize(heightMap,0).x));
-            // Terrain fade layers (lighting.glsl pbrMainWeight): the main pack's relief only where its layer shows.
-            float layer=draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5?clamp(LERP(tColor).a,0.,1.):1.;
+            // Terrain fade layers (lighting.glsl pbrMainWeight): the main pack's relief only where its layer shows
+            // (derived-height materials: everywhere, pbrReliefLayer).
+            float layer=pbrReliefLayer(draw.pbr,draw.flags.z>.5&&draw.flags.x<.5&&draw.flags.y<.5?clamp(LERP(tColor).a,0.,1.):1.);
             offset=n*(textureLod(heightMap,uv,lod).r*draw.pbr.z*weight*fade*layer);
         }
     }

@@ -41,6 +41,14 @@
    "parallax": true,
    "tint_keep_original": 0
   },
+  "cobble_original": {
+   "scale": null,
+   "height": "derived",
+   "height_scale": 0.07,
+   "tessellate": true,
+   "parallax": true,
+   "tint_keep_original": 1
+  },
   "cobble_round": {
    "scale": [
     2.0,
@@ -375,7 +383,7 @@
   "textures/arap_camii_zemin.dds": "paving_slab",
   "textures/arap_camii_zemin_kirli.dds": "paving_slab",
   "textures/arapcamiimainalpha.dds": "micro_plaster",
-  "textures/arnavut_kaldirim.dds": "cobble_fan",
+  "textures/arnavut_kaldirim.dds": "cobble_original",
   "textures/arz_kale_duvar_yeni.dds": "stone_block",
   "textures/arz_kale_sutun.dds": "marble",
   "textures/arz_kale_zemin.dds": "concrete",
@@ -506,7 +514,7 @@
   "textures/kkoy_araba_b.dds": "micro_metal",
   "textures/kkoy_araba_c.dds": "micro_metal",
   "textures/kkoy_araba_d.dds": "micro_metal",
-  "textures/kkoy_arnavut.dds": "cobble_fan",
+  "textures/kkoy_arnavut.dds": "cobble_original",
   "textures/kkoy_asfalt_parcalar.dds": "asphalt",
   "textures/kkoy_bank.dds": "micro_plaster",
   "textures/kkoy_beton.dds": "concrete",
