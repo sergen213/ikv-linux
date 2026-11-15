@@ -1,7 +1,9 @@
 #pragma once
 
+#include <QByteArray>
 #include <QString>
 #include <functional>
+#include <utility>
 
 class QDialog;
 class QPushButton;
@@ -19,6 +21,9 @@ struct Hooks {
     // Stores the Localhost profile (empty auth resets it to the default origin). select switches to it;
     // a nonempty password then also logs the launcher in.
     std::function<void(const QString& auth, const QString& ca, const QString& user, const QString& password, bool select)> useProfile;
+    // The launcher's current login on the Localhost profile: {auth origin, session token}, or empty. Sunucu Yönetimi reuses
+    // it for the private admin API when it is this hosted server (wave 31: no second login).
+    std::function<std::pair<QString, QByteArray>()> launcherSession;
 };
 
 // The "hostDialog" panel. chip (a header button) shows the live server state and opens the panel.

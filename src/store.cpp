@@ -233,14 +233,16 @@ void process(const char* binary,const std::vector<std::string>& arguments,PGconn
 }
 // ---- Realms and shards (wave 30, NONCANONICAL) ----
 // A shard row is selectable only with a real port and a heartbeat within 15 seconds.
-constexpr const char* shard_columns="s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity";
+constexpr const char* shard_columns="s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity,s.shard_index";
 constexpr const char* shard_live="s.kind='world' AND s.port>0 AND s.updated_at>now()-interval '15 seconds'";
+// NONCANONICAL wave 31: a shard only accepts logins while its realm is enabled and not deleted.
+constexpr const char* realm_open="EXISTS (SELECT 1 FROM realms r WHERE r.id=s.realm_id AND r.enabled AND r.deleted_at IS NULL)";
 ShardInfo shard_row(const Result& result,int row) {
     return {cell(result,row,0),static_cast<int>(integer(result,row,1)),cell(result,row,2),static_cast<std::uint16_t>(integer(result,row,3)),
-        static_cast<int>(integer(result,row,4)),static_cast<int>(integer(result,row,5))};
+        static_cast<int>(integer(result,row,4)),static_cast<int>(integer(result,row,5)),static_cast<int>(integer(result,row,6))};
 }
 std::optional<ShardInfo> first_shard(const Result& result) { if(!PQntuples(result.get()))return std::nullopt; return shard_row(result,0); }
-Json shard_json(const ShardInfo& s) { return {{"instance",s.instance},{"realm_id",s.realm_id},{"host",s.host},{"port",s.port},{"players",s.players},{"capacity",s.capacity}}; }
+Json shard_json(const ShardInfo& s) { return {{"instance",s.instance},{"realm_id",s.realm_id},{"host",s.host},{"port",s.port},{"players",s.players},{"capacity",s.capacity},{"index",s.index}}; }
 bool printable(std::string_view value) { return std::none_of(value.begin(),value.end(),[](unsigned char c){return c<32||c==127;}); }
 std::string instance_name(std::string_view value) {
     if(value.empty()||value.size()>128||!printable(value))throw ApiError(400,"invalid_instance","Invalid world instance");
@@ -258,17 +260,38 @@ bool handed_off(PGconn* connection,std::int64_t character,const std::string& ins
     return PQntuples(result.get())>0;
 }
 // Realm rows with live-shard population; characters counts the given account's live characters (account 0: everyone's).
-Json realm_rows(PGconn* connection,std::int64_t account) {
+// NONCANONICAL wave 31: deleted realms are hidden and disabled ones are offline even while their shards drain. desired
+// adds the administrator layout fields (desired_shards, capacity, enabled, held_shards) next to the live shard list.
+Json realm_rows(PGconn* connection,std::int64_t account,bool desired=false) {
     auto result=sql(connection,std::string("SELECT r.id,r.name,r.kind,r.sort,count(s.instance),COALESCE(sum(s.players),0),COALESCE(sum(s.capacity),0),count(s.instance) FILTER (WHERE s.players<s.capacity),"
-        "(SELECT count(*) FROM characters c WHERE c.realm_id=r.id AND ($1::bigint=0 OR c.account_id=$1::bigint) AND c.deleted_at IS NULL) "
-        "FROM realms r LEFT JOIN world_instances s ON s.realm_id=r.id AND ")+shard_live+" GROUP BY r.id ORDER BY r.sort,r.id",{std::to_string(account)});
+        "(SELECT count(*) FROM characters c WHERE c.realm_id=r.id AND ($1::bigint=0 OR c.account_id=$1::bigint) AND c.deleted_at IS NULL),r.shards,r.capacity,r.enabled,array_to_json(r.held_shards)::text "
+        "FROM realms r LEFT JOIN world_instances s ON s.realm_id=r.id AND ")+shard_live+" WHERE r.deleted_at IS NULL GROUP BY r.id ORDER BY r.sort,r.id",{std::to_string(account)});
     Json rows=Json::array();
     for(int i=0;i<PQntuples(result.get());++i){
-        const auto live=integer(result,i,4);
+        const bool enabled=boolean(result,i,11);
+        const auto live=enabled?integer(result,i,4):0;
         rows.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"kind",cell(result,i,2)},{"sort",integer(result,i,3)},{"status",live?"online":"offline"},
             {"population",realm_population(live,integer(result,i,5),integer(result,i,6),integer(result,i,7))},{"characters",integer(result,i,8)}});
+        if(desired){rows.back()["desired_shards"]=integer(result,i,9);rows.back()["capacity"]=integer(result,i,10);rows.back()["enabled"]=enabled;rows.back()["held_shards"]=Json::parse(cell(result,i,12));}
     }
     return rows;
+}
+// NONCANONICAL wave 31 host layout (GET /v1/host/layout and the PUT response): every non-deleted realm's desired shards
+// and the shard indexes an administrator holds stopped (held_shards, sorted subset of 1..shards).
+Json layout_rows(PGconn* connection) {
+    auto result=sql(connection,"SELECT id,name,shards,capacity,enabled,(SELECT COALESCE(max(revision),0) FROM realms),array_to_json(held_shards)::text FROM realms WHERE deleted_at IS NULL ORDER BY sort,id");
+    Json realms=Json::array();std::int64_t revision=0;
+    for(int i=0;i<PQntuples(result.get());++i){
+        realms.push_back({{"id",integer(result,i,0)},{"name",cell(result,i,1)},{"shards",integer(result,i,2)},{"capacity",integer(result,i,3)},{"enabled",boolean(result,i,4)},
+            {"held_shards",Json::parse(cell(result,i,6))}});
+        revision=integer(result,i,5);
+    }
+    return {{"realms",realms},{"revision",revision}};
+}
+// Hosts cap the sum of desired shards at 64 (the launcher supervisor's maxShards).
+void shard_budget(PGconn* connection) {
+    if(integer(sql(connection,"SELECT COALESCE(sum(shards),0) FROM realms WHERE deleted_at IS NULL"),0,0)>64)
+        throw ApiError(409,"shard_limit","Bir barındırıcı en fazla 64 sunucu (shard) çalıştırabilir.");
 }
 } // anonymous namespace
 // POST /v1/admin/world and the in-game Yönetici Paneli (World::handle "admin") share these bounds (NONCANONICAL web/in-game
@@ -623,13 +646,15 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         const auto realm=body.contains("realm_id")?number(body,"realm_id",1,32767):1;
         if(!valid_appearance(appearance)||body.contains("state"))throw ApiError(400,"invalid_request","Geçersiz karakter görünümü.");
         Impl::Connection connection(*impl_);Transaction transaction(connection);sql(connection,"SELECT id FROM accounts WHERE id=$1::bigint FOR UPDATE",{std::to_string(who.account_id)});
-        if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint",{std::to_string(realm)}).get()))throw ApiError(400,"invalid_realm","Böyle bir diyar yok.");
+        // NONCANONICAL wave 31: FOR SHARE serialises with a concurrent realm delete (which refuses realms with characters).
+        if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint AND deleted_at IS NULL FOR SHARE",{std::to_string(realm)}).get()))throw ApiError(400,"invalid_realm","Böyle bir diyar yok.");
         auto count=sql(connection,"SELECT count(*) FROM characters WHERE account_id=$1::bigint AND deleted_at IS NULL",{std::to_string(who.account_id)});if(integer(count,0,0)>=8)throw ApiError(409,"character_limit","En fazla 8 karakteriniz olabilir.");
         auto result=sql(connection,"INSERT INTO characters(account_id,name,class_id,appearance,realm_id) VALUES($1::bigint,$2,$3::integer,$4::jsonb,$5::smallint) RETURNING id",{std::to_string(who.account_id),name,std::to_string(class_id),appearance.dump(),std::to_string(realm)});auto id=integer(result,0,0);
         auto record=sql(connection,std::string("SELECT ")+character_columns+" FROM characters c LEFT JOIN chat_moderation m ON m.character_id=c.id WHERE c.id=$1::bigint",{std::to_string(id)});auto response=character_row(record,0);audit(connection,"character.create",who.account_id,id,{{"realm_id",realm}});transaction.commit();return response;
     }
     // NONCANONICAL wave 30: the shard a character should connect to. A pending ticket (mid party/phase transfer) wins;
-    // otherwise the least-loaded live shard of the home realm.
+    // otherwise the least-loaded live shard of the home realm. Wave 31: shards of disabled or deleted realms are never
+    // chosen (realm_offline), not even as a ticket destination.
     if(method=="GET"&&path.starts_with("/v1/characters/")&&path.ends_with("/world")){
         const auto prefix=std::string_view("/v1/characters/").size();
         auto id=id_value(path.substr(prefix,path.size()-prefix-std::string_view("/world").size()));
@@ -639,12 +664,12 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
             auto owned=sql(connection,"SELECT realm_id FROM characters WHERE id=$1::bigint AND account_id=$2::bigint AND deleted_at IS NULL",{std::to_string(id),std::to_string(who.account_id)});
             if(!PQntuples(owned.get()))throw ApiError(404,"character_not_found","Karakter bulunamadı.");
             realm=integer(owned,0,0);
-            auto pending=first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM transfer_tickets t JOIN world_instances s ON s.instance=t.to_instance WHERE t.character_id=$1::bigint AND t.consumed_at IS NULL AND t.expires_at>now() AND "+shard_live+" ORDER BY t.created_at DESC LIMIT 1",{std::to_string(id)}));
+            auto pending=first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM transfer_tickets t JOIN world_instances s ON s.instance=t.to_instance WHERE t.character_id=$1::bigint AND t.consumed_at IS NULL AND t.expires_at>now() AND "+shard_live+" AND "+realm_open+" ORDER BY t.created_at DESC LIMIT 1",{std::to_string(id)}));
             if(pending)return {{"host",pending->host},{"port",pending->port},{"instance",pending->instance}};
         }
         if(auto chosen=pick_shard(static_cast<int>(realm)))return {{"host",chosen->host},{"port",chosen->port},{"instance",chosen->instance}};
         Impl::Connection connection(*impl_);
-        auto live=sql(connection,std::string("SELECT count(*) FROM world_instances s WHERE s.realm_id=$1::smallint AND ")+shard_live,{std::to_string(realm)});
+        auto live=sql(connection,std::string("SELECT count(*) FROM world_instances s WHERE s.realm_id=$1::smallint AND ")+shard_live+" AND "+realm_open,{std::to_string(realm)});
         if(integer(live,0,0))throw ApiError(503,"realm_full","Diyar dolu; biraz sonra tekrar deneyin.");
         throw ApiError(503,"realm_offline","Diyar şu anda kapalı.");
     }
@@ -778,40 +803,112 @@ Json Store::api(std::string_view method,std::string_view raw_path,std::string_vi
         {Impl::Connection connection(*impl_);sql(connection,"INSERT INTO world_settings(id,settings,actor_id) VALUES(1,$1::jsonb,$2::bigint) ON CONFLICT(id) DO UPDATE SET settings=EXCLUDED.settings,actor_id=EXCLUDED.actor_id,updated_at=now()",{settings.dump(),std::to_string(who.account_id)});}
         auto result=enqueue("settings",settings);result["settings"]=settings;return result;
     }
-    // NONCANONICAL wave 30 realm administration: list with live shards and populations, create, rename.
+    // NONCANONICAL wave 30/31 realm administration: list with desired layout, live shards and populations; create, update
+    // (rename, kind, desired shards, capacity, enabled), start/stop (enabled), restart (one shard or every live shard),
+    // stop_shard/start_shard (hold one shard index down while the realm runs) and soft delete. The host supervisor follows
+    // the desired layout over GET /v1/host/layout.
     if(path=="/v1/admin/realms"){
         if(method=="GET"){
-            Impl::Connection connection(*impl_);auto rows=realm_rows(connection,0);
-            auto shards=sql(connection,"SELECT s.instance,s.realm_id,s.public_host,s.port,s.players,s.capacity,s.updated_at>now()-interval '15 seconds' AND s.port>0,to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM world_instances s WHERE s.updated_at>now()-interval '1 hour' ORDER BY s.realm_id,s.instance");
+            Impl::Connection connection(*impl_);auto rows=realm_rows(connection,0,true);
+            auto shards=sql(connection,std::string("SELECT ")+shard_columns+",s.updated_at>now()-interval '15 seconds' AND s.port>0,to_char(s.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM world_instances s WHERE s.updated_at>now()-interval '1 hour' ORDER BY s.realm_id,s.shard_index,s.instance");
             for(auto& row:rows){
                 Json list=Json::array();
                 for(int i=0;i<PQntuples(shards.get());++i)if(integer(shards,i,1)==row["id"].get<std::int64_t>()){
-                    auto shard=shard_json(shard_row(shards,i));shard["online"]=boolean(shards,i,6);shard["updated_at"]=cell(shards,i,7);list.push_back(std::move(shard));
+                    auto shard=shard_json(shard_row(shards,i));shard["online"]=boolean(shards,i,7);shard["updated_at"]=cell(shards,i,8);list.push_back(std::move(shard));
                 }
-                row["shards"]=std::move(list);
+                row["shards"]=std::move(list); // live shards (registered within the last hour); desired_shards is the layout
             }
             return {{"realms",rows}};
         }
         if(method!="POST")throw ApiError(404,"not_found","Route not found");
-        const auto action=text(body,"action",6,6);
-        auto name=line(body,"name",2,32);
+        const auto action=text(body,"action",4,11);
+        const auto flag=[&](const char* key){if(!body[key].is_boolean())throw ApiError(400,"invalid_request",std::string(key)+" is a boolean");return body[key].get<bool>();};
+        const auto kind_of=[&]{const auto kind=text(body,"kind",2,6);if(kind!="normal"&&kind!="pvp"&&kind!="rp")throw ApiError(400,"invalid_request","kind is normal, pvp or rp");return kind;};
         Impl::Connection connection(*impl_);Transaction transaction(connection);
         if(action=="create"){
-            const auto kind=body.contains("kind")?text(body,"kind",2,6):std::string("normal");
-            if(kind!="normal"&&kind!="pvp"&&kind!="rp")throw ApiError(400,"invalid_request","kind is normal, pvp or rp");
+            auto name=line(body,"name",2,32);
+            const auto kind=body.contains("kind")?kind_of():std::string("normal");
             const auto sort=body.contains("sort")?number(body,"sort",-32768,32767):0;
+            const auto shards=body.contains("shards")?number(body,"shards",0,16):1;
+            const auto capacity=body.contains("capacity")?number(body,"capacity",1,32):32;
+            const bool enabled=body.contains("enabled")?flag("enabled"):true;
             sql(connection,"LOCK TABLE realms IN SHARE ROW EXCLUSIVE MODE");
             const auto id=body.contains("id")?number(body,"id",1,32767):integer(sql(connection,"SELECT COALESCE(max(id),0)+1 FROM realms"),0,0);
             if(id>32767)throw ApiError(409,"realm_limit","No realm id left");
-            sql(connection,"INSERT INTO realms(id,name,kind,sort) VALUES($1::smallint,$2,$3,$4::smallint)",{std::to_string(id),name,kind,std::to_string(sort)});
-            audit(connection,"realm.create",who.account_id,id,{{"name",name},{"kind",kind},{"sort",sort}});transaction.commit();
+            sql(connection,"INSERT INTO realms(id,name,kind,sort,shards,capacity,enabled) VALUES($1::smallint,$2,$3,$4::smallint,$5::smallint,$6::smallint,$7::boolean)",
+                {std::to_string(id),name,kind,std::to_string(sort),std::to_string(shards),std::to_string(capacity),enabled?"true":"false"});
+            shard_budget(connection);
+            audit(connection,"realm.create",who.account_id,id,{{"name",name},{"kind",kind},{"sort",sort},{"shards",shards},{"capacity",capacity},{"enabled",enabled}});transaction.commit();
             return {{"ok",true},{"id",id}};
         }
-        if(action!="rename")throw ApiError(400,"invalid_request","action is create or rename");
+        if(action!="update"&&action!="rename"&&action!="start"&&action!="stop"&&action!="delete"&&action!="restart"&&action!="stop_shard"&&action!="start_shard")
+            throw ApiError(400,"invalid_request","action is create, update, start, stop, restart, stop_shard, start_shard, delete or rename");
         const auto id=number(body,"id",1,32767);
-        auto renamed=sql(connection,"UPDATE realms SET name=$2 WHERE id=$1::smallint RETURNING id",{std::to_string(id),name});
-        if(!PQntuples(renamed.get()))throw ApiError(404,"realm_not_found","Realm not found");
-        audit(connection,"realm.rename",who.account_id,id,{{"name",name}});transaction.commit();
+        if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint AND deleted_at IS NULL FOR UPDATE",{std::to_string(id)}).get()))throw ApiError(404,"realm_not_found","Realm not found");
+        if(action=="stop_shard"||action=="start_shard"){
+            // A held shard is saved and stopped by the host supervisor (the same graceful stop as a realm Durdur) and stays
+            // down until start_shard; the realm's other shards keep running. Lowering the shard count drops the hold.
+            const auto index=number(body,"index",1,16);
+            auto current=sql(connection,"SELECT shards,$2::smallint=ANY(held_shards) FROM realms WHERE id=$1::smallint",{std::to_string(id),std::to_string(index)});
+            if(index>integer(current,0,0))throw ApiError(404,"shard_not_found","Bu diyarda böyle bir parça yok.");
+            const bool stop=action=="stop_shard",changed=boolean(current,0,1)!=stop;
+            // start_shard always bumps the layout revision: the supervisor also retries a shard it gave up after failures.
+            if(changed||!stop)sql(connection,stop?"UPDATE realms SET held_shards=array_append(held_shards,$2::smallint) WHERE id=$1::smallint"
+                                                 :"UPDATE realms SET held_shards=array_remove(held_shards,$2::smallint) WHERE id=$1::smallint",{std::to_string(id),std::to_string(index)});
+            audit(connection,stop?"realm.shard_stop":"realm.shard_start",who.account_id,id,{{"index",index},{"changed",changed}});transaction.commit();
+            return {{"ok",true},{"id",id},{"index",index},{"held",stop},{"changed",changed}};
+        }
+        if(action=="delete"){
+            if(id==1)throw ApiError(409,"realm_protected","İlk diyar (Eminönü) silinemez.");
+            if(integer(sql(connection,"SELECT count(*) FROM characters WHERE realm_id=$1::smallint AND deleted_at IS NULL",{std::to_string(id)}),0,0))
+                throw ApiError(409,"realm_has_characters","Bu diyarda karakterler var; önce karakterler silinmeli.");
+            sql(connection,"UPDATE realms SET deleted_at=now(),shards=0,enabled=false WHERE id=$1::smallint",{std::to_string(id)});
+            audit(connection,"realm.delete",who.account_id,id);transaction.commit();
+            return {{"ok",true},{"id",id}};
+        }
+        if(action=="restart"){
+            Json arguments{{"delay_seconds",body.contains("delay_seconds")?number(body,"delay_seconds",0,3600):60}};
+            if(body.contains("message"))arguments["message"]=line(body,"message",0,256);
+            auto live=body.contains("instance")
+                ?sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE s.realm_id=$1::smallint AND s.instance=$2 AND ")+shard_live,{std::to_string(id),instance_name(text(body,"instance",1,128))})
+                :sql(connection,std::string("SELECT s.instance FROM world_instances s WHERE s.realm_id=$1::smallint AND ")+shard_live+" ORDER BY s.instance",{std::to_string(id)});
+            if(!PQntuples(live.get())){
+                if(body.contains("instance"))throw ApiError(404,"shard_not_found","Bu diyarda böyle çalışan bir sunucu yok.");
+                throw ApiError(409,"realm_offline","Diyarın çalışan sunucusu yok.");
+            }
+            std::vector<std::string> targets;for(int i=0;i<PQntuples(live.get());++i)targets.push_back(cell(live,i,0));
+            Json list=targets;
+            // Same bounds as /v1/admin/world: 64 pending rows, one pending restart/shutdown per target shard (or untargeted).
+            auto pending=sql(connection,"SELECT count(*),count(*) FILTER (WHERE command IN ('restart','shutdown') AND (target_instance IS NULL OR target_instance IN (SELECT jsonb_array_elements_text($1::jsonb)))) FROM world_commands WHERE consumed_at IS NULL",{list.dump()});
+            if(integer(pending,0,0)+static_cast<std::int64_t>(targets.size())>64)throw ApiError(429,"command_queue_full","64 world commands are already pending; check that the world is running");
+            if(integer(pending,0,1))throw ApiError(409,"command_pending","Bu sunucu için bekleyen bir yeniden başlatma ya da kapatma var.");
+            Json ids=Json::array();
+            for(const auto& instance:targets)
+                ids.push_back(integer(sql(connection,"INSERT INTO world_commands(command,arguments,actor_id,target_instance,target_realm) VALUES('restart',$1::jsonb,$2::bigint,$3,$4::smallint) RETURNING id",
+                                          {arguments.dump(),std::to_string(who.account_id),instance,std::to_string(id)}),0,0));
+            auto details=arguments;details["instances"]=list;
+            audit(connection,"realm.restart",who.account_id,id,details);transaction.commit();
+            return {{"ok",true},{"id",id},{"command_ids",ids}};
+        }
+        // update / rename / start / stop: change only the supplied fields.
+        Json changes=Json::object();
+        if(action=="start"||action=="stop")changes["enabled"]=action=="start";
+        else {
+            if(action=="rename"||body.contains("name"))changes["name"]=line(body,"name",2,32);
+            if(action=="update"){
+                if(body.contains("kind"))changes["kind"]=kind_of();
+                if(body.contains("sort"))changes["sort"]=number(body,"sort",-32768,32767);
+                if(body.contains("shards"))changes["shards"]=number(body,"shards",0,16);
+                if(body.contains("capacity"))changes["capacity"]=number(body,"capacity",1,32);
+                if(body.contains("enabled"))changes["enabled"]=flag("enabled");
+            }
+            if(changes.empty())throw ApiError(400,"invalid_request","update needs name, kind, sort, shards, capacity or enabled");
+        }
+        sql(connection,"UPDATE realms SET name=COALESCE($2::jsonb->>'name',name),kind=COALESCE($2::jsonb->>'kind',kind),sort=COALESCE(($2::jsonb->>'sort')::smallint,sort),"
+            "shards=COALESCE(($2::jsonb->>'shards')::smallint,shards),capacity=COALESCE(($2::jsonb->>'capacity')::smallint,capacity),enabled=COALESCE(($2::jsonb->>'enabled')::boolean,enabled) WHERE id=$1::smallint",
+            {std::to_string(id),changes.dump()});
+        shard_budget(connection);
+        audit(connection,action=="rename"?"realm.rename":action=="update"?"realm.update":"realm."+std::string(action),who.account_id,id,changes);transaction.commit();
         return {{"ok",true},{"id",id}};
     }
     if(path=="/v1/admin/backups"){
@@ -896,11 +993,12 @@ void Store::register_shard(const ShardInfo& info) {
     if(info.host.size()>253||!printable(info.host)||info.host.find(' ')!=std::string::npos)throw ApiError(400,"invalid_host","Invalid public host");
     if(info.port==0)throw ApiError(400,"invalid_port","A shard needs its world port");
     if(info.capacity<1||info.capacity>32||info.players<0||info.players>32)throw ApiError(400,"invalid_capacity","Shard capacity is 1-32 and players 0-32");
+    if(info.index<0||info.index>16)throw ApiError(400,"invalid_shard","Shard index is 0-16");
     Impl::Connection connection(*impl_);
     if(!PQntuples(sql(connection,"SELECT 1 FROM realms WHERE id=$1::smallint",{std::to_string(info.realm_id)}).get()))throw ApiError(400,"invalid_realm","Realm does not exist");
-    sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint) "
-        "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,updated_at=now()",
-        {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players)});
+    sql(connection,"INSERT INTO world_instances(instance,status,realm_id,public_host,port,kind,capacity,players,shard_index) VALUES($1,'{}',$2::smallint,$3,$4::integer,'world',$5::smallint,$6::smallint,$7::smallint) "
+        "ON CONFLICT(instance) DO UPDATE SET realm_id=EXCLUDED.realm_id,public_host=EXCLUDED.public_host,port=EXCLUDED.port,kind='world',capacity=EXCLUDED.capacity,players=EXCLUDED.players,shard_index=EXCLUDED.shard_index,updated_at=now()",
+        {instance,std::to_string(info.realm_id),info.host,std::to_string(info.port),std::to_string(info.capacity),std::to_string(info.players),std::to_string(info.index)});
 }
 void Store::retire_shard(std::string_view instance) {
     Impl::Connection connection(*impl_);
@@ -908,7 +1006,30 @@ void Store::retire_shard(std::string_view instance) {
 }
 std::optional<ShardInfo> Store::pick_shard(int realm) {
     Impl::Connection connection(*impl_);
-    return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE s.realm_id=$1::integer AND "+shard_live+" AND s.players<s.capacity ORDER BY s.players,s.updated_at DESC,s.instance LIMIT 1",{std::to_string(realm)}));
+    return first_shard(sql(connection,std::string("SELECT ")+shard_columns+" FROM world_instances s WHERE s.realm_id=$1::integer AND "+shard_live+" AND "+realm_open+" AND s.players<s.capacity ORDER BY s.players,s.updated_at DESC,s.instance LIMIT 1",{std::to_string(realm)}));
+}
+Json Store::host_layout() { Impl::Connection connection(*impl_); return layout_rows(connection); }
+Json Store::set_host_layout(const Json& body) {
+    if(!body.is_object()||!body.contains("realms")||!body["realms"].is_array()||body["realms"].size()>256)
+        throw ApiError(400,"invalid_request","realms must be an array of at most 256 {id,shards,capacity}");
+    Json layout=Json::array();std::set<std::int64_t> seen;
+    for(const auto& realm:body["realms"]){
+        if(!realm.is_object())throw ApiError(400,"invalid_request","Each realm is an object");
+        const auto id=number(realm,"id",1,32767);
+        if(!seen.insert(id).second)throw ApiError(400,"invalid_request","Duplicate realm id");
+        layout.push_back({{"id",id},{"shards",number(realm,"shards",0,16)},{"capacity",realm.contains("capacity")?number(realm,"capacity",1,32):32}});
+    }
+    Impl::Connection connection(*impl_);Transaction transaction(connection);
+    sql(connection,"LOCK TABLE realms IN SHARE ROW EXCLUSIVE MODE");
+    if(integer(sql(connection,"SELECT count(*) FROM jsonb_array_elements($1::jsonb) e WHERE NOT EXISTS (SELECT 1 FROM realms r WHERE r.id=(e->>'id')::smallint AND r.deleted_at IS NULL)",{layout.dump()}),0,0))
+        throw ApiError(400,"invalid_realm","Layout names a realm that does not exist");
+    // Only rows that change are written, so an identical PUT keeps the revision.
+    sql(connection,"UPDATE realms r SET shards=COALESCE((e->>'shards')::smallint,0),capacity=COALESCE((e->>'capacity')::smallint,r.capacity) "
+        "FROM realms x LEFT JOIN jsonb_array_elements($1::jsonb) e ON (e->>'id')::smallint=x.id "
+        "WHERE r.id=x.id AND r.deleted_at IS NULL AND (r.shards IS DISTINCT FROM COALESCE((e->>'shards')::smallint,0) OR r.capacity IS DISTINCT FROM COALESCE((e->>'capacity')::smallint,r.capacity))",{layout.dump()});
+    shard_budget(connection);
+    sql(connection,"INSERT INTO audit_events(action,details) VALUES('realm.layout',$1::jsonb)",{Json{{"realms",layout}}.dump()});
+    auto result=layout_rows(connection);transaction.commit();return result;
 }
 std::optional<ShardInfo> Store::shard(std::string_view instance) {
     if(instance.empty()||instance.size()>128)return std::nullopt;

@@ -15,6 +15,8 @@ struct HttpsConfig {
     std::filesystem::path certificate;
     std::filesystem::path private_key;
     std::filesystem::path web_root{"web"};
+    // NONCANONICAL wave 31: 64 lowercase hex characters from --host-token-file; empty disables /v1/host/layout.
+    std::string host_token;
 };
 
 // Runs the public player API and separate private administration TLS listeners.

@@ -421,10 +421,14 @@ QString since(qint64 seconds) {
     return QString("%1 sa %2 dk %3 sn").arg(seconds / 3600).arg(seconds / 60 % 60).arg(seconds % 60);
 }
 QString countText(const QJsonValue& value) { return value.isDouble() ? QString::number(value.toInteger()) : QString("—"); }
-// NONCANONICAL wave 30 hosting layout: host.json "realms" = [{"id":N,"shards":K,"capacity":C}] in hosting order. Missing or
-// empty (every pre-wave-30 host.json) = realm 1 with one 32-player shard, exactly the old single ikv-server.
-struct RealmLayout { int id = 1, shards = 1, capacity = 32; };
+// NONCANONICAL wave 30/31 hosting layout: which realms run on how many shards. Wave 31 keeps it in the database (realms
+// shards/capacity/enabled, migration 010); the supervisor reads it from GET /v1/host/layout. A wave 30 host.json "realms" =
+// [{"id":N,"shards":K,"capacity":C}] is written into the database once (PUT /v1/host/layout), then host.json records
+// "layout_in_db": true and is no longer the layout source. held: shard indexes an administrator stopped one by one
+// (realms.held_shards; stop_shard/start_shard from Sunucu Yönetimi or the web panel).
+struct RealmLayout { int id = 1, shards = 1, capacity = 32; QList<int> held; };
 constexpr int maxShardsPerRealm = 16, maxShards = 64;
+constexpr int portInUseExit = 98; // ikv-server: its world port is taken by another process (src/server_main.cpp, wave 31)
 QList<RealmLayout> hostLayout(const QJsonObject& host) {
     QList<RealmLayout> layout;
     int total = 0;
@@ -442,6 +446,20 @@ QJsonArray layoutJson(const QList<RealmLayout>& layout) {
     QJsonArray array;
     for (const auto& realm : layout) array.append(QJsonObject{{"id", realm.id}, {"shards", realm.shards}, {"capacity", realm.capacity}});
     return array;
+}
+// secrets/host-token (0600, 64 lowercase hex): ikv-auth --host-token-file accepts "Authorization: Host <token>" for the host
+// layout channel on its private listener. Created at the first wave 31 start, also for older installs.
+QByteArray hostToken(const QString& path) {
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly)) {
+        const auto token = file.read(256).trimmed();
+        file.close();
+        if (QRegularExpression("^[0-9a-f]{64}$").match(QString::fromLatin1(token)).hasMatch()) return token;
+        QFile::remove(path);
+    }
+    auto token = randomHex(32);
+    writePrivate(path, token);
+    return token;
 }
 
 // ---- Supervisor: one detached process owns PostgreSQL, ikv-auth and ikv-server ----
@@ -472,13 +490,14 @@ public:
                 for (auto& shard : shards_)
                     if (shard->process) { say(shard->name() + " güncelleme yeniden başlatmasını almadı; kaydedip durduruluyor"); askChildStop(shard->process); }
             }
-            reconcile(); // the panel may change the realm/shard layout while the server runs
+            if (ticks_ % 8 == 0) fetchLayout(); // the realm layout lives in the database: every 2 s (web panel and launcher edit it)
+            reconcile();
             // Automatic updates (docs/LAUNCHER_UPDATES.md): a newer verified release in the install root, or one a newer
             // launcher asks for (upgrade.request), is announced, every shard saves and the supervisor hands over to it.
             if (QFileInfo::exists(dir_ + "/upgrade.request") || ticks_ % 120 == 0) checkUpgrade();
         });
     }
-    ~Supervisor() override { password_.fill('\0'); }
+    ~Supervisor() override { password_.fill('\0'); hostToken_.fill('\0'); }
     void start() {
         watch_.start();
         try {
@@ -504,6 +523,7 @@ public:
             if (saved.value("sans") != config_.value("sans") || saved.value("host") != config_.value("host")) {
                 saved.insert("sans", config_.value("sans")); saved.insert("host", config_.value("host")); saveJson(dir_ + "/host.json", saved);
             }
+            hostToken_ = hostToken(dir_ + "/secrets/host-token");
             startPostgres(dir_, bin_);
             say("PostgreSQL çalışıyor");
             startAuth(password_.isEmpty() ? Auth::Plain : Auth::Register);
@@ -512,17 +532,19 @@ public:
 
 private:
     enum class Auth { Plain, Register, Bootstrap };
-    // NONCANONICAL wave 30: one ikv-server process per shard (docs/SELF_HOSTING.md "Realms and shards").
+    // NONCANONICAL wave 30: one ikv-server process per shard (docs/SELF_HOSTING.md "Realms and shards"). Wave 31: a shard the
+    // administrator stopped alone (per-shard Durdur in Sunucu Yönetimi or the web panel: realms.held_shards) stays "held"
+    // until its Başlat. portRetries counts starts refused because another process held the port (not crashes).
     struct Shard {
-        int realm = 1, index = 1, capacity = 32, port = 0, actualPort = 0;
+        int realm = 1, index = 1, capacity = 32, port = 0, actualPort = 0, portRetries = 0;
         QProcess* process = nullptr;
-        bool ready = false, failed = false, retired = false;
+        bool ready = false, failed = false, retired = false, held = false, restart = false; // restart: start once the old process is gone
         QList<qint64> crashes;
         QString problem;
         QString name() const { return QString("ikv-server[%1-%2]").arg(realm).arg(index); }
     };
     QString dir_, assets_, admin_, bin_;
-    QByteArray password_;
+    QByteArray password_, hostToken_;
     QJsonObject config_;
     QProcess* auth_{};
     std::vector<std::unique_ptr<Shard>> shards_;
@@ -530,7 +552,12 @@ private:
     int authPort_ = 0, adminPort_ = 0, ticks_ = 0;
     qint64 started_ = QDateTime::currentMSecsSinceEpoch();
     QList<qint64> authCrashes_;
-    QString layoutSeen_; // host.json layout the failed shards were given up for
+    QSet<int> refusedPorts_; // ports a shard start was refused on (another process took them); never probed again
+    QList<RealmLayout> layout_; // effective layout from /v1/host/layout (a disabled realm wants 0 shards)
+    QJsonArray layoutRows_;     // the same rows with names, written to state.json for the panel
+    bool layoutKnown_ = false, fetching_ = false;
+    qint64 layoutRevision_ = 0;
+    QString layoutSeen_, layoutProblem_; // layout the failed shards were given up for; last reported fetch problem
     QNetworkAccessManager network_;
     QTimer watch_;
     QString upgradeLauncher_, upgradeVersion_; // set once the announced restart of every shard for an upgrade is queued
@@ -569,11 +596,12 @@ private:
         for (const auto& shard : shards_)
             shards.append(QJsonObject{{"realm", shard->realm}, {"index", shard->index}, {"capacity", shard->capacity},
                 {"port", shard->ready ? shard->actualPort : shard->port}, {"pid", shard->process ? shard->process->processId() : 0},
-                {"state", shard->failed ? "failed" : shard->ready ? "running" : shard->process ? "starting" : "stopped"}, {"problem", shard->problem}});
+                {"state", shard->held ? "held" : shard->failed ? "failed" : shard->ready ? "running" : shard->process ? "starting" : "stopped"}, {"problem", shard->problem}});
         try {
             saveJson(dir_ + "/state.json", {{"pid", static_cast<qint64>(::getpid())}, {"phase", name}, {"message", message},
                 {"host", config_.value("host")}, {"bind", config_.value("bind")}, {"auth_port", authPort_}, {"admin_port", adminPort_},
-                {"world_port", worldPort()}, {"shards", shards}, {"started_at", started_}, {"version", ikv::release::version}, {"upgrades", true}});
+                {"world_port", worldPort()}, {"shards", shards}, {"layout", layoutRows_}, {"layout_problem", layoutProblem_},
+                {"started_at", started_}, {"version", ikv::release::version}, {"upgrades", true}});
         } catch (const std::exception& e) { say(failure(e)); }
     }
     void shardsChanged() { if (!stopping_) writeState(phase_, message_); }
@@ -635,7 +663,8 @@ private:
     void startAuth(Auth mode) {
         QStringList args{"--bind", config_.value("bind").toString(), "--port", QString::number(config_.value("auth_port").toInt()),
                          "--admin-bind", "127.0.0.1", "--admin-port", QString::number(config_.value("admin_port").toInt())};
-        args << tls() << "--migrations" << hostResource("database/migrations") << "--web-root" << hostResource("web") << "--backup-dir" << dir_ + "/backups";
+        args << tls() << "--migrations" << hostResource("database/migrations") << "--web-root" << hostResource("web") << "--backup-dir" << dir_ + "/backups"
+             << "--host-token-file" << dir_ + "/secrets/host-token";
         if (mode == Auth::Bootstrap) args << "--admin-bootstrap" << admin_;
         phase(mode == Auth::Bootstrap ? "bootstrap" : "auth");
         auth_ = spawn("ikv-auth", "ikv-auth", args, "READY auth_port=(\\d+) admin_port=(\\d+)", 120, [this, mode](const QRegularExpressionMatch& match) {
@@ -646,19 +675,76 @@ private:
                 say("yönetici yetkisi verildi: " + admin_);
             }
             if (running_) phase("running"); else phase("world");
-            reconcile();
+            fetchLayout();
         }, [this] { shutdown("ikv-auth hazır olmadı (zaman aşımı); Kayıt sekmesine bakın"); });
     }
-    void post(const QString& path, const QJsonObject& body, std::function<void(int, const QJsonObject&)> done) {
-        const auto bind = config_.value("bind").toString();
-        QUrl url; url.setScheme("https"); url.setHost(bind == "0.0.0.0" ? "127.0.0.1" : bind); url.setPort(authPort_); url.setPath(path);
+    void send(const QByteArray& method, const QString& host, int port, const QString& path, const QJsonObject& body, const QByteArray& authorization,
+              std::function<void(int, const QJsonObject&)> done) {
+        QUrl url; url.setScheme("https"); url.setHost(host); url.setPort(port); url.setPath(path);
         QNetworkRequest request(url); request.setSslConfiguration(pinnedTls(dir_ + "/secrets/client-ca.pem"));
         request.setTransferTimeout(30000); request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-        auto* reply = network_.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+        if (!authorization.isEmpty()) request.setRawHeader("Authorization", authorization);
+        auto* reply = network_.sendCustomRequest(request, method, method == "GET" ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact));
         connect(reply, &QNetworkReply::finished, this, [reply, done = std::move(done)] {
             reply->deleteLater();
             done(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt(), QJsonDocument::fromJson(reply->read(1 << 20)).object());
         });
+    }
+    void post(const QString& path, const QJsonObject& body, std::function<void(int, const QJsonObject&)> done) {
+        const auto bind = config_.value("bind").toString();
+        send("POST", bind == "0.0.0.0" ? "127.0.0.1" : bind, authPort_, path, body, {}, std::move(done));
+    }
+    // NONCANONICAL wave 31: the realm layout comes from the database over the private listener ("Authorization: Host"),
+    // so the web panel and Sunucu Yönetimi both control it. A wave 30 host.json layout is written there exactly once.
+    void fetchLayout() {
+        if (fetching_ || stopping_ || !upgradeLauncher_.isEmpty() || !auth_ || !adminPort_ || hostToken_.isEmpty()) return;
+        const auto host = readJson(dir_ + "/host.json");
+        if (host.isEmpty()) return;
+        const bool migrate = !host.value("layout_in_db").toBool() && !host.value("realms").toArray().isEmpty();
+        fetching_ = true;
+        send(migrate ? "PUT" : "GET", "127.0.0.1", adminPort_, "/v1/host/layout", migrate ? QJsonObject{{"realms", layoutJson(hostLayout(host))}} : QJsonObject{},
+             "Host " + hostToken_, [this, migrate](int code, const QJsonObject& reply) {
+            fetching_ = false;
+            if (stopping_) return;
+            const bool refused = migrate && code >= 400 && code < 500 && code != 401;
+            if (code != 200 && !refused) {
+                const auto error = reply.value("error").toObject().value("code").toString();
+                const auto problem = QString("diyar yerleşimi okunamadı (HTTP %1%2)").arg(code).arg(error.isEmpty() ? QString() : ", " + error);
+                if (problem != layoutProblem_) { layoutProblem_ = problem; say(problem + "; 2 sn sonra yeniden denenecek"); shardsChanged(); }
+                return;
+            }
+            if (!readJson(dir_ + "/host.json").value("layout_in_db").toBool()) {
+                auto saved = readJson(dir_ + "/host.json"); // only this field: the panel may be saving settings
+                saved.insert("layout_in_db", true);
+                try { saveJson(dir_ + "/host.json", saved); } catch (const std::exception& e) { say(failure(e)); }
+                if (refused) say("host.json diyar yerleşimi veritabanına taşınamadı (" + reply.value("error").toObject().value("message").toString() + "); veritabanındaki yerleşim kullanılıyor");
+                else if (migrate) say("host.json diyar yerleşimi veritabanına taşındı; yerleşim artık Sunucu Yönetimi ve web panelinden yönetiliyor");
+            }
+            if (refused) return; // the next poll reads the database layout
+            layoutProblem_.clear();
+            applyLayout(reply.value("realms").toArray(), reply.value("revision").toInteger());
+        });
+    }
+    void applyLayout(const QJsonArray& rows, qint64 revision) {
+        QList<QJsonObject> realms; // hosting order = realm id: realm 1 shard 1 keeps the world port and the bots
+        for (const auto& value : rows) realms << value.toObject();
+        std::sort(realms.begin(), realms.end(), [](const QJsonObject& a, const QJsonObject& b) { return a.value("id").toInt() < b.value("id").toInt(); });
+        QList<RealmLayout> layout;
+        int total = 0;
+        for (const auto& realm : realms) {
+            const int id = realm.value("id").toInt();
+            if (id < 1 || id > 32767) continue;
+            const int shards = realm.value("enabled").toBool(true) ? std::min(std::clamp(realm.value("shards").toInt(), 0, maxShardsPerRealm), maxShards - total) : 0;
+            QList<int> held;
+            for (const auto& index : realm.value("held_shards").toArray()) if (index.toInt() >= 1 && index.toInt() <= shards) held << index.toInt();
+            layout.append({id, shards, std::clamp(realm.value("capacity").toInt(32), 1, 32), held});
+            total += shards;
+        }
+        const bool rowsChanged = rows != layoutRows_;
+        layout_ = layout; layoutRows_ = rows; layoutKnown_ = true; layoutRevision_ = revision;
+        reconcile();
+        if (!running_) settle();
+        else if (rowsChanged) shardsChanged();
     }
     // Register the typed administrator over the pinned CA, then restart auth once with --admin-bootstrap for exactly
     // that account. A retry after a half-finished creation proves ownership by logging in instead.
@@ -679,28 +765,51 @@ private:
             });
         });
     }
-    // Next free world port from host.json world_port (0 = OS-assigned for every shard), skipping the account/admin ports
-    // and the other shards' ports, in hosting order: realm 1 shard 1 = world_port, the next shard the next free port.
+    // host.json world_port (0 = OS-assigned for every shard) is realm 1 shard 1's port and nobody else's, even while that
+    // shard is held or not in the layout. Every other shard takes the next free port above it, skipping the account/admin
+    // ports, the other shards' ports and ports a shard start was refused on; a shard keeps its port across restarts. The
+    // probe can still lose a race to another process: ikv-server then exits with portInUseExit and the shard moves on
+    // (exited), which is not counted as a crash.
+    bool fixedPort(const Shard& shard) const { return shard.realm == 1 && shard.index == 1; }
     int shardPort(const Shard& self) const {
         const int base = config_.value("world_port").toInt();
         if (base == 0) return 0;
-        QList<int> used{config_.value("auth_port").toInt(), config_.value("admin_port").toInt(), authPort_, adminPort_};
+        if (fixedPort(self)) return base;
+        QList<int> used{base, config_.value("auth_port").toInt(), config_.value("admin_port").toInt(), authPort_, adminPort_};
         for (const auto& shard : shards_) if (shard.get() != &self) used << shard->port << shard->actualPort;
         const QHostAddress address(config_.value("bind").toString());
-        for (int port = base; port < std::min(65536, base + 400); ++port) {
-            if (used.contains(port)) continue;
+        for (int port = base + 1; port < std::min(65536, base + 400); ++port) {
+            if (used.contains(port) || refusedPorts_.contains(port)) continue;
             QTcpServer probe;
             if (probe.listen(address, static_cast<quint16>(port))) return port;
         }
-        throw hostIssue(QString("Dünya portu %1 ve sonraki 400 port dolu").arg(base));
+        throw hostIssue(QString("Dünya portu %1 üstündeki 400 port dolu").arg(base));
+    }
+    // A shard the layout holds is saved and stopped (SIGTERM / stdin EOF: the same graceful stop as a realm Durdur) and
+    // stays down; a released hold starts it again.
+    void hold(Shard& shard, bool held) {
+        if (shard.held == held) return;
+        shard.held = held;
+        if (held) {
+            shard.failed = shard.restart = false; shard.problem.clear(); shard.ready = false;
+            say(shard.name() + " yönetici isteğiyle kaydedip durduruluyor");
+            if (shard.process) {
+                askChildStop(shard.process);
+                QTimer::singleShot(20000, shard.process, [process = QPointer<QProcess>(shard.process)] { if (process) process->kill(); });
+            }
+        } else {
+            shard.failed = false; shard.crashes.clear(); shard.problem.clear(); shard.portRetries = 0;
+            if (shard.process) { shard.restart = true; return; } // still saving after the hold: exited() starts it once it is gone
+            say(shard.name() + " yönetici isteğiyle başlatılıyor");
+            try { startShard(shard); } catch (const std::exception& e) { giveUp(shard, failure(e)); }
+        }
     }
     // Start shards the layout adds, retire (save and stop) the ones it removes; a changed layout retries given-up shards.
     void reconcile() {
-        if (stopping_ || !upgradeLauncher_.isEmpty() || !auth_ || !authPort_) return;
-        const auto host = readJson(dir_ + "/host.json");
-        if (host.isEmpty()) return;
-        const auto layout = hostLayout(host);
-        const auto signature = QJsonDocument(layoutJson(layout)).toJson(QJsonDocument::Compact);
+        if (stopping_ || !upgradeLauncher_.isEmpty() || !auth_ || !authPort_ || !layoutKnown_) return;
+        const auto& layout = layout_;
+        // Any database realm change (a new revision: e.g. start_shard on a failed shard) retries given-up shards.
+        const auto signature = QJsonDocument(layoutJson(layout)).toJson(QJsonDocument::Compact) + QByteArray::number(layoutRevision_);
         const bool changed = signature != layoutSeen_;
         layoutSeen_ = signature;
         bool touched = false;
@@ -720,15 +829,17 @@ private:
         std::erase_if(shards_, [](const auto& shard) { return shard->retired && !shard->process; });
         for (const auto& realm : layout)
             for (int index = 1; index <= realm.shards; ++index) {
+                const bool held = realm.held.contains(index);
                 const auto it = std::find_if(shards_.begin(), shards_.end(), [&](const auto& s) { return s->realm == realm.id && s->index == index && !s->retired; });
                 if (it != shards_.end()) {
-                    if ((*it)->failed && changed) { (*it)->failed = false; (*it)->crashes.clear(); (*it)->problem.clear(); startShard(**it); touched = true; }
+                    if ((*it)->held != held) { hold(**it, held); touched = true; }
+                    else if ((*it)->failed && !held && changed) { (*it)->failed = false; (*it)->crashes.clear(); (*it)->problem.clear(); (*it)->portRetries = 0; startShard(**it); touched = true; }
                     continue;
                 }
                 auto shard = std::make_unique<Shard>();
-                shard->realm = realm.id; shard->index = index; shard->capacity = realm.capacity;
+                shard->realm = realm.id; shard->index = index; shard->capacity = realm.capacity; shard->held = held;
                 shards_.push_back(std::move(shard));
-                try { shards_.back()->port = shardPort(*shards_.back()); startShard(*shards_.back()); }
+                try { shards_.back()->port = shardPort(*shards_.back()); if (!held) startShard(*shards_.back()); }
                 catch (const std::exception& e) { giveUp(*shards_.back(), failure(e)); }
                 touched = true;
             }
@@ -737,7 +848,7 @@ private:
     void startShard(Shard& shard) {
         const auto bind = config_.value("bind").toString();
         QStringList args{"--bind", bind, "--port", QString::number(shard.port), "--realm", QString::number(shard.realm),
-                         "--capacity", QString::number(shard.capacity)};
+                         "--capacity", QString::number(shard.capacity), "--shard-index", QString::number(shard.index)};
         if (bind == "0.0.0.0") args << "--public-host" << config_.value("host").toString(); // LAN players reach every shard here
         const bool first = shards_.front().get() == &shard; // server-side bots (NONCANONICAL) live on the first shard only
         args << tls() << "--gameplay" << hostResource("config/gameplay.json") << "--asset-root" << assets_
@@ -746,7 +857,7 @@ private:
         shard.ready = false;
         Shard* self = &shard;
         shard.process = spawn("ikv-server", shard.name(), args, "READY world_port=(\\d+)", 600, [this, self](const QRegularExpressionMatch& match) {
-            self->actualPort = match.captured(1).toInt(); self->ready = true;
+            self->actualPort = match.captured(1).toInt(); self->ready = true; self->portRetries = 0;
             settle();
         }, [this, self] {
             if (!self->process) return;
@@ -756,20 +867,24 @@ private:
         });
         shardsChanged();
     }
-    // "running" once every shard of the first start is ready or given up; afterwards a restarting shard keeps it.
+    // "running" once every shard of the first start is ready or given up (or the layout wants none); afterwards a restarting
+    // shard keeps it.
     void settle() {
         if (stopping_) return;
-        if (!running_ && std::all_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready || s->failed || s->retired; })) {
-            if (std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready; })) return;
+        if (!running_ && std::all_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready || s->failed || s->retired || s->held; })) {
+            const bool none = std::none_of(layout_.begin(), layout_.end(), [](const RealmLayout& r) { return r.shards > 0; });
+            if (std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->ready; }) && !(layoutKnown_ && none)) return;
             running_ = true;
         }
         if (running_ && phase_ != "running") phase("running", message_);
         else shardsChanged();
     }
+    // Only a first start where every shard fails stops the server; once running, account service and the other realms stay up
+    // and the failed shard waits for a layout change or the panel's Başlat.
     void giveUp(Shard& shard, const QString& problem) {
         say(problem);
         shard.failed = true; shard.ready = false; shard.problem = problem;
-        if (std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->process || (!s->failed && !s->retired); })) {
+        if (!running_ && std::none_of(shards_.begin(), shards_.end(), [](const auto& s) { return s->process || (!s->failed && !s->retired); })) {
             shutdown(problem);
             return;
         }
@@ -800,6 +915,9 @@ private:
             return;
         }
         if (shard->retired) { std::erase_if(shards_, [shard](const auto& s) { return s.get() == shard; }); shardsChanged(); return; }
+        if (shard->held) { shardsChanged(); return; } // the panel's per-shard Durdur: saved, stays down
+        if (std::exchange(shard->restart, false)) { say(shard->name() + " yönetici isteğiyle başlatılıyor"); startShard(*shard); return; } // Başlat while it was still saving
+        if (status == QProcess::NormalExit && code == portInUseExit && !wasReady) { portRefused(*shard); return; }
         if (status == QProcess::NormalExit && code == 75) { say(name + ": yönetici yeniden başlatması"); startShard(*shard); return; }
         if (status == QProcess::NormalExit && code == 0) { // the administrator's shutdown reaches every shard
             say(name + ": yönetici kapatması");
@@ -815,6 +933,26 @@ private:
         if (crashes.size() > 3) { giveUp(*shard, QString("%1 10 dakikada 4 kez çöktü (kod=%2); yerleşim değişene kadar yeniden başlatılmıyor").arg(name).arg(code)); return; }
         say(name + " yeniden başlatılıyor");
         startShard(*shard);
+    }
+    // Another process took the shard's port between the probe and ikv-server's bind (or holds world_port). Realm 1 shard 1
+    // waits for world_port; any other shard moves to the next free port. Neither counts as a crash; 20 refusals in a row
+    // give the shard up.
+    void portRefused(Shard& shard) {
+        if (++shard.portRetries > 20) { giveUp(shard, shard.name() + QString(": port %1 başka bir süreç tarafından kullanılıyor (20 deneme)").arg(shard.port)); return; }
+        if (!fixedPort(shard)) {
+            if (refusedPorts_.size() > 256) refusedPorts_.clear();
+            refusedPorts_.insert(shard.port);
+            try { shard.port = shardPort(shard); } catch (const std::exception& e) { giveUp(shard, failure(e)); return; }
+            say(QString("%1: port kullanımda; port %2 ile yeniden deneniyor").arg(shard.name()).arg(shard.port));
+            startShard(shard);
+            return;
+        }
+        say(QString("%1: dünya portu %2 kullanımda; 1 sn sonra yeniden deneniyor").arg(shard.name()).arg(shard.port));
+        QTimer::singleShot(1000, this, [this, self = &shard] {
+            if (stopping_ || !upgradeLauncher_.isEmpty()) return;
+            const auto it = std::find_if(shards_.begin(), shards_.end(), [self](const auto& s) { return s.get() == self; });
+            if (it != shards_.end() && !self->process && !self->held && !self->retired && !self->failed) startShard(*self);
+        });
     }
     void stopServices() {
         for (auto& shard : shards_) if (shard->process) askChildStop(shard->process); // every shard saves in parallel
@@ -857,11 +995,17 @@ private:
     // Queue every live shard's own announced restart (the management "restart" command targeted at that shard: countdown
     // announcements to its online players, then it saves every character and exits 75) on behalf of the administrator.
     void checkUpgrade() {
-        if (stopping_ || !upgradeLauncher_.isEmpty() || !running_ || !worldPort()) return;
+        if (stopping_ || !upgradeLauncher_.isEmpty() || !running_) return;
         QString launcher, version;
         try { std::tie(launcher, version) = upgradeTarget(); }
         catch (const std::exception& e) { say("kurulu güncelleme kullanılamadı: " + failure(e)); return; }
         if (launcher.isEmpty()) return;
+        if (!shardProcesses()) { // nothing to announce or save (every realm stopped): hand over at once
+            upgradeLauncher_ = launcher; upgradeVersion_ = version;
+            say("v" + version + " hazır: çalışan parça yok, yeni sürüme geçiliyor");
+            upgrade();
+            return;
+        }
         const auto host = readJson(dir_ + "/host.json");
         const int delay = std::clamp(host.value("update_delay_seconds").toInt(60), 0, 3600);
         const QString message = "Sunucu v" + version + " sürümüne güncelleniyor; karakterleriniz kaydedilir.";
@@ -970,7 +1114,8 @@ private:
     QLineEdit *announce_{}, *banReason_{}, *accountSearch_{};
     QComboBox* banDuration_{};
     QTableWidget *playersTable_{}, *accounts_{}, *realmsTable_{}, *shardsTable_{};
-    QSpinBox* shardCount_{};
+    QSpinBox* realmDelay_{};
+    QList<QPushButton*> realmButtons_, shardButtons_; // Diyarlar: enabled while the server runs and an admin session exists
     QJsonArray realms_; // GET /v1/admin/realms (with each realm's registered shards), while an admin session exists
     QJsonValue shardsSeen_;
     QSpinBox *botTarget_{}, *xp_{}, *drop_{}, *regen_{};
@@ -979,6 +1124,8 @@ private:
     QList<QWidget*> needsSession_;
     QTimer timer_;
     QByteArray session_;
+    bool borrowed_ = false;  // session_ is the launcher's own Localhost login (never logged out from here)
+    QByteArray declined_;    // a launcher session the admin API refused (not an administrator / expired)
     QString pendingPassword_; // creation password, until the automatic launcher/admin login
     QJsonArray bots_now_;
     std::function<void()> afterStop_;
@@ -1106,7 +1253,11 @@ private:
         loginPassword_->setPlaceholderText("yönetici parolası"); loginPassword_->setMinimumWidth(240); loginRow->addWidget(loginPassword_);
         login_ = button(loginRow, "Yönetici girişi", "hostLogin", [this] { adminLogin(loginPassword_->text()); });
         connect(loginPassword_, &QLineEdit::returnPressed, login_, &QPushButton::click);
-        logout_ = button(loginRow, "Çıkış", "hostLogout", [this] { call("POST", "/v1/logout", {}, [](const QJsonObject&) {}); session_.fill('\0'); session_.clear(); tick(); });
+        logout_ = button(loginRow, "Çıkış", "hostLogout", [this] {
+            if (borrowed_) declined_ = session_; // the launcher's own login: only stop using it here, never log the launcher out
+            else call("POST", "/v1/logout", {}, [](const QJsonObject&) {});
+            borrowed_ = false; session_.fill('\0'); session_.clear(); tick();
+        });
         keepAlive_ = named(new QCheckBox("Başlatıcı kapanınca da çalışsın (arka planda)"), "hostKeepAlive"); ov->addWidget(keepAlive_);
         keepAlive_->setToolTip("Sunucu ayrı bir gözetmen süreçte çalışır; başlatıcı yeniden açılınca ona bağlanır. Durdurmak için Durdur'a basın.");
         connect(keepAlive_, &QCheckBox::toggled, this, [this](bool on) { guarded([&] { saveSetting("keep_alive", on); }); });
@@ -1156,33 +1307,42 @@ private:
         botRow->addStretch();
         tabs->addTab(people, "Oyuncular");
 
-        // NONCANONICAL wave 30 (docs/SELF_HOSTING.md "Realms and shards"): realms come from /v1/admin/realms, the hosting
-        // layout (shards per realm) lives in host.json and the supervisor applies it live.
+        // NONCANONICAL wave 30/31 (docs/SELF_HOSTING.md "Realms and shards"): realms, their shard counts and capacities live in
+        // the database (/v1/admin/realms, also edited by the web panel); the supervisor applies them within 2 s.
         auto* realmsPage = new QWidget; auto* dv = new QVBoxLayout(realmsPage);
         auto* realmIntro = new QLabel("Her diyar bir veya daha fazla parçada çalışır (her parça ayrı bir ikv-server, en çok 32 oyuncu). "
-                                      "Parça sayısı çalışan sunucuya hemen uygulanır; kaldırılan parça oyuncularını kaydedip kapanır.");
+                                      "Değişiklikler çalışan sunucuya birkaç saniyede uygulanır; kapanan parça oyuncularını kaydeder.");
         realmIntro->setWordWrap(true); dv->addWidget(realmIntro);
         realmsTable_ = named(new QTableWidget(0, 5), "hostRealmsTable");
-        realmsTable_->setHorizontalHeaderLabels({"Diyar", "Tür", "Durum", "Parça sayısı", "Kapasite"});
+        realmsTable_->setHorizontalHeaderLabels({"Diyar", "Tür", "Durum", "Parça (çalışan / istenen)", "Oyuncu / kapasite"});
         shardsTable_ = named(new QTableWidget(0, 5), "hostShardsTable");
         shardsTable_->setHorizontalHeaderLabels({"Diyar", "Parça", "Port", "Oyuncu", "Durum"});
         for (auto* table : {realmsTable_, shardsTable_}) {
             table->setSelectionBehavior(QAbstractItemView::SelectRows); table->setSelectionMode(QAbstractItemView::SingleSelection);
             table->setEditTriggers(QAbstractItemView::NoEditTriggers); table->horizontalHeader()->setStretchLastSection(true); table->verticalHeader()->setVisible(false);
+            connect(table, &QTableWidget::itemSelectionChanged, this, [this] { refreshButtons(); });
         }
         dv->addWidget(realmsTable_, 1);
         auto* realmRow = new QHBoxLayout; dv->addLayout(realmRow);
-        button(realmRow, "Diyar ekle…", "hostRealmAdd", [this] { addRealm(); });
-        realmRow->addWidget(new QLabel("Seçili diyarın parça sayısı"));
-        shardCount_ = named(new QSpinBox, "hostShardCount"); shardCount_->setRange(0, maxShardsPerRealm); shardCount_->setValue(1); realmRow->addWidget(shardCount_);
-        button(realmRow, "Uygula", "hostShardApply", [this] { const auto row = selected(realmsTable_, "diyar"); setShards(row.value(0).toInt(), shardCount_->value()); });
+        realmButtons_ << button(realmRow, "Diyar ekle…", "hostRealmAdd", [this] { addRealm(); })
+                      << button(realmRow, "Düzenle…", "hostRealmEdit", [this] { editRealm(); })
+                      << button(realmRow, "Başlat", "hostRealmStart", [this] { setRealmEnabled(true); })
+                      << button(realmRow, "Durdur", "hostRealmStop", [this] { setRealmEnabled(false); })
+                      << button(realmRow, "Sil…", "hostRealmDelete", [this] { deleteRealm(); });
         realmRow->addStretch();
-        connect(realmsTable_, &QTableWidget::itemSelectionChanged, this, [this] {
-            const auto rows = realmsTable_->selectionModel()->selectedRows();
-            if (const auto* item = rows.isEmpty() ? nullptr : realmsTable_->item(rows.first().row(), 3)) shardCount_->setValue(item->data(Qt::UserRole).toInt());
-        });
+        auto* restartRow = new QHBoxLayout; dv->addLayout(restartRow);
+        realmButtons_ << button(restartRow, "Diyarı yeniden başlat", "hostRealmRestart", [this] { restartRealm(false); });
+        realmDelay_ = named(new QSpinBox, "hostRealmRestartDelay"); realmDelay_->setRange(0, 3600); realmDelay_->setValue(60);
+        realmDelay_->setPrefix("duyuru "); realmDelay_->setSuffix(" sn");
+        realmDelay_->setToolTip("Yeniden başlatmadan önce oyunculara geri sayım duyurulur; sonra karakterler kaydedilir ve parça yeniden açılır");
+        restartRow->addWidget(realmDelay_); restartRow->addStretch();
         dv->addWidget(new QLabel("Parçalar:"));
         dv->addWidget(shardsTable_, 1);
+        auto* shardRow = new QHBoxLayout; dv->addLayout(shardRow);
+        shardButtons_ << button(shardRow, "Parçayı yeniden başlat", "hostShardRestart", [this] { restartRealm(true); })
+                      << button(shardRow, "Parçayı durdur", "hostShardStop", [this] { shardRequest("stop"); })
+                      << button(shardRow, "Parçayı başlat", "hostShardStart", [this] { shardRequest("start"); });
+        shardRow->addStretch();
         tabs->addTab(realmsPage, "Diyarlar");
 
         auto* accountsPage = new QWidget; auto* av = new QVBoxLayout(accountsPage);
@@ -1246,7 +1406,7 @@ private:
             if (title == "Hesaplar") refreshAccounts(); else if (title == "Yedekler") refreshBackups(); else if (title == "Oranlar") loadSettings();
         });
         needsSession_ = {announce_, playersTable_, banReason_, banDuration_, botTarget_, accounts_, accountSearch_, xp_, drop_, regen_, zonesList_, backups_};
-        for (auto* name : {"hostAnnounce", "hostKick", "hostPlayerItems", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostRealmAdd", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
+        for (auto* name : {"hostAnnounce", "hostKick", "hostPlayerItems", "hostBanPlayer", "hostBotApply", "hostAccountRefresh", "hostAccountBan", "hostAccountUnban", "hostAccountCreate",
                            "hostSettingsSave", "hostSettingsRefresh", "hostBackupCreate", "hostBackupRefresh", "hostBackupRestore"})
             needsSession_ << managePage_->findChild<QPushButton*>(QString::fromLatin1(name));
     }
@@ -1278,7 +1438,12 @@ private:
             {"self_ban", "Etkin yönetici hesabı yasaklanamaz."}, {"command_pending", "Bekleyen bir yeniden başlatma/kapatma komutu var; önce iptal edin."},
             {"command_queue_full", "Dünya 64 bekleyen komutu işlemedi; dünya sunucusu çalışıyor mu?"},
             {"account_not_found", "Hesap bulunamadı."}, {"rate_limited", "Çok fazla deneme; biraz bekleyin."},
-            {"conflict", "Bu kullanıcı adı zaten kullanılıyor."},
+            {"conflict", "Bu isim zaten kullanılıyor; farklı bir isim seçin."},
+            {"realm_protected", "Ana diyar (#1) silinemez; durdurabilir veya yeniden adlandırabilirsiniz."},
+            {"realm_has_characters", "Bu diyarda karakterler var; silinemez. Diyarı durdurabilirsiniz."},
+            {"realm_offline", "Bu diyarın çalışan bir parçası yok; yeniden başlatılacak bir şey yok."},
+            {"realm_not_found", "Diyar bulunamadı (silinmiş olabilir)."}, {"shard_not_found", "Parça bulunamadı; kapanmış veya henüz kaydolmamış olabilir."},
+            {"shard_limit", "En çok 64 parça barındırılabilir; önce başka bir diyarın parça sayısını azaltın."},
             {"not_found", "Çalışan sunucu bu işlemi tanımıyor; sunucu eski bir sürümle çalışıyor olabilir: Durdur, sonra Başlat."}};
         return known.value(code, message);
     }
@@ -1295,17 +1460,20 @@ private:
         if (!session_.isEmpty()) request.setRawHeader("Authorization", "Bearer " + session_);
         auto* reply = network_.sendCustomRequest(request, method, method == "POST" ? QJsonDocument(body).toJson(QJsonDocument::Compact) : QByteArray());
         connect(reply, &QNetworkReply::downloadProgress, reply, [reply](qint64 received, qint64) { if (received > (4 << 20)) reply->abort(); });
-        connect(reply, &QNetworkReply::finished, this, [this, reply, path, port, done = std::move(done), failed = std::move(failed)] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, path, port, sent = session_, done = std::move(done), failed = std::move(failed)] {
             reply->deleteLater();
             const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const auto object = QJsonDocument::fromJson(reply->readAll()).object();
             QString issue;
             if (code >= 200 && code < 300 && reply->error() == QNetworkReply::NoError) {
                 try { done(object); } catch (const std::exception& e) { issue = failure(e); }
-            } else if (code == 401) {
-                session_.fill('\0'); session_.clear();
+            } else if (code == 401 || (code == 403 && borrowed_ && sent == session_ && !sent.isEmpty())) {
+                const bool reused = borrowed_ && sent == session_ && !sent.isEmpty();
+                if (reused) declined_ = sent; // the launcher's login is not an administrator here (or expired): fall back to the in-dialog login
+                if (sent == session_) { borrowed_ = false; session_.fill('\0'); session_.clear(); }
                 issue = path == "/v1/login" ? object.value("error").toObject().value("message").toString("Kullanıcı adı veya parola hatalı.")
-                                            : QString("Yönetici oturumu sona erdi; yeniden giriş yapın.");
+                      : reused ? QString("Başlatıcıdaki oturum bu sunucuda yönetici değil; Durum sekmesinden yönetici girişi yapın.")
+                               : QString("Yönetici oturumu sona erdi; yeniden giriş yapın.");
             } else if (code) {
                 const auto error = object.value("error").toObject();
                 issue = turkish(error.value("code").toString(), error.value("message").toString(QString("Sunucu isteği reddetti (HTTP %1)").arg(code)));
@@ -1320,6 +1488,19 @@ private:
             tick();
         });
     }
+    // Wave 31: the launcher already holds a session for its Localhost profile; when that profile is this hosted server, the
+    // panel uses it for the admin API (no second login). A session the API refuses is not tried again.
+    void borrowLauncherSession(const QJsonObject& state) {
+        if (!hooks_.launcherSession) return;
+        const auto [origin, token] = hooks_.launcherSession();
+        const QUrl auth(origin);
+        const auto host = auth.host();
+        if (token.isEmpty() || token == declined_ || auth.port() != state.value("auth_port").toInt() ||
+            (host != "localhost" && host != "127.0.0.1" && host != state.value("host").toString())) return;
+        session_ = token; borrowed_ = true; settingsDirty_ = false;
+        note("Sunucu Yönetimi başlatıcının yönetici oturumunu kullanıyor");
+        poll();
+    }
     void adminLogin(const QString& password) {
         const auto admin = readJson(dir() + "/host.json").value("admin").toString();
         if (password.isEmpty()) throw hostIssue("Yönetici parolasını girin");
@@ -1327,7 +1508,7 @@ private:
         call("POST", "/v1/login", {{"username", admin}, {"password", password}}, [this, admin](const QJsonObject& reply) {
             const auto token = reply.value("session").toString().toLatin1();
             if (!QRegularExpression("^[0-9a-f]{64}$").match(QString::fromLatin1(token)).hasMatch()) throw hostIssue("Sunucudan geçersiz oturum yanıtı geldi");
-            session_ = token; loginPassword_->clear();
+            session_ = token; borrowed_ = false; loginPassword_->clear();
             info("Yönetici olarak giriş yapıldı: " + admin);
             settingsDirty_ = false;
             poll(); loadSettings(); refreshBackups(); refreshAccounts();
@@ -1631,83 +1812,185 @@ private:
         call("GET", "/v1/admin/realms", {}, [this](const QJsonObject& reply) { realms_ = reply.value("realms").toArray(); renderRealms(); },
              15000, [this](const QString& issue) { notice_->setText(issue.toHtmlEscaped()); });
     }
-    // Realm rows: the API's realms (name, kind, population) joined with the host.json layout; shard rows: the supervisor's
-    // shards (state.json) with the players each one registered (matched by port).
-    void renderRealms() {
-        const auto layout = hostLayout(readJson(dir() + "/host.json"));
-        const auto state = readJson(dir() + "/state.json");
-        const bool up = alive();
-        QMap<int, QJsonObject> known;
-        for (const auto& value : realms_) known.insert(value.toObject().value("id").toInt(), value.toObject());
-        QList<int> ids;
-        for (const auto& realm : layout) ids << realm.id;
-        for (auto it = known.cbegin(); it != known.cend(); ++it) if (!ids.contains(it.key())) ids << it.key();
-        static const QMap<QString, QString> population{{"low", "Sakin"}, {"medium", "Normal"}, {"high", "Yoğun"}, {"full", "Dolu"}};
-        const auto realmName = [&](int id) { return known.contains(id) ? QString("%1 (#%2)").arg(known.value(id).value("name").toString()).arg(id) : QString("#%1").arg(id); };
-        QList<QStringList> rows, keys;
-        for (const int id : ids) {
-            const auto realm = known.value(id);
-            const auto hosted = std::find_if(layout.begin(), layout.end(), [id](const RealmLayout& r) { return r.id == id; });
-            const int shards = hosted == layout.end() ? 0 : hosted->shards, capacity = hosted == layout.end() ? 32 : hosted->capacity;
-            const QString status = realm.isEmpty() ? QString("—") : realm.value("status").toString() != "online" ? QString("Kapalı")
-                                 : population.value(realm.value("population").toString(), realm.value("population").toString());
-            rows << QStringList{realmName(id), realm.value("kind").toString("—"), status, QString::number(shards), QString::number(capacity)};
-            keys << QStringList{QString::number(id), {}, {}, QString::number(shards)};
+    // One row per realm: the API's rows while an admin session exists (desired shards, capacity, enabled, live shards), else
+    // the supervisor's last database layout from state.json (names and desired counts, no players).
+    QList<QJsonObject> realmModel() const {
+        QList<QJsonObject> model;
+        if (!session_.isEmpty() && !realms_.isEmpty()) {
+            for (const auto& value : realms_) {
+                auto row = value.toObject();
+                const auto live = row.value("shards").isArray() ? row.value("shards") : row.value("live_shards");
+                row.insert("desired", row.value("desired_shards").toInt(row.value("shards").isDouble() ? row.value("shards").toInt() : 0));
+                row.insert("live", live);
+                model << row;
+            }
+            return model;
         }
-        const auto chosen = realmsTable_->selectionModel()->selectedRows();
-        const int keep = chosen.isEmpty() ? -1 : chosen.first().row();
-        fill(realmsTable_, rows, keys);
-        if (keep >= 0 && keep < realmsTable_->rowCount()) realmsTable_->selectRow(keep);
+        for (const auto& value : readJson(dir() + "/state.json").value("layout").toArray()) {
+            auto row = value.toObject();
+            row.insert("desired", row.value("shards").toInt());
+            model << row;
+        }
+        return model;
+    }
+    // Realm state from the supervisor's shards: Çalışıyor / Durduruldu / Başlatılıyor / Hata, with players / capacity.
+    void renderRealms() {
+        const auto state = readJson(dir() + "/state.json");
+        const bool up = alive() && !state.value("phase").toString().startsWith("stop");
+        const auto model = realmModel();
+        QMap<int, QJsonObject> known;
+        for (const auto& row : model) known.insert(row.value("id").toInt(), row);
+        const auto realmName = [&](int id) { return known.contains(id) ? QString("%1 (#%2)").arg(known.value(id).value("name").toString()).arg(id) : QString("#%1").arg(id); };
+        const auto livePlayers = [&](int realm, int port) -> QJsonObject { // the shard's registry row (players, capacity, instance)
+            for (const auto& entry : known.value(realm).value("live").toArray())
+                if (entry.toObject().value("port").toInt() == port && entry.toObject().value("online").toBool(true)) return entry.toObject();
+            return {};
+        };
+        const auto shards = up ? state.value("shards").toArray() : QJsonArray{};
+        static const QMap<QString, QString> kinds{{"normal", "Normal"}, {"pvp", "PvP"}, {"rp", "RP"}};
+        QList<QStringList> rows, keys;
+        for (const auto& realm : model) {
+            const int id = realm.value("id").toInt(), capacity = realm.value("capacity").toInt(32);
+            const int desired = realm.value("enabled").toBool(true) ? realm.value("desired").toInt() : 0;
+            int running = 0, held = 0, failed = 0, starting = 0, players = 0;
+            for (const auto& value : shards) {
+                const auto shard = value.toObject();
+                if (shard.value("realm").toInt() != id) continue;
+                const auto word = shard.value("state").toString();
+                running += word == "running"; held += word == "held"; failed += word == "failed"; starting += word == "starting";
+                players += livePlayers(id, shard.value("port").toInt()).value("players").toInt();
+            }
+            QString status = up && desired == 0 && running + starting > 0 ? QString("Durduruluyor…") : !up || desired == 0 ? QString("Durduruldu") : failed ? QString("Hata")
+                           : running > 0 && running + held >= desired ? QString("Çalışıyor") : QString("Başlatılıyor");
+            if (status == "Çalışıyor" && held) status += QString(" (%1 parça durduruldu)").arg(held);
+            if (!realm.value("enabled").toBool(true)) status += " — kapalı";
+            rows << QStringList{realmName(id), kinds.value(realm.value("kind").toString(), realm.value("kind").toString("—")), status,
+                                QString("%1 / %2").arg(running).arg(desired),
+                                desired ? QString("%1 / %2").arg(players).arg(desired * capacity) : QString("— (kapasite %1)").arg(capacity)};
+            keys << QStringList{QString::number(id)};
+        }
+        const auto keep = [](QTableWidget* table) {
+            const auto chosen = table->selectionModel()->selectedRows();
+            if (chosen.isEmpty()) return QStringList{};
+            QStringList key;
+            for (int column = 0; column < 2; ++column)
+                key << (table->item(chosen.first().row(), column) ? table->item(chosen.first().row(), column)->data(Qt::UserRole).toString() : QString());
+            return key;
+        };
+        const auto restore = [](QTableWidget* table, const QStringList& key, int columns) {
+            if (key.isEmpty()) return;
+            for (int row = 0; row < table->rowCount(); ++row) {
+                bool same = true;
+                for (int column = 0; column < columns; ++column) same = same && table->item(row, column) && table->item(row, column)->data(Qt::UserRole).toString() == key[column];
+                if (same) { QSignalBlocker block(table); table->selectRow(row); return; }
+            }
+        };
+        const auto realmKey = keep(realmsTable_), shardKey = keep(shardsTable_);
+        { QSignalBlocker block(realmsTable_); fill(realmsTable_, rows, keys); }
+        restore(realmsTable_, realmKey, 1);
         rows.clear(); keys.clear();
-        static const QMap<QString, QString> words{{"running", "Çalışıyor"}, {"starting", "Başlatılıyor"}, {"failed", "Hata"}, {"stopped", "Durdu"}};
-        for (const auto& value : up ? state.value("shards").toArray() : QJsonArray{}) {
+        static const QMap<QString, QString> words{{"running", "Çalışıyor"}, {"starting", "Başlatılıyor"}, {"failed", "Hata"}, {"stopped", "Durduruldu"}, {"held", "Durduruldu (yönetici)"}};
+        for (const auto& value : shards) {
             const auto shard = value.toObject();
             const int realm = shard.value("realm").toInt(), port = shard.value("port").toInt();
-            QString players = "—";
-            for (const auto& entry : known.value(realm).value("shards").toArray())
-                if (entry.toObject().value("port").toInt() == port && entry.toObject().value("online").toBool())
-                    players = QString("%1 / %2").arg(entry.toObject().value("players").toInt()).arg(entry.toObject().value("capacity").toInt());
+            const auto live = livePlayers(realm, port);
             const auto problem = shard.value("problem").toString();
-            rows << QStringList{realmName(realm), QString::number(shard.value("index").toInt()), port ? QString::number(port) : QString("—"), players,
-                                words.value(shard.value("state").toString(), shard.value("state").toString()) + (problem.isEmpty() ? QString() : ": " + problem)};
-            keys << QStringList{QString::number(realm)};
+            const auto word = shard.value("state").toString();
+            rows << QStringList{realmName(realm), QString::number(shard.value("index").toInt()), port ? QString::number(port) : QString("—"),
+                                live.isEmpty() ? QString("—") : QString("%1 / %2").arg(live.value("players").toInt()).arg(live.value("capacity").toInt()),
+                                words.value(word, word) + (problem.isEmpty() ? QString() : ": " + problem)};
+            keys << QStringList{QString::number(realm), QString::number(shard.value("index").toInt()), QString::number(port), live.value("instance").toString(), word};
         }
-        fill(shardsTable_, rows, keys);
+        { QSignalBlocker block(shardsTable_); fill(shardsTable_, rows, keys); }
+        restore(shardsTable_, shardKey, 2);
+        refreshButtons();
     }
-    void setShards(int realm, int count) {
-        auto config = readJson(dir() + "/host.json");
-        if (config.isEmpty()) throw hostIssue("Sunucu henüz kurulmadı");
-        auto layout = hostLayout(config);
-        const auto it = std::find_if(layout.begin(), layout.end(), [realm](const RealmLayout& r) { return r.id == realm; });
-        if (it == layout.end()) layout.append({realm, count, 32}); else it->shards = count;
-        int total = 0;
-        for (const auto& entry : layout) total += entry.shards;
-        if (total < 1) throw hostIssue("En az bir parça çalışmalı");
-        if (total > maxShards) throw hostIssue(QString("En çok %1 parça barındırılabilir").arg(maxShards));
-        config.insert("realms", layoutJson(layout));
-        saveJson(dir() + "/host.json", config);
-        info(QString("Diyar #%1: %2 parça%3").arg(realm).arg(count).arg(alive() ? QString(" (çalışan sunucuya uygulanıyor)") : QString(" (sunucu başlayınca)")));
-        renderRealms();
+    QJsonObject chosenRealm() const {
+        const auto row = selected(realmsTable_, "diyar");
+        for (const auto& realm : realmModel()) if (realm.value("id").toInt() == row.value(0).toInt()) return realm;
+        throw hostIssue("Seçili diyar artık listede yok");
     }
-    void addRealm() {
-        QDialog dialog(this); dialog.setObjectName("hostRealmDialog"); dialog.setWindowTitle("Diyar ekle");
+    // Diyar ekle / Düzenle: name, kind, shard count, capacity (and for a new realm whether it starts right away).
+    bool realmDialog(const char* objectName, const QString& title, QJsonObject& values, bool create) {
+        QDialog dialog(this); dialog.setObjectName(objectName); dialog.setWindowTitle(title);
         auto* form = new QFormLayout(&dialog);
-        auto* name = named(new QLineEdit, "hostRealmName"); name->setMaxLength(32); name->setPlaceholderText("2–32 karakter, ör. Galata"); form->addRow("İsim", name);
-        auto* kind = named(new QComboBox, "hostRealmKind"); kind->addItems({"normal", "pvp", "rp"}); form->addRow("Tür", kind);
-        auto* shards = named(new QSpinBox, "hostRealmShards"); shards->setRange(0, maxShardsPerRealm); shards->setValue(1); form->addRow("Parça sayısı", shards);
-        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Ok)->setText("Diyar ekle"); form->addRow(buttons);
+        auto* name = named(new QLineEdit(values.value("name").toString()), "hostRealmName"); name->setMaxLength(32); name->setPlaceholderText("2–32 karakter, ör. Galata"); form->addRow("İsim", name);
+        auto* kind = named(new QComboBox, "hostRealmKind"); kind->addItems({"normal", "pvp", "rp"}); kind->setCurrentText(values.value("kind").toString("normal")); form->addRow("Tür", kind);
+        auto* shards = named(new QSpinBox, "hostRealmShards"); shards->setRange(0, maxShardsPerRealm); shards->setValue(values.value("desired").toInt(1)); form->addRow("Parça sayısı", shards);
+        shards->setToolTip("Her parça ayrı bir ikv-server süreci; 0 = diyar barındırılmaz");
+        auto* capacity = named(new QSpinBox, "hostRealmCapacity"); capacity->setRange(1, 32); capacity->setValue(values.value("capacity").toInt(32)); capacity->setSuffix(" oyuncu / parça");
+        capacity->setToolTip(create ? QString("Parça başına en çok oyuncu") : QString("Parça başına en çok oyuncu; çalışan parçalara bir sonraki yeniden başlatmada uygulanır"));
+        form->addRow("Kapasite", capacity);
+        QCheckBox* startNow = nullptr;
+        if (create) { startNow = named(new QCheckBox("Hemen başlat"), "hostRealmStartNow"); startNow->setChecked(true); form->addRow(startNow); }
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Ok)->setText(create ? "Diyar ekle" : "Kaydet"); form->addRow(buttons);
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-            if (name->text().trimmed().size() < 2) QMessageBox::warning(&dialog, "Diyar ekle", "Diyar adı en az 2 karakter olmalı"); else dialog.accept();
+            if (name->text().trimmed().size() < 2) QMessageBox::warning(&dialog, title, "Diyar adı en az 2 karakter olmalı"); else dialog.accept();
         });
-        if (dialog.exec() != QDialog::Accepted) return;
-        const auto title = name->text().trimmed(); const int count = shards->value();
-        call("POST", "/v1/admin/realms", {{"action", "create"}, {"name", title}, {"kind", kind->currentText()}}, [this, title, count](const QJsonObject& reply) {
-            const int id = static_cast<int>(reply.value("id").toInteger());
-            info(QString("Diyar eklendi: %1 (#%2)").arg(title).arg(id));
-            if (count > 0) setShards(id, count);
+        if (dialog.exec() != QDialog::Accepted) return false;
+        values = {{"name", name->text().trimmed()}, {"kind", kind->currentText()}, {"shards", shards->value()}, {"capacity", capacity->value()}};
+        if (startNow) values.insert("enabled", startNow->isChecked());
+        return true;
+    }
+    void realmAction(const QJsonObject& body, const QString& done) {
+        call("POST", "/v1/admin/realms", body, [this, done](const QJsonObject&) { info(done); refreshRealms(); });
+    }
+    void addRealm() {
+        QJsonObject values;
+        if (!realmDialog("hostRealmDialog", "Diyar ekle", values, true)) return;
+        auto body = values; body.insert("action", "create");
+        call("POST", "/v1/admin/realms", body, [this, values](const QJsonObject& reply) {
+            info(QString("Diyar eklendi: %1 (#%2), %3 parça%4").arg(values.value("name").toString()).arg(reply.value("id").toInteger()).arg(values.value("shards").toInt())
+                     .arg(values.value("enabled").toBool() ? QString(", başlatılıyor") : QString(", kapalı")));
             refreshRealms();
         });
+    }
+    void editRealm() {
+        const auto realm = chosenRealm();
+        auto values = realm;
+        if (!realmDialog("hostRealmEditDialog", "Diyarı düzenle — " + realm.value("name").toString(), values, false)) return;
+        auto body = values; body.insert("action", "update"); body.insert("id", realm.value("id"));
+        const bool capacityChanged = values.value("capacity").toInt() != realm.value("capacity").toInt(32);
+        realmAction(body, QString("Diyar #%1 kaydedildi%2").arg(realm.value("id").toInt())
+                              .arg(capacityChanged ? QString("; yeni kapasite çalışan parçalara bir sonraki yeniden başlatmada uygulanır") : QString()));
+    }
+    void setRealmEnabled(bool enabled) {
+        const auto realm = chosenRealm();
+        realmAction({{"action", "update"}, {"id", realm.value("id")}, {"enabled", enabled}},
+                    QString("%1 (#%2) %3").arg(realm.value("name").toString()).arg(realm.value("id").toInt())
+                        .arg(enabled ? QString("başlatılıyor") : QString("durduruluyor (oyuncular kaydedilir)")));
+    }
+    void deleteRealm() {
+        const auto realm = chosenRealm();
+        if (QMessageBox::question(this, "Diyarı sil", QString("Diyar «%1» (#%2) silinsin mi?\n\nParçaları oyuncularını kaydedip kapanır ve diyar listelerden kalkar. "
+                                                         "Karakteri olan diyar silinemez.").arg(realm.value("name").toString()).arg(realm.value("id").toInt())) != QMessageBox::Yes) return;
+        realmAction({{"action", "delete"}, {"id", realm.value("id")}}, QString("Diyar silindi: %1 (#%2)").arg(realm.value("name").toString()).arg(realm.value("id").toInt()));
+    }
+    // Announced restart (countdown to the players, save, exit 75; the supervisor brings it back) of the realm or one shard.
+    void restartRealm(bool shard) {
+        const int delay = realmDelay_->value();
+        QJsonObject body{{"action", "restart"}, {"delay_seconds", delay}};
+        QString what;
+        if (shard) {
+            const auto row = selected(shardsTable_, "parça");
+            if (row.value(3).isEmpty()) throw hostIssue("Parça henüz kayıtlı değil (başlatılıyor olabilir); birkaç saniye sonra tekrar deneyin");
+            body.insert("id", row.value(0).toInt()); body.insert("instance", row.value(3));
+            what = QString("Parça %1-%2").arg(row.value(0), row.value(1));
+        } else {
+            const auto realm = chosenRealm();
+            body.insert("id", realm.value("id"));
+            what = QString("%1 (#%2)").arg(realm.value("name").toString()).arg(realm.value("id").toInt());
+        }
+        realmAction(body, QString("%1 %2 sn sonra yeniden başlatılacak (oyunculara duyuruldu)").arg(what).arg(delay));
+    }
+    // Per-shard Durdur / Başlat (NONCANONICAL wave 31): POST /v1/admin/realms stop_shard / start_shard, the same database
+    // hold the web panel sets; the supervisor saves and stops the held shard and starts it again when released.
+    void shardRequest(const char* action) {
+        const auto row = selected(shardsTable_, "parça");
+        const bool stop = QString::fromLatin1(action) == "stop";
+        realmAction({{"action", stop ? "stop_shard" : "start_shard"}, {"id", row.value(0).toInt()}, {"index", row.value(1).toInt()}},
+                    QString("Parça %1-%2 %3").arg(row.value(0), row.value(1), stop ? QString("kaydedip durduruluyor") : QString("başlatılıyor")));
     }
     // Live bot count: spawn (≤50 per command) or despawn the newest bots (≤64 ids per command); also kept for the next start.
     void applyBots(int target) {
@@ -2085,13 +2368,15 @@ private:
             keepAlive_->setChecked(config.value("keep_alive").toBool()); autostart_->setChecked(config.value("autostart").toBool());
             lanMode_->setChecked(config.value("bind").toString() != "127.0.0.1");
         }
+        if (running && session_.isEmpty()) borrowLauncherSession(state);
         identity_->setText(session_.isEmpty() ? QString("Yönetim işlemleri için giriş yapın (%1):").arg(config.value("admin").toString().toHtmlEscaped())
-                                              : "Yönetici: " + config.value("admin").toString().toHtmlEscaped());
+                         : borrowed_ ? QString("Yönetici: başlatıcıdaki oturum kullanılıyor")
+                                     : "Yönetici: " + config.value("admin").toString().toHtmlEscaped());
         // A half-finished creation (no admin yet) keeps its access mode and ports.
         for (QWidget* widget : std::initializer_list<QWidget*>{local_, lan_, lanName_}) widget->setEnabled(!provisioned && mode_ == Mode::Idle);
         if (provisioned && !admin) { lan_->setChecked(config.value("bind").toString() != "127.0.0.1"); local_->setChecked(!lan_->isChecked()); }
         tailLog();
-        if (const QJsonValue seen = QJsonObject{{"up", up}, {"shards", state.value("shards")}, {"layout", config.value("realms")}}; seen != shardsSeen_) {
+        if (const QJsonValue seen = QJsonObject{{"up", up}, {"phase", phase}, {"shards", state.value("shards")}, {"layout", state.value("layout")}}; seen != shardsSeen_) {
             shardsSeen_ = seen; renderRealms();
         }
         if (running && ++ticks_ % 4 == 1) poll();
@@ -2113,6 +2398,32 @@ private:
         login_->setEnabled(running);
         for (auto* widget : needsSession_) widget->setEnabled(session);
         if (!session) cancel_->setEnabled(false);
+        // Diyarlar: everything works while the hosted server runs; otherwise each button says why it is disabled.
+        const QString why = !running ? QString("Yerel sunucu çalışmıyor; önce Durum sekmesinden Başlat'a basın")
+                          : session_.isEmpty() ? QString("Yönetici oturumu yok: başlatıcıda bu sunucunun yönetici hesabıyla giriş yapın veya Durum sekmesinden yönetici girişi yapın")
+                                               : QString();
+        const bool realmChosen = !realmsTable_->selectionModel()->selectedRows().isEmpty();
+        const auto shardRows = shardsTable_->selectionModel()->selectedRows();
+        const auto* shardState = shardRows.isEmpty() ? nullptr : shardsTable_->item(shardRows.first().row(), 4);
+        const QString shardWord = shardState ? shardState->data(Qt::UserRole).toString() : QString();
+        static const QMap<QString, QString> realmHelp{{"hostRealmAdd", "Yeni diyar: isim, tür, parça sayısı, kapasite"}, {"hostRealmEdit", "Seçili diyarın adını, türünü, parça sayısını ve kapasitesini değiştir"},
+            {"hostRealmStart", "Seçili diyarı başlat (parçaları açılır)"}, {"hostRealmStop", "Seçili diyarı durdur (parçalar oyuncuları kaydedip kapanır)"},
+            {"hostRealmDelete", "Seçili diyarı sil (ana diyar ve karakteri olan diyar silinemez)"}, {"hostRealmRestart", "Seçili diyarın bütün parçalarını duyurup yeniden başlat"},
+            {"hostShardRestart", "Seçili parçayı duyurup yeniden başlat"}, {"hostShardStop", "Seçili parçayı kaydedip durdur (diyar çalışmaya devam eder)"},
+            {"hostShardStart", "Durdurulmuş veya hatalı parçayı yeniden başlat"}};
+        for (auto* b : realmButtons_ + shardButtons_) {
+            const auto name = b->objectName();
+            const bool shardButton = shardButtons_.contains(b);
+            QString need = why;
+            if (need.isEmpty() && shardButton && !shardState) need = "Önce parçalar tablosundan bir parça seçin";
+            else if (need.isEmpty() && !shardButton && name != "hostRealmAdd" && !realmChosen) need = "Önce bir diyar seçin";
+            else if (need.isEmpty() && name == "hostShardRestart" && shardWord != "running") need = "Yalnız çalışan bir parça yeniden başlatılabilir";
+            else if (need.isEmpty() && name == "hostShardStop" && shardWord != "running" && shardWord != "starting") need = "Parça zaten durmuş";
+            else if (need.isEmpty() && name == "hostShardStart" && shardWord != "held" && shardWord != "failed") need = "Parça zaten çalışıyor";
+            b->setEnabled(need.isEmpty());
+            b->setToolTip(need.isEmpty() ? realmHelp.value(name) : need);
+        }
+        realmDelay_->setEnabled(why.isEmpty());
     }
     void tailLog() {
         QFile file(dir() + "/server.log");

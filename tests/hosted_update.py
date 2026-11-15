@@ -4,8 +4,9 @@ notices a newer signed release N+1 installed into its install root, queues the w
 player receives the countdown), the world saves every character, and the supervisor hands over to N+1's supervisor,
 which restarts PostgreSQL, ikv-auth and ikv-server; the character's saved position survives.
 
-Wave 30 (default): the supervisor hosts realm 1 on two shards; the test adds realm 2 over /v1/admin/realms and one shard
-for it through host.json (applied live), checks that every shard registers (/v1/realms, /v1/admin/realms), kills a shard
+Wave 30/31 (default): the provisioned host.json carries a wave 30 layout (realm 1 on two shards), which the supervisor
+migrates once into the database; the test adds realm 2 with one shard over /v1/admin/realms (applied live, as from the web
+panel or Sunucu Yönetimi), checks that every shard registers (/v1/realms, /v1/admin/realms), kills a shard
 and waits for its restart, then connects one player to every shard: each announces, saves and runs the new release.
 --single keeps a pre-wave-30 host.json (no "realms" layout) and one player.
 
@@ -195,13 +196,12 @@ def main():
         expected = {(1, 1)} if args.single else {(1, 1), (1, 2), (2, 1)}
         killed = None
         if not args.single:
-            # Realm 2 through the management API, then one shard for it in the hosting layout (applied without a restart).
+            # Realm 2 with one shard through the management API (the database layout; the supervisor applies it within 2 s).
             admin_session = admin_api("POST", "/v1/login", {"username": "hostadmin", "password": PASSWORD})["session"]
-            realm = admin_api("POST", "/v1/admin/realms", {"action": "create", "name": "Galata"}, admin_session)["id"]
+            realm = admin_api("POST", "/v1/admin/realms", {"action": "create", "name": "Galata", "shards": 1}, admin_session)["id"]
             assert realm == 2, realm
-            layout = json.loads((server / "host.json").read_text())
-            layout["realms"] = [{"id": 1, "shards": 2}, {"id": 2, "shards": 1}]
-            write_host(server, layout)
+            migrated = json.loads((server / "host.json").read_text())
+            assert migrated.get("layout_in_db") is True, migrated  # the wave 30 host.json layout went into the database once
         def all_running():
             shards = shards_of(server)
             return shards if set(shards) == expected and all(s["state"] == "running" for s in shards.values()) else None

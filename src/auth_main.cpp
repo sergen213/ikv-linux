@@ -1,6 +1,7 @@
 #include "ikv/https_service.hpp"
 #include "ikv/store.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cerrno>
 #include <cctype>
@@ -60,6 +61,15 @@ std::string read_dsn(const std::filesystem::path& path) {
     return dsn;
 }
 
+// NONCANONICAL wave 31: the launcher supervisor's host layout token (32 random bytes as 64 lowercase hex characters).
+// Same private-file rules as the DSN file; the token itself is never echoed.
+std::string read_host_token(const std::filesystem::path& path) {
+    auto token = read_dsn(path);
+    if (token.size() != 64 || !std::all_of(token.begin(), token.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }))
+        throw std::runtime_error("Host token file must contain 64 lowercase hexadecimal characters");
+    return token;
+}
+
 std::uint16_t port(std::string_view text) {
     unsigned value{};
     const auto parsed = std::from_chars(text.data(), text.data() + text.size(), value);
@@ -74,6 +84,8 @@ void usage() {
                  "  [--admin-bind 127.0.0.1] [--admin-port 7444]\n"
                  "  [--migrations database/migrations] [--admin-bootstrap EXISTING_USERNAME]\n"
                  "  [--web-root web] [--backup-dir backups]\n"
+                 "  [--host-token-file FILE] (0600 file with 64 hex characters; enables GET/PUT /v1/host/layout on the\n"
+                 "   administration listener for the launcher supervisor)\n"
                  "  [--stop-on-stdin-eof] (stop like SIGINT when stdin closes; the Windows launcher supervisor)\n"
                  "Offline restore (stop auth/world first):\n"
                  "  ikv-auth --dsn-file FILE --restore-backup FILE\n"
@@ -87,6 +99,7 @@ int main(int argc, char** argv) {
     std::filesystem::path migrations{"database/migrations"};
     std::filesystem::path backups{"backups"};
     std::filesystem::path restore;
+    std::filesystem::path host_token_file;
     std::string bootstrap;
     std::set<std::string> seen;
     bool stop_on_stdin_eof = false;
@@ -111,6 +124,7 @@ int main(int argc, char** argv) {
             else if (flag == "--web-root") config.web_root = value;
             else if (flag == "--backup-dir") backups = value;
             else if (flag == "--restore-backup") restore = value;
+            else if (flag == "--host-token-file") host_token_file = value;
             else throw std::runtime_error("Unknown option; use --help");
         }
         if (dsn_file.empty()) throw std::runtime_error("--dsn-file is required");
@@ -129,6 +143,10 @@ int main(int argc, char** argv) {
     std::string stage{"DSN file validation"};
     try {
         auto dsn = read_dsn(dsn_file);
+        if (!host_token_file.empty()) {
+            stage = "host token file validation (owned regular 0600 file with 64 lowercase hex characters)";
+            config.host_token = read_host_token(host_token_file);
+        }
         stage = "database connection";
         // Private configuration only. pg_dump/pg_restore receive secrets through the Store's environment/file handling.
 #ifdef _WIN32

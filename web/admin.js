@@ -24,6 +24,10 @@
   const realmName = (id) => { const realm = realms.find((entry) => entry.id === id); return realm ? realm.name : id == null ? '—' : `diyar ${id}`; };
   const shardRealm = (instance) => realms.find((realm) => (realm.shards || []).some((shard) => shard.instance === instance));
   const populationWords = { low: 'Sakin', medium: 'Normal', high: 'Yoğun', full: 'Dolu' };
+  // NONCANONICAL wave 31 realm control: desired layout (desired_shards, capacity, enabled) lives in the database.
+  let realmEdit = null; // { id, name, kind, shards, capacity } while a row is edited inline
+  const realmShortSince = new Map(); // realm id -> time the running shard count first fell below the desired count
+  const realmShortHintMs = 30000;
 
   const text = (value) => value == null ? '—' : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
   const node = (tag, value, className) => {
@@ -85,10 +89,16 @@
     accountLoaded = false;
     characterLoaded = false;
     inventoryCharacter = 0;
-    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat', 'item-character', 'item-query', 'item-id', 'currency-amount', 'xp-amount', 'kit-level', 'realm-name', 'realm-rename-name'].forEach((id) => { element(id).value = ''; });
+    ['password', 'account-id', 'character-id', 'account-query', 'character-query', 'ban-reason', 'announce-text', 'control-message', 'create-username', 'create-password', 'create-repeat', 'item-character', 'item-query', 'item-id', 'currency-amount', 'xp-amount', 'kit-level', 'realm-name'].forEach((id) => { element(id).value = ''; });
     realms = [];
+    realmEdit = null;
+    realmShortSince.clear();
     element('realm-sort').dataset.edited = 'false';
-    element('realm-rename-id').replaceChildren();
+    element('realm-shards').value = '1';
+    element('realm-capacity').value = '32';
+    element('realm-start').checked = true;
+    element('realm-restart-delay').value = '60';
+    ['realm-restart-id', 'realm-restart-instance'].forEach((id) => element(id).replaceChildren());
     element('realm-state').textContent = '';
     element('kit-equip').checked = false;
     element('kit-state').textContent = 'Önizleme yapılmadı.';
@@ -360,13 +370,15 @@
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
     if (!session) return;
+    // Poll every 3 s while the Sunucular tab shows a realm whose shards are still starting or stopping (wave 31).
+    const settling = !element('page-realms').hidden && realms.some((realm) => realmStarting(realm) || (realmLive(realm).length > (realmEnabled(realm) ? realmWanted(realm) : 0)));
     refreshTimer = setTimeout(async () => {
       if (!busy && !document.hidden) {
         try { await refreshStatus(); await refreshRealms(); }
         catch (error) { notice(error.message, 'error'); }
       }
       scheduleRefresh();
-    }, 10000);
+    }, settling ? 3000 : 10000);
   }
 
   // Commands are queued for the world's 1 s heartbeat; poll status until the world records the result.
@@ -561,38 +573,190 @@
     notice(`Karakter ${player.name} (${id}) kaydı açıldı.`, 'success');
   }
 
-  // NONCANONICAL wave 30 Sunucular tab: realms with live shards, populations and character counts.
-  function renderRealms() {
-    const target = element('realm-results');
-    target.replaceChildren();
-    if (!realms.length) emptyRow(target, 8, 'Diyar yok.');
-    const now = Date.now();
+  // NONCANONICAL wave 30/31 Sunucular tab: realms with their desired layout (desired_shards, capacity, enabled), live
+  // shards, populations and character counts, plus full control (edit inline, start, stop, restart, delete).
+  const realmLive = (realm) => (Array.isArray(realm.shards) ? realm.shards : []).filter((shard) => shard.online);
+  const realmDesired = (realm) => Number.isInteger(realm.desired_shards) ? realm.desired_shards : realmLive(realm).length;
+  const realmEnabled = (realm) => realm.enabled !== false;
+  // Shard indexes an administrator holds stopped (held_shards, stop_shard/start_shard); the host keeps them down.
+  const realmHeld = (realm) => (Array.isArray(realm.held_shards) ? realm.held_shards : []).filter((index) => Number.isInteger(index) && index >= 1 && index <= realmDesired(realm));
+  const realmWanted = (realm) => realmDesired(realm) - realmHeld(realm).length;
+  const realmStarting = (realm) => realmEnabled(realm) && realmLive(realm).length < realmWanted(realm);
+
+  function trackRealmShortage(now) {
+    const seen = new Set();
     realms.forEach((realm) => {
-      const row = node('tr');
-      const online = realm.status === 'online';
-      const shards = node('td');
-      const list = node('ul', undefined, 'shard-list');
-      (realm.shards || []).forEach((shard) => {
-        const age = Math.max(0, Math.round((now - timestamp(shard.updated_at)) / 1000));
-        list.append(node('li', `${shard.instance} · ${shard.host || '(HTTPS sunucusu)'}:${shard.port} · ${shard.players}/${shard.capacity} oyuncu · ${shard.online ? 'canlı' : 'ÖLÜ'} · son bildirim ${Number.isFinite(age) ? `${age} sn önce` : '—'}`, shard.online ? 'ok' : 'bad'));
-      });
-      if (!list.childElementCount) list.append(node('li', 'Parça yok (son bir saatte bildirim yok).', 'bad'));
-      shards.append(list);
-      const actions = node('td');
-      actions.append(actionButton('Yeniden adlandır', 'Fill the rename form with this realm', () => { element('realm-rename-id').value = String(realm.id); element('realm-rename-name').value = realm.name; element('realm-rename-name').focus(); }));
-      row.append(node('td', realm.id), node('td', realm.name), node('td', realm.kind), node('td', online ? 'çevrimiçi' : 'kapalı', online ? 'ok' : 'bad'),
-        node('td', online ? `${populationWords[realm.population] || text(realm.population)} (${realm.population})` : 'Kapalı'), node('td', count(realm.characters)), shards, actions);
-      target.append(row);
+      seen.add(realm.id);
+      if (!realmStarting(realm)) realmShortSince.delete(realm.id);
+      else if (!realmShortSince.has(realm.id)) realmShortSince.set(realm.id, now);
     });
-    const select = element('realm-rename-id');
+    [...realmShortSince.keys()].forEach((id) => { if (!seen.has(id)) realmShortSince.delete(id); });
+  }
+
+  function realmStatusCell(realm, now) {
+    const cell = node('td');
+    const live = realmLive(realm).length;
+    const desired = realmWanted(realm);
+    const held = realmHeld(realm).length;
+    if (!realmEnabled(realm)) cell.append(node('span', live ? `Durduruluyor (${live} canlı parça)` : 'Durduruldu', 'bad'));
+    else if (desired === 0) cell.append(node('span', live ? 'Kapatılıyor' : held ? 'Bütün parçalar durduruldu' : 'Parça istenmiyor', 'bad'));
+    else if (live >= desired) cell.append(node('span', held ? `Çalışıyor (${held} parça durduruldu)` : 'Çalışıyor', 'ok'));
+    else {
+      const since = realmShortSince.get(realm.id) ?? now;
+      const late = now - since >= realmShortHintMs;
+      cell.append(node('span', live ? `Başlatılıyor (${live}/${desired})` : 'Başlatılıyor', late ? 'bad' : undefined));
+      if (late) {
+        const units = [];
+        const held = realmHeld(realm);
+        for (let shard = 1; shard <= realmDesired(realm) && units.length < 4; shard += 1) {
+          if (!held.includes(shard) && !realmLive(realm).some((entry) => entry.index === shard)) units.push(`ikv-server@${realm.id}-${shard}`);
+        }
+        cell.append(node('p', `Bu sunucu barındırıcı tarafından başlatılmadı; elle kurulumda ${units.join(', ')}${desired - live > units.length ? ' …' : ''} birimini başlatın.`, 'realm-hint bad'));
+      }
+    }
+    return cell;
+  }
+
+  // One row per layout shard index (Parça N) with its live process, if the host reports the index (--shard-index), and
+  // per-shard Durdur / Başlat (stop_shard / start_shard); then any other live process (started by hand: index 0).
+  function realmShardList(realm, now) {
+    const cell = node('td');
+    const list = node('ul', undefined, 'shard-list');
+    const shards = Array.isArray(realm.shards) ? realm.shards : [];
+    const describe = (shard) => {
+      const age = Math.max(0, Math.round((now - timestamp(shard.updated_at)) / 1000));
+      return `${shard.instance} · ${shard.host || '(HTTPS sunucusu)'}:${shard.port} · ${shard.players}/${shard.capacity} oyuncu · ${shard.online ? 'canlı' : 'ÖLÜ'} · son bildirim ${Number.isFinite(age) ? `${age} sn önce` : '—'}`;
+    };
+    const shown = new Set();
+    const held = realmHeld(realm);
+    for (let index = 1; index <= realmDesired(realm); index += 1) {
+      const shard = shards.find((entry) => entry.index === index && entry.online);
+      if (shard) shown.add(shard);
+      const stopped = held.includes(index);
+      const state = stopped ? (shard ? 'durduruluyor (oyuncular kaydediliyor)' : 'durduruldu (yönetici)') : shard ? describe(shard) : realmEnabled(realm) ? 'çalışan süreç yok' : 'diyar durduruldu';
+      const item = node('li', `Parça ${index}: ${state}`, stopped ? 'bad' : shard ? 'ok' : undefined);
+      item.dataset.shardIndex = String(index);
+      if (shard && !stopped) item.append(actionButton('Yeniden başlat', 'Fill the restart form with this shard', () => fillRestart(realm.id, shard.instance)));
+      if (stopped) item.append(actionButton('Başlat', 'Let the host start this shard again', () => { void setShardHeld(realm, index, false); }, ''));
+      else item.append(actionButton('Durdur', 'Save this shard\'s players and stop only this shard', () => { void setShardHeld(realm, index, true); }, 'danger'));
+      list.append(item);
+    }
+    shards.filter((shard) => !shown.has(shard)).forEach((shard) => {
+      const item = node('li', describe(shard), shard.online ? 'ok' : 'bad');
+      if (shard.online) item.append(actionButton('Yeniden başlat', 'Fill the restart form with this shard', () => fillRestart(realm.id, shard.instance)));
+      list.append(item);
+    });
+    if (!list.childElementCount) list.append(node('li', 'Parça yok (son bir saatte bildirim yok).', 'bad'));
+    cell.append(list);
+    return cell;
+  }
+
+  function realmInput(field, attributes) {
+    const input = node(attributes.options ? 'select' : 'input');
+    if (attributes.options) attributes.options.forEach((value) => { const option = node('option', value); option.value = value; input.append(option); });
+    else Object.entries(attributes).forEach(([key, value]) => { input[key] = value; });
+    input.value = String(realmEdit[field]);
+    input.dataset.realmField = field;
+    input.setAttribute('aria-label', attributes.label || field);
+    input.addEventListener('input', () => { if (realmEdit) realmEdit[field] = input.value; });
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); void saveRealmEdit(); } if (event.key === 'Escape') { realmEdit = null; renderRealms(); } });
+    return input;
+  }
+
+  function realmEditorRow(realm, now) {
+    const row = node('tr', undefined, 'editing');
+    const cell = (child) => { const td = node('td'); td.append(child); return td; };
+    const name = realmInput('name', { maxLength: 32, autocomplete: 'off', className: 'realm-edit-name', label: 'Ad' });
+    const kind = realmInput('kind', { options: ['normal', 'pvp', 'rp'], label: 'Tür' });
+    const shards = realmInput('shards', { type: 'number', min: 0, max: 16, step: 1, label: 'Parça sayısı' });
+    const capacity = realmInput('capacity', { type: 'number', min: 1, max: 32, step: 1, label: 'Kapasite' });
+    const layout = node('td');
+    layout.append(node('label', 'Parça', 'hint'), shards, node('label', 'Kapasite', 'hint'), capacity);
+    const actions = node('td');
+    actions.append(actionButton('Kaydet', 'Save name, kind, shard count and capacity', () => { void saveRealmEdit(); }, ''),
+      actionButton('Vazgeç', 'Discard the edit', () => { realmEdit = null; renderRealms(); }));
+    row.append(node('td', realm.id), cell(name), cell(kind), realmStatusCell(realm, now), layout,
+      node('td', '—'), node('td', count(realm.characters)), realmShardList(realm, now), actions);
+    row.dataset.id = String(realm.id);
+    return row;
+  }
+
+  function realmRow(realm, now) {
+    const row = node('tr');
+    row.dataset.id = String(realm.id);
+    const live = realmLive(realm);
+    const enabled = realmEnabled(realm);
+    const online = realm.status === 'online';
+    const capacity = Number.isInteger(realm.capacity) ? realm.capacity : null;
+    const players = live.reduce((sum, shard) => sum + (Number(shard.players) || 0), 0);
+    const layout = `${realmDesired(realm)} / ${live.length}${capacity != null ? ` · ${players}/${live.length * capacity} oyuncu · parça başına ${capacity}` : ''}`;
+    const actions = node('td');
+    actions.append(actionButton('Düzenle', 'Edit name, kind, shard count and capacity in this row', () => {
+      realmEdit = { id: realm.id, name: realm.name, kind: realm.kind || 'normal', shards: realmDesired(realm), capacity: capacity ?? 32 };
+      renderRealms();
+      element('realm-results').querySelector('[data-realm-field="name"]')?.focus();
+    }));
+    if (enabled) actions.append(actionButton('Durdur', 'Save every player and stop every shard of this realm', () => { void setRealmEnabled(realm, false); }, 'danger'));
+    else actions.append(actionButton('Başlat', 'Let the host start the desired shards', () => { void setRealmEnabled(realm, true); }, ''));
+    actions.append(actionButton('Yeniden başlat', 'Fill the restart form with this realm', () => fillRestart(realm.id, '')));
+    const remove = actionButton('Sil', realm.id === 1 ? 'Realm 1 is the default realm and cannot be deleted' : 'Delete the realm (only without characters)', () => { void deleteRealm(realm); }, 'danger');
+    if (realm.id === 1) remove.dataset.unavailable = 'true';
+    actions.append(remove);
+    row.append(node('td', realm.id), node('td', realm.name), node('td', realm.kind), realmStatusCell(realm, now), node('td', layout),
+      node('td', online ? `${populationWords[realm.population] || text(realm.population)} (${realm.population})` : 'Kapalı'), node('td', count(realm.characters)), realmShardList(realm, now), actions);
+    return row;
+  }
+
+  function renderRestartForm() {
+    const select = element('realm-restart-id');
     const previous = select.value;
     select.replaceChildren();
     realms.forEach((realm) => { const option = node('option', `${realm.id} · ${realm.name}`); option.value = String(realm.id); select.append(option); });
     if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+    renderRestartShards();
+  }
+
+  function renderRestartShards() {
+    const select = element('realm-restart-instance');
+    const previous = select.value;
+    const realm = realms.find((entry) => String(entry.id) === element('realm-restart-id').value);
+    select.replaceChildren();
+    const all = node('option', 'Tüm canlı parçalar');
+    all.value = '';
+    select.append(all);
+    (realm ? realmLive(realm) : []).forEach((shard) => { const option = node('option', `${shard.instance} (${shard.players}/${shard.capacity})`); option.value = shard.instance; select.append(option); });
+    if ([...select.options].some((option) => option.value === previous)) select.value = previous;
+  }
+
+  function fillRestart(id, instance) {
+    element('realm-restart-id').value = String(id);
+    renderRestartShards();
+    element('realm-restart-instance').value = instance;
+    element('realm-restart-delay').focus();
+    notice(`Yeniden başlatma formu dolduruldu: diyar ${id}${instance ? `, parça ${instance}` : ', tüm canlı parçalar'}. Gecikmeyi seçip “Yeniden başlat” düğmesine basın.`);
+  }
+
+  function renderRealms() {
+    const target = element('realm-results');
+    const focused = document.activeElement?.dataset?.realmField; // keep the caret in the inline editor across refreshes
+    const caret = focused && typeof document.activeElement.selectionStart === 'number' ? document.activeElement.selectionStart : null;
+    target.replaceChildren();
+    if (!realms.length) emptyRow(target, 9, 'Diyar yok.');
+    if (realmEdit && !realms.some((realm) => realm.id === realmEdit.id)) realmEdit = null;
+    const now = Date.now();
+    trackRealmShortage(now);
+    realms.forEach((realm) => target.append(realmEdit?.id === realm.id ? realmEditorRow(realm, now) : realmRow(realm, now)));
+    if (focused) {
+      const input = target.querySelector(`[data-realm-field="${CSS.escape(focused)}"]`);
+      input?.focus();
+      if (input && caret != null) try { input.setSelectionRange(caret, caret); } catch { /* number inputs have no caret */ }
+    }
+    renderRestartForm();
     const sortField = element('realm-sort'); // new realms go to the end of the launcher list unless an order was typed
     if (sortField.dataset.edited !== 'true') sortField.value = String(Math.min(32767, Math.max(0, ...realms.map((realm) => Number(realm.sort) || 0)) + 1));
-    const live = realms.reduce((sum, realm) => sum + (realm.shards || []).filter((shard) => shard.online).length, 0);
-    element('realm-state').textContent = `${realms.length} diyar · ${live} canlı parça · ${new Date().toLocaleTimeString('tr-TR')}`;
+    const live = realms.reduce((sum, realm) => sum + realmLive(realm).length, 0);
+    const desired = realms.reduce((sum, realm) => sum + (realmEnabled(realm) ? realmDesired(realm) : 0), 0);
+    element('realm-state').textContent = `${realms.length} diyar · istenen ${desired} parça · ${live} canlı parça · ${new Date().toLocaleTimeString('tr-TR')}`;
     updateControls();
   }
 
@@ -668,6 +832,7 @@
     const version = sessionVersion;
     try {
       await refreshAll();
+      scheduleRefresh(); // a realm change may leave shards settling; poll faster (wave 31)
       if (session && version === sessionVersion) { notice(message, 'success'); resetVisible = sensitive; }
     } catch (error) {
       if (session && version === sessionVersion) { notice(`${message}\nYenileme tamamlanamadı: ${error.message}`, 'error'); resetVisible = sensitive; }
@@ -681,6 +846,7 @@
       tab.tabIndex = selected ? 0 : -1;
       element(tab.getAttribute('aria-controls')).hidden = !selected;
     });
+    if (session && name === 'realms') scheduleRefresh(); // faster polling while shards settle (wave 31)
   }
   const tabs = [...document.querySelectorAll('[role="tab"]')];
   tabs.forEach((tab, index) => {
@@ -788,31 +954,96 @@
     if (bytes < 2 || bytes > 32 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error('Diyar adı 2–32 UTF-8 bayt olmalı ve kontrol karakteri içermemelidir.');
     return name;
   };
+  const realmCount = (value, label, low, high) => {
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < low || number > high) throw new Error(`${label} ${low}–${high} arasında bir tamsayı olmalıdır.`);
+    return number;
+  };
+  // NONCANONICAL wave 31: the host reconciles shards from the database layout within a few seconds.
+  const hostNote = 'Barındırıcı düzeni birkaç saniye içinde uygular.';
   element('realm-sort').addEventListener('input', () => { element('realm-sort').dataset.edited = 'true'; });
   element('realm-create').addEventListener('submit', (event) => {
     event.preventDefault();
     const name = element('realm-name').value.trim();
     const kind = element('realm-kind').value;
-    const sort = Number(element('realm-sort').value);
+    const enabled = element('realm-start').checked;
     void perform(async () => {
       realmNameBytes(name);
-      if (!Number.isSafeInteger(sort) || sort < -32768 || sort > 32767) throw new Error('Sıra −32768–32767 arasında bir tamsayı olmalıdır.');
-      const result = await request('/v1/admin/realms', 'POST', { action: 'create', name, kind, sort });
+      const sort = realmCount(element('realm-sort').value, 'Sıra', -32768, 32767);
+      const shards = realmCount(element('realm-shards').value, 'Parça sayısı', 0, 16);
+      const capacity = realmCount(element('realm-capacity').value, 'Kapasite', 1, 32);
+      const result = await request('/v1/admin/realms', 'POST', { action: 'create', name, kind, sort, shards, capacity, enabled });
       element('realm-name').value = '';
       element('realm-sort').dataset.edited = 'false';
-      await afterMutation(`Diyar oluşturuldu: ${name} (ID ${text(result.id)}). Parça başlatmak için: ikv-server … --realm ${text(result.id)}`);
+      element('realm-shards').value = '1';
+      element('realm-capacity').value = '32';
+      element('realm-start').checked = true;
+      await afterMutation(`Diyar oluşturuldu: ${name} (ID ${text(result.id)}), ${shards} parça × ${capacity} oyuncu${enabled ? `. ${hostNote}` : ', durdurulmuş. Başlatmak için satırdaki “Başlat” düğmesini kullanın.'}`);
     });
   });
-  element('realm-rename').addEventListener('submit', (event) => {
+
+  async function saveRealmEdit() {
+    if (!realmEdit || busy) return;
+    const draft = realmEdit;
+    const realm = realms.find((entry) => entry.id === draft.id);
+    await perform(async () => {
+      if (!realm) throw new Error(`Diyar ${draft.id} artık listede yok.`);
+      const name = realmNameBytes(String(draft.name).trim());
+      const body = { action: 'update', id: draft.id };
+      if (name !== realm.name) body.name = name;
+      if (draft.kind !== realm.kind) body.kind = draft.kind;
+      const shards = realmCount(draft.shards, 'Parça sayısı', 0, 16);
+      const capacity = realmCount(draft.capacity, 'Kapasite', 1, 32);
+      if (shards !== realmDesired(realm)) body.shards = shards;
+      if (capacity !== realm.capacity) body.capacity = capacity;
+      if (Object.keys(body).length === 2) { realmEdit = null; renderRealms(); notice('Değişiklik yok.'); return; }
+      if (body.shards != null && body.shards < realmLive(realm).length && !window.confirm(`Diyar ${realm.name}: parça sayısı ${realmLive(realm).length} → ${body.shards}. Fazla parçalardaki oyuncular kaydedilip bağlantıları kesilsin mi?`)) { notice('İşlem iptal edildi.'); return; }
+      await request('/v1/admin/realms', 'POST', body);
+      realmEdit = null;
+      await afterMutation(`Diyar ${draft.id} güncellendi: ${name} · ${draft.kind} · ${shards} parça × ${capacity} oyuncu. ${hostNote}`);
+    });
+  }
+
+  async function setRealmEnabled(realm, enabled) {
+    await perform(async () => {
+      if (!enabled && !window.confirm(`Diyar ${realm.name} (ID ${realm.id}) durdurulsun mu? Çevrimiçi oyuncular kaydedilir ve bütün parçaları kapanır.`)) { notice('İşlem iptal edildi.'); return; }
+      await request('/v1/admin/realms', 'POST', { action: 'update', id: realm.id, enabled });
+      await afterMutation(`Diyar ${realm.name} ${enabled ? 'başlatılıyor' : 'durduruluyor'}. ${hostNote}`);
+    });
+  }
+
+  // NONCANONICAL wave 31 per-shard Durdur / Başlat: a database hold (realms.held_shards) the host supervisor applies.
+  async function setShardHeld(realm, index, stop) {
+    await perform(async () => {
+      if (stop && !window.confirm(`Diyar ${realm.name} parça ${index} durdurulsun mu? Bu parçadaki oyuncular kaydedilir ve bağlantıları kesilir; diyarın diğer parçaları çalışmaya devam eder.`)) { notice('İşlem iptal edildi.'); return; }
+      await request('/v1/admin/realms', 'POST', { action: stop ? 'stop_shard' : 'start_shard', id: realm.id, index });
+      await afterMutation(`Diyar ${realm.name} parça ${index} ${stop ? 'durduruluyor' : 'başlatılıyor'}. ${hostNote}`);
+    });
+  }
+
+  async function deleteRealm(realm) {
+    await perform(async () => {
+      if (realm.id === 1) throw new Error('Diyar 1 varsayılan diyardır ve silinemez.');
+      if (!window.confirm(`Diyar ${realm.name} (ID ${realm.id}) silinsin mi? Parçaları kapanır ve diyar bütün listelerden kalkar. Karakteri olan diyar silinemez.`)) { notice('İşlem iptal edildi.'); return; }
+      await request('/v1/admin/realms', 'POST', { action: 'delete', id: realm.id });
+      if (realmEdit?.id === realm.id) realmEdit = null;
+      await afterMutation(`Diyar ${realm.name} (ID ${realm.id}) silindi.`);
+    });
+  }
+
+  element('realm-restart-id').addEventListener('change', renderRestartShards);
+  element('realm-restart').addEventListener('submit', (event) => {
     event.preventDefault();
-    const id = Number(element('realm-rename-id').value);
-    const name = element('realm-rename-name').value.trim();
+    const id = Number(element('realm-restart-id').value);
+    const instance = element('realm-restart-instance').value;
     void perform(async () => {
       positiveId(id, 'Diyar ID');
-      realmNameBytes(name);
-      await request('/v1/admin/realms', 'POST', { action: 'rename', id, name });
-      element('realm-rename-name').value = '';
-      await afterMutation(`Diyar ${id} yeniden adlandırıldı: ${name}.`);
+      const delay = realmCount(element('realm-restart-delay').value, 'Gecikme', 0, 3600);
+      const target = instance ? `parça ${instance}` : `diyar ${realmName(id)} (bütün canlı parçalar)`;
+      if (!window.confirm(`${target} ${delay} saniye sonra yeniden başlatılsın mı? Çevrimiçi oyunculara duyurulur ve karakterleri kaydedilir.`)) { notice('İşlem iptal edildi.'); return; }
+      const result = await request('/v1/admin/realms', 'POST', { action: 'restart', id, ...(instance ? { instance } : {}), delay_seconds: delay });
+      const ids = Array.isArray(result.command_ids) ? result.command_ids : [];
+      await afterMutation(`Yeniden başlatma sıraya alındı: ${target}, ${delay} sn${ids.length ? ` · komut ${ids.join(', ')}` : ''}. Son dünya komutları tablosundan izleyin.`);
     });
   });
 

@@ -16,7 +16,8 @@ struct Identity { std::int64_t account_id; bool admin; bool plus = false, kasa =
 struct CharacterSave { std::int64_t account_id; std::int64_t character_id; Json state; Json bank = nullptr; }; // bank null: unchanged
 // NONCANONICAL wave 30: one ikv-server process (shard) of a realm. host is the public address clients connect to
 // (empty: the address the client already used for HTTPS); capacity is at most 32 players.
-struct ShardInfo { std::string instance; int realm_id = 1; std::string host; std::uint16_t port = 0; int players = 0, capacity = 32; };
+// index: the shard's place in the realm layout (1..16) when a host supervisor started it, 0 otherwise (wave 31).
+struct ShardInfo { std::string instance; int realm_id = 1; std::string host; std::uint16_t port = 0; int players = 0, capacity = 32, index = 0; };
 struct ApiError : std::runtime_error {
     int status;
     std::string code;
@@ -59,8 +60,15 @@ public:
     Json realms(std::int64_t account_id);                       // [{id,name,kind,status,population,characters}]
     void register_shard(const ShardInfo&);                     // also the heartbeat (players); throws ApiError
     void retire_shard(std::string_view instance);              // clean stop: the row stops being live at once (not after 15 s)
-    std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room
+    std::optional<ShardInfo> pick_shard(int realm_id);         // least loaded live shard with room; none for disabled/deleted realms
     std::optional<ShardInfo> shard(std::string_view instance); // live shard (heartbeat within 15 s)
+    // NONCANONICAL wave 31 host layout (migration 010) for the launcher supervisor; the HTTPS service authenticates the
+    // host token on the private listener before calling these. host_layout: {realms:[{id,name,shards,capacity,enabled,
+    // held_shards}],revision} of every non-deleted realm (held_shards: indexes an administrator stopped one by one).
+    // set_host_layout {realms:[{id,shards,capacity?}]} is authoritative: listed realms
+    // get those desired shards/capacity, unlisted realms 0 shards; returns host_layout(). Throws ApiError 400/409.
+    Json host_layout();
+    Json set_host_layout(const Json& body);
     std::optional<ShardInfo> locate(int realm_id, std::string_view name); // online character's live shard
     std::vector<ShardInfo> shards(int realm_id = 0);           // live shards (0: every realm), by realm then instance
     int character_realm(std::int64_t character_id);            // home realm; throws ApiError 404
