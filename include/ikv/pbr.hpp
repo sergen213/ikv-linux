@@ -39,11 +39,17 @@ struct PbrMaterial {
     std::array<float, 2> scale{1, 1};
     float height_scale = 0; // metres
     bool tessellate = false, parallax = false;
+    // NONCANONICAL wave 32: manifest "height": "derived" — the material has no maps of its own: it keeps the original
+    // texture whole (tint_keep_original 1) and its relief (parallax occlusion and tessellated displacement, both on the
+    // original UVs) is the original art's derived relief (Material::height, scene.cpp parallax_height). Drawn only on
+    // scene materials that have one (pbr_main_material).
+    bool derived_height = false;
     float tint_keep_original = 0;
     // RGBA8 full mip chains; empty data = absent map. albedo sRGB, normal +Y (OpenGL) in rgb, orm r AO g roughness b
     // metallic, height in the derived-parallax layout (scene.cpp parallax_height: r height 1 = top, g/b central
     // differences + .5).
     Texture albedo, normal, orm, height;
+    bool has_height() const { return derived_height || !height.data.empty(); }
 };
 // Per-draw shader vector (pbr.glsl `pbr`: Vulkan push constant, GL uniform) of a draw with pack material p; {0,0,0,-1}
 // without one. tessellated: the draw displaces its geometry; NONCANONICAL wave 31: it keeps parallax occlusion (relief
@@ -51,12 +57,14 @@ struct PbrMaterial {
 // geometry (coarse, near) and parallax occlusion (fine detail, and all of it where the displacement fades out). A
 // tessellation material drawn without tessellation uses parallax occlusion alone. w = tint_keep_original + 2 x relief
 // + 4 x tessellated + 8 x round(low_gain x 256) (pbr.glsl pbrTintKeep, pbrParallax, pbrTessellated, pbrLowGain).
+// pbr.x = -1 (derived_height): the original UVs carry the relief, and pbr.glsl never applies the generic derived relief of
+// whole-original-albedo materials (pbrDerivedRelief) to it, so --parallax off leaves only the tessellated displacement.
 inline std::array<float, 4> pbr_draw_params(const PbrMaterial* p, bool parallax_option, bool tessellated, float low_gain = 1.f) {
     if (!p) return {0, 0, 0, -1};
-    const bool relief = parallax_option && (p->parallax || p->tessellate) && !p->height.data.empty();
+    const bool relief = parallax_option && (p->parallax || p->tessellate) && p->has_height();
     const float gain = std::round(std::clamp(low_gain, 1.f / 256.f, 16.f) * 256.f);
-    return {p->world_uv ? .25f / p->scale[0] : 0.f, p->world_uv ? .25f / p->scale[1] : 0.f, p->height_scale * 4.f,
-            p->tint_keep_original + (relief ? 2.f : 0.f) + (tessellated ? 4.f : 0.f) + 8.f * gain};
+    const float u = p->world_uv ? .25f / p->scale[0] : p->derived_height ? -1.f : 0.f, v = p->world_uv ? .25f / p->scale[1] : 0.f;
+    return {u, v, p->height_scale * 4.f, p->tint_keep_original + (relief ? 2.f : 0.f) + (tessellated ? 4.f : 0.f) + 8.f * gain};
 }
 // NONCANONICAL wave 29: linear brightness gain of the blurred-original tint (pbr.glsl pbrAlbedo). The shader samples a
 // coarse authored mip of the original diffuse and linearises it, but the authored mips average sRGB values: for high-
@@ -74,6 +82,18 @@ struct PbrPack {
     std::vector<std::string> diagnostics;
     const PbrMaterial* find(std::string_view diffuse) const;
 };
+// The pack material of an eligible scene material (manifest key Material::diffuse); a derived-height material only where
+// the scene derived a relief for it (flat art has none: displacing by the 1x1 white would lift the whole surface).
+inline const PbrMaterial* pbr_main_material(const PbrPack& pack, const Material& m) {
+    const auto* p = pack.find(m.diffuse);
+    return p && p->derived_height && m.height.empty() ? nullptr : p;
+}
+// The pack material of a fade-layer scene material's secondary layer (Material::luminance) under main. NONCANONICAL wave 32:
+// none under a derived-height main material: the whole original terrain blend is kept (the cobble streets' toprak layer
+// mapped to the gravel pack greyed the original cobbles).
+inline const PbrMaterial* pbr_fade_material(const PbrPack& pack, const Material& m, const PbrMaterial& main) {
+    return main.derived_height ? nullptr : pack.find(m.luminance);
+}
 // First existing <root>/manifest.json of: $IKV_PBR_DIR (set but empty or "off": no pack), compiled-in source tree
 // (IKV_PBR_SOURCE_DIR), <base>/pbr, <base>/../share/ikv/pbr. Empty path: none.
 std::filesystem::path pbr_pack_root(const char* executable_base);

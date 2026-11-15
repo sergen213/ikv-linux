@@ -306,10 +306,13 @@ void parallax() {
     surface_uv=texcoord;pbr_uv=texcoord;
     if(original_appearance||sky||source_ocean)return;
     pbr_on=pbrActive(pbr);
-    pbr_derived_relief=pbr_on&&!pbrParallax(pbr)&&pbrTintKeep(pbr)>=1.0;
+    pbr_derived_relief=pbr_on&&pbr.x>=0.0&&!pbrParallax(pbr)&&pbrTintKeep(pbr)>=1.0; // wave 32: x -1 = derived-height material
     if(pbr_on&&pbr.x>0.0)pbr_uv=pbrWorldUV(fragment_position,world_normal,pbr.xy);
     vec2 base=pbr_on?pbr_uv:texcoord;
-    vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),nf=cross(dp1,dp2),v=camera_position-fragment_position;
+    vec3 dp1=dFdx(fragment_position),dp2=dFdy(fragment_position),v=camera_position-fragment_position;
+    // Vulkan parallax(): a tessellated derived-height draw takes the undisplaced surface's frame (wave 32).
+    if(pbr_on&&pbr.x<0.0&&pbrTessellated(pbr)){vec3 n0=normalize(world_normal);dp1-=n0*dot(n0,dp1);dp2-=n0*dot(n0,dp2);}
+    vec3 nf=cross(dp1,dp2);
     vec2 du1=dFdx(base),du2=dFdy(base),tu1=dFdx(texcoord),tu2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbr_du1=du1;pbr_du2=du2;
     pbr_uv_per_unit=max(length(tu1)/max(length(dp1),1e-6),length(tu2)/max(length(dp2),1e-6));
@@ -334,7 +337,7 @@ void parallax() {
     }
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv);
     float c=dot(v,nf),relief=smoothstep(0.05,0.18,c)*(1.0-smoothstep(50.0,90.0,dist))*
-        (pack?min(pbr.z,1.0)*pbr_main_weight():min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
+        (pack?min(pbr.z,1.0)*pbrReliefLayer(pbr,pbr_main_weight()):min(12.0*min(length(pu),length(pv))/float(textureSize(height_map,0).x),0.6));
     float depth=pack?relief*pbrReliefShare(pbr,dist):relief; // Vulkan parallax(): parallax occlusion's share of the relief
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth;
@@ -476,7 +479,7 @@ void main() {
         if(has_normal_map||has_environment_map)surface.a=1.0;
         float nlength=length(world_normal);
         vec3 n=nlength>0.00001?world_normal/nlength:vec3(0.0,1.0,0.0);
-        if(pbr_on&&(pbr_fade_layer||pbr_maps.y>0.5)){ // wave 29; fade layers never have a source normal map
+        if(pbr_on&&pbr.x>=0.0&&(pbr_fade_layer||pbr_maps.y>0.5)){ // wave 29; fade layers never have a source normal map (wave 32: derived-height materials take the unmapped path)
             vec3 m=pbr_maps.y>0.5?pbrNormal(normalize(n-parallax_gradient),pbr_pu,pbr_pv,textureGrad(pbr_normal_map,pbr_uv,pbr_du1,pbr_du2).rgb):normalize(n-parallax_gradient);
             if(pbr_fade_layer){vec3 f=pbr_fade_on&&pbr_fade_maps.y>0.5?pbrNormal(n,pbr_fade_pu,pbr_fade_pv,textureGrad(pbr_fade_normal_map,pbr_fade_uv,pbr_fade_du1,pbr_fade_du2).rgb):n;
                 m=normalize(mix(f,m,pbr_main_weight()));}
@@ -1424,7 +1427,9 @@ private:
             auto& gpu=set.materials[index];
             gpu.pbr=p;gpu.pbr_albedo=found[0];gpu.pbr_normal=found[1];gpu.pbr_orm=found[2];
             // Whole-original-albedo materials without relief of their own keep the derived one (pbr_derived_relief).
-            if(p->parallax||p->tessellate)gpu.height=options_.parallax||(p->tessellate&&tess_program_)?found[3]:0;
+            // NONCANONICAL wave 32: a derived-height material's relief is the original art's derived one (pbr.hpp).
+            if(p->derived_height)gpu.height=options_.parallax||(p->tessellate&&tess_program_)?find_texture(set,material.height):0;
+            else if(p->parallax||p->tessellate)gpu.height=options_.parallax||(p->tessellate&&tess_program_)?found[3]:0;
             else if(p->tint_keep_original<1.f)gpu.height=0;
             if(const auto* f=index<set.pbr_fade.size()?set.pbr_fade[index]:nullptr){const auto& fade=upload(f);
                 gpu.pbr_fade=f;gpu.pbr_fade_albedo=fade[0];gpu.pbr_fade_normal=fade[1];gpu.pbr_fade_orm=fade[2];}
@@ -1449,9 +1454,9 @@ private:
         const auto eligible=pbr_eligible_materials(scene);
         std::size_t mapped=0,fades=0;
         set.pbr_fade.assign(scene.materials.size(),nullptr);
-        for(std::size_t i=0;i<scene.materials.size();++i)if(eligible[i]&&(set.pbr[i]=pbr_pack_->find(scene.materials[i].diffuse))) {
+        for(std::size_t i=0;i<scene.materials.size();++i)if(eligible[i]&&(set.pbr[i]=pbr_main_material(*pbr_pack_,scene.materials[i]))) {
             ++mapped;
-            if(pbr_fade_layer(scene.materials[i])&&(set.pbr_fade[i]=pbr_pack_->find(scene.materials[i].luminance)))++fades;
+            if(pbr_fade_layer(scene.materials[i])&&(set.pbr_fade[i]=pbr_fade_material(*pbr_pack_,scene.materials[i],*set.pbr[i])))++fades;
         }
         set.pbr_gains=pbr_low_gains(scene,set.pbr,set.pbr_fade);
         std::size_t tessellated=0;

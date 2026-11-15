@@ -233,6 +233,16 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-14 wave 32: the original cobble road, with parallax and tessellation
+
+User request: bring back the old cobble road — the original `arnavut_kaldirim` texture as in 0.14.0 (warm, even stones, its colour and scale), with 0.14's parallax and tessellation. Captures of 0.14.0, 0.16.1 and the fix at the Eminönü cobble street (`1320,1480`; close, mid, grazing, far, low × Vulkan enhanced, Vulkan RT faithful, GL enhanced): `analysis/porting-wave32/Cobble/index.md`. Everything below is NONCANONICAL, enhanced appearance only; Vulkan, Vulkan RT and GL share `pbr.glsl`.
+
+- **Derived-height pack materials:** manifest `"height": "derived"` (scale null, no images) keeps the original texture whole and takes its relief from the original art's derived relief (`scene.cpp parallax_height`, the 0.14 parallax relief) on the original UVs: full parallax occlusion at `height_scale` plus tessellated displacement of the same height on top. `pbr.x = -1` marks such draws; scene materials without a derived relief keep their plain look (`pbr_main_material`).
+- **`cobble_original`** (`arnavut_kaldirim`, `kkoy_arnavut`; `cobble_fan` is now unused): 0.07 m, measured as 0.14's derived-parallax depth on every cobble placement (12 relief texels of the 512-texel relief at ~11.8 units per tile = 0.277 units).
+- **Kept like 0.14:** the cobble terrains' fade layer (`toprak`, `kkoy_toprak`, `kkoy_asfalt`) is no longer replaced by the gravel/dirt/asphalt pack under a derived-height material (`pbr_fade_material`; the gravel speckle had greyed the stones), and the relief and its normal tilt cover the whole blend as 0.14's did (`pbrReliefLayer`).
+- **Tessellated frame:** on displaced triangles the parallax frame takes the undisplaced surface's (position derivatives minus their normal component); without it the parallax smeared the stones.
+- **Cost** (GPU scene pass, 1280×720, `IKV_VSYNC=0`, mean of two alternating rounds; 0.16.1 → fixed code with the 0.16.1 manifest → fixed): Vulkan enhanced 0.667 → 0.668 → 0.632 ms; RT faithful 3.180 → 3.193 → 3.153 ms; GL enhanced 0.727 → 0.722 → 0.664 ms (no pack maps sampled on the street).
+
 ## 2026-11-14 wave 31 (0.16.1): full server control, cobble relief
 
 Plan (local): every realm/server operation from **both** the launcher's Sunucu Yönetimi and the web panel, without a second admin login in the launcher; v0.16.0 gated **Diyar ekle** behind an in-dialog login and kept the shard layout in `host.json`, so web-created realms never started. Branches `wave31-control-final` (api 0413f85, launcher 40c94bd/8e0a3ab/a35c110, web 675a70b/8663b7b/491b4d6, per-shard holds and port race 1903973) and `wave31-cobble` (2d2ffbc). Everything below is NONCANONICAL.

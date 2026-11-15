@@ -1,7 +1,8 @@
 // NONCANONICAL wave 29: enhanced PBR texture pack (include/ikv/pbr.hpp, assets/pbr/README.md), shared by the Vulkan
 // scene fragment/tessellation shaders; renderer_gl.cpp embeds this file (IKV_GL_PBR), so it holds no preprocessor lines.
 // The per-draw vec4 `pbr` (Vulkan push constant, GL uniform):
-//   xy  pack tiles per scene unit (0.25 m / manifest scale metres); 0 = the original UVs carry the pack maps
+//   xy  pack tiles per scene unit (0.25 m / manifest scale metres); 0 = the original UVs carry the pack maps; x -1 (wave
+//       32): a derived-height material, the original texture and its derived relief on the original UVs
 //   z   relief depth in scene units (height_scale metres x 4): parallax depth and tessellation displacement
 //   w   tint_keep_original + 2 when parallax occlusion is on for the draw + 4 when the draw is tessellated + 8 x the
 //       low-frequency gain code (below); negative = no pack material
@@ -32,7 +33,12 @@ float pbrTessFade(float distanceToEye){return 1.-smoothstep(kPbrTessFadeStart,kP
 // kPbrTessPomNear of the depth on top of the displacement near the eye (the per-pixel joints) and takes over all of it as
 // the displacement fades out.
 const float kPbrTessPomNear=.5;
-float pbrReliefShare(vec4 pbr,float distanceToEye){return pbrTessellated(pbr)?1.-pbrTessFade(distanceToEye)*(1.-kPbrTessPomNear):1.;}
+// NONCANONICAL wave 32: a derived-height material (x -1) keeps 0.14's full parallax occlusion everywhere, the displacement
+// adding geometric relief (silhouettes, grazing views) on top.
+float pbrReliefShare(vec4 pbr,float distanceToEye){return pbrTessellated(pbr)&&pbr.x>=0.?1.-pbrTessFade(distanceToEye)*(1.-kPbrTessPomNear):1.;}
+// Relief weight on a terrain blending a fade layer (layer: the main layer's weight). NONCANONICAL wave 32: a derived-height
+// material (x -1) keeps its relief over the whole blend, as the 0.14 derived relief of the original terrain did.
+float pbrReliefLayer(vec4 pbr,float layer){return pbr.x<0.?1.:layer;}
 // Shadow casters (Vulkan near cascade only): coarser segments and half the range. The caster fade never exceeds the
 // receiver's (pbrTessFade), so a displaced receiver never sinks under its own caster depth.
 const float kPbrShadowTessPixels=24.,kPbrShadowTessFadeStart=20.,kPbrShadowTessFadeEnd=40.;

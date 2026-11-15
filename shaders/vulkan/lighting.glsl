@@ -82,10 +82,15 @@ void parallax(){
     surfaceUV=texcoord;pbrUV=texcoord;
     if(frame.params.x<.5)return;
     pbrOn=pbrActive(draw.pbr);
-    pbrDerivedRelief=pbrOn&&!pbrParallax(draw.pbr)&&pbrTintKeep(draw.pbr)>=1.;
+    pbrDerivedRelief=pbrOn&&draw.pbr.x>=0.&&!pbrParallax(draw.pbr)&&pbrTintKeep(draw.pbr)>=1.; // wave 32: x -1 = derived-height material (pbr.hpp)
     if(pbrOn&&draw.pbr.x>0.)pbrUV=pbrWorldUV(worldPosition,worldNormal,draw.pbr.xy);
     vec2 base=pbrOn?pbrUV:texcoord;
-    vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),nf=cross(dp1,dp2),v=frame.eye.xyz-worldPosition;
+    vec3 dp1=dFdx(worldPosition),dp2=dFdy(worldPosition),v=frame.eye.xyz-worldPosition;
+    // NONCANONICAL wave 32: on a tessellated derived-height draw the parallax frame is the undisplaced surface's: the
+    // displacement runs along the (smoothed) normal, so the position derivatives lose their normal component; else every
+    // displaced micro-triangle tilted the frame and the parallax smeared the stones.
+    if(pbrOn&&draw.pbr.x<0.&&pbrTessellated(draw.pbr)){vec3 n0=normalize(worldNormal);dp1-=n0*dot(n0,dp1);dp2-=n0*dot(n0,dp2);}
+    vec3 nf=cross(dp1,dp2);
     vec2 du1=dFdx(base),du2=dFdy(base),tu1=dFdx(texcoord),tu2=dFdy(texcoord);float det=du1.x*du2.y-du2.x*du1.y,dist=length(v);
     pbrDu1=du1;pbrDu2=du2;
     pbrUvPerUnit=max(length(tu1)/max(length(dp1),1e-6),length(tu2)/max(length(dp2),1e-6));
@@ -111,7 +116,7 @@ void parallax(){
     vec3 gu=cross(pv,nf),gv=cross(nf,pu);gu/=dot(pu,gu);gv/=dot(pv,gv); // in-plane gradients of u and v
     // relief: the relief depth at this pixel; depth: the share parallax occlusion draws (tessellated draws: pbrReliefShare).
     float c=dot(v,nf),relief=smoothstep(.05,.18,c)*(1-smoothstep(50.,90.,dist))*
-        (pack?min(draw.pbr.z,1.)*pbrMainWeight():min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
+        (pack?min(draw.pbr.z,1.)*pbrReliefLayer(draw.pbr,pbrMainWeight()):min(12*min(length(pu),length(pv))/textureSize(heightMap,0).x,.6));
     float depth=pack?relief*pbrReliefShare(draw.pbr,dist):relief;
     if(!(depth>1e-3))return;
     vec2 shift=-vec2(dot(v,gu),dot(v,gv))/c*depth; // UV travel down to height 0
@@ -129,7 +134,8 @@ void parallax(){
 }
 vec3 mappedNormal(){
     vec3 n=normalize(worldNormal);
-    if(pbrOn&&(pbrFadeLayer||textureSize(pbrNormalMap,0).x>1)) { // fade layers never have a source normal map
+    // Derived-height materials (x -1, no maps) take the unmapped path below: the whole relief, as on 0.14's terrain.
+    if(pbrOn&&draw.pbr.x>=0.&&(pbrFadeLayer||textureSize(pbrNormalMap,0).x>1)) { // fade layers never have a source normal map
         vec3 m=textureSize(pbrNormalMap,0).x>1?pbrNormal(normalize(n-parallaxGradient),pbrPu,pbrPv,textureGrad(pbrNormalMap,pbrUV,pbrDu1,pbrDu2).rgb):normalize(n-parallaxGradient);
         if(!pbrFadeLayer)return m;
         vec3 f=pbrFadeOn&&textureSize(pbrFadeNormalMap,0).x>1?pbrNormal(n,pbrFadePu,pbrFadePv,textureGrad(pbrFadeNormalMap,pbrFadeUV,pbrFadeDu1,pbrFadeDu2).rgb):n;

@@ -278,6 +278,12 @@ def cmd_check(args):
     for material_id, params in manifest['materials'].items():
         folder = pack / material_id
         files = sorted(folder.glob('*.png'))
+        if params.get('height') is not None:  # wave 32: the original art and its derived relief, no maps of its own
+            if params['height'] != 'derived' or params.get('scale') is not None:
+                problems.append(f'{material_id}: height must be "derived" with scale null')
+            if files:
+                problems.append(f'{material_id}: derived-height material with images')
+            continue
         if not files:
             problems.append(f'{material_id}: no images')
         for path in files:

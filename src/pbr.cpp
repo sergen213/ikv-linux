@@ -295,6 +295,11 @@ std::shared_ptr<const PbrPack> load_pbr_pack(const std::filesystem::path& root) 
         m.tessellate = flag_in(j, "tessellate", false, where);
         m.parallax = flag_in(j, "parallax", false, where);
         m.tint_keep_original = number_in(j, "tint_keep_original", 0, 0, 1, where);
+        if (j.contains("height") && !j.at("height").is_null()) { // NONCANONICAL wave 32: the original art's derived relief
+            if (j.at("height") != "derived" || m.world_uv) fail(where + ".height must be \"derived\" (with scale null) or null");
+            m.derived_height = true;
+            m.tint_keep_original = 1; // no maps of its own: the original texture is kept whole
+        }
         ids.emplace(id, std::uint32_t(pack->materials.size()));
         pack->materials.push_back(std::move(m));
     }
@@ -313,8 +318,8 @@ std::shared_ptr<const PbrPack> load_pbr_pack(const std::filesystem::path& root) 
                     kind == 2 ? height_layout(png) : png_rgba(png), kind == 1, kind == 3);
             } catch (const std::exception& error) { notes.push_back(path.string() + ": " + error.what()); }
         };
-        load("albedo.png", m.albedo, 3); load("normal.png", m.normal, 1); load("orm.png", m.orm, 0); load("height.png", m.height, 2);
-        if (m.height.data.empty() || m.height_scale <= 0) m.tessellate = m.parallax = false; // nothing to displace
+        if (!m.derived_height) { load("albedo.png", m.albedo, 3); load("normal.png", m.normal, 1); load("orm.png", m.orm, 0); load("height.png", m.height, 2); }
+        if (!m.has_height() || m.height_scale <= 0) m.tessellate = m.parallax = false; // nothing to displace
         return notes;
     }));
     for (auto& job : jobs) for (auto& note : job.get()) pack->diagnostics.push_back(std::move(note));
@@ -407,6 +412,15 @@ void pbr_self_test() {
     need(std::abs(gain - 16.f) < 2e-3f && tess && relief && std::abs(keep - .35f) < 5e-3f, "tessellated draw params encoding"); // w ~ 32768: ulp 1/256
     decode(pbr_draw_params(&pm, false, true, 1.f)[3], gain, tess, relief, keep);
     need(tess && !relief && std::abs(keep - .35f) < 1e-3f, "tessellated draw params without parallax");
+    // Derived-height materials (wave 32): no maps, relief on, x -1 (original UVs, never the generic derived relief).
+    PbrMaterial dm; dm.derived_height = true; dm.tint_keep_original = 1; dm.height_scale = .07f; dm.parallax = dm.tessellate = true;
+    const auto dp = pbr_draw_params(&dm, true, true);
+    decode(dp[3], gain, tess, relief, keep);
+    need(dp[0] == -1 && dp[1] == 0 && std::abs(dp[2] - .28f) < 1e-6f && tess && relief && std::abs(keep - 1) < 1e-3f, "derived-height draw params");
+    Material flat; flat.diffuse = "textures/x.dds"; PbrPack dpack; dpack.materials.push_back(dm); dpack.textures[pbr_texture_key(flat.diffuse)] = 0;
+    need(!pbr_main_material(dpack, flat), "derived-height material needs a derived relief");
+    flat.height = flat.diffuse + "#parallax";
+    need(pbr_main_material(dpack, flat) == &dpack.materials[0], "derived-height material mapped");
     // Two quads sharing an edge, 16 units wide: after splitting to 8-unit edges, interior vertices displace, rim does not.
     Mesh m;
     for (int z2 = 0; z2 <= 1; ++z2) for (int x = 0; x <= 2; ++x) m.vertices.push_back(Vertex{float(x * 16), 0, float(z2 * 16), 0, 1, 0, float(x), float(z2)});

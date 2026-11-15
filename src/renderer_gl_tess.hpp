@@ -109,8 +109,9 @@ void main(){
         if(fade>0.0){
             vec2 huv=pbr.x>0.0?pbrWorldUV(world_position.xyz,n,pbr.xy):uv;
             float lod=pbrHeightLod(pbr,d,tess_view.y,tess_view.x,float(textureSize(height_map,0).x));
-            // Terrain fade layers (scene_fragment pbr_main_weight): the main pack's relief only where its layer shows.
-            float layer=has_fade_map&&!has_normal_map&&!has_environment_map?clamp(LERP(t_color).a,0.0,1.0):1.0;
+            // Terrain fade layers (scene_fragment pbr_main_weight): the main pack's relief only where its layer shows
+            // (derived-height materials: everywhere, pbrReliefLayer).
+            float layer=pbrReliefLayer(pbr,has_fade_map&&!has_normal_map&&!has_environment_map?clamp(LERP(t_color).a,0.0,1.0):1.0);
             world_position.xyz+=n*(textureLod(height_map,huv,lod).r*pbr.z*weight*fade*layer);
         }
     }
