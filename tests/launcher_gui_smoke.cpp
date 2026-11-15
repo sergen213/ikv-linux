@@ -300,9 +300,9 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
     const auto checkPrivate = [&] {
 #ifdef _WIN32
         // NONCANONICAL wave 19: no POSIX modes on Windows (per-user ACL); PostgreSQL listens on 127.0.0.1 only, no socket.
-        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "pg-superuser", "tls-ca", "tls-cert", "tls-key"};
+        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "host-token", "pg-superuser", "tls-ca", "tls-cert", "tls-key"};
 #else
-        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "tls-ca", "tls-cert", "tls-key"};
+        const QStringList expectedSecrets{"client-ca.pem", "development-ca-key", "dsn", "host-token", "tls-ca", "tls-cert", "tls-key"};
         const auto dirMode = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner | QFileDevice::ReadUser | QFileDevice::WriteUser | QFileDevice::ExeUser;
         const auto fileMode = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadUser | QFileDevice::WriteUser;
         for (const auto& dir : {serverDir, serverDir + "/secrets", serverDir + "/sock", serverDir + "/backups", serverDir + "/pg"})
@@ -647,9 +647,11 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
                   600, "the restarted shard back (with the edited capacity)");
         if (!logText().contains(QString("ikv-server[%1-1] çıktı: kod=75").arg(galata))) throw std::runtime_error("The shard restart was not the announced save-and-exit (75)");
         {
-            const auto lines = QString::fromUtf8(clientOutput).split('\n');
-            const auto notice = std::find_if(lines.begin(), lines.end(), [](const QString& line) { return line.contains("saniye içinde yeniden başlatılacak"); });
-            controlEvidence.insert("shard_restart_announce", notice == lines.end() ? QString() : notice->left(200));
+            const auto text = QString::fromUtf8(clientOutput);
+            const auto at = text.indexOf(QString::fromUtf8("saniye içinde yeniden başlatılacak"));
+            const auto event = text.lastIndexOf("\"announce\"", at);
+            if (at < 0 || event < 0 || at - event > 400) throw std::runtime_error("The restart countdown did not arrive as an announce event");
+            controlEvidence.insert("shard_restart_announce", text.mid(event, at - event + 60));
         }
 
         stage = "shard-stop";
@@ -665,7 +667,8 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
         stage = "realm-stop";
         pick(realmsTable, {QString::number(galata)});
         press("hostRealmStop");
-        waitUntil([&] { return shardsOf(galata).isEmpty() && realmText(galata, 2).startsWith(QString::fromUtf8("Durduruldu")) && !adminRealms().value(galata).value("enabled").toBool(true); },
+        waitUntil([&] { return shardsOf(galata).isEmpty() && realmText(galata, 2).startsWith(QString::fromUtf8("Durduruldu")) && !adminRealms().value(galata).value("enabled").toBool(true) &&
+                               rowOf(shardsTable, {QString::number(galata)}) < 0; },
                   90, "the stopped realm (shards saved and gone)");
         {
             const auto log = logText();
@@ -762,6 +765,8 @@ int hostServerSmoke(int& argc, char** argv, const QJsonObject& fixture, QString&
             if (!json(serverDir + "/host.json").value("layout_in_db").toBool() || rows.value(1).value("desired_shards").toInt() != 2 ||
                 rows.value(galata).value("desired_shards").toInt() != 1 || rows.value(galata).value("capacity").toInt() != 24)
                 throw std::runtime_error("host.json realms were not migrated into the database");
+            if (shardsOf(1).value(1).value("port").toInt() != json(serverDir + "/host.json").value("world_port").toInt())
+                throw std::runtime_error("Realm 1 shard 1 lost the configured world port to another realm");
         }
         click("hostStop");
         waitUntil([&] { return !supervisorAlive() && label("hostStatus") == "Durduruldu"; }, 120, "stop after the migration");

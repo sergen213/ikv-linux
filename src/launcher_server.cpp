@@ -722,10 +722,12 @@ private:
         });
     }
     void applyLayout(const QJsonArray& rows) {
+        QList<QJsonObject> realms; // hosting order = realm id: realm 1 shard 1 keeps the world port and the bots
+        for (const auto& value : rows) realms << value.toObject();
+        std::sort(realms.begin(), realms.end(), [](const QJsonObject& a, const QJsonObject& b) { return a.value("id").toInt() < b.value("id").toInt(); });
         QList<RealmLayout> layout;
         int total = 0;
-        for (const auto& value : rows) {
-            const auto realm = value.toObject();
+        for (const auto& realm : realms) {
             const int id = realm.value("id").toInt();
             if (id < 1 || id > 32767) continue;
             const int shards = realm.value("enabled").toBool(true) ? std::min(std::clamp(realm.value("shards").toInt(), 0, maxShardsPerRealm), maxShards - total) : 0;
@@ -1409,7 +1411,7 @@ private:
             {"self_ban", "Etkin yönetici hesabı yasaklanamaz."}, {"command_pending", "Bekleyen bir yeniden başlatma/kapatma komutu var; önce iptal edin."},
             {"command_queue_full", "Dünya 64 bekleyen komutu işlemedi; dünya sunucusu çalışıyor mu?"},
             {"account_not_found", "Hesap bulunamadı."}, {"rate_limited", "Çok fazla deneme; biraz bekleyin."},
-            {"conflict", "Bu kullanıcı adı zaten kullanılıyor."},
+            {"conflict", "Bu isim zaten kullanılıyor; farklı bir isim seçin."},
             {"realm_protected", "Ana diyar (#1) silinemez; durdurabilir veya yeniden adlandırabilirsiniz."},
             {"realm_has_characters", "Bu diyarda karakterler var; silinemez. Diyarı durdurabilirsiniz."},
             {"realm_offline", "Bu diyarın çalışan bir parçası yok; yeniden başlatılacak bir şey yok."},
@@ -1823,15 +1825,15 @@ private:
         for (const auto& realm : model) {
             const int id = realm.value("id").toInt(), capacity = realm.value("capacity").toInt(32);
             const int desired = realm.value("enabled").toBool(true) ? realm.value("desired").toInt() : 0;
-            int running = 0, held = 0, failed = 0, players = 0;
+            int running = 0, held = 0, failed = 0, starting = 0, players = 0;
             for (const auto& value : shards) {
                 const auto shard = value.toObject();
                 if (shard.value("realm").toInt() != id) continue;
                 const auto word = shard.value("state").toString();
-                running += word == "running"; held += word == "held"; failed += word == "failed";
+                running += word == "running"; held += word == "held"; failed += word == "failed"; starting += word == "starting";
                 players += livePlayers(id, shard.value("port").toInt()).value("players").toInt();
             }
-            QString status = !up || desired == 0 ? QString("Durduruldu") : failed ? QString("Hata")
+            QString status = up && desired == 0 && running + starting > 0 ? QString("Durduruluyor…") : !up || desired == 0 ? QString("Durduruldu") : failed ? QString("Hata")
                            : running > 0 && running + held >= desired ? QString("Çalışıyor") : QString("Başlatılıyor");
             if (status == "Çalışıyor" && held) status += QString(" (%1 parça durduruldu)").arg(held);
             if (!realm.value("enabled").toBool(true)) status += " — kapalı";
