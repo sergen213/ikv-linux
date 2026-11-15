@@ -3,8 +3,8 @@
 // The per-draw vec4 `pbr` (Vulkan push constant, GL uniform):
 //   xy  pack tiles per scene unit (0.25 m / manifest scale metres); 0 = the original UVs carry the pack maps
 //   z   relief depth in scene units (height_scale metres x 4): parallax depth and tessellation displacement
-//   w   tint_keep_original + 2 when parallax occlusion is on for the draw + 4 x the low-frequency gain code (below);
-//       negative = no pack material
+//   w   tint_keep_original + 2 when parallax occlusion is on for the draw + 4 when the draw is tessellated + 8 x the
+//       low-frequency gain code (below); negative = no pack material
 // World projection: the dominant axis of the surface normal picks the plane (floors XZ, walls XY or ZY with image-up =
 // world +Y), so pack maps tile in metres whatever the original UVs (atlases) are.
 vec2 pbrWorldUV(vec3 p,vec3 n,vec2 tiles){
@@ -12,17 +12,27 @@ vec2 pbrWorldUV(vec3 p,vec3 n,vec2 tiles){
     vec2 uv=a.y>=a.x&&a.y>=a.z?vec2(p.x,p.z):a.x>=a.z?vec2(p.z,-p.y):vec2(p.x,-p.y);
     return uv*tiles;
 }
-// w = tint_keep_original + 2 x parallax + 4 x round(low gain x 256) (pbr.hpp pbr_draw_params, pbr_low_gain).
+// w = tint_keep_original + 2 x parallax + 4 x tessellated + 8 x round(low gain x 256) (pbr.hpp pbr_draw_params, pbr_low_gain).
 bool pbrActive(vec4 pbr){return pbr.w>=0.;}
-float pbrFlags(vec4 pbr){return pbr.w-4.*floor(pbr.w*.25);}
-bool pbrParallax(vec4 pbr){return pbrFlags(pbr)>=2.;}
-float pbrTintKeep(vec4 pbr){float f=pbrFlags(pbr);return f>=2.?f-2.:f;}
-float pbrLowGain(vec4 pbr){float q=floor(pbr.w*.25);return q>0.?q/256.:1.;}
+float pbrFlags(vec4 pbr){return pbr.w-8.*floor(pbr.w*.125);}
+bool pbrTessellated(vec4 pbr){return pbrFlags(pbr)>=4.;}
+float pbrReliefFlags(vec4 pbr){float f=pbrFlags(pbr);return f>=4.?f-4.:f;}
+bool pbrParallax(vec4 pbr){return pbrReliefFlags(pbr)>=2.;}
+float pbrTintKeep(vec4 pbr){float f=pbrReliefFlags(pbr);return f>=2.?f-2.:f;}
+float pbrLowGain(vec4 pbr){float q=floor(pbr.w*.125);return q>0.?q/256.:1.;}
 // Tessellation: segments of about kPbrTessPixels pixels, fading to none (and displacement to zero) between these view
-// distances (scene units): beyond them parallax-free flat shading costs nothing extra.
+// distances (scene units).
 const float kPbrTessPixels=8.;
 const float kPbrTessFadeStart=40.,kPbrTessFadeEnd=80.;
 float pbrTessFade(float distanceToEye){return 1.-smoothstep(kPbrTessFadeStart,kPbrTessFadeEnd,distanceToEye);}
+// NONCANONICAL wave 31: share of the relief depth (pbr.z) parallax occlusion draws on a tessellated draw. The displaced
+// geometry (pbrHeightLod: about one height texel per segment, so a low-passed height) carries the cobbles' shape and
+// silhouette near the eye; wave 29 drew it with no parallax at all, so the stones' joints softened to the segment size and
+// the relief vanished entirely past the tessellation fade (10..20 m, the third-person street). Parallax occlusion adds
+// kPbrTessPomNear of the depth on top of the displacement near the eye (the per-pixel joints) and takes over all of it as
+// the displacement fades out.
+const float kPbrTessPomNear=.5;
+float pbrReliefShare(vec4 pbr,float distanceToEye){return pbrTessellated(pbr)?1.-pbrTessFade(distanceToEye)*(1.-kPbrTessPomNear):1.;}
 // Shadow casters (Vulkan near cascade only): coarser segments and half the range. The caster fade never exceeds the
 // receiver's (pbrTessFade), so a displaced receiver never sinks under its own caster depth.
 const float kPbrShadowTessPixels=24.,kPbrShadowTessFadeStart=20.,kPbrShadowTessFadeEnd=40.;

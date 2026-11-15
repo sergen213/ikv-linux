@@ -33,8 +33,11 @@ RGBA or palette, non-interlaced. Installed next to the shaders: `share/ikv/pbr` 
   original UVs (often atlases) are ignored. `null`: the original UVs carry the maps, one pack tile per original UV tile.
 - `height_scale`: relief depth in metres (0..0.5): parallax occlusion depth and tessellation displacement.
 - `tessellate`: hardware tessellation of the surface (Vulkan and OpenGL 4.x; `--tessellation off` or no support falls
-  back to parallax occlusion when `--parallax on`). Displacement is outward only, fades out between 10 and 20 m.
-- `parallax`: parallax occlusion mapping with the height map (`--parallax on`, the default); fades out by ~20 m.
+  back to parallax occlusion when `--parallax on`). Displacement is outward only, fades out between 10 and 20 m. With
+  `--parallax on` a tessellated surface also gets parallax occlusion: half the depth on top of the displacement near
+  the eye (per-pixel joints the ~8-pixel segments cannot show), all of it where the displacement has faded out.
+- `parallax`: parallax occlusion mapping with the height map (`--parallax on`, the default); fades out by ~22 m. The
+  relief also tilts the shading normal (under `normal.png` too), as the original's derived relief does.
 - `tint_keep_original`: 0..1 blend from the pack albedo (0) back to the original diffuse (1).
 
 ## Texture keys

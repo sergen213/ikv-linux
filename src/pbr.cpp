@@ -395,9 +395,18 @@ void pbr_self_test() {
     Texture checker{"c", 2, 1, {0, 0, 0, 255, 255, 255, 255, 255, 128, 128, 128, 255}, {{2, 1, 0, 8}, {1, 1, 8, 4}}};
     need(std::abs(pbr_low_gain(checker, true) - float(.5 / std::pow(128. / 255., 2.2))) < 1e-3f, "low gain");
     PbrMaterial pm; pm.tint_keep_original = .35f; pm.parallax = true; pm.height = tex;
-    const auto w = pbr_draw_params(&pm, true, false, 1.21f)[3]; // pbr.glsl pbrFlags/pbrLowGain decoding
-    const float q = std::floor(w * .25f), flags = w - 4 * q;
-    need(std::abs(q / 256 - 1.21f) < 2e-3f && flags >= 2 && std::abs(flags - 2 - .35f) < 1e-3f, "draw params encoding");
+    const auto decode = [](float w, float& gain, bool& tess, bool& relief, float& keep) { // pbr.glsl pbrFlags.. decoding
+        const float q = std::floor(w * .125f);
+        float f = w - 8 * q;
+        gain = q / 256; tess = f >= 4; if (tess) f -= 4; relief = f >= 2; keep = relief ? f - 2 : f;
+    };
+    float gain = 0, keep = 0; bool tess = false, relief = false;
+    decode(pbr_draw_params(&pm, true, false, 1.21f)[3], gain, tess, relief, keep);
+    need(std::abs(gain - 1.21f) < 2e-3f && !tess && relief && std::abs(keep - .35f) < 1e-3f, "draw params encoding");
+    decode(pbr_draw_params(&pm, true, true, 16.f)[3], gain, tess, relief, keep); // tessellated draws keep parallax occlusion
+    need(std::abs(gain - 16.f) < 2e-3f && tess && relief && std::abs(keep - .35f) < 5e-3f, "tessellated draw params encoding"); // w ~ 32768: ulp 1/256
+    decode(pbr_draw_params(&pm, false, true, 1.f)[3], gain, tess, relief, keep);
+    need(tess && !relief && std::abs(keep - .35f) < 1e-3f, "tessellated draw params without parallax");
     // Two quads sharing an edge, 16 units wide: after splitting to 8-unit edges, interior vertices displace, rim does not.
     Mesh m;
     for (int z2 = 0; z2 <= 1; ++z2) for (int x = 0; x <= 2; ++x) m.vertices.push_back(Vertex{float(x * 16), 0, float(z2 * 16), 0, 1, 0, float(x), float(z2)});

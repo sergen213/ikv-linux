@@ -46,15 +46,17 @@ struct PbrMaterial {
     Texture albedo, normal, orm, height;
 };
 // Per-draw shader vector (pbr.glsl `pbr`: Vulkan push constant, GL uniform) of a draw with pack material p; {0,0,0,-1}
-// without one. tessellated: the draw displaces its geometry (no parallax then); a tessellation material drawn without
-// tessellation falls back to parallax occlusion when RendererOptions::parallax allows. w = tint_keep_original + 2 x relief
-// + 4 x round(low_gain x 256) (pbr.glsl pbrTintKeep, pbrParallax, pbrLowGain).
+// without one. tessellated: the draw displaces its geometry; NONCANONICAL wave 31: it keeps parallax occlusion (relief
+// flag) where RendererOptions::parallax allows, and pbr.glsl pbrReliefShare splits the relief between the displaced
+// geometry (coarse, near) and parallax occlusion (fine detail, and all of it where the displacement fades out). A
+// tessellation material drawn without tessellation uses parallax occlusion alone. w = tint_keep_original + 2 x relief
+// + 4 x tessellated + 8 x round(low_gain x 256) (pbr.glsl pbrTintKeep, pbrParallax, pbrTessellated, pbrLowGain).
 inline std::array<float, 4> pbr_draw_params(const PbrMaterial* p, bool parallax_option, bool tessellated, float low_gain = 1.f) {
     if (!p) return {0, 0, 0, -1};
-    const bool relief = !tessellated && parallax_option && (p->parallax || p->tessellate) && !p->height.data.empty();
+    const bool relief = parallax_option && (p->parallax || p->tessellate) && !p->height.data.empty();
     const float gain = std::round(std::clamp(low_gain, 1.f / 256.f, 16.f) * 256.f);
     return {p->world_uv ? .25f / p->scale[0] : 0.f, p->world_uv ? .25f / p->scale[1] : 0.f, p->height_scale * 4.f,
-            p->tint_keep_original + (relief ? 2.f : 0.f) + 4.f * gain};
+            p->tint_keep_original + (relief ? 2.f : 0.f) + (tessellated ? 4.f : 0.f) + 8.f * gain};
 }
 // NONCANONICAL wave 29: linear brightness gain of the blurred-original tint (pbr.glsl pbrAlbedo). The shader samples a
 // coarse authored mip of the original diffuse and linearises it, but the authored mips average sRGB values: for high-
