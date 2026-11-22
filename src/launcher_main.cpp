@@ -14,6 +14,7 @@
 #include <QCommandLineParser>
 #include <QDeadlineTimer>
 #include <QMap>
+#include <QRegularExpression>
 #include <QMetaObject>
 #include <QSslSocket>
 #include <QTextDocument>
@@ -549,6 +550,8 @@ class Launcher final : public QWidget {
             if (issue.isEmpty() && (reply->error() != QNetworkReply::NoError || code < 200 || code >= 300)) {
                 const auto object = QJsonDocument::fromJson(state->bytes).object();
                 issue = object.value("error").toObject().value("message").toString();
+                if (issue.isEmpty()) issue = object.value("message").toString(); // GitHub API errors (e.g. rate limit)
+                if (!issue.isEmpty() && code > 0) issue = QString("%1 (HTTP %2)").arg(issue).arg(code);
                 if (issue.isEmpty()) issue = QString("Sunucu isteği reddetti (%1): %2").arg(code).arg(reply->errorString());
             }
             if (issue.isEmpty() && state->file && !state->file->commit()) issue = "Cannot commit staged HTTPS file";
@@ -690,13 +693,16 @@ class Launcher final : public QWidget {
     }
     QString updateChannel() const { return channel->currentText(); }
     // Release API: explicit HTTPS override, else GitHub Releases of the configured (default compiled-in) repository.
-    QUrl releaseEndpoint() {
-        if (!releaseApi->text().isEmpty()) return validatedUrl(releaseApi->text());
+    QString releaseRepository() {
         const QString repository = repo->text().isEmpty() ? QString(ikv::release::repository) : repo->text();
         const auto parts = repository.split('/');
         if (parts.size() != 2 || parts[0].isEmpty() || parts[1].isEmpty()) throw std::runtime_error("Depo OWNER/REPOSITORY biçiminde olmalı");
         for (const auto& part : parts) for (const QChar c : part) if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) throw std::runtime_error("Geçersiz depo adı");
-        return QUrl("https://api.github.com/repos/" + repository + "/releases");
+        return repository;
+    }
+    QUrl releaseEndpoint() {
+        if (!releaseApi->text().isEmpty()) return validatedUrl(releaseApi->text());
+        return QUrl("https://api.github.com/repos/" + releaseRepository() + "/releases");
     }
     std::shared_ptr<TransferBudget> releaseBudget(const QUrl& endpoint) {
         auto budget = std::make_shared<TransferBudget>();
@@ -715,7 +721,21 @@ class Launcher final : public QWidget {
         if (busy || !replies.isEmpty()) throw std::runtime_error("Başka bir kurulum, güncelleme veya HTTPS isteği sürüyor");
         const QUrl endpoint = releaseEndpoint();
         auto budget = releaseBudget(endpoint);
-        if (background) budget->fail = [this](const QString& issue) { status->setText("Güncellemeler denetlenemedi: " + issue); log(status->text()); };
+        const auto report = [this, background](const QString& issue) {
+            if (background) { status->setText("Güncellemeler denetlenemedi: " + issue); log(status->text()); }
+            else error(issue);
+        };
+        // NONCANONICAL: the unauthenticated GitHub API allows 60 requests per hour per IP address (shared by every
+        // computer behind one router); once spent it answers 403/429. The releases feed and release downloads are not
+        // part of that quota, so the check falls back to them (checkFeed).
+        budget->fail = [this, budget, background, report](const QString& issue) {
+            if (budget->github && (budget->status == 403 || budget->status == 429)) {
+                log("GitHub API isteği reddetti (" + issue + "); sürüm akışı deneniyor");
+                try { checkFeed(background); } catch (const std::exception& e) { report(failure(e)); }
+                return;
+            }
+            report(issue);
+        };
         status->setText("Güncellemeler denetleniyor…");
         fetch(endpoint, updateCa->text(), "GET", {}, false, 4 * 1024 * 1024, {}, [this, background](const QByteArray& bytes) {
             QJsonParseError parse; const auto doc = QJsonDocument::fromJson(bytes, &parse);
@@ -731,6 +751,64 @@ class Launcher final : public QWidget {
                 try { if (!newer()) continue; } catch (const std::exception&) { continue; }
                 newest = release; newestVersion = QString::fromStdString(version);
             }
+            offerRelease(newest, newestVersion, background);
+        }, 0, budget);
+    }
+    // Fallback release discovery without the GitHub API: tags from github.com/OWNER/REPO/releases.atom, newest first;
+    // the first whose signed manifest verifies for this channel and platform is offered with the deterministic
+    // github.com/OWNER/REPO/releases/download/TAG/NAME asset URLs (installUpdate verifies everything again).
+    void checkFeed(bool background) {
+        const QString base = "https://github.com/" + releaseRepository();
+        auto budget = releaseBudget(QUrl(base));
+        budget->github = true;
+        const auto report = [this, background](const QString& issue) {
+            if (background) { status->setText("Güncellemeler denetlenemedi: " + issue); log(status->text()); }
+            else error(issue);
+        };
+        budget->fail = report;
+        fetch(QUrl(base + "/releases.atom"), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, {}, [this, base, budget, background, report](const QByteArray& bytes) {
+            std::vector<std::string> tags;
+            const QString feed = QString::fromUtf8(bytes);
+            static const QRegularExpression entry(R"(<id>tag:github\.com,2008:Repository/[0-9]+/v([0-9A-Za-z.+-]{1,64})</id>)");
+            for (auto it = entry.globalMatch(feed); it.hasNext();) {
+                const auto version = it.next().captured(1).toStdString();
+                try { ikv::updates::compare_versions(version, version); } catch (const std::exception&) { continue; }
+                if (std::find(tags.begin(), tags.end(), version) == tags.end()) tags.push_back(version);
+            }
+            std::sort(tags.begin(), tags.end(), [](const auto& a, const auto& b) { return ikv::updates::compare_versions(a, b) > 0; });
+            if (tags.size() > 6) tags.resize(6);
+            if (tags.empty()) throw std::runtime_error("Sürüm akışında sürüm bulunamadı");
+            auto temp = std::make_shared<QTemporaryDir>(); if (!temp->isValid()) throw std::runtime_error("Güncelleme hazırlama klasörü oluşturulamadı");
+            feedCandidate(base, std::make_shared<std::vector<std::string>>(std::move(tags)), 0, temp, budget, background);
+        }, 0, budget);
+    }
+    void feedCandidate(const QString& base, std::shared_ptr<std::vector<std::string>> tags, std::size_t index,
+                       std::shared_ptr<QTemporaryDir> temp, std::shared_ptr<TransferBudget> budget, bool background) {
+        if (index >= tags->size()) throw std::runtime_error("Seçili kanalda (" + updateChannel().toStdString() + ") sürüm bulunamadı");
+        const QString version = QString::fromStdString((*tags)[index]), download = base + "/releases/download/v" + version + "/";
+        const QString manifest = temp->filePath(QString("%1-%2").arg(index).arg(manifestAsset)), sig = temp->filePath(QString("%1-%2").arg(index).arg(signatureAsset));
+        const auto next = [this, base, tags, index, temp, budget, background] { feedCandidate(base, tags, index + 1, temp, budget, background); };
+        const auto report = budget->fail;
+        // A release without this platform's manifest (404) or of the other channel: try the next older tag.
+        budget->fail = [budget, next, report](const QString& issue) {
+            if (budget->status == 404) { budget->fail = report; try { next(); } catch (const std::exception& e) { report(QString::fromUtf8(e.what())); } return; }
+            report(issue);
+        };
+        fetch(QUrl(download + manifestAsset), updateCa->text(), "GET", {}, false, 2 * 1024 * 1024, manifest, [this, download, manifest, sig, version, budget, report, next, background](const QByteArray&) {
+            fetch(QUrl(download + signatureAsset), updateCa->text(), "GET", {}, false, 64, sig, [this, download, manifest, sig, version, budget, report, next, background](const QByteArray&) {
+                budget->fail = report;
+                const auto m = ikv::updates::verify_manifest(fs(manifest), fs(sig), fs(trustPem(trust->text())));
+                if (QString::fromStdString(m.channel) != updateChannel() || m.platform != ikv::updates::platform) { next(); return; }
+                if (QString::fromStdString(m.version) != version) throw std::runtime_error("İmzalı manifest sürümü (" + m.version + ") sürüm etiketiyle uyuşmuyor");
+                QJsonArray assets;
+                for (const QString name : {QString(manifestAsset), QString(signatureAsset), QString::fromStdString(m.package)})
+                    assets.append(QJsonObject{{"name", name}, {"browser_download_url", download + name}});
+                offerRelease(QJsonObject{{"tag_name", "v" + version}, {"assets", assets}}, version, background);
+            }, 0, budget);
+        }, 0, budget);
+    }
+    // The newest release of the channel (API or feed): install it when newer than the running/installed release.
+    void offerRelease(const QJsonObject& newest, const QString& newestVersion, bool background) {
             if (newestVersion.isEmpty()) throw std::runtime_error("Seçili kanalda (" + updateChannel().toStdString() + ") sürüm bulunamadı");
             // --server updates the install root's services, which run its current release, not this launcher binary.
             std::string baseline = ikv::release::version;
@@ -752,7 +830,6 @@ class Launcher final : public QWidget {
                 return;
             }
             installUpdate(background);
-        }, 0, budget);
     }
     // Download the offered release's signed manifest, signature and package, verify, install through ikv-updater into
     // the install root (assets/settings untouched), then restart into it, or once the game has closed.

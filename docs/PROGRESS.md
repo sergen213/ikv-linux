@@ -233,6 +233,12 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-22 0.16.4: updates survive the GitHub API rate limit
+
+- **Bug:** a Windows launcher reported 403 when updating. The unauthenticated GitHub Releases API allows 60 requests per hour per IP address, shared by every computer on the network; once spent (here `x-ratelimit-remaining: 0`) it answers 403, and the launcher showed only `Sunucu isteği reddetti (403)`.
+- **Fix (`src/launcher_main.cpp` `checkFeed`/`feedCandidate`/`offerRelease`):** on 403/429 from the GitHub API the check falls back to `releases.atom` and the signed manifests under `releases/download/vX.Y.Z/` (neither counts against the quota); the selected release installs through the same verified path. GitHub's error `message` is shown with the HTTP status.
+- **Verified:** with this network's API quota spent, `ikv-launcher --update-once` logged the fallback and installed v0.16.3 from the feed into a scratch install root. Launchers before 0.16.4 still need the API once (after the hourly reset) to reach this release.
+
 ## 2026-11-22 0.16.3: enhanced raster shadows reach the view distance
 
 User report: Vulkan with enhanced appearance and RT off drew shadows wrongly with a very short shadow distance (OpenGL the same). Shadows popped in near the camera, had wrong shapes, and characters away from the camera cast none. Captures before/after (Sultanahmet courtyard, 7:00 low Sun, clear-weather override; Vulkan and GL enhanced, RT off): `analysis/shadows-original/{before,after}/`.
