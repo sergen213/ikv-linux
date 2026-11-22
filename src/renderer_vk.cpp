@@ -51,8 +51,8 @@ struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HAN
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
 // NONCANONICAL wave 28: ground_mark_info/bounds/marks = frame.glsl groundMark* (renderer.hpp GroundMarkUniforms).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;std::array<float,4> ocean_shore,ocean_bed;};
-static_assert(sizeof(Frame)==1680 && offsetof(Frame,ocean_shore)==1648 && offsetof(Frame,ocean_bed)==1664 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;std::array<float,4> ocean_shore,ocean_bed;std::array<Matrix4,kShadowCascades> shadow_cascades;};
+static_assert(sizeof(Frame)==1936 && offsetof(Frame,shadow_cascades)==1680 && kShadowCascades==4 && offsetof(Frame,ocean_shore)==1648 && offsetof(Frame,ocean_bed)==1664 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
               offsetof(Frame,ground_mark_info)==592 && offsetof(Frame,ground_marks)==624 && kMaxGroundMarks==64);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 // pbr: NONCANONICAL wave 29 (pbr.glsl draw.pbr; w < 0 = no pack material). Every Draw{} defaults to no pack.
@@ -1389,7 +1389,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      water_color_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
      water_ready_=false;
-     shadow_=image(4096,2048,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
+     shadow_=image(4096,4096,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
      shadow_ready_=false;
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1430,7 +1430,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          after_views.push_back(depth_.view);
          after_fb_[i]=framebuffer(after_pass_,after_views,render_extent_);
      }
-     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,2048});
+     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,4096});
      std::array post_views{output_.view};post_fb_=framebuffer(post_pass_,post_views,extent_);
      const char* scene_shader=denoise_enabled_?"scene_rt_guided.frag":rt_enabled_?"scene_rt.frag":"scene.frag";
      opaque_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false);
@@ -2443,11 +2443,12 @@ void set_particles(const ParticleFrame& frame)override {
      }
      // A scene not drawn last frame has no previous view: no motion (previous = this frame, its own jitter).
      f.jitter[2]=continued?previous_jitter_[0]:f.jitter[0];f.jitter[3]=continued?previous_jitter_[1]:f.jitter[1];
-     const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance);
+     const auto shadow_cascades=shadow_light_cascades(options_.camera,enhanced_sun(scene.lighting),options_.view_distance,
+         float(extent_.width)/float(std::max(extent_.height,1u)));
      // shadow_params.y: NONCANONICAL wave 28 sparse far indirect start depth (lighting.glsl `indirect`; guided RT only).
-     f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];
+     f.light=shadow_cascades.light[0];f.far_light=shadow_cascades.light[1];f.shadow_cascades=shadow_cascades.light;
      // shadow_params.z/w: NONCANONICAL wave 29 sparse foliage indirect / sparse glossy reflection (1: on).
-     f.shadow_params={shadow_cascades.split,denoise_enabled_?sparse_indirect_depth_:0.f,denoise_enabled_&&sparse_foliage_?1.f:0.f,
+     f.shadow_params={shadow_cascades.split.back(),denoise_enabled_?sparse_indirect_depth_:0.f,denoise_enabled_&&sparse_foliage_?1.f:0.f,
          denoise_enabled_&&sparse_reflection_?1.f:0.f};
      f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
@@ -2483,17 +2484,18 @@ void set_particles(const ParticleFrame& frame)override {
      // Screen-space history ping-pong: alternates every frame (frame 0 ignores history).
      const unsigned current=total_frames_&1u;
      // Replacement shadows share color visibility; this is not evidence of original source shadow behavior.
-     // Enhanced raster: the near and far cascade in two atlas columns.
+     // Enhanced raster: kShadowCascades 2048^2 cascades in a 2x2 atlas (cascade i at column i&1, row i>>1).
      // Only enhanced raster lighting samples the shadow map (lighting.glsl shadowVisibility); original appearance and
      // the RT shaders never read it: the pass then only clears it, once after create_targets (wave 27 perf).
      const bool shadows_sampled=!options_.original_appearance&&!rt_enabled_;
      if(shadows_sampled||!shadow_ready_) {
      shadow_ready_=true;
-     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,2048},true);
-     if(shadows_sampled)for(unsigned index=0;index<2;++index) {
-         VkViewport v{float(index*2048),0,2048,2048,0,1};VkRect2D r{{std::int32_t(index*2048),0},{2048,2048}};
+     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,4096},true);
+     if(shadows_sampled)for(unsigned index=0;index<kShadowCascades;++index) {
+         const auto x=std::int32_t((index&1u)*2048),y=std::int32_t((index>>1)*2048);
+         VkViewport v{float(x),float(y),2048,2048,0,1};VkRect2D r{{x,y},{2048,2048}};
          vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
-         const Matrix4& light=index?f.far_light:f.light;
+         const Matrix4& light=f.shadow_cascades[index];
          const auto casters=shadow_caster_planes(light);
          draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light,false,index==0);
      }

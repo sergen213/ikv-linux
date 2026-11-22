@@ -171,28 +171,37 @@ int main() {
     };
     assert(ikv::original_blob_shadows_enabled(true));
     assert(!ikv::original_blob_shadows_enabled(false));
+    // Frustum-slice cascades: slices end at increasing eye depths up to the view distance (800 when unlimited), map radii
+    // grow, the first covers the player, and every slice's near/far corners lie inside its map with depth in [0,1].
     const auto unlimited=ikv::shadow_light_cascades(shadow_camera,shadow_sun,0);
-    assert(unlimited.light[0]==ikv::shadow_light_matrix(shadow_camera,shadow_sun));
-    assert(std::abs(unlimited.split-44)<1e-6f);
-    assert(std::abs(shadow_radius(unlimited.light[0])-44)<1e-4f);
-    assert(std::abs(shadow_radius(unlimited.light[1])-600)<1e-4f);
+    assert(std::abs(unlimited.split[0]-54)<1e-4f && std::abs(unlimited.split.back()-800)<1e-3f);
     const auto small=ikv::shadow_light_cascades(shadow_camera,shadow_sun,10);
-    assert(std::abs(shadow_radius(small.light[1])-176)<1e-4f);
-    const auto configured=ikv::shadow_light_cascades(shadow_camera,shadow_sun,2000);
-    assert(std::abs(shadow_radius(configured.light[1])-2000)<1e-2f);
-    for(const auto& cascades:{unlimited,small,configured}) {
-        for(const auto& light:cascades.light) {
+    assert(std::abs(small.split.back()-432)<1e-3f); // at least 8x the first slice
+    const auto configured=ikv::shadow_light_cascades(shadow_camera,shadow_sun,2000,2);
+    assert(std::abs(configured.split.back()-2000)<1e-2f);
+    const auto view=ikv::camera_basis(shadow_camera);
+    for(const auto* cascades:{&unlimited,&small,&configured}) {
+        float begin=0;
+        const float aspect=cascades==&configured?2.f:16.f/9;
+        const float tv=std::tan(shadow_camera.fov*3.14159265f/360),th=tv*aspect;
+        for(unsigned i=0;i<ikv::kShadowCascades;++i) {
+            const auto& light=cascades->light[i];
             for(float value:light) assert(std::isfinite(value));
             const float radius=shadow_radius(light);
-            assert(std::abs(light[12]*1024-std::round(light[12]*1024))<1e-3f);
-            assert(std::abs(light[13]*1024-std::round(light[13]*1024))<1e-3f);
-            for(float direction:{-1.f,1.f}) {
-                std::array<float,3> edge{};
-                for(unsigned i=0;i<3;++i) edge[i]=shadow_camera.target[i]+shadow_sun[i]*radius*direction;
-                const auto projected=project(light,edge);
-                assert(projected[2]>=0&&projected[2]<=1);
+            assert(std::abs(radius-cascades->radius[i])<radius*1e-4f);
+            if(i){assert(cascades->split[i]>cascades->split[i-1]&&radius>=cascades->radius[i-1]);}
+            const float texel=2*radius/ikv::kShadowCascadeSize;
+            for(float t:{light[12]*radius,-light[13]*radius}) assert(std::abs(t/texel-std::round(t/texel))<2e-2f); // texel-snapped
+            for(float depth:{begin,cascades->split[i]})for(float sx:{-1.f,1.f})for(float sy:{-1.f,1.f}) {
+                std::array<float,3> corner{};
+                for(unsigned a=0;a<3;++a) corner[a]=view.eye[a]+view.forward[a]*depth+view.right[a]*sx*th*depth+view.up[a]*sy*tv*depth;
+                const auto projected=project(light,corner);
+                assert(std::abs(projected[0])<=1.001f&&std::abs(projected[1])<=1.001f&&projected[2]>=0&&projected[2]<=1);
             }
+            begin=cascades->split[i];
         }
+        const auto target=project(cascades->light[0],shadow_camera.target);
+        assert(std::abs(target[0])<.9f&&std::abs(target[1])<.9f);
     }
     { // NONCANONICAL wave 27 weather inputs
         ikv::SceneLighting light;

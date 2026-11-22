@@ -67,8 +67,6 @@ in vec3 t_position[];in vec3 t_normal[];in vec2 t_uv[];in vec4 t_ambient[];in ve
 uniform mat4 view_projection;
 uniform mat4 object_matrix;
 uniform mat3 normal_matrix;
-uniform mat4 light_view_projection;
-uniform mat4 far_light_view_projection;
 uniform vec3 sun_direction;
 uniform vec3 camera_position;
 uniform bool source_lighting;
@@ -82,8 +80,6 @@ uniform vec2 tess_view;
 uniform bool has_fade_map;uniform bool has_normal_map;uniform bool has_environment_map;
 uniform sampler2D height_map;
 out vec3 fragment_position;
-out vec4 shadow_position;
-out vec4 far_shadow_position;
 out vec2 texcoord;
 out vec3 world_normal;
 out vec3 world_tangent;
@@ -116,12 +112,7 @@ void main(){
         }
     }
     gl_Position=view_projection*world_position;
-    fragment_position=world_position.xyz;shadow_position=light_view_projection*world_position;far_shadow_position=far_light_view_projection*world_position;
-    vec3 n=normal_matrix*normal;float nl=length(n);
-    float texel=2.0/(2048.0*max(length(vec3(light_view_projection[0][0],light_view_projection[1][0],light_view_projection[2][0])),1e-6));
-    float far_texel=2.0/(2048.0*max(length(vec3(far_light_view_projection[0][0],far_light_view_projection[1][0],far_light_view_projection[2][0])),1e-6));
-    if(nl>0.00001){n/=nl;shadow_position+=light_view_projection*vec4(n*texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);
-        far_shadow_position+=far_light_view_projection*vec4(n*far_texel*2.0*(1.0-max(dot(n,normalize(sun_direction)),0.0)),0.0);}
+    fragment_position=world_position.xyz;
     texcoord=uv;world_normal=normal_matrix*normal;world_tangent=vec3(0.0); // the copy's tangent holds the smoothed normal
     lightmap_uv=LERP(t_lightmap);fade_blend=LERP(t_color).a;environment_uv=vec2(0.0);
     source_tangent_sun=vec3(0.0);source_tangent_eye=vec3(0.0);

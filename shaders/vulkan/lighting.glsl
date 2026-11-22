@@ -41,10 +41,39 @@ layout(set=0,binding=9) uniform sampler2D originalLightmap;
 const float PI=3.14159265359;
 vec3 sky(vec3 direction) { return mix(vec3(.055,.07,.09),vec3(.32,.44,.62),clamp(direction.y*.5+.5,0,1)); }
 vec3 environment(vec3 direction) { if(draw.flags.y<.5)return sky(direction);return textureLod(environmentMap,vec2(atan(direction.z,direction.x)/(2*PI)+.5,acos(clamp(direction.y,-1,1))/PI),0).rgb; }
-// Shadow atlas (4096x2048): near, then far cascade, in two columns.
+// Shadow atlas (4096x4096): renderer.hpp shadow_light_cascades' kShadowCascades (4) 2048^2 maps fitted to view-depth
+// slices, cascade i at column i&1, row i>>1. Receivers take the first map containing them, blended across a band at its
+// edge into the next (the last fades to lit), so there is no visible split and no eye-distance cut-off.
 layout(location=16) in vec4 farShadowPosition;
-float shadowPcf(vec4 clip,float offset,vec3 n){vec3 p=clip.xyz/clip.w;vec2 uv=p.xy*.5+.5;if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||p.z<0||p.z>1)return 1;uv.x=uv.x*.5+offset;float bias=max(.0003,.002*(1-dot(n,normalize(frame.sun.xyz))));vec2 t=1./vec2(textureSize(shadowMap,0));vec2 lo=vec2(offset+t.x*.5,0),hi=vec2(offset+.5-t.x*.5,1);float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(uv+vec2(x,y)*t,lo,hi),p.z-bias));return visible/9;}
-float shadowVisibility(vec3 n){vec3 p=shadowPosition.xyz/shadowPosition.w;vec2 uv=p.xy*.5+.5;bool nearValid=distance(frame.eye.xyz,worldPosition)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&p.z>=0&&p.z<=1;if(nearValid)return shadowPcf(shadowPosition,0,n);return shadowPcf(farShadowPosition,.5,n);}
+// Receiver bias in world units of the cascade's own texel: a normal offset (1.5 texels at grazing light) plus a slope-scaled
+// depth bias covering the 3x3 PCF footprint. A fixed NDC-depth fraction scaled with each map's depth range instead and
+// removed actor shadows outside the first map.
+float shadowCascadeSample(int i,vec3 p,vec3 n){
+    mat4 m=frame.shadowCascades[i];
+    float texel=2./(2048.*max(length(vec3(m[0][0],m[1][0],m[2][0])),1e-6));
+    float depthScale=length(vec3(m[0][2],m[1][2],m[2][2]));
+    float cosT=clamp(dot(n,normalize(frame.sun.xyz)),0.,1.),sinT=sqrt(1.-cosT*cosT),tanT=min(sinT/max(cosT,.05),4.);
+    vec4 c=m*vec4(p+n*(texel*1.5*sinT),1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
+    if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||q.z>1.)return 1.;
+    float z=max(q.z,0.)-depthScale*texel*(.6+.9*tanT);
+    vec2 tile=vec2(float(i&1),float(i>>1))*.5,t=1./vec2(textureSize(shadowMap,0)),lo=tile+t*.5,hi=tile+.5-t*.5,a=tile+uv*.5;
+    float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(a+vec2(x,y)*t,lo,hi),z));
+    return visible/9.;
+}
+float shadowAt(vec3 p,vec3 n){
+    const float band=.08;
+    for(int i=0;i<4;i++){
+        vec4 c=frame.shadowCascades[i]*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
+        float edge=min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+        if(edge<0.||q.z>1.)continue;
+        float v=shadowCascadeSample(i,p,n);
+        if(edge<band)v=mix(i<3?shadowCascadeSample(i+1,p,n):1.,v,edge/band);
+        return v;
+    }
+    return 1.;
+}
+// n: shading normal; the bias follows the interpolated geometric normal when there is one.
+float shadowVisibility(vec3 n){return shadowAt(worldPosition,dot(worldNormal,worldNormal)>.25?normalize(worldNormal):n);}
 // NONCANONICAL parallax occlusion (enhanced): static zone materials get a relief texture derived from their diffuse
 // (scene.cpp derive_parallax_heights: r height, 1 = surface; g/b central differences + .5); others bind the 1x1 white.
 // Zone meshes carry no usable tangents: the frame comes from screen derivatives (exact per planar triangle, linear UVs).
@@ -262,9 +291,7 @@ float waterBedSun(vec3 p){
 #ifdef IKV_RT
     return rtSunVisibilityMasked(p+vec3(0,.6,0),vec3(0,1,0),normalize(frame.sun.xyz),3u,0u); // ocean (mask 4) never shadows
 #else
-    vec4 c=frame.lightVP*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
-    bool nearValid=distance(frame.eye.xyz,p)<=frame.shadowParams.x&&all(greaterThanEqual(uv,vec2(0)))&&all(lessThanEqual(uv,vec2(1)))&&q.z>=0&&q.z<=1;
-    return nearValid?shadowPcf(c,0,vec3(0,1,0)):shadowPcf(frame.farLightVP*vec4(p,1),.5,vec3(0,1,0));
+    return shadowAt(p,vec3(0,1,0));
 #endif
 }
 bool waterRayReflection(vec3 origin,vec3 direction,inout vec3 colour){

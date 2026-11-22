@@ -39,6 +39,9 @@ layout(set=0,binding=0,std140) uniform Frame {
     // 1/(cell x depth); lighting.glsl waterShoreField), zero without one; oceanBed.x the water level.
     vec4 oceanShore;
     vec4 oceanBed;
+    // Enhanced raster sun shadow cascades (renderer.hpp shadow_light_cascades; lighting.glsl shadowAt). lightVP/farLightVP
+    // above repeat cascades 0/1.
+    mat4 shadowCascades[4];
 } frame;
 #include "weather.glsl"
 // Original fullscreen gamma ramp 0x467030(1,1,1.2) -> SetGammaRamp @0x46711f: ramp[i] = pow(i/255,1/1.2)*1.005, clamped.

@@ -399,11 +399,60 @@ inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float,
 inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float, 3>& sun) {
     return shadow_light_matrix(camera,sun,std::max(30.f,camera.distance*2));
 }
-struct ShadowCascades { std::array<Matrix4, 2> light; float split; };
-inline ShadowCascades shadow_light_cascades(const Camera& camera, const std::array<float, 3>& sun, float view_distance) {
-    const float near = std::max(30.f, camera.distance*2);
-    const float far = std::max(near*4, view_distance>0?view_distance:600.f);
-    return {{shadow_light_matrix(camera,sun,near),shadow_light_matrix(camera,sun,far)},near};
+// Enhanced raster sun shadows: kShadowCascades orthographic 2048^2 maps fitted to consecutive slices of the view frustum
+// (eye-depth [split[i-1], split[i]]). Each map covers the slice's bounding sphere, so its texel size stays constant while
+// the camera turns (with texel-snapped centres: no shimmer); the sunward depth margin keeps tall casters in range.
+// Receivers pick the first map containing them (lighting.glsl / renderer_gl.cpp shadow_visibility).
+inline constexpr unsigned kShadowCascades = 4;
+inline constexpr int kShadowCascadeSize = 2048;
+inline Matrix4 shadow_cascade_matrix(const std::array<float, 3>& centre, const std::array<float, 3>& sun, float radius) {
+    Camera light;
+    light.target = centre;
+    light.yaw = std::atan2(sun[0], sun[2]); light.pitch = std::atan2(sun[1], std::sqrt(sun[0]*sun[0]+sun[2]*sun[2]));
+    light.pitch = std::clamp(light.pitch, -1.54f, 1.54f);
+    // Sunward margin: casters up to ~2r+150 units toward the sun stay in range (beyond it they clamp to depth 0, both
+    // backends enable depth clamp) and the receiving sphere ends r past the centre.
+    light.distance = radius*2+150; light.near_plane = .1f; light.far_plane = light.distance+radius+50;
+    const auto basis = camera_basis(light);
+    auto dot = [](const auto& a, const auto& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
+    Matrix4 view{basis.right[0], basis.up[0], -basis.forward[0], 0, basis.right[1], basis.up[1], -basis.forward[1], 0,
+        basis.right[2], basis.up[2], -basis.forward[2], 0, -dot(basis.right,basis.eye), -dot(basis.up,basis.eye), dot(basis.forward,basis.eye), 1};
+    const float texel = 2*radius/kShadowCascadeSize;
+    for (std::size_t i : {12u, 13u}) view[i] = std::round(view[i]/texel)*texel;
+    Matrix4 projection{}; projection[0] = 1/radius; projection[5] = -1/radius;
+    projection[10] = 1/(light.near_plane-light.far_plane);
+    projection[14] = light.near_plane/(light.near_plane-light.far_plane); projection[15] = 1;
+    return multiply_matrix(projection, view);
+}
+struct ShadowCascades {
+    std::array<Matrix4, kShadowCascades> light;
+    std::array<float, kShadowCascades> split; // far eye depth of each slice
+    std::array<float, kShadowCascades> radius; // world radius each map covers (texel = 2*radius/kShadowCascadeSize)
+};
+// aspect: render width/height. view_distance: RendererOptions::view_distance (0 = unlimited: shadows to 800 units).
+inline ShadowCascades shadow_light_cascades(const Camera& camera, const std::array<float, 3>& sun, float view_distance, float aspect = 16.f/9) {
+    const auto basis = camera_basis(camera);
+    const float tv = std::tan(std::clamp(camera.fov, 1.f, 175.f)*3.14159265f/360), th = tv*(std::isfinite(aspect)&&aspect>0?aspect:16.f/9);
+    const float k2 = tv*tv+th*th, k = std::sqrt(k2);
+    // First slice: the player (camera.target, camera.distance ahead) plus as much again around them.
+    const float first = std::max(40.f, camera.distance*2+10);
+    const float far = std::max(first*8, view_distance>0?view_distance:800.f);
+    ShadowCascades out{};
+    float begin = 0;
+    for (unsigned i = 0; i < kShadowCascades; ++i) {
+        const float end = i+1==kShadowCascades ? far : first*std::pow(far/first, float(i)/float(kShadowCascades-1));
+        // Smallest sphere through the slice's near and far rectangles (centre on the view axis, clamped to the far plane).
+        const float c = std::min(end, (begin+end)*(1+k2)*.5f);
+        const float r = std::max(std::hypot(end-c, end*k), std::hypot(c-begin, begin*k));
+        // Quantised radius: zoom changes step the map scale instead of re-rasterising every frame.
+        const float radius = std::exp2(std::ceil(std::log2(std::max(r, 1.f))*8)/8);
+        std::array<float, 3> centre{};
+        for (unsigned a = 0; a < 3; ++a) centre[a] = basis.eye[a]+basis.forward[a]*c;
+        out.light[i] = shadow_cascade_matrix(centre, sun, radius);
+        out.split[i] = end; out.radius[i] = radius;
+        begin = end;
+    }
+    return out;
 }
 // Conservative culling sphere {centre xyz, radius} in mesh space: AABB centre and half-diagonal.
 // Non-finite vertices give an infinite radius, which is never culled.

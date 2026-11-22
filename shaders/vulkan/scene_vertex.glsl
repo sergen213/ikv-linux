@@ -54,14 +54,7 @@ void sceneVertex(vec3 position,vec3 normal,vec2 uv,vec4 ambient,vec3 tangent,vec
     if(ocean)vertexAmbient=vec4(frame.ambient.rgb,1);
     shadowPosition=frame.lightVP*world;
     farShadowPosition=frame.farLightVP*world;
-    // Normal-offset receiver (renderer_gl.cpp scene_vertex): up to 2 shadow-map texels out along the normal as the surface
-    // turns from the sun, so curved actor skin stops self-shadowing against its own neighbouring texels.
-    if(frame.params.x>.5&&dot(worldNormal,worldNormal)>.5) { // false for degenerate (NaN) source normals
-        float texel=2./(2048.*max(length(vec3(frame.lightVP[0][0],frame.lightVP[1][0],frame.lightVP[2][0])),1e-6));
-        float farTexel=2./(2048.*max(length(vec3(frame.farLightVP[0][0],frame.farLightVP[1][0],frame.farLightVP[2][0])),1e-6));
-        shadowPosition+=frame.lightVP*vec4(worldNormal*texel*2.*(1.-max(dot(worldNormal,normalize(frame.sun.xyz)),0.)),0);
-        farShadowPosition+=frame.farLightVP*vec4(worldNormal*farTexel*2.*(1.-max(dot(worldNormal,normalize(frame.sun.xyz)),0.)),0);
-    }
+    // Unused by lighting.glsl (it projects worldPosition into every cascade); kept for the shared interface.
     gl_Position=frame.vp*world;
     motionCurrent=vec4(gl_Position.xy-frame.jitter.xy*gl_Position.w,gl_Position.zw);
     // Ocean displacement is evaluated at this frame's time for both: only the transform moves the water.
