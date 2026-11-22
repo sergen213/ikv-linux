@@ -227,6 +227,8 @@ uniform sampler2DShadow shadow_far_map; // cascade 1 (unit 9); cascades 2/3: sha
 uniform sampler2DShadow shadow_map_2;
 uniform sampler2DShadow shadow_map_3;
 uniform mat4 shadow_cascades[4]; // renderer.hpp shadow_light_cascades (Vulkan frame.shadowCascades)
+uniform sampler2DShadow actor_shadow_map; // unit 19, 4096^2, actors only (renderer.hpp shadow_actor_fit)
+uniform mat4 actor_shadow;uniform vec4 actor_shadow_params; // Vulkan frame.actorShadow/actorShadowParams
 uniform vec3 camera_position;
 in vec3 fragment_position;
 in float sky_scatter;
@@ -267,29 +269,45 @@ float shadow_tap(int i,vec3 c){
     if(i==0)return texture(shadow_map,c);if(i==1)return texture(shadow_far_map,c);
     if(i==2)return texture(shadow_map_2,c);return texture(shadow_map_3,c);
 }
-float shadow_cascade_sample(int i,vec3 p,vec3 n,vec3 l){
-    mat4 m=shadow_cascades[i];
-    float texel=2.0/(2048.0*max(length(vec3(m[0][0],m[1][0],m[2][0])),1e-6));
+// Vulkan shadowMapSample: bias scales the normal offset and the depth bias (cascades 1, actor map .3).
+vec3 shadow_coord(mat4 m,float size,vec3 p,vec3 n,vec3 l,float bias,out float texel){
+    texel=2.0/(size*max(length(vec3(m[0][0],m[1][0],m[2][0])),1e-6));
     float depth_scale=length(vec3(m[0][2],m[1][2],m[2][2]));
     float cos_t=clamp(dot(n,l),0.0,1.0),sin_t=sqrt(1.0-cos_t*cos_t),tan_t=min(sin_t/max(cos_t,0.05),4.0);
-    vec4 c=m*vec4(p+n*(texel*1.5*sin_t),1.0);vec3 q=c.xyz/c.w;vec2 uv=q.xy*0.5+0.5;
-    if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||q.z>1.0)return 1.0;
-    float z=max(q.z,0.0)-depth_scale*texel*(0.6+0.9*tan_t);
+    vec4 c=m*vec4(p+n*(texel*1.5*sin_t*bias),1.0);vec3 q=c.xyz/c.w;
+    return vec3(q.xy*0.5+0.5,max(q.z,0.0)-depth_scale*texel*(0.6+0.9*tan_t)*bias+(q.z>1.0?2.0:0.0));
+}
+float shadow_cascade_sample(int i,vec3 p,vec3 n,vec3 l){
+    float texel;vec3 c=shadow_coord(shadow_cascades[i],2048.0,p,n,l,1.0,texel);vec2 uv=c.xy;float z=c.z;
+    if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||z>1.5)return 1.0;
     float t=1.0/2048.0,visible=0.0;
     for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=shadow_tap(i,vec3(clamp(uv+vec2(x,y)*t,vec2(0.5*t),vec2(1.0-0.5*t)),z));
     return visible/9.0;
 }
+// Vulkan actorShadowAt: actors only, so it darkens on top of the cascades (min), fading out at its edge.
+float actor_shadow_at(vec3 p,vec3 n,vec3 l){
+    if(actor_shadow_params.x<0.5)return 1.0;
+    vec4 e=actor_shadow*vec4(p,1.0);vec3 q=e.xyz/e.w;vec2 euv=q.xy*0.5+0.5;
+    float edge=min(min(euv.x,euv.y),min(1.0-euv.x,1.0-euv.y));
+    if(edge<=0.0||q.z>1.0)return 1.0;
+    float texel;vec3 c=shadow_coord(actor_shadow,4096.0,p,n,l,0.3,texel);vec2 uv=c.xy;float z=c.z;
+    if(any(lessThan(uv,vec2(0.0)))||any(greaterThan(uv,vec2(1.0)))||z>1.5)return 1.0;
+    float t=1.0/4096.0,visible=0.0;
+    for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(actor_shadow_map,vec3(clamp(uv+vec2(x,y)*t,vec2(0.5*t),vec2(1.0-0.5*t)),z));
+    return mix(1.0,visible/9.0,clamp(edge/0.05,0.0,1.0));
+}
 float shadow_at(vec3 p,vec3 n,vec3 l){
     const float band=0.08;
+    float actor=actor_shadow_at(p,n,l);
     for(int i=0;i<4;i++){
         vec4 c=shadow_cascades[i]*vec4(p,1.0);vec3 q=c.xyz/c.w;vec2 uv=q.xy*0.5+0.5;
         float edge=min(min(uv.x,uv.y),min(1.0-uv.x,1.0-uv.y));
         if(edge<0.0||q.z>1.0)continue;
         float v=shadow_cascade_sample(i,p,n,l);
         if(edge<band)v=mix(i<3?shadow_cascade_sample(i+1,p,n,l):1.0,v,edge/band);
-        return v;
+        return min(v,actor);
     }
-    return 1.0;
+    return actor;
 }
 float shadow_visibility(vec3 n,vec3 l) {
     return shadow_at(fragment_position,dot(world_normal,world_normal)>0.25?normalize(world_normal):n,normalize(l));
@@ -798,6 +816,10 @@ class GlRenderer final : public Renderer {
     GLuint shadow_program_=0,shadow_textures_[kShadowCascades]{},shadow_framebuffers_[kShadowCascades]{};
     std::array<Matrix4,kShadowCascades> shadow_lights_{};
     GLint shadow_cascades_location_=-1;
+    // NONCANONICAL actor shadow map (Vulkan atlas right half): 4096^2, actors only, fitted by shadow_actor_fit.
+    GLuint actor_texture_=0,actor_framebuffer_=0;GLint actor_shadow_location_=-1,actor_params_location_=-1;
+    Matrix4 actor_light_{};std::array<float,4> actor_params_{};
+    std::vector<const Draw*> actor_casters_,actor_excluded_; // actor map casters; actors cast only there (sorted)
     GLint shadow_light_location_=-1,shadow_object_location_=-1,shadow_color_location_=-1,shadow_cutoff_location_=-1;
     GLint shadow_texture_location_=-1,shadow_fade_location_=-1,shadow_opaque_location_=-1;
     GLint glow_mode_location_=-1,glow_step_location_=-1;
@@ -860,7 +882,7 @@ class GlRenderer final : public Renderer {
     UniformVec4 depth_sway_;
     GLint normal_matrix_location_=-1,grayscale_location_=-1,contour_grayscale_location_=-1;
     GLint particle_grayscale_location_=-1,particle_fog_enabled_location_=-1,particle_fog_start_location_=-1,particle_fog_end_location_=-1;
-    std::array<GLuint,19> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
+    std::array<GLuint,20> bound_textures_{};GLenum active_unit_=0;GLuint bound_vao_=0;int cull_=-1;
     // Shadow casters without an alpha cutoff draw with a depth-only program. Static casters (no entity, skin or sway) of a
     // cascade are cached in shadow_static_*: while the light matrix and the static caster list are unchanged, the cached
     // depth is restored only where last frame's dynamic casters drew, then the dynamic casters are drawn again (the depth
@@ -966,6 +988,8 @@ public:
             glUniform1i_(uniform(program_,"shadow_map_2"),17);glUniform1i_(uniform(program_,"shadow_map_3"),18);
             water_shore_grid_location_=uniform(program_,"water_shore_grid");water_shore_level_location_=uniform(program_,"water_shore_level");
             shadow_cascades_location_=uniform(program_,"shadow_cascades");
+            glUniform1i_(uniform(program_,"actor_shadow_map"),19);
+            actor_shadow_location_=uniform(program_,"actor_shadow");actor_params_location_=uniform(program_,"actor_shadow_params");
             normal_matrix_location_=uniform(program_,"normal_matrix");grayscale_location_=uniform(program_,"grayscale");
             draw_uniforms_={{sky_location_},{ocean_location_},{fog_enabled_location_},{normal_location_},{environment_location_},{lightmap_location_},
                 {fade_location_},{height_location_},{texture_location_},{cutoff_location_},{scroll_location_},{weather_sway_location_},{color_location_},
@@ -1034,6 +1058,16 @@ public:
                     glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
                     if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL shadow framebuffer incomplete");
                 }
+                glGenTextures(1,&actor_texture_);glGenFramebuffers_(1,&actor_framebuffer_);
+                glBindTexture(GL_TEXTURE_2D,actor_texture_);
+                glTexImage2D(GL_TEXTURE_2D,0,GL_DEPTH_COMPONENT24,kActorShadowSize,kActorShadowSize,0,GL_DEPTH_COMPONENT,GL_UNSIGNED_INT,nullptr);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_COMPARE_MODE,GL_COMPARE_REF_TO_TEXTURE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_COMPARE_FUNC,GL_LEQUAL);
+                glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+                glBindFramebuffer_(GL_FRAMEBUFFER,actor_framebuffer_);
+                glFramebufferTexture2D_(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_2D,actor_texture_,0);
+                glDrawBuffer(GL_NONE);glReadBuffer(GL_NONE);
+                if(glCheckFramebufferStatus_(GL_FRAMEBUFFER)!=GL_FRAMEBUFFER_COMPLETE) throw std::runtime_error("OpenGL actor shadow framebuffer incomplete");
                 glGenTextures(kShadowCascades,shadow_static_textures_);glGenFramebuffers_(kShadowCascades,shadow_static_framebuffers_);
                 for(unsigned i=0;i<kShadowCascades;++i) {
                     glBindTexture(GL_TEXTURE_2D,shadow_static_textures_[i]);
@@ -1192,7 +1226,9 @@ public:
             time_begin(timed_shadow);
             const auto cascades=shadow_light_cascades(options_.camera,enhanced_sun(light),options_.view_distance,
                 float(width_)/float(std::max(height_,1)));
+            actor_fit(set,scene,enhanced_sun(light));
             for(unsigned i=0;i<kShadowCascades;++i)shadow_pass(int(i),set,scene,view_,cascades.light[i]);
+            actor_pass(set,scene);
             time_end(timed_shadow);
         }
         time_begin(timed_opaque);
@@ -1757,6 +1793,7 @@ private:
         for(const auto* list:{&view.opaque,&view.alpha})for(const auto& draw:*list) {
             const auto mesh=draw.instance->mesh;
             if(scene.materials[draw.material].source_ocean||!sphere_visible(caster_planes,draw.matrix,set.meshes[mesh].bounds))continue;
+            if(std::binary_search(actor_excluded_.begin(),actor_excluded_.end(),&draw))continue;
             if(draw.instance->entity_id!=0||!scene.meshes[mesh].influences.empty()||draw.scroll!=std::array<float,4>{}) {
                 shadow_dynamic_.push_back(&draw);
                 const auto w=world_sphere(draw.matrix,set.meshes[mesh].bounds);
@@ -1838,11 +1875,65 @@ private:
         glUseProgram_(shadow_program_);
         for(const auto* draw:casters) if(scene.materials[draw->material].alpha_cutoff>0) draw_shadow(set,scene,*draw);
     }
+    static bool actor_draw(const Scene& scene,const Draw& draw) {
+        return !draw.instance->ocean&&!scene.materials[draw.material].source_ocean&&
+            (draw.instance->entity_id!=0||!scene.meshes[draw.instance->mesh].influences.empty());
+    }
+    // Vulkan render(): the actor map is fitted around the visible actors nearest the camera target (the player); actors
+    // wholly inside it (outside its 5% edge fade) cast only there, so their coarse cascade shadow cannot blur or leak
+    // through the sharp one (hair on the forehead) as the camera zooms out.
+    void actor_fit(const GlSet& set,const Scene& scene,const std::array<float,3>& sun) {
+        actor_casters_.clear();actor_excluded_.clear();actor_params_={};actor_light_={};
+        std::vector<std::pair<float,std::array<float,4>>> near;
+        const auto& t=options_.camera.target;
+        for(const auto* list:{&view_.opaque,&view_.alpha})for(const auto& draw:*list) {
+            if(!actor_draw(scene,draw))continue;
+            actor_casters_.push_back(&draw);
+            if(!draw.visible)continue;
+            const auto s=world_sphere(draw.matrix,set.meshes[draw.instance->mesh].bounds);
+            const float dx=s[0]-t[0],dy=s[1]-t[1],dz=s[2]-t[2],distance=std::sqrt(dx*dx+dy*dy+dz*dz);
+            if(std::isfinite(distance)&&distance<80)near.push_back({distance,s});
+        }
+        std::sort(near.begin(),near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+        std::vector<std::array<float,4>> spheres;for(const auto& n:near)spheres.push_back(n.second);
+        const auto actor=shadow_actor_fit(spheres,sun);
+        if(!actor.enabled)return;
+        actor_light_=actor.light;actor_params_={1.f,actor.radius,0,0};
+        for(const auto* draw:actor_casters_) {
+            const auto s=world_sphere(draw->matrix,set.meshes[draw->instance->mesh].bounds);
+            const auto& m=actor.light;
+            const float x=m[0]*s[0]+m[4]*s[1]+m[8]*s[2]+m[12],y=m[1]*s[0]+m[5]*s[1]+m[9]*s[2]+m[13];
+            const float limit=.9f-s[3]/actor.radius;
+            if(std::isfinite(x)&&std::isfinite(y)&&std::abs(x)<=limit&&std::abs(y)<=limit)actor_excluded_.push_back(draw);
+        }
+        std::sort(actor_excluded_.begin(),actor_excluded_.end());
+    }
+    void actor_pass(const GlSet& set,const Scene& scene) {
+        if(actor_params_[0]<.5f){glUseProgram_(program_);shadow_bind();return;}
+        const auto planes=shadow_caster_planes(actor_light_);
+        std::vector<const Draw*> casters;
+        for(const auto* draw:actor_casters_)
+            if(sphere_visible(planes,draw->matrix,set.meshes[draw->instance->mesh].bounds))casters.push_back(draw);
+        state_reset();
+        glViewport(0,0,kActorShadowSize,kActorShadowSize);
+        glDepthMask(GL_TRUE);glFrontFace(GL_CCW);
+        glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(1.75f,1.25f);glEnable(GL_DEPTH_CLAMP);
+        glUseProgram_(shadow_depth_program_);glUniformMatrix4fv_(depth_light_location_,1,GL_FALSE,actor_light_.data());
+        glUseProgram_(shadow_program_);glUniformMatrix4fv_(shadow_light_location_,1,GL_FALSE,actor_light_.data());
+        glBindFramebuffer_(GL_FRAMEBUFFER,actor_framebuffer_);glClear(GL_DEPTH_BUFFER_BIT);
+        draw_casters(set,scene,casters);
+        glDisable(GL_DEPTH_CLAMP);glDisable(GL_POLYGON_OFFSET_FILL);glFrontFace(GL_CW);
+        glBindFramebuffer_(GL_FRAMEBUFFER,framebuffer_);glViewport(0,0,width_,height_);
+        glUseProgram_(program_);shadow_bind();
+        check("drawing actor shadow map");
+    }
     void shadow_invalidate(){for(auto& cache:shadow_cache_){cache.valid=cache.has_light=false;cache.keys.clear();}}
     void shadow_bind() {
         glUniformMatrix4fv_(shadow_cascades_location_,kShadowCascades,GL_FALSE,shadow_lights_[0].data());
         bind_texture(5,shadow_textures_[0]);bind_texture(9,shadow_textures_[1]);
         bind_texture(17,shadow_textures_[2]);bind_texture(18,shadow_textures_[3]);
+        glUniformMatrix4fv_(actor_shadow_location_,1,GL_FALSE,actor_light_.data());
+        glUniform4fv_(actor_params_location_,1,actor_params_.data());bind_texture(19,actor_texture_);
     }
     // Cached state helpers (see draw_uniforms_).
     void set1i(UniformInt& u,int v){if(u.value!=v){u.value=v;glUniform1i_(u.location,v);}}
@@ -2105,6 +2196,8 @@ private:
             if(shadow_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(kShadowCascades,shadow_framebuffers_);
             if(shadow_static_textures_[0])glDeleteTextures(kShadowCascades,shadow_static_textures_);
             if(shadow_static_framebuffers_[0] && glDeleteFramebuffers_)glDeleteFramebuffers_(kShadowCascades,shadow_static_framebuffers_);
+            if(actor_texture_)glDeleteTextures(1,&actor_texture_);
+            if(actor_framebuffer_ && glDeleteFramebuffers_)glDeleteFramebuffers_(1,&actor_framebuffer_);
             if(timing_queries_[0][0] && glDeleteQueries_)glDeleteQueries_(timing_ring*timed_passes,&timing_queries_[0][0]);
         }
         SDL_GL_DestroyContext(context_);context_=nullptr;

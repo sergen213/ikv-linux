@@ -405,7 +405,7 @@ inline Matrix4 shadow_light_matrix(const Camera& camera, const std::array<float,
 // Receivers pick the first map containing them (lighting.glsl / renderer_gl.cpp shadow_visibility).
 inline constexpr unsigned kShadowCascades = 4;
 inline constexpr int kShadowCascadeSize = 2048;
-inline Matrix4 shadow_cascade_matrix(const std::array<float, 3>& centre, const std::array<float, 3>& sun, float radius) {
+inline Matrix4 shadow_cascade_matrix(const std::array<float, 3>& centre, const std::array<float, 3>& sun, float radius, int size = kShadowCascadeSize) {
     Camera light;
     light.target = centre;
     light.yaw = std::atan2(sun[0], sun[2]); light.pitch = std::atan2(sun[1], std::sqrt(sun[0]*sun[0]+sun[2]*sun[2]));
@@ -417,7 +417,7 @@ inline Matrix4 shadow_cascade_matrix(const std::array<float, 3>& centre, const s
     auto dot = [](const auto& a, const auto& b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; };
     Matrix4 view{basis.right[0], basis.up[0], -basis.forward[0], 0, basis.right[1], basis.up[1], -basis.forward[1], 0,
         basis.right[2], basis.up[2], -basis.forward[2], 0, -dot(basis.right,basis.eye), -dot(basis.up,basis.eye), dot(basis.forward,basis.eye), 1};
-    const float texel = 2*radius/kShadowCascadeSize;
+    const float texel = 2*radius/float(size);
     for (std::size_t i : {12u, 13u}) view[i] = std::round(view[i]/texel)*texel;
     Matrix4 projection{}; projection[0] = 1/radius; projection[5] = -1/radius;
     projection[10] = 1/(light.near_plane-light.far_plane);
@@ -452,6 +452,34 @@ inline ShadowCascades shadow_light_cascades(const Camera& camera, const std::arr
         out.split[i] = end; out.radius[i] = radius;
         begin = end;
     }
+    return out;
+}
+// NONCANONICAL actor shadow map (enhanced raster): a kActorShadowSize^2 map holding only actors (skinned or entity draws),
+// fitted around the actors nearest the player. The cascades' texels (~3 cm in the first map) are as wide as the gap between
+// a fringe of hair and the face, so their bias and PCF footprint let the sun through hair onto faces.
+inline constexpr int kActorShadowSize = 4096;
+inline constexpr float kActorShadowMaxRadius = 12;
+struct ActorShadow { Matrix4 light{}; std::array<float, 3> centre{}; float radius = 0; bool enabled = false; };
+// spheres: world {centre xyz, radius} of actor draws, nearest the player (camera target) first. Spheres join while the box around them stays
+// within kActorShadowMaxRadius (the nearest is always taken); the radius is quantised like the cascades'.
+inline ActorShadow shadow_actor_fit(std::span<const std::array<float, 4>> spheres, const std::array<float, 3>& sun) {
+    ActorShadow out;
+    std::array<float, 3> lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+    bool any = false;
+    for (const auto& s : spheres) {
+        if (!std::isfinite(s[0])||!std::isfinite(s[1])||!std::isfinite(s[2])||!std::isfinite(s[3])||s[3]<0) continue;
+        auto l = lo, h = hi;
+        for (unsigned a = 0; a < 3; ++a) { l[a] = std::min(l[a], s[a]-s[3]); h[a] = std::max(h[a], s[a]+s[3]); }
+        const float r = .5f*std::sqrt((h[0]-l[0])*(h[0]-l[0])+(h[1]-l[1])*(h[1]-l[1])+(h[2]-l[2])*(h[2]-l[2]));
+        if (any && r > kActorShadowMaxRadius) continue;
+        lo = l; hi = h; any = true;
+    }
+    if (!any) return out;
+    const float r = .5f*std::sqrt((hi[0]-lo[0])*(hi[0]-lo[0])+(hi[1]-lo[1])*(hi[1]-lo[1])+(hi[2]-lo[2])*(hi[2]-lo[2]));
+    out.radius = std::exp2(std::ceil(std::log2(std::max(r, 1.f))*8)/8);
+    for (unsigned a = 0; a < 3; ++a) out.centre[a] = (lo[a]+hi[a])*.5f;
+    out.light = shadow_cascade_matrix(out.centre, sun, out.radius, kActorShadowSize);
+    out.enabled = true;
     return out;
 }
 // Conservative culling sphere {centre xyz, radius} in mesh space: AABB centre and half-diagonal.

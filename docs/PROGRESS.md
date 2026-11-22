@@ -233,6 +233,14 @@ User request: the same water as the Tomb Raider: Underworld port (`/mnt/1st4TB/P
 
 Verification: `build-full`, `build-gl-only` **19/19** (100.4 s / 98.6 s) and `build-full-sanitized` **19/19** alone with `--parallel 1` (337.4 s), all three warning-free; RT smoke **5/5** ok (`analysis/porting-wave23/Verify/rt-smoke/`); signed Qt launcher smoke (Vulkan ½ scale, enhanced, RT required) PASSED (`analysis/porting-wave23/Verify/launcher-vulkan-half/`); `build-release` rebuilt. In-game play-testing of the new water is left to the user. The historical sanitizer shutdown timeout stays open.
 
+## 2026-11-22 0.16.5: hair shadows faces in enhanced raster
+
+- Reported: with enhanced appearance (RT off) sunlight passed through long hair and lit the face, worse when zoomed out; also on the character selection page.
+- Cause: the first cascade's texel (~3 cm) is as wide as the gap between a fringe and the face, so receiver bias and the 3×3 PCF let light through; zooming out made actors cast into coarser cascades whose blurred shadow was combined with the sharp one.
+- Fix (NONCANONICAL, Vulkan and OpenGL): a 4096² actors-only shadow map fitted around the actors nearest the player (`shadow_actor_fit`, radius ≤ 12, quantised), sampled with a smaller bias and combined with the cascades by `min`, fading at its edge. Actors wholly inside it no longer cast into the cascades. Vulkan places it in the right half of an 8192×4096 atlas; GL uses texture unit 19.
+- Ray-traced reference also lights skin through open gaps in the hair mesh; those gaps are geometry, not a shadow error.
+- Tests: `render_math_test` covers the fit (joining, projection, oversized nearest, non-finite).
+
 ## 2026-11-22 0.16.4: updates survive the GitHub API rate limit
 
 - **Bug:** a Windows launcher reported 403 when updating. The unauthenticated GitHub Releases API allows 60 requests per hour per IP address, shared by every computer on the network; once spent (here `x-ratelimit-remaining: 0`) it answers 403, and the launcher showed only `Sunucu isteği reddetti (403)`.

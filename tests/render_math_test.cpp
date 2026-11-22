@@ -179,6 +179,21 @@ int main() {
     assert(std::abs(small.split.back()-432)<1e-3f); // at least 8x the first slice
     const auto configured=ikv::shadow_light_cascades(shadow_camera,shadow_sun,2000,2);
     assert(std::abs(configured.split.back()-2000)<1e-2f);
+    // Actor shadow map: nearest actor always taken, farther ones join while the box stays within the max radius;
+    // every taken actor projects inside the map; no finite spheres disables it.
+    {
+        const std::array<std::array<float,4>,3> actors{{{0,1,0,1},{3,1,0,1},{40,1,0,1}}};
+        const auto fit=ikv::shadow_actor_fit(actors,shadow_sun);
+        assert(fit.enabled&&fit.radius>=2.5f&&fit.radius<=ikv::kActorShadowMaxRadius*1.1f&&std::abs(fit.centre[0]-1.5f)<1e-4f);
+        assert(std::abs(shadow_radius(fit.light)-fit.radius)<fit.radius*1e-4f);
+        for(const auto& a:{actors[0],actors[1]}){const auto q=project(fit.light,{a[0],a[1],a[2]});
+            assert(std::abs(q[0])<1&&std::abs(q[1])<1&&q[2]>=0&&q[2]<=1);}
+        assert(std::abs(project(fit.light,{40,1,0})[0])>1||std::abs(project(fit.light,{40,1,0})[1])>1);
+        const std::array<std::array<float,4>,1> lone{{{100,0,0,30}}};
+        assert(ikv::shadow_actor_fit(lone,shadow_sun).enabled); // the nearest is taken even when oversized
+        const std::array<std::array<float,4>,1> bad{{{NAN,0,0,1}}};
+        assert(!ikv::shadow_actor_fit(bad,shadow_sun).enabled&&!ikv::shadow_actor_fit({},shadow_sun).enabled);
+    }
     const auto view=ikv::camera_basis(shadow_camera);
     for(const auto* cascades:{&unlimited,&small,&configured}) {
         float begin=0;

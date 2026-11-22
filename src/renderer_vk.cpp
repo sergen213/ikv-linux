@@ -51,8 +51,8 @@ struct Buffer { VkBuffer handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HAN
 struct Image {VkImage handle=VK_NULL_HANDLE;VkDeviceMemory memory=VK_NULL_HANDLE;VkImageView view=VK_NULL_HANDLE;std::uint32_t width=0,height=0,levels=1;VkFormat format=VK_FORMAT_UNDEFINED;std::shared_ptr<MemoryBlock> block;};
 // jitter: xy this frame's / zw the previous frame's sub-pixel projection offset in NDC (vp/previous_vp include it).
 // NONCANONICAL wave 28: ground_mark_info/bounds/marks = frame.glsl groundMark* (renderer.hpp GroundMarkUniforms).
-struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;std::array<float,4> ocean_shore,ocean_bed;std::array<Matrix4,kShadowCascades> shadow_cascades;};
-static_assert(sizeof(Frame)==1936 && offsetof(Frame,shadow_cascades)==1680 && kShadowCascades==4 && offsetof(Frame,ocean_shore)==1648 && offsetof(Frame,ocean_bed)==1664 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
+struct Frame {Matrix4 vp,light;std::array<float,4> eye,sun,params,viewport,ambient,diffuse,fog_color,fog,sky_b,sky_c;Matrix4 previous_vp;std::array<float,4> camera_right,camera_up,camera_forward,previous_eye,previous_forward,source_time,jitter;Matrix4 far_light;std::array<float,4> shadow_params,wind,weather,weather_misc,ground_mark_info,ground_mark_bounds;std::array<std::array<float,4>,kMaxGroundMarks> ground_marks;std::array<float,4> ocean_shore,ocean_bed;std::array<Matrix4,kShadowCascades> shadow_cascades;Matrix4 actor_shadow;std::array<float,4> actor_shadow_params;};
+static_assert(sizeof(Frame)==2016 && offsetof(Frame,actor_shadow)==1936 && offsetof(Frame,shadow_cascades)==1680 && kShadowCascades==4 && offsetof(Frame,ocean_shore)==1648 && offsetof(Frame,ocean_bed)==1664 && offsetof(Frame,previous_vp)==288 && offsetof(Frame,source_time)==432 && offsetof(Frame,jitter)==448 && offsetof(Frame,far_light)==464 && offsetof(Frame,shadow_params)==528 && offsetof(Frame,wind)==544 &&
               offsetof(Frame,ground_mark_info)==592 && offsetof(Frame,ground_marks)==624 && kMaxGroundMarks==64);
 // previous_model: last frame's model matrix (scene.vert motion vectors only; other shaders declare the 128-byte prefix).
 // pbr: NONCANONICAL wave 29 (pbr.glsl draw.pbr; w < 0 = no pack material). Every Draw{} defaults to no pack.
@@ -70,7 +70,7 @@ struct Geometry {Buffer vertices,indices,staging[2],previous,wave_vertices,wave_
 struct FrameSlot {VkCommandBuffer command=VK_NULL_HANDLE;VkFence fence=VK_NULL_HANDLE;VkSemaphore acquire=VK_NULL_HANDLE;bool pending=false;std::uint64_t serial=0;};
 // ocean: source ocean material (casts no shadow); water: enhanced water (ocean outside original appearance, drawn last).
 // waves: draw the subdivided ocean copy (Geometry::wave_*; renderer.hpp ocean_waves_on / kOceanWaveRange).
-struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};bool ocean=false,water=false,waves=false,tess=false;}; // tess: draw Geometry::tess_* with opaque_tess_*
+struct DrawItem {std::uint32_t mesh,material;Matrix4 model;float distance=0;bool alpha=false,sky=false,fog=false,dynamic=false;std::array<float,4> scroll{};bool visible=true;Matrix4 previous{};bool ocean=false,water=false,waves=false,tess=false,actor=false;}; // actor: skinned or entity draw (actor shadow map). tess: draw Geometry::tess_* with opaque_tess_*
 class VulkanRenderer final:public Renderer {
  SDL_Window* window_;RendererOptions options_;VkInstance instance_=VK_NULL_HANDLE;VkSurfaceKHR surface_=VK_NULL_HANDLE;VkPhysicalDevice physical_=VK_NULL_HANDLE;VkDevice device_=VK_NULL_HANDLE;VkQueue queue_=VK_NULL_HANDLE;std::uint32_t family_=0;
  VkSwapchainKHR swapchain_=VK_NULL_HANDLE;VkFormat swap_format_=VK_FORMAT_UNDEFINED;VkExtent2D extent_{},render_extent_{};std::vector<VkImage> swap_images_;std::vector<VkSemaphore> present_semaphores_;VkCommandPool pool_=VK_NULL_HANDLE;
@@ -81,6 +81,7 @@ class VulkanRenderer final:public Renderer {
  VkPipeline opaque_double_=VK_NULL_HANDLE,alpha_double_=VK_NULL_HANDLE,shadow_double_=VK_NULL_HANDLE;
  // Wave 27 perf: depth-only shadow casters (no fragment stage) for materials without an alpha cutoff.
  VkPipeline shadow_depth_=VK_NULL_HANDLE,shadow_depth_double_=VK_NULL_HANDLE;
+ std::vector<DrawItem> actor_draws_,cascade_draws_; // this frame's actor shadow map casters; cascade casters (render)
  // Wave 27 perf, RT and enhanced (prepass_): opaque surfaces without an alpha cutoff first write depth only
  // (prepass_pipeline_, no fragment stage), then shade with depth writes off (opaque_prepassed_*: LESS_OR_EQUAL against
  // the identical invariant depth), so every pixel runs the expensive fragment shader (ray queries; parallax and PCF)
@@ -1389,7 +1390,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
      water_color_=image(render_extent_.width,render_extent_.height,VK_FORMAT_R16G16B16A16_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT);
      water_depth_=image(render_extent_.width,render_extent_.height,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_SAMPLED_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_DEPTH_BIT);
      water_ready_=false;
-     shadow_=image(4096,4096,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
+     shadow_=image(8192,4096,VK_FORMAT_D32_SFLOAT,VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT|VK_IMAGE_USAGE_SAMPLED_BIT,VK_IMAGE_ASPECT_DEPTH_BIT); // near | far cascade
      shadow_ready_=false;
      // Frame generation also samples output_ (HUD-less interpolation source) and copies it into real_.
      constexpr VkImageUsageFlags display_usage=VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT|VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1430,7 +1431,7 @@ VkRenderPass render_pass(std::span<const VkFormat> colors,VkImageLayout final,bo
          after_views.push_back(depth_.view);
          after_fb_[i]=framebuffer(after_pass_,after_views,render_extent_);
      }
-     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{4096,4096});
+     std::array shadow_views{shadow_.view};shadow_fb_=framebuffer(shadow_pass_,shadow_views,{8192,4096});
      std::array post_views{output_.view};post_fb_=framebuffer(post_pass_,post_views,extent_);
      const char* scene_shader=denoise_enabled_?"scene_rt_guided.frag":rt_enabled_?"scene_rt.frag":"scene.frag";
      opaque_=pipeline("scene.vert",scene_shader,scene_pass_,true,false,true,false);
@@ -2272,6 +2273,7 @@ void set_particles(const ParticleFrame& frame)override {
          const bool water=ocean&&!options_.original_appearance;
          draws.push_back({mesh,material,matrix,dx*dx+dy*dy+dz*dz,alpha,sky,fog,dynamic||!scene.meshes[mesh].influences.empty(),scroll,visible,previous?*previous:matrix,
              ocean,water,water&&ocean_waves_&&set.geometry[mesh].wave_vertices.handle&&sphere_within(eye,matrix,set.geometry[mesh].bounds,kOceanWaveRange)});
+         draws.back().actor=!sky&&!ocean&&!scene.meshes[mesh].influences.empty();
          // NONCANONICAL wave 29: tessellated PBR relief where the copy exists (load) and the placement reaches the fade range.
          const auto* pbr=material<set.pbr.size()?set.pbr[material]:nullptr;
          draws.back().tess=tess_enabled_&&pbr&&pbr->tessellate&&!sky&&set.geometry[mesh].tess_vertices.handle&&
@@ -2328,6 +2330,7 @@ void set_particles(const ParticleFrame& frame)override {
                  scroll=weather_sway(weather_,scene.materials[material],matrix,set.geometry[instance.mesh].height,
                      rt_enabled_||instance.entity_id!=0||!scene.meshes[instance.mesh].influences.empty());
              add(instance.mesh,matrix,instance.material,instance.sky,fog,instance.entity_id!=0||moved,scroll,visible,&previous_matrix);
+             if(instance.entity_id!=0&&!instance.sky&&!instance.ocean)draws.back().actor=true;
              if(!visible||!contours)continue;
              if(entity&&!instance.sky&&entity->contour!=std::array<float,3>{}) {
                  for(float v:entity->contour)if(!std::isfinite(v))throw std::invalid_argument("non-finite entity contour colour");
@@ -2450,6 +2453,39 @@ void set_particles(const ParticleFrame& frame)override {
      // shadow_params.z/w: NONCANONICAL wave 29 sparse foliage indirect / sparse glossy reflection (1: on).
      f.shadow_params={shadow_cascades.split.back(),denoise_enabled_?sparse_indirect_depth_:0.f,denoise_enabled_&&sparse_foliage_?1.f:0.f,
          denoise_enabled_&&sparse_reflection_?1.f:0.f};
+     // NONCANONICAL actor shadow map: fitted around the visible actors nearest the player (renderer.hpp shadow_actor_fit).
+     actor_draws_.clear();cascade_draws_.clear();f.actor_shadow={};f.actor_shadow_params={};bool actor_mapped=false;
+     if(!options_.original_appearance&&!rt_enabled_) {
+         std::vector<std::pair<float,std::array<float,4>>> near;
+         for(const auto& d:scene_set.draws) {
+             if(!d.actor)continue;
+             actor_draws_.push_back(d);
+             if(!d.visible||d.mesh>=scene_set.geometry.size())continue;
+             const auto s=world_sphere(d.model,scene_set.geometry[d.mesh].bounds);
+             // Nearest the camera target (the player), not the eye: zooming out must not refit the map elsewhere.
+             const auto& t=options_.camera.target;
+             const float dx=s[0]-t[0],dy=s[1]-t[1],dz=s[2]-t[2],distance=std::sqrt(dx*dx+dy*dy+dz*dz);
+             if(std::isfinite(distance)&&distance<80)near.push_back({distance,s});
+         }
+         std::sort(near.begin(),near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+         std::vector<std::array<float,4>> spheres;for(const auto& n:near)spheres.push_back(n.second);
+         const auto actor=shadow_actor_fit(spheres,enhanced_sun(scene.lighting));
+         if(actor.enabled){f.actor_shadow=actor.light;f.actor_shadow_params={1.f,actor.radius,0,0};actor_mapped=true;}
+         // Actors wholly inside the actor map (outside its 5% edge fade) cast only there: their coarse cascade shadow,
+         // blurred and biased by up to 25x larger texels as the camera zooms out, would otherwise darken or leak through
+         // the sharp one (hair on the forehead). Other actors keep casting into the cascades.
+         if(actor_mapped)for(const auto& d:scene_set.draws) {
+             bool inside=false;
+             if(d.actor&&d.mesh<scene_set.geometry.size()) {
+                 const auto s=world_sphere(d.model,scene_set.geometry[d.mesh].bounds);
+                 const auto& m=actor.light;
+                 const float x=m[0]*s[0]+m[4]*s[1]+m[8]*s[2]+m[12],y=m[1]*s[0]+m[5]*s[1]+m[9]*s[2]+m[13];
+                 const float limit=.9f-s[3]/actor.radius;
+                 inside=std::isfinite(x)&&std::isfinite(y)&&std::abs(x)<=limit&&std::abs(y)<=limit;
+             }
+             if(!inside)cascade_draws_.push_back(d);
+         }
+     }
      f.eye={eye[0],eye[1],eye[2],1};
      set_lighting(f,scene.lighting);
      f.wind=weather_.wind;f.weather=weather_.weather;f.weather_misc=weather_.misc;
@@ -2490,14 +2526,21 @@ void set_particles(const ParticleFrame& frame)override {
      const bool shadows_sampled=!options_.original_appearance&&!rt_enabled_;
      if(shadows_sampled||!shadow_ready_) {
      shadow_ready_=true;
-     begin_pass(command_,shadow_pass_,shadow_fb_,{4096,4096},true);
+     begin_pass(command_,shadow_pass_,shadow_fb_,{8192,4096},true);
      if(shadows_sampled)for(unsigned index=0;index<kShadowCascades;++index) {
          const auto x=std::int32_t((index&1u)*2048),y=std::int32_t((index>>1)*2048);
          VkViewport v{float(x),float(y),2048,2048,0,1};VkRect2D r{{x,y},{2048,2048}};
          vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
          const Matrix4& light=f.shadow_cascades[index];
          const auto casters=shadow_caster_planes(light);
-         draw_scene(command_,true,scene_set,scene_set.draws,&casters,&light,false,index==0);
+         draw_scene(command_,true,scene_set,actor_mapped?cascade_draws_:scene_set.draws,&casters,&light,false,index==0);
+     }
+     if(shadows_sampled&&f.actor_shadow_params[0]>.5f) {
+         // NONCANONICAL actor shadow map: right half of the atlas, actors only (renderer.hpp shadow_actor_fit).
+         VkViewport v{4096,0,float(kActorShadowSize),float(kActorShadowSize),0,1};VkRect2D r{{4096,0},{std::uint32_t(kActorShadowSize),std::uint32_t(kActorShadowSize)}};
+         vkCmdSetViewport(command_,0,1,&v);vkCmdSetScissor(command_,0,1,&r);
+         const auto casters=shadow_caster_planes(f.actor_shadow);
+         draw_scene(command_,true,scene_set,actor_draws_,&casters,&f.actor_shadow,false,true);
      }
      vkCmdEndRenderPass(command_);
      }

@@ -41,36 +41,48 @@ layout(set=0,binding=9) uniform sampler2D originalLightmap;
 const float PI=3.14159265359;
 vec3 sky(vec3 direction) { return mix(vec3(.055,.07,.09),vec3(.32,.44,.62),clamp(direction.y*.5+.5,0,1)); }
 vec3 environment(vec3 direction) { if(draw.flags.y<.5)return sky(direction);return textureLod(environmentMap,vec2(atan(direction.z,direction.x)/(2*PI)+.5,acos(clamp(direction.y,-1,1))/PI),0).rgb; }
-// Shadow atlas (4096x4096): renderer.hpp shadow_light_cascades' kShadowCascades (4) 2048^2 maps fitted to view-depth
+// Shadow atlas (8192x4096; the right 4096^2 is the actor map below): renderer.hpp shadow_light_cascades' kShadowCascades (4) 2048^2 maps fitted to view-depth
 // slices, cascade i at column i&1, row i>>1. Receivers take the first map containing them, blended across a band at its
 // edge into the next (the last fades to lit), so there is no visible split and no eye-distance cut-off.
 layout(location=16) in vec4 farShadowPosition;
 // Receiver bias in world units of the cascade's own texel: a normal offset (1.5 texels at grazing light) plus a slope-scaled
 // depth bias covering the 3x3 PCF footprint. A fixed NDC-depth fraction scaled with each map's depth range instead and
 // removed actor shadows outside the first map.
-float shadowCascadeSample(int i,vec3 p,vec3 n){
-    mat4 m=frame.shadowCascades[i];
-    float texel=2./(2048.*max(length(vec3(m[0][0],m[1][0],m[2][0])),1e-6));
+// One map of the atlas: light matrix m, its tile's pixel origin and size (the 2048^2 cascades, the 4096^2 actor map).
+float shadowMapSample(mat4 m,vec2 origin,float size,vec3 p,vec3 n,float bias){
+    float texel=2./(size*max(length(vec3(m[0][0],m[1][0],m[2][0])),1e-6));
     float depthScale=length(vec3(m[0][2],m[1][2],m[2][2]));
     float cosT=clamp(dot(n,normalize(frame.sun.xyz)),0.,1.),sinT=sqrt(1.-cosT*cosT),tanT=min(sinT/max(cosT,.05),4.);
-    vec4 c=m*vec4(p+n*(texel*1.5*sinT),1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
+    vec4 c=m*vec4(p+n*(texel*1.5*sinT*bias),1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
     if(any(lessThan(uv,vec2(0)))||any(greaterThan(uv,vec2(1)))||q.z>1.)return 1.;
-    float z=max(q.z,0.)-depthScale*texel*(.6+.9*tanT);
-    vec2 tile=vec2(float(i&1),float(i>>1))*.5,t=1./vec2(textureSize(shadowMap,0)),lo=tile+t*.5,hi=tile+.5-t*.5,a=tile+uv*.5;
+    float z=max(q.z,0.)-depthScale*texel*(.6+.9*tanT)*bias;
+    vec2 atlas=vec2(textureSize(shadowMap,0)),t=1./atlas,lo=(origin+.5)*t,hi=(origin+size-.5)*t,a=(origin+uv*size)*t;
     float visible=0;for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++)visible+=texture(shadowMap,vec3(clamp(a+vec2(x,y)*t,lo,hi),z));
     return visible/9.;
 }
+float shadowCascadeSample(int i,vec3 p,vec3 n){
+    return shadowMapSample(frame.shadowCascades[i],vec2(float(i&1),float(i>>1))*2048.,2048.,p,n,1.);
+}
+// NONCANONICAL actor shadow map: actors only, so it darkens on top of the cascades (min), fading out at its edge.
+float actorShadowAt(vec3 p,vec3 n){
+    if(frame.actorShadowParams.x<.5)return 1.;
+    vec4 c=frame.actorShadow*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
+    float edge=min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
+    if(edge<=0.||q.z>1.)return 1.;
+    return mix(1.,shadowMapSample(frame.actorShadow,vec2(4096.,0.),4096.,p,n,.3),clamp(edge/.05,0.,1.));
+}
 float shadowAt(vec3 p,vec3 n){
     const float band=.08;
+    float actor=actorShadowAt(p,n);
     for(int i=0;i<4;i++){
         vec4 c=frame.shadowCascades[i]*vec4(p,1);vec3 q=c.xyz/c.w;vec2 uv=q.xy*.5+.5;
         float edge=min(min(uv.x,uv.y),min(1.-uv.x,1.-uv.y));
         if(edge<0.||q.z>1.)continue;
         float v=shadowCascadeSample(i,p,n);
         if(edge<band)v=mix(i<3?shadowCascadeSample(i+1,p,n):1.,v,edge/band);
-        return v;
+        return min(v,actor);
     }
-    return 1.;
+    return actor;
 }
 // n: shading normal; the bias follows the interpolated geometric normal when there is one.
 float shadowVisibility(vec3 n){return shadowAt(worldPosition,dot(worldNormal,worldNormal)>.25?normalize(worldNormal):n);}
