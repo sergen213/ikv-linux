@@ -1884,7 +1884,7 @@ private:
     // through the sharp one (hair on the forehead) as the camera zooms out.
     void actor_fit(const GlSet& set,const Scene& scene,const std::array<float,3>& sun) {
         actor_casters_.clear();actor_excluded_.clear();actor_params_={};actor_light_={};
-        std::vector<std::pair<float,std::array<float,4>>> near;
+        std::vector<std::pair<float,std::array<float,4>>> nearby;
         const auto& t=options_.camera.target;
         for(const auto* list:{&view_.opaque,&view_.alpha})for(const auto& draw:*list) {
             if(!actor_draw(scene,draw))continue;
@@ -1892,10 +1892,10 @@ private:
             if(!draw.visible)continue;
             const auto s=world_sphere(draw.matrix,set.meshes[draw.instance->mesh].bounds);
             const float dx=s[0]-t[0],dy=s[1]-t[1],dz=s[2]-t[2],distance=std::sqrt(dx*dx+dy*dy+dz*dz);
-            if(std::isfinite(distance)&&distance<80)near.push_back({distance,s});
+            if(std::isfinite(distance)&&distance<80)nearby.push_back({distance,s});
         }
-        std::sort(near.begin(),near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
-        std::vector<std::array<float,4>> spheres;for(const auto& n:near)spheres.push_back(n.second);
+        std::sort(nearby.begin(),nearby.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+        std::vector<std::array<float,4>> spheres;for(const auto& n:nearby)spheres.push_back(n.second);
         const auto actor=shadow_actor_fit(spheres,sun);
         if(!actor.enabled)return;
         actor_light_=actor.light;actor_params_={1.f,actor.radius,0,0};

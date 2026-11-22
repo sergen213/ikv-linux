@@ -2456,7 +2456,7 @@ void set_particles(const ParticleFrame& frame)override {
      // NONCANONICAL actor shadow map: fitted around the visible actors nearest the player (renderer.hpp shadow_actor_fit).
      actor_draws_.clear();cascade_draws_.clear();f.actor_shadow={};f.actor_shadow_params={};bool actor_mapped=false;
      if(!options_.original_appearance&&!rt_enabled_) {
-         std::vector<std::pair<float,std::array<float,4>>> near;
+         std::vector<std::pair<float,std::array<float,4>>> nearby;
          for(const auto& d:scene_set.draws) {
              if(!d.actor)continue;
              actor_draws_.push_back(d);
@@ -2465,10 +2465,10 @@ void set_particles(const ParticleFrame& frame)override {
              // Nearest the camera target (the player), not the eye: zooming out must not refit the map elsewhere.
              const auto& t=options_.camera.target;
              const float dx=s[0]-t[0],dy=s[1]-t[1],dz=s[2]-t[2],distance=std::sqrt(dx*dx+dy*dy+dz*dz);
-             if(std::isfinite(distance)&&distance<80)near.push_back({distance,s});
+             if(std::isfinite(distance)&&distance<80)nearby.push_back({distance,s});
          }
-         std::sort(near.begin(),near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
-         std::vector<std::array<float,4>> spheres;for(const auto& n:near)spheres.push_back(n.second);
+         std::sort(nearby.begin(),nearby.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+         std::vector<std::array<float,4>> spheres;for(const auto& n:nearby)spheres.push_back(n.second);
          const auto actor=shadow_actor_fit(spheres,enhanced_sun(scene.lighting));
          if(actor.enabled){f.actor_shadow=actor.light;f.actor_shadow_params={1.f,actor.radius,0,0};actor_mapped=true;}
          // Actors wholly inside the actor map (outside its 5% edge fade) cast only there: their coarse cascade shadow,
