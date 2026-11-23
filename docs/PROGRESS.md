@@ -10,6 +10,11 @@
   so in 0.17.0 the new sections could be walked on but not clicked.
 - 0.17.2: the copied sections no longer repeat the stub's baked tram and lamp-post shadows (`galata::clean_lightmaps`:
   each copy samples one lit texel of its lightmap, the 90th percentile of its triangle centroids).
+- 0.17.3: the tram tracks continue across (the stub's straight 70.9 pieces `tramway_91/94` tiled from the old end to
+  Karaköy's track at s = 615; the left track eases 3 outward from s = 425) with catenary poles (`lamba_tramvay_`/`_03`)
+  every 70.9. The copied cobbles run on: each face's uv is shifted by its gradient along the copy offset (cobble
+  materials only; the concrete track bed has painted grooves on a skewed mapping). Fixed: the deck copies' non-cobble
+  faces had escaped the section clip, and the stub's quay-level skirts (y < 15) are no longer copied.
 - Shared math in `include/ikv/galata.hpp` / `src/galata.cpp`; server walk check `analysis/bridge-c/walk_test.py`.
 - Known: players are not visible to each other across the midpoint; one click cannot route the whole bridge (click again).
 

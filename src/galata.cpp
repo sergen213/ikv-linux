@@ -136,6 +136,9 @@ std::string lower(std::string s) { for (auto& c : s) c = char(std::tolower(stati
 std::uint32_t material_of(const Scene& scene, const Instance& i) { return i.material == UINT32_MAX ? scene.meshes[i.mesh].material : i.material; }
 // A world-space mesh of the given instance's geometry, triangles clipped to one section [-section, 0] of the Eminönü
 // stub, moved `offset` along the bridge and raised onto the new deck's slope.
+// Tram track ends (s): the stub's last pieces (tramway_92/95) end at the old deck end; Karaköy's track starts at rail_end.
+constexpr float rail_left_start = 0.f, rail_right_start = 0.f, rail_end = 615.f, rail_ease_from = 425.f, rail_piece = 70.866f;
+
 Mesh section_copy(const Scene& scene, const Instance& instance, float offset, bool clip_section) {
     const auto& source = scene.meshes[instance.mesh];
     const auto& m = instance.transform.matrix;
@@ -147,6 +150,8 @@ Mesh section_copy(const Scene& scene, const Instance& instance, float offset, bo
         world[i] = v;
     }
     Mesh out; out.texture = source.texture; out.material = material_of(scene, instance); out.source_material_id = source.source_material_id;
+    // Only the cobbles: the concrete track bed has the rail grooves painted in on a slightly skewed mapping, which a shift would slide sideways.
+    const bool cobbles = out.material < scene.materials.size() && lower(scene.materials[out.material].diffuse).find("kaldirim") != std::string::npos;
     const auto place = [&](Vertex v) {
         const float s = bridge_coordinates(v.x, v.z).s + offset;
         v.x += offset * axis_x; v.z += offset * axis_z; v.y += deck_height(s) - deck_eminonu;
@@ -154,15 +159,55 @@ Mesh section_copy(const Scene& scene, const Instance& instance, float offset, bo
     };
     for (std::size_t k = 0; k + 2 < source.indices.size(); k += 3) {
         std::vector<Vertex> polygon{world[source.indices[k]], world[source.indices[k + 1]], world[source.indices[k + 2]]};
+        if (clip_section && cobbles) {
+            // Tiling deck textures run on: shift each face's uv by its gradient along the offset, so the copies don't restart the pattern.
+            const Vertex& a = polygon[0]; const Vertex& b = polygon[1]; const Vertex& c = polygon[2];
+            const double e1[3]{b.x - a.x, b.y - a.y, b.z - a.z}, e2[3]{c.x - a.x, c.y - a.y, c.z - a.z};
+            const double d[3]{offset * axis_x, 0, offset * axis_z};
+            const auto dot = [](const double* p, const double* q) { return p[0] * q[0] + p[1] * q[1] + p[2] * q[2]; };
+            const double g11 = dot(e1, e1), g12 = dot(e1, e2), g22 = dot(e2, e2), r1 = dot(d, e1), r2 = dot(d, e2), det = g11 * g22 - g12 * g12;
+            if (std::abs(det) > 1e-9) {
+                const double p1 = (r1 * g22 - r2 * g12) / det, p2 = (r2 * g11 - r1 * g12) / det;
+                const float du = float(p1 * (b.u - a.u) + p2 * (c.u - a.u)), dv = float(p1 * (b.v - a.v) + p2 * (c.v - a.v));
+                for (auto& v : polygon) { v.u += du; v.v += dv; }
+            }
+        }
         if (clip_section) {
             // End caps lying in a section plane would stand inside the new deck.
             bool cap = true;
             for (const auto& v : polygon) { const float s = bridge_coordinates(v.x, v.z).s; cap &= std::abs(s) < .05f || std::abs(s + section) < .05f; }
             if (cap) continue;
+            // The stub's quay-level pieces beside its ramp (y ≈ 5) would hang over the water.
+            if (std::max({polygon[0].y, polygon[1].y, polygon[2].y}) < 15) continue;
             polygon = clip(clip(polygon, -section, true), 0, false);
             if (polygon.size() < 3) continue;
         }
         for (std::size_t i = 1; i + 1 < polygon.size(); ++i) { place(polygon[0]); place(polygon[i]); place(polygon[i + 1]); }
+    }
+    return out;
+}
+
+// One straight rail piece moved `offset` along the bridge, cut to [lo, hi], its rails eased `shift(s)` across the deck.
+Mesh rail_copy(const Scene& scene, const Instance& instance, float offset, float lo, float hi, float (*shift)(float)) {
+    const auto& source = scene.meshes[instance.mesh];
+    const auto& m = instance.transform.matrix;
+    Mesh out; out.texture = source.texture; out.material = material_of(scene, instance); out.source_material_id = source.source_material_id;
+    std::vector<Vertex> world(source.vertices.size());
+    for (std::size_t i = 0; i < world.size(); ++i) {
+        auto v = source.vertices[i];
+        const auto p = apply(m, v.x, v.y, v.z, 1), n = apply(m, v.nx, v.ny, v.nz, 0), t = apply(m, v.tangent[0], v.tangent[1], v.tangent[2], 0);
+        v.x = p[0] + offset * axis_x; v.y = p[1]; v.z = p[2] + offset * axis_z; v.nx = n[0]; v.ny = n[1]; v.nz = n[2]; v.tangent = t;
+        world[i] = v;
+    }
+    for (std::size_t k = 0; k + 2 < source.indices.size(); k += 3) {
+        auto polygon = clip(clip({world[source.indices[k]], world[source.indices[k + 1]], world[source.indices[k + 2]]}, lo, true), hi, false);
+        if (polygon.size() < 3) continue;
+        for (auto& v : polygon) {
+            const float s = bridge_coordinates(v.x, v.z).s, w = shift(s);
+            v.x += w * axis_z; v.z -= w * axis_x; v.y += deck_height(s) - deck_eminonu;
+        }
+        for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+            for (const auto j : {std::size_t(0), i, i + 1}) { out.indices.push_back(std::uint32_t(out.vertices.size())); out.vertices.push_back(polygon[j]); }
     }
     return out;
 }
@@ -206,11 +251,13 @@ void merge(Scene& scene, Scene karakoy, void (*append)(Scene&, Scene)) {
         mesh.indices = std::move(kept);
     }
     // --- Eminönü: the stub's end cap and the painted Karaköy backdrop cards stand where the bridge and Karaköy now are.
-    std::vector<Instance> deck, piers;
+    std::vector<Instance> deck, piers, rails, poles;
     std::erase_if(scene.instances, [&](const Instance& i) {
         const auto name = lower(i.name);
         if (name == "galata_yol") deck.push_back(i);
         if (name == "galata_ayak" || name.starts_with("galata_korkuluk")) piers.push_back(i);
+        if (name == "lamba_tramvay_" || name == "lamba_tramvay_03") poles.push_back(i);
+        if (name == "tramway_91" || name == "tramway_94") rails.push_back(i);
         return name == "kopru_kapatma" || (name.starts_with("kara_0") && name.size() == 7);
     });
     if (deck.empty() || piers.empty()) throw std::runtime_error("Galata Bridge: Eminönü stub not found");
@@ -238,6 +285,39 @@ void merge(Scene& scene, Scene karakoy, void (*append)(Scene&, Scene)) {
             for (const auto& v : mesh.vertices) { const auto q = apply(p.transform.matrix, v.x, v.y, v.z, 1); s += bridge_coordinates(q[0], q[2]).s; }
             s /= float(mesh.vertices.size());
             if (s >= -section && s < 0) add(p, false);
+        }
+    }
+    // --- The tram tracks: the stub's straight 70.9-long pieces tiled on from its last piece to Karaköy's track.
+    // The stub's left (w < 0) track drifts 0.3 outward along its pieces and Karaköy's lies ~3 further out: match, then ease across.
+    for (const auto& r : rails) {
+        const auto& mesh = scene.meshes[r.mesh];
+        if (mesh.vertices.empty()) continue;
+        float lo = 1e9f, hi = -1e9f, w = 0;
+        for (const auto& v : mesh.vertices) {
+            const auto q = apply(r.transform.matrix, v.x, v.y, v.z, 1); const auto b = bridge_coordinates(q[0], q[2]);
+            lo = std::min(lo, b.s); hi = std::max(hi, b.s); w += b.w;
+        }
+        const float length = hi - lo;
+        const auto left = w < 0;
+        float (*shift)(float) = left ? +[](float s) { return -.3f - 2.7f * std::clamp((s - rail_ease_from) / (rail_end - rail_ease_from), 0.f, 1.f); }
+                                     : +[](float) { return 0.f; };
+        const float start = left ? rail_left_start : rail_right_start;
+        for (int k = 2; lo + length * float(k) < rail_end; ++k) {
+            auto copy_mesh = rail_copy(scene, r, length * float(k), start, rail_end, shift);
+            if (copy_mesh.indices.empty()) continue;
+            Instance copy; copy.mesh = std::uint32_t(scene.meshes.size()); copy.node = node; copy.name = r.name + "_yeni" + std::to_string(k);
+            copy.source_support = r.source_support; copy.source_nocamera = r.source_nocamera;
+            scene.meshes.push_back(std::move(copy_mesh)); scene.instances.push_back(std::move(copy));
+        }
+    }
+    // --- The catenary poles: the stub's last pair (s ≈ -12) repeated at the rail spacing up to Karaköy's own poles.
+    for (const auto& p : poles) {
+        for (int k = 1; -12.f + rail_piece * float(k) < rail_end - 40; ++k) {
+            auto copy_mesh = rail_copy(scene, p, rail_piece * float(k), -1e9f, 1e9f, +[](float) { return 0.f; });
+            if (copy_mesh.indices.empty()) continue;
+            Instance copy; copy.mesh = std::uint32_t(scene.meshes.size()); copy.node = node; copy.name = p.name + "_yeni" + std::to_string(k);
+            copy.source_support = p.source_support; copy.source_nocamera = p.source_nocamera;
+            scene.meshes.push_back(std::move(copy_mesh)); scene.instances.push_back(std::move(copy));
         }
     }
     {
