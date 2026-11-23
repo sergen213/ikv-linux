@@ -212,6 +212,11 @@ void merge(Scene& scene, Scene karakoy, void (*append)(Scene&, Scene)) {
         return name == "kopru_kapatma" || (name.starts_with("kara_0") && name.size() == 7);
     });
     if (deck.empty() || piers.empty()) throw std::runtime_error("Galata Bridge: Eminönü stub not found");
+    // Clicks pick only the invisible walk set (SourceSupport colliders); the new deck needs its own strip in it.
+    const auto walkset = std::find_if(scene.instances.begin(), scene.instances.end(),
+        [](const Instance& i) { return i.source_support && lower(i.name).starts_with("walkset"); });
+    if (walkset == scene.instances.end()) throw std::runtime_error("Galata Bridge: Eminönü walk set not found");
+    const Instance walk_template = *walkset;
     append(scene, std::move(karakoy));
     // --- The new sections: copies of the stub's last section, each one section further and on the rising deck.
     const auto node = std::uint32_t(scene.nodes.size());
@@ -232,6 +237,28 @@ void merge(Scene& scene, Scene karakoy, void (*append)(Scene&, Scene)) {
             s /= float(mesh.vertices.size());
             if (s >= -section && s < 0) add(p, false);
         }
+    }
+    {
+        Mesh strip = scene.meshes[walk_template.mesh];
+        strip.vertices.clear(); strip.indices.clear(); strip.influences.clear();
+        constexpr int steps = 64;
+        const float from = -6, to = gap + 6;
+        for (int k = 0; k <= steps; ++k) {
+            const float s = from + (to - from) * float(k) / steps;
+            for (const float w : {-walk_half_width, walk_half_width}) {
+                Vertex v{};
+                v.x = eminonu_end_x + s * axis_x + w * axis_z; v.z = eminonu_end_z + s * axis_z - w * axis_x;
+                v.y = deck_height(s); v.ny = 1;
+                strip.vertices.push_back(v);
+            }
+            if (k) {
+                const auto a = std::uint32_t(2 * k - 2);
+                strip.indices.insert(strip.indices.end(), {a, a + 1, a + 2, a + 1, a + 3, a + 2});
+            }
+        }
+        Instance walk = walk_template;
+        walk.mesh = std::uint32_t(scene.meshes.size()); walk.node = node; walk.name = "walkset_galata_yeni"; walk.transform = Transform{};
+        scene.meshes.push_back(std::move(strip)); scene.instances.push_back(std::move(walk));
     }
     ++scene.geometry_revision;
 }

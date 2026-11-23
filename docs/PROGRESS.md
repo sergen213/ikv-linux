@@ -6,6 +6,8 @@
   the Eminönü frame, its overlapping water clipped, Eminönü's end cap and painted Karaköy backdrop cards removed). Server keeps
   both zones; walking past the bridge's midpoint transfers the player at the same place (hysteresis: E→K at s≥326, K→E at s≤317).
   Minimap, world map, music and ambient grids follow the server zone. Open to everyone; the boats still work.
+- 0.17.1: the new deck gets its own invisible walk-set strip (`walkset_galata_yeni`); clicks pick only walk-set colliders,
+  so in 0.17.0 the new sections could be walked on but not clicked.
 - Shared math in `include/ikv/galata.hpp` / `src/galata.cpp`; server walk check `analysis/bridge-c/walk_test.py`.
 - Known: players are not visible to each other across the midpoint; one click cannot route the whole bridge (click again).
 
