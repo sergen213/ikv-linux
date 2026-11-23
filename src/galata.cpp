@@ -1,7 +1,9 @@
 // NONCANONICAL Galata Bridge: see include/ikv/galata.hpp.
 #include "ikv/galata.hpp"
 #include "ikv/scene.hpp"
+#include "ikv/assets.hpp"
 #include <algorithm>
+#include <map>
 #include <array>
 #include <cmath>
 #include <numbers>
@@ -261,5 +263,46 @@ void merge(Scene& scene, Scene karakoy, void (*append)(Scene&, Scene)) {
         scene.meshes.push_back(std::move(strip)); scene.instances.push_back(std::move(walk));
     }
     ++scene.geometry_revision;
+}
+
+void clean_lightmaps(Scene& scene) {
+    std::map<std::string, assets::DdsImage> decoded;
+    for (const auto& instance : scene.instances) {
+        const auto name = lower(instance.name);
+        if (name.find("_yeni") == std::string::npos || name.starts_with("walkset") || instance.mesh >= scene.meshes.size()) continue;
+        auto& mesh = scene.meshes[instance.mesh];
+        const auto m = material_of(scene, instance);
+        if (m >= scene.materials.size() || scene.materials[m].lightmap.empty() || mesh.vertices.empty()) continue;
+        const auto& lightmap = scene.materials[m].lightmap;
+        auto image = decoded.find(lightmap);
+        if (image == decoded.end()) {
+            const auto texture = std::find_if(scene.textures.begin(), scene.textures.end(), [&](const Texture& t) { return t.name == lightmap; });
+            if (texture == scene.textures.end() || texture->mips.empty()) continue;
+            assets::DdsImage source{texture->mips[0].width, texture->mips[0].height, texture->data, texture->mips, texture->format};
+            image = decoded.emplace(lightmap, assets::decompress_dds(source)).first;
+        }
+        const auto& img = image->second;
+        const auto& mip = img.mips[0];
+        const auto luminance = [&](const std::array<float, 2>& uv) {
+            const auto wrap = [](float t) { return t - std::floor(t); };
+            const auto x = std::min(mip.width - 1, std::uint32_t(wrap(uv[0]) * float(mip.width)));
+            const auto y = std::min(mip.height - 1, std::uint32_t(wrap(uv[1]) * float(mip.height)));
+            const auto* p = img.rgba.data() + mip.offset + (std::size_t(y) * mip.width + x) * 4;
+            return .299f * p[0] + .587f * p[1] + .114f * p[2];
+        };
+        // The lit level: triangle centroids (vertices sit on chart edges and black gutter texels), 90th percentile
+        // (shadows are the dark tail; the top few percent are bleeding edge texels).
+        std::vector<std::pair<float, std::array<float, 2>>> samples;
+        for (std::size_t k = 0; k + 2 < mesh.indices.size(); k += 3) {
+            std::array<float, 2> c{};
+            for (int j = 0; j < 3; ++j) { const auto& uv = mesh.vertices[mesh.indices[k + j]].uv1; c[0] += uv[0] / 3; c[1] += uv[1] / 3; }
+            samples.emplace_back(luminance(c), c);
+        }
+        if (samples.empty()) continue;
+        std::sort(samples.begin(), samples.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+        const auto lit = samples[samples.size() * 9 / 10].second;
+        for (auto& v : mesh.vertices) v.uv1 = lit;
+        ++mesh.revision;
+    }
 }
 } // namespace ikv::galata

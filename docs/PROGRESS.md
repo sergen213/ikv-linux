@@ -8,6 +8,8 @@
   Minimap, world map, music and ambient grids follow the server zone. Open to everyone; the boats still work.
 - 0.17.1: the new deck gets its own invisible walk-set strip (`walkset_galata_yeni`); clicks pick only walk-set colliders,
   so in 0.17.0 the new sections could be walked on but not clicked.
+- 0.17.2: the copied sections no longer repeat the stub's baked tram and lamp-post shadows (`galata::clean_lightmaps`:
+  each copy samples one lit texel of its lightmap, the 90th percentile of its triangle centroids).
 - Shared math in `include/ikv/galata.hpp` / `src/galata.cpp`; server walk check `analysis/bridge-c/walk_test.py`.
 - Known: players are not visible to each other across the midpoint; one click cannot route the whole bridge (click again).
 

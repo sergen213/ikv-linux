@@ -527,7 +527,7 @@ Scene load_galata_scene(const std::filesystem::path& installation) {
  scene.zone=load_zone(installation,descriptor.support_id);scene.linked_zone=std::make_shared<const Zone>(load_zone(installation,galata::karakoy_support));
  set_scene_environment(scene,descriptor.support_id,descriptor.minute);scene.lighting.roofed=descriptor.roofed;
  bind_source_skydome(scene,descriptor);
- load_model_resources(scene,base);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
+ load_model_resources(scene,base);galata::clean_lightmaps(scene);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
 }
 Scene load_charsel_scene(const std::filesystem::path& installation) {
  // cModuleCharsel 004b1950 loads charsel.adf, charsel_particles.adf and sky_box.adf; no zone grid or registry row.

@@ -42,5 +42,8 @@ std::optional<Crossing> crossing(unsigned registry, std::int32_t x, std::int32_t
 std::optional<float> scene_ground(const Scene& scene, float x, float z);
 // Builds the merged world from an Eminönü scene and a decoded Karaköy scene, before resources load (scene.cpp).
 void merge(Scene& eminonu, Scene karakoy, void (*append)(Scene&, Scene));
+// The new sections reuse the stub section's baked lightmap, whose tram and lamp-post shadows would repeat on every copy:
+// after resources load, each copy samples one unshadowed texel of its own lightmap instead.
+void clean_lightmaps(Scene& scene);
 } // namespace galata
 } // namespace ikv
