@@ -1,4 +1,5 @@
 #include "ikv/audio.hpp"
+#include "ikv/galata.hpp"
 #include "ikv/effects.hpp"
 #include "ikv/client_admin.hpp"
 #include "ikv/client_map.hpp"
@@ -526,7 +527,7 @@ std::pair<std::array<float,3>,std::array<float,3>> camera_ray(const ikv::Camera&
 std::optional<std::array<float,3>> pick_scene(const ikv::Scene& scene,const ikv::Camera& camera,float px,float py,int w,int h) {
     if (w<=0 || h<=0 || !scene.source_registry_id) return {};
     const auto [eye,ray]=camera_ray(camera,px,py,w,h);
-    const auto hit=source_ray(scene,true,eye,ray,[&](float d){return ikv::zone_height(scene.zone,eye[0]+ray[0]*d,eye[2]+ray[2]*d).has_value();});
+    const auto hit=source_ray(scene,true,eye,ray,[&](float d){return ikv::galata::scene_ground(scene,eye[0]+ray[0]*d,eye[2]+ray[2]*d).has_value();});
     if (!hit) return {};
     return std::array<float,3>{eye[0]+ray[0]**hit,eye[1]+ray[1]**hit,eye[2]+ray[2]**hit};
 }
@@ -570,6 +571,19 @@ class Application {
     std::vector<ikv::Player> players_;
     bool has_snapshot_=false,state_pending_=false;
     std::optional<unsigned> accepted_source_,snapshot_source_;
+    std::optional<ikv::galata::Crossing> pending_crossing_; // NONCANONICAL Galata Bridge: the destination waiting for the seam
+    // The authoritative zone's registry (Karaköy while the merged Eminönü scene shows it); positions arrive in its frame.
+    unsigned server_registry() const {
+        if (state_.is_object() && state_.contains("source_registry_id") && state_.at("source_registry_id").is_number_unsigned()) return state_.at("source_registry_id").get<unsigned>();
+        return scene_.source_registry_id.value_or(0);
+    }
+    static ikv::Player scene_position(unsigned registry,ikv::Player p) {
+        if (registry!=ikv::galata::karakoy_registry) return p;
+        const auto q=ikv::galata::to_scene(registry,static_cast<float>(p.x)/1000.f,static_cast<float>(p.y)/1000.f);
+        p.x=static_cast<std::int32_t>(std::lround(q.x*1000)); p.y=static_cast<std::int32_t>(std::lround(q.z*1000)); return p;
+    }
+    // Map art (support grid) and map coordinates follow the authoritative zone, not the merged scene.
+    std::array<float,2> map_xz(float x,float z) const { const auto q=ikv::galata::from_scene(server_registry(),x,z); return {q.x,q.z}; }
     std::uint64_t snapshot_revision_=0,painted_snapshot_revision_=0;
     using PendingMutation=ikv::PendingMutation;
     std::vector<std::shared_ptr<const Json>> accepted_actors_;
@@ -837,7 +851,7 @@ private:
         if (state.at("source_registry_id").is_null())
             throw std::runtime_error("graphical play requires an authoritative source scene");
         const auto source=state.at("source_registry_id").get<unsigned>();
-        const bool changed_source=!accepted_source_ || *accepted_source_!=source;
+        const bool changed_source=!accepted_source_ || ikv::galata::scene_registry(*accepted_source_)!=ikv::galata::scene_registry(source);
         const auto tick=state.at("tick").get<std::uint32_t>();
         PendingMutation mutation; mutation.source=source; mutation.reset=changed_source;
         if (changed_source) accepted_actors_.clear();
@@ -943,7 +957,7 @@ private:
         while (!pending_mutations_.empty()) {
             auto mutation=std::move(pending_mutations_.front());
             pending_mutations_.pop_front(); pending_bytes_-=mutation.bytes;
-            const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=mutation.source;
+            const bool loading=!scene_.source_registry_id || *scene_.source_registry_id!=ikv::galata::scene_registry(mutation.source);
             if (loading) begin_loading();
             load_authoritative_scene(mutation.source);
             attach_models(mutation,loading);
@@ -952,7 +966,7 @@ private:
                 const auto& row=*mutation.actors[i];
                 const auto id=row.at("id").get<std::uint32_t>();
                 actor_life(id,row.at("hp").get<int>(),row.at("alive").get<bool>());
-                move_actor({id,row.at("x").get<std::int32_t>(),row.at("y").get<std::int32_t>()},mutation.ticks[i]);
+                move_actor(scene_position(mutation.source,{id,row.at("x").get<std::int32_t>(),row.at("y").get<std::int32_t>()}),mutation.ticks[i]);
             }
             handle_events(mutation.events);
         }
@@ -963,12 +977,13 @@ private:
             if (std::exchange(transferring_,false)) loading_=false; // the destination shard admitted the transfer
         }
         bool changed_snapshot=false;
-        if (snapshot_source_!=scene_.source_registry_id ||
+        if (!snapshot_source_ || ikv::galata::scene_registry(*snapshot_source_)!=scene_.source_registry_id ||
             (!state_.empty() && session_->tick<state_.at("tick").get<std::uint32_t>())) {
             players_.clear();
             painted_snapshot_revision_=snapshot_revision_;
         } else if (snapshot_revision_!=painted_snapshot_revision_) {
             players_=session_->players;
+            for (auto& p:players_) p=scene_position(*snapshot_source_,p);
             painted_snapshot_revision_=snapshot_revision_; has_snapshot_=session_->has_snapshot;
             changed_snapshot=true;
         }
@@ -1073,8 +1088,9 @@ private:
         connect(transfer.ticket);
     }
     void load_authoritative_scene(unsigned source) {
+        source=ikv::galata::scene_registry(source); // NONCANONICAL Galata Bridge: Karaköy shows in the merged Eminönü scene
         if (scene_.source_registry_id && *scene_.source_registry_id==source) return;
-        auto replacement=load_cpu([&]{return ikv::load_source_scene(options_.assets,source);});
+        auto replacement=load_cpu([&]{return source==ikv::galata::eminonu_registry?ikv::load_galata_scene(options_.assets):ikv::load_source_scene(options_.assets,source);});
         // The record fog lives in the game state (004b43a0), not the zone: a received server fog survives the zone load.
         if (scene_.lighting.source_hour>=0) { replacement.lighting.fog_record=scene_.lighting.fog_record; replacement.lighting.fog_color=scene_.lighting.fog_color; }
         loading_stage(.5f);
@@ -3179,7 +3195,7 @@ private:
     // ui\eye.dds is the view cone, '%d:%.2d' (004a4e2b) the clock. Frame: UI2 611,798 186x203, map hole 15,34 158x157. ----
     static constexpr float map_scale=2.f/3;
     void ensure_zone_map() {
-        const unsigned zone=ikv::source_scene_descriptor(*scene_.source_registry_id).support_id;
+        const unsigned zone=ikv::source_scene_descriptor(server_registry()).support_id;
         if (zone==zone_map_zone_) return;
         char name[16]; std::snprintf(name,sizeof(name),"zone%02u.dds",zone);
         const auto base=asset_base();
@@ -3195,7 +3211,8 @@ private:
         const float fx=static_cast<float>(width_)-188*s_,fy=static_cast<float>(height_)-205*s_;
         ui_atlas(original_ui2_,fx,fy,0,0,186,203,611,798,186,203);
         const float ix=fx+15*s_,iy=fy+34*s_,iw=158*s_,ih=157*s_;
-        const float cu=1024-self->x*map_scale,cv=1024-self->z*map_scale,half=256.f*static_cast<float>(map_zoom_);
+        const auto me=map_xz(self->x,self->z);
+        const float cu=1024-me[0]*map_scale,cv=1024-me[1]*map_scale,half=256.f*static_cast<float>(map_zoom_);
         const float l=(cu-half)/2048,r=(cu+half)/2048,t=(cv-half)/2048,b=(cv+half)/2048;
         ui_->image(zone_map_,{ix,iy,iw,ih},{{{l,t},{r,t},{l,b},{r,b}}});
         // Map help colours: enemies FFFF3333, neutral NPCs FFFFFF00, players 77008000, selected FF33FFFF.
@@ -3203,20 +3220,21 @@ private:
             const Json* e=p.id==session_->self?nullptr:entity(p.id);
             if (!e || (e->value("kind",std::string{})=="enemy" && !e->value("alive",true))) continue;
             const auto kind=e->value("kind",std::string{});
-            const float sx=ix+iw*(1024-p.x*map_scale-(cu-half))/(2*half),sy=iy+ih*(1024-p.z*map_scale-(cv-half))/(2*half);
+            const auto q=map_xz(p.x,p.z);
+            const float sx=ix+iw*(1024-q[0]*map_scale-(cu-half))/(2*half),sy=iy+ih*(1024-q[1]*map_scale-(cv-half))/(2*half);
             if (sx<ix+2*s_ || sy<iy+2*s_ || sx>ix+iw-2*s_ || sy>iy+ih-2*s_) continue;
             const int d=std::max(2,S(4));
             ui_->rect(static_cast<int>(sx)-d/2,static_cast<int>(sy)-d/2,d,d,
                 original_rgba(p.id==target_?0xff33ffff:kind=="enemy"?0xffff3333:kind=="player"?0x77008000:kind=="summon"?0xff00ff00:0xffffff00));
         }
         // eye.dds apex is its centre; texture-up maps to the camera heading (sin yaw, cos yaw) in map space.
-        const float phi=3.14159265f-renderer_->camera().yaw,c=std::cos(phi),sn=std::sin(phi);
+        const float phi=3.14159265f-ikv::galata::native_yaw(server_registry(),renderer_->camera().yaw),c=std::cos(phi),sn=std::sin(phi);
         std::array<std::array<float,2>,4> uv{{{-.5f,-.5f},{.5f,-.5f},{-.5f,.5f},{.5f,.5f}}};
         for (auto& o:uv) o={.5f+c*o[0]+sn*o[1],.5f-sn*o[0]+c*o[1]};
         ui_->image(eye_,{ix,iy,iw,ih},uv);
         const int left=static_cast<int>(ix)+S(4);
-        label(left,static_cast<int>(iy)+S(3),"("+std::to_string(1024-static_cast<int>(self->x*map_scale))+", "+
-            std::to_string(1024-static_cast<int>(self->z*map_scale))+")");
+        label(left,static_cast<int>(iy)+S(3),"("+std::to_string(1024-static_cast<int>(me[0]*map_scale))+", "+
+            std::to_string(1024-static_cast<int>(me[1]*map_scale))+")");
         // Original thgf hour drives the minimap clock text (004a4c90 "%d:%.2d"); before it arrives, the zone minute.
         const float hour=scene_.lighting.source_hour>=0?scene_.lighting.source_hour:scene_.lighting.source_minute/60;
         char clock[16]; std::snprintf(clock,sizeof(clock),"%d:%.2d",static_cast<int>(hour),std::min(59,static_cast<int>(std::fmod(hour,1.f)*60)));
@@ -3309,7 +3327,7 @@ private:
     void world_map_centre() {
         const auto* self=session_?pose(session_->self):nullptr;
         if (!self) return;
-        map_.zoom=std::max(map_.zoom,3.f); const auto t=ikv::ClientMap::texel(self->x,self->z); map_.pan(t[0]-map_.centre_u,t[1]-map_.centre_v);
+        map_.zoom=std::max(map_.zoom,3.f); const auto m=map_xz(self->x,self->z); const auto t=ikv::ClientMap::texel(m[0],m[1]); map_.pan(t[0]-map_.centre_u,t[1]-map_.centre_v);
     }
     // Dünya Haritası: zone art with NPCs, doors (destination), party, own position and facing, quest marks and objective areas;
     // wheel zooms at the pointer, a left drag pans; legend and active objectives on the right.
@@ -3321,7 +3339,7 @@ private:
         const int legend=S(230),pad=S(24);
         const int side=std::max(S(200),std::min({height_-S(120),width_-legend-3*pad-S(20),S(900)}));
         const int w=side+legend+3*pad,h=side+S(34)+pad,x=(width_-w)/2,y=std::max(S(8),(height_-S(80)-h)/2);
-        const auto zone=*scene_.source_registry_id;
+        const auto zone=server_registry();
         const auto content=frame(0,x,y,w,h,"Dünya Haritası - "+ikv::source_scene_descriptor(zone).label);
         ui_->rect(content[0]-S(10),content[1]-S(4),content[2]-content[0]+S(20),content[3]-content[1]+S(8),{14,16,18,235}); // world name labels stay behind
         world_map_frame_={x,y,w,h};
@@ -3381,9 +3399,9 @@ private:
         }
         paint_quest_markers(view,u0,v0,span,true); // objective areas and quest badges over the NPC icons
         { // own position and facing (actor heading; the eye.dds convention: texture-up along pi - yaw), red for contrast
-            const auto p=screen(self->x,self->z);
+            const auto me=map_xz(self->x,self->z); const auto p=screen(me[0],me[1]);
             const auto* actor=actor_state(session_->self);
-            const float yaw=actor?actor->shown_yaw:renderer_->camera().yaw;
+            const float yaw=ikv::galata::native_yaw(server_registry(),actor?actor->shown_yaw:renderer_->camera().yaw);
             if (shown(p)) rotated_image(map_arrow_,p[0],p[1],icon*1.8f,3.14159265f-yaw,self_rgba);
             else { const auto e=ikv::ClientMap::clamp_to_rect(p[0],p[1],view[0],view[1],view[0]+view[2],view[1]+view[3],icon); rotated_image(map_arrow_,e.x,e.y,icon*1.4f,e.angle+1.5707963f,self_rgba); }
         }
@@ -3393,7 +3411,7 @@ private:
             label(ax+S(6),ay+S(4),"("+std::to_string(static_cast<int>(u))+", "+std::to_string(static_cast<int>(v))+")");
         }
         paint_world_map_legend(ax+side+pad,ay,legend,side);
-        const auto own=ikv::ClientMap::texel(self->x,self->z);
+        const auto own_xz=map_xz(self->x,self->z); const auto own=ikv::ClientMap::texel(own_xz[0],own_xz[1]);
         map_center_={static_cast<int>(own[0]),static_cast<int>(own[1])}; map_painted_=Clock::now();
     }
     Rgba npc_map_rgba(const ikv::ClientMap::Npc& n) const {
@@ -3447,7 +3465,7 @@ private:
         if (!floaters_.empty() || floaters_.size()!=floating) world_dirty_=true; // the frame after the last expiry clears it
         if (const auto* self=session_?pose(session_->self):nullptr) {
             // ponytail: CPU overlay repaints per moved map texel and 4x/s for dots; a GPU map quad if HUD cost shows up.
-            const std::array<int,2> center{static_cast<int>(1024-self->x*map_scale),static_cast<int>(1024-self->z*map_scale)};
+            const auto me=map_xz(self->x,self->z); const std::array<int,2> center{static_cast<int>(1024-me[0]*map_scale),static_cast<int>(1024-me[1]*map_scale)};
             if ((map_open_ || world_map_open_) && (center!=map_center_ || now-map_painted_>=std::chrono::milliseconds(250))) hud_dirty_=true;
             // F4 'Kamerayı kilitler': keep the camera behind the character's heading.
             if (const auto* actor=camera_locked_?actor_state(session_->self):nullptr) { auto camera=renderer_->camera(); camera.yaw=actor->shown_yaw; renderer_->set_camera(camera); }
@@ -4221,9 +4239,13 @@ private:
             }
         }
         if (state.contains("entities")) for (const auto& e:state.at("entities")) {
-            entities_.push_back({e.at("id").get<std::uint32_t>(),e.at("x").get<std::int32_t>(),e.at("y").get<std::int32_t>()});
+            entities_.push_back(scene_position(server_registry(),{e.at("id").get<std::uint32_t>(),e.at("x").get<std::int32_t>(),e.at("y").get<std::int32_t>()}));
         }
-        entities_.push_back({session_->self,cs.at("x").get<std::int32_t>(),cs.at("y").get<std::int32_t>()});
+        entities_.push_back(scene_position(server_registry(),{session_->self,cs.at("x").get<std::int32_t>(),cs.at("y").get<std::int32_t>()}));
+        // NONCANONICAL Galata Bridge: a click beyond the seam walked to it first; now the linked zone takes the rest.
+        if (pending_crossing_ && pending_crossing_->registry==server_registry()) {
+            session_->destination(pending_crossing_->x,pending_crossing_->y); pending_crossing_.reset();
+        }
         cache_original_ui_state();
         for (const auto& position:entities_) if (std::none_of(players_.begin(),players_.end(),[&](const auto& p){return p.id==position.id;})) move_actor(position,state.at("tick").get<std::uint32_t>());
     }
@@ -4881,12 +4903,36 @@ private:
         if (const auto id=entity_at(x,y,hit)) { click_entity(id); return; }
         // The original simply ignores a click that hits no walkable ground; no player-facing message.
         if (!hit) return;
-        const double wx=std::round(static_cast<double>((*hit)[0])*1000),wy=std::round(static_cast<double>((*hit)[2])*1000);
+        pending_crossing_.reset();
+        const auto registry=server_registry();
+        // NONCANONICAL Galata Bridge: scene-frame hit -> the authoritative zone's frame; a point on the far side of the
+        // seam walks to the seam, and the linked zone's destination follows once the server has moved the player across.
+        if (scene_.linked_zone && ikv::galata::linked(registry)) {
+            const bool karakoy=registry==ikv::galata::karakoy_registry;
+            const auto here=ikv::galata::from_scene(registry,(*hit)[0],(*hit)[2]);
+            const auto& own_grid=karakoy?*scene_.linked_zone:scene_.zone;
+            if (!ikv::zone_height(own_grid,here.x,here.z)) {
+                const unsigned other=karakoy?ikv::galata::eminonu_registry:ikv::galata::karakoy_registry;
+                const auto there=ikv::galata::from_scene(other,(*hit)[0],(*hit)[2]);
+                if (!ikv::zone_height(karakoy?scene_.zone:*scene_.linked_zone,there.x,there.z)) return;
+                const auto* self=pose(session_->self);
+                const float w=self?std::clamp(ikv::galata::bridge_coordinates(self->x,self->z).w,-25.f,25.f):0.f;
+                const float s=karakoy?ikv::galata::seam_to_eminonu-7:ikv::galata::seam_to_karakoy+6;
+                const float sx=6.08f-.524837f*s+.851203f*w,sz=1227.8f+.851203f*s+.524837f*w; // bridge (s,w) -> Eminönü frame
+                const auto seam=ikv::galata::from_scene(registry,sx,sz);
+                pending_crossing_=ikv::galata::Crossing{other,static_cast<std::int32_t>(std::lround(there.x*1000)),static_cast<std::int32_t>(std::lround(there.z*1000))};
+                session_->destination(static_cast<std::int32_t>(std::lround(seam.x*1000)),static_cast<std::int32_t>(std::lround(seam.z*1000)));
+                if (effects_) effects_->trigger_at("Click",*hit);
+                return;
+            }
+        }
+        const auto native=ikv::galata::from_scene(registry,(*hit)[0],(*hit)[2]);
+        const double wx=std::round(static_cast<double>(native.x)*1000),wy=std::round(static_cast<double>(native.z)*1000);
         const auto& bounds=state_.at("bounds");
         if (wx<bounds[0].get<double>() || wy<bounds[1].get<double>() || wx>bounds[2].get<double>() || wy>bounds[3].get<double>()) {
             return;
         }
-        if (!ikv::zone_height(scene_.zone,static_cast<float>(wx/1000),static_cast<float>(wy/1000))) return;
+        if (!ikv::galata::scene_ground(scene_,(*hit)[0],(*hit)[2])) return;
         session_->destination(static_cast<std::int32_t>(wx),static_cast<std::int32_t>(wy));
         if (effects_) effects_->trigger_at("Click",*hit); // 004b6524: the original "Click" system marks the clicked ground point
     }
@@ -4982,7 +5028,7 @@ private:
                 const double t=std::clamp((render_tick-a.tick)/span,0.0,1.0);
                 p.x=static_cast<std::int32_t>(std::lround(a.x+(b.x-a.x)*t)); p.y=static_cast<std::int32_t>(std::lround(a.z+(b.z-a.z)*t));
                 // Authority validated each sample, not every point between them (respawns within the teleport bound).
-                if (!ikv::zone_height(scene_.zone,static_cast<float>(p.x)/1000.f,static_cast<float>(p.y)/1000.f)) { p.x=b.x; p.y=b.z; }
+                if (!ikv::galata::scene_ground(scene_,static_cast<float>(p.x)/1000.f,static_cast<float>(p.y)/1000.f)) { p.x=b.x; p.y=b.z; }
                 const bool moving=(a.x!=b.x || a.z!=b.z) && render_tick<b.tick+late_gait_ticks;
                 float speed=0;
                 if (moving) {
@@ -5006,7 +5052,7 @@ private:
             auto* actor=actor_state(position.id);
             if (!actor) continue;
             const float x=static_cast<float>(position.x)/1000.f,z=static_cast<float>(position.y)/1000.f;
-            const auto ground=ikv::zone_height(scene_.zone,x,z);
+            const auto ground=ikv::galata::scene_ground(scene_,x,z);
             if (!ground) throw std::runtime_error("authoritative visible entity has no source-grid support");
             poses_.push_back({position.id,x,*ground,z,actor->shown_yaw});
             if (session_ && position.id==session_->self) {
@@ -5022,7 +5068,7 @@ private:
             const auto* corpse=pose(id);
             if (!corpse || id<2*sack_offset) continue;
             const float x=corpse->x+1,z=corpse->z;
-            const auto ground=ikv::zone_height(scene_.zone,x,z);
+            const auto ground=ikv::galata::scene_ground(scene_,x,z);
             sacks.push_back(id-sack_offset); poses_.push_back({id-sack_offset,x,ground.value_or(corpse->ground_y),z,0});
         }
         if (sacks!=sacks_) {

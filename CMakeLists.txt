@@ -52,7 +52,7 @@ add_library(ikv-assets-lib STATIC src/assets.cpp src/audio_asset.cpp src/adf_cod
 target_include_directories(ikv-assets-lib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(ikv-assets-lib PUBLIC cxx_std_20)
 target_link_libraries(ikv-assets-lib PUBLIC ZLIB::ZLIB)
-add_library(ikv-scene STATIC src/scene.cpp src/scene_animation.cpp src/scene_resources.cpp src/effects.cpp src/pbr.cpp)
+add_library(ikv-scene STATIC src/scene.cpp src/galata.cpp src/scene_animation.cpp src/scene_resources.cpp src/effects.cpp src/pbr.cpp)
 target_link_libraries(ikv-scene PUBLIC ikv-assets-lib PRIVATE Boost::headers nlohmann_json::nlohmann_json)
 # NONCANONICAL wave 29: enhanced PBR texture pack (include/ikv/pbr.hpp); the source tree copy is found first, like shaders.
 target_compile_definitions(ikv-scene PRIVATE IKV_PBR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets/pbr")

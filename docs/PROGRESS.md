@@ -1,3 +1,14 @@
+## 2026-11-22 Galata Bridge (NONCANONICAL)
+
+- Eminönü's broken Galata Bridge stub now continues over the Golden Horn into the original Karaköy map (registry 69): four new
+  sections (~620 units) copied from the stub's own deck, piers and railings, rising from deck height 20 to Karaköy's 27.2.
+- Seamless: the client loads Eminönü + bridge + Karaköy as one scene (`load_galata_scene`, Karaköy rotated 70° and moved into
+  the Eminönü frame, its overlapping water clipped, Eminönü's end cap and painted Karaköy backdrop cards removed). Server keeps
+  both zones; walking past the bridge's midpoint transfers the player at the same place (hysteresis: E→K at s≥326, K→E at s≤317).
+  Minimap, world map, music and ambient grids follow the server zone. Open to everyone; the boats still work.
+- Shared math in `include/ikv/galata.hpp` / `src/galata.cpp`; server walk check `analysis/bridge-c/walk_test.py`.
+- Known: players are not visible to each other across the midpoint; one click cannot route the whole bridge (click again).
+
 # Native reconstruction progress — 2026-10-08
 
 ## 2026-10-09 user playtest: completion claim retracted

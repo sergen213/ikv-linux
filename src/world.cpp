@@ -1,5 +1,6 @@
 #include "ikv/world.hpp"
 #include "ikv/scene.hpp"
+#include "ikv/galata.hpp"
 #include <openssl/rand.h>
 #include <algorithm>
 #include <array>
@@ -2709,6 +2710,18 @@ void World::advance() {
         bool clear=routed && source ? passable(zone,nx,ny) : clear_path(zone,x,y,nx,ny);
         if (!clear) { a.moving=false;a.dx=a.dy=0; emit(id,{{"type","correction"},{"x",x},{"y",y},{"reason","collision"}}); continue; }
         index(id,zone,x,y,false); s["x"]=nx;s["y"]=ny;index(id,zone,nx,ny,true); a.posture=0;
+        // NONCANONICAL Galata Bridge (galata.hpp): walking over the seam in the middle of the bridge moves the player into
+        // the linked zone at the same place; the client shows both as one world, so it is no zone load.
+        if (const auto& here=config_.at("zones").at(zone); here.contains("source_registry_id") && here.at("source_registry_id").is_number_unsigned() && !here.contains("instance_of"))
+            if (const auto c=galata::crossing(here.at("source_registry_id").get<unsigned>(),nx,ny))
+                for (const auto& [name,other]:config_.at("zones").items())
+                    if (other.contains("source_registry_id") && other.at("source_registry_id")==c->registry && !other.contains("instance_of")) {
+                        if (source_zones_.contains(name) && passable(name,c->x,c->y)) {
+                            try { transfer(id,name,c->x,c->y); }
+                            catch (const Rejected& e) { a.moving=false;a.route.clear();a.dx=a.dy=0; reject(id,e.code,e.message); }
+                        }
+                        break;
+                    }
     }
     for (auto it=trades_.begin();it!=trades_.end();) {
         const auto first=it->second.a,second=it->second.b;

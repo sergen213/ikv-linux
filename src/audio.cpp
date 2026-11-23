@@ -1,4 +1,5 @@
 #include "ikv/audio.hpp"
+#include "ikv/galata.hpp"
 #include "ikv/audio_asset.hpp"
 #include "ikv/renderer.hpp"
 #include "ikv/scene.hpp"
@@ -400,20 +401,25 @@ void GameAudio::frame(const Scene& scene, std::span<const RenderEntity> poses, s
         return found == poses.end() ? nullptr : &*found;
     };
     const auto* player = pose(self);
-    if (!override_ && player && scene.source_support < 18) {
-        if (grid_zone_ != scene.source_support) {
+    // NONCANONICAL Galata Bridge: on the Karaköy side of a merged scene, Karaköy's grids at its own coordinates.
+    unsigned support = scene.source_support; float grid_x = player ? player->x : 0, grid_z = player ? player->z : 0;
+    if (player && scene.linked_zone && !zone_height(scene.zone, grid_x, grid_z)) {
+        const auto k = galata::eminonu_to_karakoy(grid_x, grid_z); support = galata::karakoy_support; grid_x = k.x; grid_z = k.z;
+    }
+    if (!override_ && player && support < 18) {
+        if (grid_zone_ != support) {
             // 00419a40: musicNN.raw / soundNN.raw are 2048x2048 byte grids; a missing file is all zero.
             for (auto [grid, name] : {std::pair{&music_grid_, "music"}, std::pair{&sound_grid_, "sound"}}) {
                 char file[32];
-                std::snprintf(file, sizeof file, "%s%02u.raw", name, scene.source_support);
+                std::snprintf(file, sizeof file, "%s%02u.raw", name, support);
                 grid->assign(grid_bytes, 0);
                 std::ifstream input(base_ / file, std::ios::binary);
                 if (input) input.read(reinterpret_cast<char*>(grid->data()), static_cast<std::streamsize>(grid_bytes));
             }
-            grid_zone_ = scene.source_support;
+            grid_zone_ = support;
             trace("zone", std::to_string(grid_zone_), "music/sound grids");
         }
-        if (const auto cell = audio_grid_index(player->x, player->z)) choose(music_grid_[*cell], sound_grid_[*cell]);
+        if (const auto cell = audio_grid_index(grid_x, grid_z)) choose(music_grid_[*cell], sound_grid_[*cell]);
     }
     // 0045c890: clip audio at the actor when a non-looping clip starts or a looping clip wraps.
     next_cues_.clear();

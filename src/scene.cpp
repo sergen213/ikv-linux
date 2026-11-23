@@ -1,4 +1,5 @@
 #include "ikv/scene.hpp"
+#include "ikv/galata.hpp"
 #include "scene_source_sort.hpp"
 #include <algorithm>
 #include <atomic>
@@ -508,6 +509,26 @@ Scene load_source_scene(const std::filesystem::path& installation,unsigned regis
  bind_source_skydome(scene,descriptor);
  load_model_resources(scene,base);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
 }
+Scene load_galata_scene(const std::filesystem::path& installation) {
+ // NONCANONICAL Galata Bridge (galata.hpp): Eminönü's registered members, then Karaköy's in the Eminönü frame, then the new
+ // bridge sections; environment, sky and walk grid are Eminönü's, with Karaköy's grid linked behind it.
+ const auto& descriptor=source_scene_descriptor(galata::eminonu_registry);const auto base=base_path(installation);Pack objects(base/"objects.dat");
+ const auto members=[&](Scene& scene,const SourceSceneDescriptor& d){
+  for(const auto& member:d.members){
+   if(objects.entries.contains(lower(member))){append_model(scene,read_model(objects,member,base));continue;}
+   const auto loose=base/member;
+   if(std::filesystem::is_regular_file(loose)){append_model(scene,read_model(objects,member,base,&loose));continue;}
+   scene.diagnostics.push_back("Original registered scene component absent and unloaded: registry="+std::to_string(d.registry_id)+" "+objects.source_name+":"+member);
+  }
+ };
+ Scene scene,karakoy;members(scene,descriptor);members(karakoy,source_scene_descriptor(galata::karakoy_registry));
+ galata::merge(scene,std::move(karakoy),[](Scene& to,Scene model){append_model(to,std::move(model));});
+ scene.source_registry_id=descriptor.registry_id;scene.source_support=descriptor.support_id;scene.source_environment_key=descriptor.environment_key;scene.source_lightmap=descriptor.lightmap;
+ scene.zone=load_zone(installation,descriptor.support_id);scene.linked_zone=std::make_shared<const Zone>(load_zone(installation,galata::karakoy_support));
+ set_scene_environment(scene,descriptor.support_id,descriptor.minute);scene.lighting.roofed=descriptor.roofed;
+ bind_source_skydome(scene,descriptor);
+ load_model_resources(scene,base);derive_parallax_heights(scene);load_scene_help(scene,base);return scene;
+}
 Scene load_charsel_scene(const std::filesystem::path& installation) {
  // cModuleCharsel 004b1950 loads charsel.adf, charsel_particles.adf and sky_box.adf; no zone grid or registry row.
  const auto base=base_path(installation);Pack objects(base/"objects.dat");Scene scene;
@@ -820,7 +841,7 @@ void detach_source_actor(Scene& scene,std::uint32_t entity_id) {
  ++scene.geometry_revision;
 }
 Zone load_zone(const std::filesystem::path& installation,unsigned zone) {
- need(zone<18,"original zone number outside supplied corpus");auto base=base_path(installation);char name[32];std::snprintf(name,sizeof(name),"zone%02u.bin",zone);auto cells=file_bytes(base/name,4194304);need(cells.size()==4194304,"original zone cell size");std::snprintf(name,sizeof(name),"zone%02u_height.bin",zone);auto bytes=file_bytes(base/name,16777216);need(bytes.size()==16777216,"original zone height size");Zone out;out.width=out.height=2048;out.cells=std::move(cells);out.source=name;out.heights.reserve(4194304);for(std::size_t p=0;p<bytes.size();p+=4){auto h=scalar(bytes,p);need(out.cells[p/4]==0||out.cells[p/4]==255,"unknown original zone cell");out.heights.push_back(h);}return out;
+ need(zone<18,"original zone number outside supplied corpus");auto base=base_path(installation);char name[32];std::snprintf(name,sizeof(name),"zone%02u.bin",zone);auto cells=file_bytes(base/name,4194304);need(cells.size()==4194304,"original zone cell size");std::snprintf(name,sizeof(name),"zone%02u_height.bin",zone);auto bytes=file_bytes(base/name,16777216);need(bytes.size()==16777216,"original zone height size");Zone out;out.width=out.height=2048;out.cells=std::move(cells);out.source=name;out.heights.reserve(4194304);for(std::size_t p=0;p<bytes.size();p+=4){auto h=scalar(bytes,p);need(out.cells[p/4]==0||out.cells[p/4]==255,"unknown original zone cell");out.heights.push_back(h);}galata::paint_bridge(out,zone);return out;
 }
 std::optional<float> zone_height(const Zone& zone,float x,float z) {
  if(!std::isfinite(x)||!std::isfinite(z)||zone.width!=2048||zone.height!=2048||zone.cells.size()!=4194304||zone.heights.size()!=4194304)return {};
